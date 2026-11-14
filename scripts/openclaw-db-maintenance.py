@@ -67,8 +67,16 @@ carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
     override took first. Then measures the databases the core would migrate and
     refuses (exit 3) when the filesystem cannot hold the migration's copies.
 
-``record-doctor`` (run by install.sh after ``doctor --fix``)
-    Records the migration verdict for the status file.
+``record-doctor`` (run by install.sh after ``doctor --fix``, and by the update's
+gateway check after its own ``doctor --fix`` completed)
+    Records the migration verdict for the status file. ``--source`` says which.
+
+``doctor-due`` (run by the update's gateway check after its own ``doctor --fix``
+did not complete)
+    Keeps the recorded verdict and core, which install.sh's fast path reads,
+    and drops the run's time, which only the update's gateway check reads: that
+    check then runs doctor again at the next update, as it did at every update
+    before it learnt to skip a recent run.
 
 ``maintain`` (Settings "Run now" and the CLI, whatever the owner's switch
 says; the web server's nightly slot only while it is on)
@@ -1938,9 +1946,26 @@ def cmd_record_doctor(args):
     previous["doctor"] = {"core": (core or {}).get("version"), "verdict": args.verdict, "at": iso(time.time())}
     dbs = inventory(args.state_dir, args.config)
     status = migration_status(dbs, core, previous)
-    status["source"] = "install"
-    write_json(status_path, status)
+    status["source"] = args.source
+    if not write_json(status_path, status):
+        return 1
     log("recorded the migration as %s (%s)" % (args.verdict, status["state"]))
+    return 0
+
+
+def cmd_doctor_due(args):
+    """doctor's recorded run, due again: the verdict and core stay, the time goes."""
+    status_path = os.path.join(args.data_dir, STATUS_FILE)
+    status = read_json(status_path)
+    doctor = status.get("doctor") if isinstance(status, dict) else None
+    if not isinstance(doctor, dict) or doctor.get("at") is None:
+        log("doctor's recorded run is already due")
+        return 0
+    status["doctor"] = dict(doctor, at=None)
+    status["source"] = "update"
+    if not write_json(status_path, status):
+        return 1
+    log("doctor's recorded run is due again")
     return 0
 
 
@@ -2788,6 +2813,10 @@ def main(argv=None):
     p = sub.add_parser("record-doctor")
     common(p)
     p.add_argument("--verdict", choices=("complete", "incomplete"), required=True)
+    p.add_argument("--source", choices=("install", "update"), default="install")
+
+    p = sub.add_parser("doctor-due")
+    common(p)
 
     def maintenance(p):
         # Every path defaults to the box's own (default_paths), for the CLI.
@@ -2870,6 +2899,7 @@ def main(argv=None):
         "start-guard": cmd_start_guard,
         "preflight": cmd_preflight,
         "record-doctor": cmd_record_doctor,
+        "doctor-due": cmd_doctor_due,
         "maintain": cmd_maintain,
         "status": cmd_status,
         "memory-rebuild": cmd_memory_rebuild,

@@ -10,12 +10,23 @@
  * the vision fallback while it cannot, and nobody — said in words — when
  * neither can.
  *
+ * ON THE BOX'S OWN ENGINE (TASK-2501 PR-C). Where the box's AI features run on
+ * its own engine (`feature-engine.ts`: the local-only AI lock is on, or the box
+ * holds no ClawBox AI credential), the picture goes to that engine instead —
+ * through the Local AI proxy, or to the owner's External engine — and never
+ * leaves for the cloud. Only a model that can see is asked: an External engine
+ * the owner declared takes pictures, an Ollama model with the `vision`
+ * capability; llama.cpp runs without its vision projector, so on it the answer
+ * is {@link LOCAL_NO_VISION_ERROR} in words.
+ *
  * Failure is an answer, never an exception: an offline box or an unlinked
  * account returns { text: null, error } and the caller degrades to titles.
  */
 import { get as configGet } from "@/lib/config-store";
 import { clawboxAiProxyUrl } from "@/lib/clawbox-ai-models";
 import { clawboxAiVisionModelFor, probeClawboxAiVision, readClawboxAiVision } from "@/lib/clawbox-ai-vision";
+import { resolveFeatureEngine } from "@/lib/feature-engine";
+import { localEngineSeesPictures, postLocalChat, type LocalEngine } from "@/lib/local-engine";
 
 /**
  * The whole call's wall-clock budget, retry included. 60 s, not 30: the
@@ -76,6 +87,18 @@ let cachedModel: { id: string | null; at: number } | null = null;
 
 /** What the describe route says when no ClawBox AI model can look at a picture. */
 export const NO_VISION_MODEL_ERROR = "ClawBox AI cannot look at pictures right now";
+/** What it says when the box's AI runs on its own engine and that model cannot look at a picture. */
+export const LOCAL_NO_VISION_ERROR = "The model on this box cannot look at pictures";
+/** The same for an External engine the owner saved without image input. */
+export const EXTERNAL_NO_VISION_ERROR = "The External engine is not set to take pictures (Settings → Local AI)";
+/** What it says when the local-only AI lock is on and the box has no model of its own. */
+export const LOCKED_NO_ENGINE_ERROR = "Local-only AI is on, and no model on this box can look at pictures";
+/**
+ * The answer's ceiling on the box's own engine: a description, no hidden
+ * reasoning (thinking is asked off there), inside half the model's window so
+ * the picture's own tokens fit beside it.
+ */
+const LOCAL_DESCRIPTION_TOKENS = 2_048;
 
 async function visionModelId(token: string): Promise<string | null> {
   if (cachedModel && Date.now() - cachedModel.at < RESOLVE_TTL_MS) return cachedModel.id;
@@ -162,40 +185,113 @@ async function ask(
       }
       return { text: null, error: "the vision request failed", transient: true };
     }
-    metric.status = res.status;
-    if (!res.ok) {
-      // 5xx and 429 are the proxy's moment, not this image's; any other status
-      // is final unless the body is one of the known flaps.
-      const body = await res.text().catch(() => "");
-      const transient = res.status >= 500 || res.status === 429 || PROXY_FLAP_RE.test(body);
-      return { text: null, error: `the vision model answered ${res.status}`, transient };
-    }
-    let data: { model?: unknown; usage?: Record<string, unknown>; choices?: { message?: { content?: unknown } }[] };
-    try {
-      data = await res.json();
-    } catch {
-      // A 200 whose body did not arrive whole is a transport failure, not an answer.
-      return { text: null, error: "the vision request failed", transient: true };
-    }
-    metric.responseModel = typeof data.model === "string" ? data.model : null;
-    if (data.usage && typeof data.usage === "object") {
-      metric.usage = Object.fromEntries(["prompt_tokens", "completion_tokens", "total_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens"].flatMap((key) => {
-        const value = data.usage![key];
-        return typeof value === "number" && Number.isFinite(value) && value >= 0 ? [[key, value]] : [];
-      }));
-    }
-    const text = data.choices?.[0]?.message?.content;
-    if (typeof text !== "string" || !text.trim()) {
-      return { text: null, error: "the vision model answered without a description", transient: false };
-    }
-    return { text: text.trim(), error: null, transient: false };
+    return await answerOf(res, metric);
   } finally {
     metric.durationMs = Math.max(0, Date.now() - startedAt);
   }
 }
 
-/** Describe a PNG through ClawBox AI's model. */
+/** One answer read: the description, or why there is none and whether asking again could change it. */
+async function answerOf(res: Response, metric: VisionAttempt): Promise<Attempt> {
+  metric.status = res.status;
+  if (!res.ok) {
+    // 5xx and 429 are the proxy's moment, not this image's; any other status
+    // is final unless the body is one of the known flaps.
+    const body = await res.text().catch(() => "");
+    const transient = res.status >= 500 || res.status === 429 || PROXY_FLAP_RE.test(body);
+    return { text: null, error: `the vision model answered ${res.status}`, transient };
+  }
+  let data: { model?: unknown; usage?: Record<string, unknown>; choices?: { message?: { content?: unknown } }[] };
+  try {
+    data = await res.json();
+  } catch {
+    // A 200 whose body did not arrive whole is a transport failure, not an answer.
+    return { text: null, error: "the vision request failed", transient: true };
+  }
+  // JSON that is no object (`null`, a number) is no answer, and never a throw.
+  if (!data || typeof data !== "object") {
+    return { text: null, error: "the vision model answered without a description", transient: false };
+  }
+  metric.responseModel = typeof data.model === "string" ? data.model : null;
+  if (data.usage && typeof data.usage === "object") {
+    metric.usage = Object.fromEntries(["prompt_tokens", "completion_tokens", "total_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens"].flatMap((key) => {
+      const value = data.usage![key];
+      return typeof value === "number" && Number.isFinite(value) && value >= 0 ? [[key, value]] : [];
+    }));
+  }
+  const text = data.choices?.[0]?.message?.content;
+  if (typeof text !== "string" || !text.trim()) {
+    return { text: null, error: "the vision model answered without a description", transient: false };
+  }
+  return { text: text.trim(), error: null, transient: false };
+}
+
+/** One attempt on the box's own engine: {@link ask}'s contract, the Local AI proxy (or the External engine) as the transport. */
+async function askLocal(
+  engine: LocalEngine,
+  prompt: string,
+  imageBase64: string,
+  mime: VisionImageMime,
+  timeoutMs: number,
+  attempts: VisionAttempt[],
+): Promise<Attempt> {
+  const startedAt = Date.now();
+  const metric: VisionAttempt = { requestedModel: engine.modelRef, responseModel: null, durationMs: 0, status: null, usage: null };
+  attempts.push(metric);
+  try {
+    let res: Response;
+    try {
+      res = await postLocalChat(
+        engine,
+        {
+          max_tokens: Math.max(1, Math.min(LOCAL_DESCRIPTION_TOKENS, engine.maxOutputTokens, Math.floor(engine.contextTokens / 2))),
+          messages: [{
+            role: "user",
+            content: [
+              { type: "text", text: prompt },
+              { type: "image_url", image_url: { url: `data:${mime};base64,${imageBase64}` } },
+            ],
+          }],
+        },
+        { signal: AbortSignal.timeout(timeoutMs) },
+      );
+    } catch (err) {
+      if (err instanceof Error && err.name === "TimeoutError") {
+        return { text: null, error: "the vision request timed out", transient: false };
+      }
+      return { text: null, error: "the vision request failed", transient: true };
+    }
+    return await answerOf(res, metric);
+  } finally {
+    metric.durationMs = Math.max(0, Date.now() - startedAt);
+  }
+}
+
+/** The first attempt, and one retry inside the same budget when the first failed for a transient reason. */
+async function withOneRetry(attempt: (timeoutMs: number) => Promise<Attempt>, attempts: VisionAttempt[], deadline: number): Promise<VisionDescription> {
+  const first = await attempt(Math.max(1, deadline - Date.now()));
+  if (!first.transient || deadline - Date.now() - RETRY_DELAY_MS < MIN_RETRY_MS) {
+    return { text: first.text, error: first.error, vision: { attempts } };
+  }
+  await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+  // The retry lives inside the SAME budget, so a caller sized against
+  // DESCRIBE_TIMEOUT_MS never sees the two attempts as one long hang.
+  const second = await attempt(deadline - Date.now());
+  return { text: second.text, error: second.error, vision: { attempts } };
+}
+
+/** Describe a picture through the box's AI: ClawBox AI's model, or the box's own engine (see the module docblock). */
 export async function describeImage(imageBase64: string, prompt: string = DEFAULT_PROMPT, mime: VisionImageMime = "image/png"): Promise<VisionDescription> {
+  const engine = await resolveFeatureEngine();
+  if (engine.kind === "local") {
+    const deadline = Date.now() + DESCRIBE_TIMEOUT_MS;
+    if (!(await localEngineSeesPictures(engine.engine))) {
+      return { text: null, error: engine.engine.kind === "clawext" ? EXTERNAL_NO_VISION_ERROR : LOCAL_NO_VISION_ERROR };
+    }
+    const attempts: VisionAttempt[] = [];
+    return await withOneRetry((ms) => askLocal(engine.engine, prompt, imageBase64, mime, ms, attempts), attempts, deadline);
+  }
+  if (engine.kind === "none" && engine.reason === "cloud_ai_locked") return { text: null, error: LOCKED_NO_ENGINE_ERROR };
   const token = await configGet("clawai_token");
   if (typeof token !== "string" || !token.trim()) {
     return { text: null, error: "ClawBox AI is not connected on this device" };
@@ -204,13 +300,5 @@ export async function describeImage(imageBase64: string, prompt: string = DEFAUL
   const model = await visionModelId(token.trim());
   if (!model) return { text: null, error: NO_VISION_MODEL_ERROR };
   const attempts: VisionAttempt[] = [];
-  const first = await ask(token.trim(), model, prompt, imageBase64, mime, Math.max(1, deadline - Date.now()), attempts);
-  if (!first.transient || deadline - Date.now() - RETRY_DELAY_MS < MIN_RETRY_MS) {
-    return { text: first.text, error: first.error, vision: { attempts } };
-  }
-  await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
-  // The retry lives inside the SAME budget, so a caller sized against
-  // DESCRIBE_TIMEOUT_MS never sees the two attempts as one long hang.
-  const second = await ask(token.trim(), model, prompt, imageBase64, mime, deadline - Date.now(), attempts);
-  return { text: second.text, error: second.error, vision: { attempts } };
+  return await withOneRetry((ms) => ask(token.trim(), model, prompt, imageBase64, mime, ms, attempts), attempts, deadline);
 }

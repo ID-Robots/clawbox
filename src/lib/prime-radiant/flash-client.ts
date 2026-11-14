@@ -21,7 +21,19 @@
  * and the boot layer are separate module copies); the deterministic stub when
  * the box runs under `CLAWBOX_TEST_MODE=1` with `PRIME_RADIANT_FLASH_STUB=1`
  * (the browser smoke test cannot mock a server-side call); otherwise the
- * real proxy.
+ * engine `feature-engine.ts` names (TASK-2501 PR-C): ClawBox AI's proxy on a
+ * box signed in to it, else the box's own engine
+ * ({@link createLocalFlashClient}: Local AI or the owner's External engine) —
+ * which is also the one engine the local-only AI lock allows.
+ *
+ * THE BOX'S OWN ENGINE HAS A WINDOW. A client that answers from it carries a
+ * {@link FlashBudget} — the window, the longest answer, one request at a
+ * time — and every pass sizes its calls to it (the writer's batches:
+ * writer.ts `writerLimits`); the client itself cuts each answer's ceiling to
+ * what is left of the window after the prompt and refuses, as `too_long`, a
+ * prompt that leaves no room to answer. Its calls are counted against no
+ * ClawBox AI allowance: they are recorded under the engine's own model ref
+ * (`llamacpp/…`, `ollama/…`, `clawext/…`), which the allowance meter leaves out.
  *
  * SERVER ONLY.
  */
@@ -41,7 +53,10 @@ import {
   proxyRefusedClawaiCredential,
   resolveClawaiToken,
 } from "@/lib/harness/credentials";
+import { resolveFeatureEngine } from "@/lib/feature-engine";
+import { postLocalChat, type LocalEngine } from "@/lib/local-engine";
 import { processStore } from "@/lib/process-store";
+import { estimateTokens } from "@/lib/token-estimate";
 import { createStubFlashClient } from "./flash-stub";
 
 export interface FlashUsage {
@@ -66,13 +81,31 @@ export interface FlashResponse {
   finishReason?: string | null;
 }
 
+/** What one request to a model with a bounded window may carry: the box's own engine. */
+export interface FlashBudget {
+  /** The window, prompt and answer together, in tokens. */
+  contextTokens: number;
+  /** The longest answer the engine is asked for, in tokens. */
+  maxOutputTokens: number;
+  /** Requests in flight at once. */
+  parallel: number;
+}
+
 export interface FlashClient {
   readonly model: string;
+  /** Where the calls are answered; absent is ClawBox AI (and a test's client). */
+  readonly engine?: "clawbox-ai" | "local";
+  /** Present on a client whose model has a bounded window: every pass sizes its calls to it. */
+  readonly budget?: FlashBudget;
   complete(request: FlashRequest): Promise<FlashResponse>;
 }
 
 export type FlashErrorKind =
   | "no_credential"
+  /** No engine can write: the local-only AI lock is on and the box has no model of its own. */
+  | "no_engine"
+  /** The request does not fit the model's window, or the model did not finish it in time: asked again smaller, never as it was. */
+  | "too_long"
   | "auth"
   | "refused"
   | "rate_limited"
@@ -180,6 +213,7 @@ export function createClawboxAiFlashClient(options: ClawboxAiFlashOptions = {}):
   const timeoutMs = options.timeoutMs ?? FLASH_CALL_TIMEOUT_MS;
   return {
     model,
+    engine: "clawbox-ai",
     async complete(request) {
       const token = await resolveClawaiToken();
       if (!token) throw new FlashCallError("no_credential", "This box is not signed in to ClawBox AI.");
@@ -252,6 +286,159 @@ export function createClawboxAiFlashClient(options: ClawboxAiFlashOptions = {}):
   };
 }
 
+// ── the box's own engine ──────────────────────────────────────────────────
+
+/**
+ * One call to the box's own engine: the wake of a stopped runtime (up to three
+ * minutes) plus a small model's answer, which on a Jetson runs at tens of
+ * tokens a second. Past it the request is `too_long`: asked again smaller,
+ * never resent as it was.
+ */
+export const LOCAL_FLASH_CALL_TIMEOUT_MS = 15 * 60_000;
+/** The chat template's own tokens around the system and user turns, plus a margin for the estimate. */
+export const LOCAL_FRAME_TOKENS = 320;
+/** A prompt that leaves less than this to answer in (or less than a shorter answer asked for) is `too_long` before it is sent. */
+export const LOCAL_MIN_ANSWER_TOKENS = 256;
+
+/** A refusal body that names the window: llama.cpp's `exceed_context_size_error`, Ollama's and vLLM's wording. */
+const CONTEXT_REFUSAL_RE = /context|too long|exceed|maximum.*tokens|n_ctx/i;
+const MAX_ERROR_BODY_CHARS = 4_096;
+
+/** The first few KB of a refusal's body, read no further: an engine's error page is no reason to download it whole. */
+async function errorBodyOf(res: Response): Promise<string> {
+  const reader = res.body?.getReader();
+  if (!reader) return "";
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    while (text.length < MAX_ERROR_BODY_CHARS) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+  } catch {
+    // What arrived is what there is.
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  return text.slice(0, MAX_ERROR_BODY_CHARS);
+}
+
+/** Does this request (prompt, frame and its longest answer) fit `budget`'s window, by the estimate the local client refuses with? */
+export function fitsWindow(budget: FlashBudget, request: Pick<FlashRequest, "system" | "user" | "maxTokens">): boolean {
+  const prompt = estimateTokens(request.system) + estimateTokens(request.user) + LOCAL_FRAME_TOKENS;
+  return prompt + Math.min(request.maxTokens, budget.maxOutputTokens) <= budget.contextTokens;
+}
+
+/**
+ * How many of the next items one call may carry: on a client with a bounded
+ * window (the box's own engine), the most — up to `max` — whose request
+ * `build(n)` fits it; at least one, whose own refusal (`too_long`) then says
+ * so. `max` itself on a client with no budget (ClawBox AI's batches as they
+ * always were).
+ */
+export function itemsThatFit(
+  budget: FlashBudget | undefined,
+  max: number,
+  build: (n: number) => Pick<FlashRequest, "system" | "user" | "maxTokens">,
+): number {
+  const most = Math.max(1, Math.floor(max));
+  if (!budget) return most;
+  for (let n = most; n > 1; n--) if (fitsWindow(budget, build(n))) return n;
+  return 1;
+}
+
+/**
+ * A {@link FlashClient} on the box's own engine (`local-engine.ts`): the same
+ * contract, the same error kinds, a {@link FlashBudget}. The answer's ceiling
+ * is cut to what the window leaves after the prompt; a prompt that leaves too
+ * little is refused before it is sent. Responses are recorded under the
+ * engine's model ref, never a ClawBox AI model id.
+ */
+export function createLocalFlashClient(engine: LocalEngine, options: { fetchImpl?: typeof fetch; timeoutMs?: number } = {}): FlashClient {
+  const timeoutMs = options.timeoutMs ?? LOCAL_FLASH_CALL_TIMEOUT_MS;
+  const name = engine.kind === "clawext" ? "The External engine" : "The model on this box";
+  return {
+    model: engine.modelRef,
+    engine: "local",
+    budget: { contextTokens: engine.contextTokens, maxOutputTokens: engine.maxOutputTokens, parallel: engine.parallel },
+    async complete(request) {
+      const promptTokens = estimateTokens(request.system) + estimateTokens(request.user) + LOCAL_FRAME_TOKENS;
+      const room = engine.contextTokens - promptTokens;
+      const maxTokens = Math.min(request.maxTokens, engine.maxOutputTokens, room);
+      // Too long: the window leaves less than a useful answer (or less than the short one asked for).
+      if (maxTokens < 1 || room < Math.min(request.maxTokens, LOCAL_MIN_ANSWER_TOKENS)) {
+        throw new FlashCallError("too_long", `${name} has a window of ${engine.contextTokens} tokens; this request needs about ${promptTokens} before its answer.`);
+      }
+      const timeout = AbortSignal.timeout(timeoutMs);
+      const signals = [timeout];
+      if (request.signal) signals.push(request.signal);
+      let res: Response;
+      try {
+        res = await postLocalChat(
+          engine,
+          {
+            temperature: 0,
+            max_tokens: maxTokens,
+            messages: [
+              { role: "system", content: request.system },
+              { role: "user", content: request.user },
+            ],
+          },
+          { signal: AbortSignal.any(signals), fetchImpl: options.fetchImpl },
+        );
+      } catch (err) {
+        if (request.signal?.aborted) throw new FlashCallError("aborted", "The ingest was stopped.");
+        if (timeout.aborted) throw new FlashCallError("too_long", `${name} did not answer within ${Math.round(timeoutMs / 60_000)} minutes.`);
+        throw new FlashCallError("network", `${name} could not be reached: ${err instanceof Error ? err.name : "error"}`);
+      }
+      if (!res.ok) {
+        const status = res.status;
+        const body = await errorBodyOf(res);
+        if (status === 401 || status === 403) {
+          throw new FlashCallError("auth", engine.kind === "clawext" ? "The External engine refused this box's key. Check it in Settings → Local AI." : "The model on this box refused ClawBox's own key.", status);
+        }
+        if ((status === 400 || status === 413) && CONTEXT_REFUSAL_RE.test(body)) {
+          throw new FlashCallError("too_long", `${name} refused the request as too long for its window.`, status);
+        }
+        if (status === 429) throw new FlashCallError("rate_limited", `${name} is busy (429).`, status, retryAfterMs(res.headers.get("retry-after")));
+        if (status >= 500) throw new FlashCallError("server", `${name} answered ${status}.`, status, retryAfterMs(res.headers.get("retry-after")));
+        throw new FlashCallError("refused", `${name} refused the request (${status}).`, status);
+      }
+      let body: unknown;
+      try {
+        body = await res.json();
+      } catch {
+        // The same clock runs while the answer arrives: one cut there is the time, not the answer.
+        if (request.signal?.aborted) throw new FlashCallError("aborted", "The ingest was stopped.");
+        if (timeout.aborted) throw new FlashCallError("too_long", `${name} did not answer within ${Math.round(timeoutMs / 60_000)} minutes.`);
+        throw new FlashCallError("bad_response", `${name} answered something that is not JSON.`);
+      }
+      const b = (body ?? {}) as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }>; usage?: unknown };
+      const text = b.choices?.[0]?.message?.content;
+      const finish = b.choices?.[0]?.finish_reason;
+      const finishReason = typeof finish === "string" ? finish : null;
+      if (typeof text !== "string" || text.trim() === "") {
+        throw new FlashCallError("bad_response", finishReason === "length" ? `${name} reached the output cap before it answered.` : `${name} answered with no text.`);
+      }
+      return { text, usage: readUsage(b.usage), model: engine.modelRef, finishReason };
+    },
+  };
+}
+
+/** A client that answers every call with why nothing can write: no engine on a locked box. */
+function unavailableFlashClient(): FlashClient {
+  return {
+    model: "none",
+    async complete() {
+      throw new FlashCallError("no_engine", NO_ENGINE_MESSAGE);
+    },
+  };
+}
+
+/** What a step says when the lock is on and the box has no model of its own. */
+export const NO_ENGINE_MESSAGE = "Local-only AI is on, and no model is set up on this box to write the pages. Set up Local AI first.";
+
 // ── which client answers ──────────────────────────────────────────────────
 
 const store = processStore("prime-radiant:flash-client", () => ({ override: null as FlashClient | null }));
@@ -265,21 +452,45 @@ export function stubEnabled(): boolean {
   return process.env.CLAWBOX_TEST_MODE === "1" && process.env.PRIME_RADIANT_FLASH_STUB === "1";
 }
 
-export function flashClient(): FlashClient {
+/**
+ * The client a pass or an ingest uses, chosen once when it starts: see the
+ * module docblock. A box with neither engine gets ClawBox AI's client, whose
+ * first call answers `no_credential` as it always has; a locked box with no
+ * model of its own gets one that answers `no_engine`.
+ */
+export async function flashClient(): Promise<FlashClient> {
   if (store.override) return store.override;
   if (stubEnabled()) return createStubFlashClient();
+  const engine = await resolveFeatureEngine();
+  if (engine.kind === "local") return createLocalFlashClient(engine.engine);
+  if (engine.kind === "none" && engine.reason === "cloud_ai_locked") return unavailableFlashClient();
   return createClawboxAiFlashClient();
 }
 
 /**
- * Whether a real call could be made right now (a stub or override always can).
- * A credential, not an allowance: a spent one is the proxy's answer to the
- * call itself — one request, then the step stops on `allowance` — never a
+ * Why a real call cannot be made right now, or null when one can (a stub or
+ * override always can): the lock with no model on the box first, then neither
+ * engine. A credential, not an allowance: a spent one is the proxy's answer to
+ * the call itself — one request, then the step stops on `allowance` — never a
  * remembered refusal that would keep turning a since-upgraded plan away.
  */
+export async function flashUnavailableReason(): Promise<"cloud_ai_locked" | "no_credential" | null> {
+  if (store.override || stubEnabled()) return null;
+  const engine = await resolveFeatureEngine();
+  return engine.kind === "none" ? engine.reason : null;
+}
+
+/** Whether a real call could be made right now: {@link flashUnavailableReason} is null. */
 export async function flashAvailable(): Promise<boolean> {
-  if (store.override || stubEnabled()) return true;
-  return (await resolveClawaiToken()) !== null;
+  return (await flashUnavailableReason()) === null;
+}
+
+/** Which engine would write right now, for the views that say so: null when none can. */
+export async function flashEngine(): Promise<"clawbox-ai" | "local" | null> {
+  if (store.override) return store.override.engine ?? "clawbox-ai";
+  if (stubEnabled()) return "clawbox-ai";
+  const engine = await resolveFeatureEngine();
+  return engine.kind === "none" ? null : engine.kind;
 }
 
 // ── retries ───────────────────────────────────────────────────────────────

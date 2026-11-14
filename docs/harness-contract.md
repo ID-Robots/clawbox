@@ -33,8 +33,12 @@ directory):
 - every gateway RPC method ClawBox calls exists (the core's method table, hidden methods included);
 - every gateway event ClawBox waits for is one the core sends;
 - every plugin hook ClawBox's own plugins register exists;
-- the updater's state-schema row for the pin matches the package's `openclaw.schemaVersions.state`;
-- install.sh's `OPENCLAW_NODE_ENGINE` matches the package's `engines.node`.
+- the updater's state- and agent-schema rows for the pin match the package's `openclaw.schemaVersions`;
+- install.sh's `OPENCLAW_NODE_ENGINE` is the package's `engines.node` or stricter:
+  every Node it accepts, the core accepts too. Stricter is reported as INFO —
+  at 2026.11.3 the core accepts `>=24.16.0 <25 || >=26.1.0` again and only
+  recommends the October 2026 security releases, which ClawBox keeps required
+  (`>=24.22.1 <25 || >=26.12.1`).
 
 Against the Hermes source at `HERMES_PIN_COMMIT` (one shallow commit; nothing is
 installed or executed beyond importing the modules that build its parser,
@@ -98,7 +102,7 @@ ClawBox file:line that uses it (also as an annotation on the PR diff).
 ## Running it
 
 `scripts/harness-contract/run.sh` runs the whole check. It needs a Node the
-pinned core accepts (its `engines.node`, `>=24.22.1 <25 || >=26.12.1` at
-2026.10.6 — not Node 25) and Python 3.11 or newer. It keeps the pinned harnesses in
+pinned core accepts (its `engines.node`, `>=24.16.0 <25 || >=26.1.0` at
+2026.11.3 — not Node 25) and Python 3.11 or newer. It keeps the pinned harnesses in
 `~/.cache/clawbox-harness-contract` (`HARNESS_CONTRACT_CACHE`), so only the
 first run after a pin moves uses the network; CI caches the same paths by pin.

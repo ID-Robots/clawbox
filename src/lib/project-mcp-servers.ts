@@ -100,7 +100,15 @@ interface UsableServer extends ConfiguredMcpServer {
   secrets: Array<{ name: string; value: string }>;
 }
 
-type ServerRead = ConfiguredMcpServer & Partial<Pick<UsableServer, "config" | "include" | "exclude" | "secrets">>;
+export type ServerRead = ConfiguredMcpServer & Partial<Pick<UsableServer, "config" | "include" | "exclude" | "secrets">>;
+
+/**
+ * The entries ClawBox itself writes into OpenClaw's `mcp.servers` for members
+ * of staff (src/lib/staff-mcp.ts): each carries ONE member's relay token, so
+ * none is ever offered to a coding run or listed as a server of the owner's.
+ * The prefix is config/org-staff-policy.json's `mcpEntryPrefix`.
+ */
+const STAFF_RELAY_ENTRY_PREFIX = "cbstaff-";
 
 function unusable(name: string, harness: McpHarness, transport: ConfiguredMcpServer["transport"], reasonCode: UnusableReason, reason: string): ServerRead {
   return { name, harness, transport, usable: false, reason, reasonCode };
@@ -236,10 +244,17 @@ function entriesOf(servers: unknown, harness: McpHarness): ServerRead[] {
   for (const [name, raw] of Object.entries(servers)) {
     // The box's own server is the run's already, in the run's own profile.
     if (name === CLAWBOX_READ_ONLY_ENTRY) continue;
+    // A member of staff's relay entry is theirs, never the owner's or a run's.
+    if (name.toLowerCase().startsWith(STAFF_RELAY_ENTRY_PREFIX)) continue;
     const read = translate(name, harness, raw);
     if (read) out.push(read);
   }
   return out;
+}
+
+/** OpenClaw's `mcp.servers` as this module reads it — for a caller that already holds openclaw.json (src/lib/staff-mcp.ts). */
+export function openclawServerEntries(servers: unknown): ServerRead[] {
+  return entriesOf(servers, "openclaw");
 }
 
 async function readOpenclawServers(): Promise<ServerRead[]> {

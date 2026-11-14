@@ -43,8 +43,10 @@ The older `codex/…` and `openai-codex/…` namespaces are **retired**: the cor
 
 `POST /setup-api/providers/sign-out { provider }` (owner only; `ai-models/clawai/sign-out` for
 ClawBox AI) removes the row provider's credential everywhere the box and the **active** harness
-keep it, then reads the result back. On OpenClaw that is `openclaw models auth logout <id>` for
-every auth profile filed under the provider, then `config unset` for what logout leaves (an
+keep it, then reads the result back. On OpenClaw that is the gateway's own `models.authLogout`
+for every auth profile filed under the provider (OpenClaw 2026.11.3 refuses `openclaw models auth
+logout` while the gateway runs; the CLI is used only when no gateway answers), then `config
+unset` for what logout leaves (an
 `auth.profiles` entry, the provider's `auth.order`, an inline `apiKey`); on Hermes the provider's
 entries in the credential pool, `config.yaml` and `.env`, followed by a Hermes restart. The
 **default** provider's sign-out is refused (`is_default`) — make another provider the default
@@ -61,7 +63,7 @@ Configuring a provider writes up to four places:
 
 The active model is `agents.defaults.model.primary` (e.g. `openai/gpt-5.5`), with `agents.defaults.model.fallbacks` behind it (typically ClawBox AI or a local model).
 
-Per-provider credential preference, when a box holds both OpenAI credentials, is the core's own `openclaw models auth order set --agent main --provider openai <profileIds…>` — stored in the agent's auth store, revised by whichever OpenAI save happened last, and cleared when only one OpenAI profile is left.
+Per-provider credential preference, when a box holds both OpenAI credentials, is the core's own auth-profile order — written through the gateway's `models.authOrderSet` (every profile the store holds for the provider, the preferred one first), or `openclaw models auth order set --provider openai <profileIds…>` when no gateway runs — stored in the agent's auth store, revised by whichever OpenAI save happened last, and cleared when only one OpenAI profile is left.
 
 ## Compatibility routing (why some lanes use "OpenAI-compat")
 

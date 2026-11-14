@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# timeout: 2100
+# timeout: 3300
 # tier: long
-# covers: config/org-staff-policy.json scripts/org-staff-policy.js scripts/gateway-user-relay.js src/lib/org-staff-*.ts src/lib/hermes-staff-profile.ts scripts/openclaw-plugins/clawbox-staff-guard/* scripts/hermes-plugins/clawbox_staff_guard/* src/app/setup-api/hermes/chat/route.ts scripts/nano-tests/board/org-mode-staff.mjs
+# covers: config/org-staff-policy.json scripts/org-staff-policy.js scripts/gateway-user-relay.js src/lib/org-staff-*.ts src/lib/hermes-staff-profile.ts scripts/openclaw-plugins/clawbox-staff-guard/* scripts/hermes-plugins/clawbox_staff_guard/* src/app/setup-api/hermes/chat/route.ts scripts/nano-tests/board/org-mode-staff.mjs src/lib/staff-mcp*.ts src/app/setup-api/staff-mcp/* src/app/setup-api/settings/staff-mcp/* scripts/nano-tests/board/org-mode-staff-mcp.mjs src/lib/files-scope*.ts src/app/setup-api/files/*
 #
 # An organisation box's limited assistant and private memory (TASK-2444,
 # TASK-2445), for real, on whichever agent runtime the board runs:
@@ -18,7 +18,15 @@
 #   4. Memory: A asks the assistant to remember a fact; it is in A's own
 #      workspace/profile, B cannot get it back, the owner's MEMORY.md is
 #      unchanged.
-#   5. The owner turns the switch off and removes both users: the staff agents
+#   5. Files (TASK-2377): each member sees only their own home and Shared —
+#      not the owner's checkout or another member's home, not through a
+#      traversal, an absolute path or a link out of their home.
+#   6. Staff MCP tools (TASK-2377, scripts/nano-tests/board/org-mode-staff-mcp.mjs):
+#      a stub MCP server that echoes the credential; on OpenClaw the owner
+#      grants it, A's call carries A's credential, B without one gets none,
+#      then B's carries B's, and the owner's assistant uses its own entry; on
+#      Hermes the grant is refused and A's ask reaches nothing.
+#   7. The owner turns the switch off and removes both users: the staff agents
 #      leave the roster and their folders go with them.
 #
 # Long tier: a dozen real model turns per runtime. A pull request touching the
@@ -122,7 +130,46 @@ grep -E "^(RESULT|NOTE) " "$DRIVER_OUT" || say "not ok - [$RUNTIME] the chat dri
 [ "$DRIVER_RC" = 0 ] || say "not ok - [$RUNTIME] the chat driver ended with status $DRIVER_RC (124: it ran out of time)"
 rm -f "$DRIVER_OUT"
 
-# 5. Off, and the users gone — both of them, by what the box answered and by
+# 5. Files: their own home and Shared, nothing else of the box.
+fl=$(call GET "/setup-api/files?dir=" "$A_COOKIE")
+top=$(printf "%s\n" "$fl" | tail -n +2 | python3 -c "import json,sys; print(\",\".join(sorted(f[\"name\"] for f in json.load(sys.stdin)[\"files\"])))" 2>/dev/null || echo "?")
+if [ "$(status_of "$fl")" = 200 ] && [ "$top" = "Home,Shared" ]; then say "ok - [$RUNTIME] A'"'"'s Files shows only Home and Shared"; else say "not ok - [$RUNTIME] A'"'"'s Files top folder: $(status_of "$fl") $top"; fi
+up=$(printf "from %s" "$A_NAME" | curl -sS -o /dev/null -w "%{http_code}" -X PUT -H "Cookie: clawbox_session=$A_COOKIE" -H "Origin: http://127.0.0.1" --data-binary @- "$DASHBOARD/setup-api/files?dir=Home&name=$MARK.txt")
+if [ "$up" = 200 ] && [ -f "/home/$A_NAME/$MARK.txt" ]; then say "ok - [$RUNTIME] A uploads into their own Linux home"; else say "not ok - [$RUNTIME] A'"'"'s upload into Home answered $up"; fi
+bp=$(printf "from %s" "$B_NAME" | curl -sS -o /dev/null -w "%{http_code}" -X PUT -H "Cookie: clawbox_session=$B_COOKIE" -H "Origin: http://127.0.0.1" --data-binary @- "$DASHBOARD/setup-api/files?dir=Home&name=$MARK-b.txt")
+hl=$(call GET "/setup-api/files?dir=Home" "$B_COOKIE")
+hb=$(printf "%s\n" "$hl" | tail -n +2)
+if [ "$bp" = 200 ] && [ "$(status_of "$hl")" = 200 ]; then
+  case "$hb" in *"$MARK.txt"*) say "not ok - [$RUNTIME] B sees A'"'"'s file in their Home" ;; *"$MARK-b.txt"*) say "ok - [$RUNTIME] B'"'"'s Home is B'"'"'s own, not A'"'"'s" ;; *) say "not ok - [$RUNTIME] B'"'"'s Home does not list B'"'"'s own upload" ;; esac
+else
+  say "not ok - [$RUNTIME] B'"'"'s Home answered upload $bp / listing $(status_of "$hl")"
+fi
+sh=$(printf "shared by %s" "$A_NAME" | curl -sS -o /dev/null -w "%{http_code}" -X PUT -H "Cookie: clawbox_session=$A_COOKIE" -H "Origin: http://127.0.0.1" --data-binary @- "$DASHBOARD/setup-api/files?dir=Shared&name=$MARK-shared.txt")
+sb=$(call GET "/setup-api/files?dir=Shared" "$B_COOKIE")
+case "$sh:$(status_of "$sb"):$(printf "%s\n" "$sb" | tail -n +2)" in 200:200:*"$MARK-shared.txt"*) say "ok - [$RUNTIME] A writes into Shared and B reads it" ;; *) say "not ok - [$RUNTIME] Shared answered $sh / $(status_of "$sb")" ;; esac
+ln -sfn "$REPO" "/home/$A_NAME/$MARK-link" 2>/dev/null || printf "NOTE [%s] could not plant the test link in A home\n" "$RUNTIME"
+bad=""
+for p in "dir=.." "dir=Home/.." "dir=Home/../.." "dir=$REPO" "dir=clawbox" "dir=Home/$MARK-link" "dir=Shared/.." "dir=/etc"; do
+  c=$(status_of "$(call GET "/setup-api/files?$p" "$A_COOKIE")"); [ "$c" = 400 ] || bad="$bad $p:$c"
+done
+c=$(status_of "$(call GET "/setup-api/files/Home/$MARK-link/package.json" "$A_COOKIE")"); [ "$c" = 400 ] || bad="$bad link-download:$c"
+c=$(status_of "$(call GET "/setup-api/files/..%2F..%2Fclawbox%2Fpackage.json" "$A_COOKIE")"); [ "$c" = 400 ] || [ "$c" = 403 ] || [ "$c" = 404 ] || bad="$bad encoded-traversal:$c"
+if [ -z "$bad" ]; then say "ok - [$RUNTIME] A cannot reach the owner'"'"'s files: traversal, absolute paths and a link out of Home are refused"; else say "not ok - [$RUNTIME] A reached outside their folders:$bad"; fi
+ol=$(call GET "/setup-api/files?dir=" "$OWNER")
+case "$(printf "%s\n" "$ol" | tail -n +2)" in *"\"clawbox\""*) say "ok - [$RUNTIME] the owner'"'"'s Files is unchanged (their home, the checkout included)" ;; *) say "not ok - [$RUNTIME] the owner'"'"'s Files top folder changed" ;; esac
+printf "NOTE [%s] files: A top=%s upload=%s shared=%s\n" "$RUNTIME" "$top" "$up" "$sh"
+rm -f "$REPO/../Shared/$MARK-shared.txt" "$HOME/Shared/$MARK-shared.txt" 2>/dev/null || true
+
+# 6. Staff MCP tools, each call with the member own credential.
+MCP_OUT=$(mktemp)
+cd "$REPO" && A_NAME="$A_NAME" A_COOKIE="$A_COOKIE" B_NAME="$B_NAME" B_COOKIE="$B_COOKIE" OWNER_COOKIE="$OWNER" MARK="$MARK" RUNTIME="$RUNTIME" REPO="$REPO" \
+  timeout 1500 node "$REPO/scripts/nano-tests/board/org-mode-staff-mcp.mjs" >"$MCP_OUT" 2>&1
+MCP_RC=$?
+grep -E "^(RESULT|NOTE) " "$MCP_OUT" || say "not ok - [$RUNTIME] the staff MCP driver printed nothing"
+[ "$MCP_RC" = 0 ] || say "not ok - [$RUNTIME] the staff MCP driver ended with status $MCP_RC (124: it ran out of time)"
+rm -f "$MCP_OUT"
+
+# 7. Off, and the users gone — both of them, by what the box answered and by
 # what it now lists.
 trap - EXIT
 cleanup

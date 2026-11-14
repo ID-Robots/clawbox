@@ -157,6 +157,29 @@ vi.mock("@/lib/provider-status", async (importOriginal) => ({
     degraded: false,
   })),
 }));
+// OpenClaw 2026.11.3's credential writes go through src/lib/openclaw-auth-ops.ts
+// (the gateway's RPCs while it runs; its own unit tests cover that). Here they
+// take its offline arm, the CLI argv this file has always asserted.
+vi.mock("@/lib/openclaw-auth-ops", async () => {
+  const { spawnOpenclawCli } = await import("@/lib/openclaw-config");
+  const cli = (args: string[], opts: Record<string, unknown> = {}) => spawnOpenclawCli(args, { timeoutMs: 60_000, ...opts });
+  return {
+    providerOfProfileId: (id: string) => id.split(":")[0]?.trim().toLowerCase() ?? "",
+    saveOpenclawApiKey: async (provider: string, profileId: string, key: string) => {
+      await cli(["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId], { stdinData: key + "\n" });
+      return { via: "cli", profileId };
+    },
+    logoutOpenclawAuthProfiles: async (_provider: string, ids: string[]) => {
+      for (const id of ids) await cli(["models", "auth", "logout", id, "--yes"]);
+      return ids;
+    },
+    setOpenclawAuthOrder: async (provider: string, order: string[] | null) => {
+      await cli(order && order.length ? ["models", "auth", "order", "set", "--provider", provider, ...order] : ["models", "auth", "order", "clear", "--provider", provider]);
+    },
+    withOpenclawGatewayStopped: async <T,>(work: () => Promise<T>) => work(),
+  };
+});
+
 vi.mock("@/lib/openclaw-config", async () => ({
   ...(await import("./config-write-passthrough")).configWritePassthrough,
   // Spies over the passthrough, for "one openclaw.json write per save" below:
@@ -267,6 +290,9 @@ vi.mock("@/lib/openclaw-core-generation", () => ({
 // must never reach it, and one that does by accident fails on the first read.
 vi.mock("@/lib/openclaw-auth-store", () => ({
   readGatewayAuthProfile: vi.fn(),
+  // The xAI sign-in check reads the store directly (OpenClaw 2026.11.3's
+  // `models auth list` needs the gateway stopped).
+  readGatewayProviderAuth: vi.fn(() => ({ kind: "no-store" })),
   putGatewayOAuthProfile: vi.fn(),
 }));
 
@@ -302,6 +328,7 @@ import { forgetProviderEnumerations } from "@/lib/provider-runnable";
 import {
   putGatewayOAuthProfile,
   readGatewayAuthProfile,
+  readGatewayProviderAuth,
   type GatewayAuthProfileRead,
   type GatewayOAuthBundle,
 } from "@/lib/openclaw-auth-store";
@@ -2740,12 +2767,22 @@ describe("POST /setup-api/ai-models/configure", () => {
   // which /setup-api/ai-models/xai-login drives. This save is everything after
   // the credential write — and it proves the sign-in is in the store first.
   describe("the xAI sign-in", () => {
-    const storeAnswer = (profiles: unknown[]) => JSON.stringify({ profiles });
+    const storeAnswer = (profiles: { id: string; type: string }[]) => {
+      vi.mocked(readGatewayProviderAuth).mockImplementation((provider: string) => (provider === "xai"
+        ? {
+          kind: "present",
+          profiles: profiles.map((row) => ({ profileId: row.id, type: row.type, fingerprint: null, refreshFingerprint: null, expires: null, fenced: false, fence: null })),
+          order: null,
+          failures: {},
+        }
+        : { kind: "no-store" }));
+    };
+    afterEach(() => {
+      vi.mocked(readGatewayProviderAuth).mockImplementation(() => ({ kind: "no-store" }));
+    });
 
     it("finishes a sign-in the store holds: oauth profile metadata, primary, applied live — and no paste", async () => {
-      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce(
-        storeAnswer([{ id: "xai:default", provider: "xai", type: "oauth" }]),
-      );
+      storeAnswer([{ id: "xai:default", type: "oauth" }]);
 
       const res = await configurePost(jsonRequest({ provider: "xai", authMode: "subscription" }));
       const body = await res.json();
@@ -2753,10 +2790,8 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(res.status).toBe(200);
       expect(body.success).toBe(true);
 
-      // The store was asked, with the store's own reader.
-      expect(vi.mocked(spawnOpenclawCli).mock.calls.some(
-        ([args]) => Array.isArray(args) && args.join(" ") === "models auth list --json",
-      )).toBe(true);
+      // The store was asked, read directly.
+      expect(vi.mocked(readGatewayProviderAuth)).toHaveBeenCalledWith("xai");
       // Nothing was pasted and no legacy OAuth file was written: there is no
       // credential in this request to store.
       expect(pasteCallFor("xai:default")).toBeUndefined();
@@ -2775,9 +2810,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     });
 
     it("writes the model the owner picked", async () => {
-      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce(
-        storeAnswer([{ id: "xai:default", provider: "xai", type: "oauth" }]),
-      );
+      storeAnswer([{ id: "xai:default", type: "oauth" }]);
 
       const res = await configurePost(jsonRequest({ provider: "xai", authMode: "subscription", model: "grok-4.5" }));
 
@@ -2788,9 +2821,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     it("refuses, before any write, when the store answers and holds no xAI sign-in", async () => {
       // An API key at the id is not a sign-in: the login did not land.
-      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce(
-        storeAnswer([{ id: "xai:default", provider: "xai", type: "api_key" }]),
-      );
+      storeAnswer([{ id: "xai:default", type: "api_key" }]);
 
       const res = await configurePost(jsonRequest({ provider: "xai", authMode: "subscription" }));
       const body = await res.json();
@@ -2803,7 +2834,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     });
 
     it("saves anyway when the store cannot be read — unknown is not a refusal", async () => {
-      vi.mocked(spawnOpenclawCli).mockRejectedValueOnce(new Error("store busy"));
+      vi.mocked(readGatewayProviderAuth).mockImplementation((provider: string) => (provider === "xai" ? { kind: "unreadable" } : { kind: "no-store" }));
 
       const res = await configurePost(jsonRequest({ provider: "xai", authMode: "subscription" }));
 
@@ -2814,23 +2845,16 @@ describe("POST /setup-api/ai-models/configure", () => {
       // Both modes live at `xai:default`, and picking the API Key tab is the
       // owner switching. The guard that protects a Claude sign-in would make
       // that switch impossible from the UI, so xAI does not ask it.
-      vi.mocked(spawnOpenclawCli).mockImplementation(async (args) =>
-        Array.isArray(args) && args.includes("list")
-          ? storeAnswer([{ id: "xai:default", provider: "xai", type: "oauth" }])
-          : "");
-      try {
-        const res = await configurePost(jsonRequest({ provider: "xai", apiKey: "xai-test-key-not-real" }));
+      storeAnswer([{ id: "xai:default", type: "oauth" }]);
+      vi.mocked(readGatewayAuthProfile).mockClear();
+      const res = await configurePost(jsonRequest({ provider: "xai", apiKey: "xai-test-key-not-real" }));
 
-        expect(res.status).toBe(200);
-        expect(vi.mocked(spawnOpenclawCli).mock.calls.some(
-          ([args]) => Array.isArray(args) && args.includes("list"),
-        )).toBe(false);
-        expect(pasteStdin("xai:default")).toContain("xai-test-key-not-real");
-        const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-        expect(commands).toContain('config set auth.profiles.xai:default {"provider":"xai","mode":"api_key"} --json');
-      } finally {
-        vi.mocked(spawnOpenclawCli).mockReset().mockResolvedValue("");
-      }
+      expect(res.status).toBe(200);
+      // No sign-in guard read for xAI (the store reader), and the paste goes ahead.
+      expect(vi.mocked(readGatewayAuthProfile)).not.toHaveBeenCalledWith("xai:default");
+      expect(pasteStdin("xai:default")).toContain("xai-test-key-not-real");
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands).toContain('config set auth.profiles.xai:default {"provider":"xai","mode":"api_key"} --json');
     });
 
     it("still requires a key for an xai API-key save", async () => {
@@ -5183,10 +5207,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     it("still asks the sign-in guard before a paste that would change something", async () => {
       const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-api03-test" }));
       expect(res.status).toBe(200);
-      const listed = vi.mocked(spawnOpenclawCli).mock.calls.some(
-        (call) => Array.isArray(call[0]) && call[0].join(" ").includes("models auth list"),
-      );
-      expect(listed).toBe(true);
+      // The guard reads the gateway's store itself (OpenClaw 2026.11.3 refuses
+      // `models auth list` while the gateway runs).
+      expect(vi.mocked(readGatewayAuthProfile)).toHaveBeenCalledWith("anthropic:default");
       expect(pasteCallFor("anthropic:default")).toBeDefined();
     });
 

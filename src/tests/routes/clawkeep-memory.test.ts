@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { processStartKey } from "@/lib/process-identity";
 
 /**
  * TASK-398: the three routes behind the ClawKeep memory panel.
@@ -19,6 +20,28 @@ const DATA_DIR = path.join(TEST_ROOT, "clawkeep");
 // so the suite does not leak a real timer, and so we can assert the re-arm
 // happened — a saved schedule that only takes effect at the next reboot is the
 // bug this panel is meant to make impossible.
+// OpenClaw 2026.11.3: the status probe asks the gateway's memory.status first
+// (no gateway in these tests: the CLI answers, as before), and an OpenClaw
+// index pass runs with the gateway stopped and started again (recorded here).
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>();
+  return { ...real, gatewayWsCall: vi.fn(async () => { throw new real.GatewayWsUnavailableError("no gateway in this test"); }) };
+});
+vi.mock("@/lib/openclaw-auth-ops", () => ({
+  // The gateway request through the (mocked) socket: no gateway = not answered.
+  askOpenclawGateway: async (method: string, params: Record<string, unknown>, timeoutMs: number) => {
+    const ws = await import("@/lib/openclaw-gateway-ws");
+    try {
+      return { answered: true, result: await ws.gatewayWsCall(method, params, { timeoutMs }) };
+    } catch (err) {
+      if (err instanceof ws.GatewayWsUnavailableError) return { answered: false };
+      throw err;
+    }
+  },
+  stopOpenclawGatewayForOffline: vi.fn(async () => undefined),
+  startOpenclawGatewayAfterOffline: vi.fn(async () => undefined),
+}));
+
 vi.mock("@/lib/clawkeep-memory-scheduler", () => ({
   start: vi.fn(async () => {}),
   refresh: vi.fn(async () => {}),
@@ -158,7 +181,8 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
     await fs.mkdir(path.join(DATA_DIR, "memory-index.lock"), { recursive: true });
     await fs.writeFile(path.join(DATA_DIR, "memory-index-state.json"), JSON.stringify({
       status: "running", mode: "full", trigger: "manual",
-      startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "", childPid: process.pid,
+      startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "",
+      childPid: process.pid, childStartKey: processStartKey(process.pid),
     }));
     const res = await indexPOST(new NextRequest("http://localhost/x", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "full" }),
@@ -186,7 +210,8 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
       await fs.mkdir(path.join(DATA_DIR, "memory-index.lock"), { recursive: true });
       await fs.writeFile(path.join(DATA_DIR, "memory-index-state.json"), JSON.stringify({
         status: "running", mode: "full", trigger: "manual",
-        startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "", childPid: process.pid,
+        startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "",
+      childPid: process.pid, childStartKey: processStartKey(process.pid),
       }));
       const started = performance.now();
       const res = await indexPOST(new NextRequest("http://localhost/x", {
@@ -247,7 +272,8 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
     await fs.mkdir(path.join(DATA_DIR, "memory-index.lock"), { recursive: true });
     await fs.writeFile(path.join(DATA_DIR, "memory-index-state.json"), JSON.stringify({
       status: "running", mode: "incremental", trigger: "schedule",
-      startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "", childPid: process.pid,
+      startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "",
+      childPid: process.pid, childStartKey: processStartKey(process.pid),
     }));
     const res = await indexPOST(new NextRequest("http://localhost/x", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",

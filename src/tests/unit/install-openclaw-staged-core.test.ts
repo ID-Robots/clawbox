@@ -7,7 +7,9 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { recursiveChownRecorder, shellFunctionIfPresent } from "../helpers/account-only-home";
+import {
+  accountOnlyHome, type AccountOnlyHome, CAN_LOCK_HOME, recursiveChownRecorder, shellFunctionIfPresent, unlockTree,
+} from "../helpers/account-only-home";
 
 // A real bash per case: vitest's 5 s default is not enough on a loaded runner.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -271,10 +273,17 @@ describe("recover_parked_openclaw_core", () => {
 describe("step_openclaw_install stages the core", () => {
   /** The step, driven with a stub npm that lays npm's layout down at the prefix it is handed. */
   function runStep(p: Prefix, opts: {
-    npm: "ok" | "empty-launcher" | "wrong-version" | "stderr-first" | "nothing";
+    npm: "ok" | "empty-launcher" | "wrong-version" | "stderr-first" | "refuses" | "nothing";
     pin?: string;
     /** Record where each recursive chown would land, one path per line in this file. */
     chownLog?: string;
+    /** The npm prefix only `as_clawbox` can write to (src/tests/helpers/account-only-home.ts). */
+    account?: AccountOnlyHome;
+    /** The migration pre-flight refuses, so the step leaves through its gateway-restoring failure path. */
+    preflightFails?: boolean;
+    /** Run under errexit, as a dispatched root step does; `prelude` is sourced last before the step. */
+    errexit?: boolean;
+    prelude?: string;
   }) {
     const calls = JSON.stringify(path.join(p.dir, "calls"));
     const bin = path.join(p.dir, "bin");
@@ -296,6 +305,8 @@ mkdir -p "$prefix/bin" "$prefix/lib/node_modules/openclaw"
 said_who='${SAID_WHO}'
 first=""
 [ ${JSON.stringify(opts.npm)} = stderr-first ] && first='echo "a line on stderr before the banner" >&2'
+# The core's own banner for a Node it does not accept, and its exit 1.
+[ ${JSON.stringify(opts.npm)} = refuses ] && first='echo "Node.js >=24.16.0 is required (current: v22.23.2)" >&2; exit 1'
 if [ ${JSON.stringify(opts.npm)} = empty-launcher ]; then
   : > "$prefix/lib/node_modules/openclaw/openclaw.mjs"
 else
@@ -312,7 +323,7 @@ exit 0
     mkdirSync(path.join(src, "config"), { recursive: true });
     writeFileSync(path.join(src, "config", "openclaw-target.txt"), `${opts.pin ?? "2026.9.4"}\n`);
     const program = [
-      "set -uo pipefail",
+      opts.errexit ? "set -euo pipefail" : "set -uo pipefail",
       `NPM_PREFIX=${JSON.stringify(p.prefix)}`,
       `OPENCLAW_BIN=${JSON.stringify(path.join(p.prefix, "bin", "openclaw"))}`,
       `SRC_DIR=${JSON.stringify(src)}`,
@@ -337,6 +348,16 @@ exit 0
       // root must still read as root.
       'runuser() { local who=""; [ "${1:-}" = "-u" ] && [ "${2:-}" = "$CLAWBOX_USER" ] && who=1; '
         + 'shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=$who "$@"; }',
+      // The locked prefix's own `as_clawbox`, with the -H the step passes.
+      ...(opts.account
+        ? [
+          opts.account.shell,
+          'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__ao_as_clawbox /\')"',
+          'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; __ao_as_clawbox "$@"; }',
+        ]
+        : []),
+      `systemctl() { printf 'systemctl %s\\n' "$*" >> ${calls}; }`,
+      "has_openclaw_harness() { return 0; }",
       shellFunction("recover_parked_openclaw_core"),
       shellFunction("promote_staged_openclaw_core"),
       // Stubbed, never lifted: the step calls it with no arguments, which means
@@ -345,7 +366,7 @@ exit 0
       "remove_shadowing_system_openclaw() { :; }",
       // The migration disk pre-flight and verdict record have suites of their own
       // (install-openclaw-migration-preflight.test.ts); here they pass.
-      "openclaw_migration_disk_preflight() { return 0; }",
+      `openclaw_migration_disk_preflight() { return ${opts.preflightFails ? 1 : 0}; }`,
       "openclaw_record_migration_verdict() { :; }",
       // The fast path and its marker have a suite of their own
       // (install-openclaw-fast-path.test.ts); every case here is a full path.
@@ -353,6 +374,8 @@ exit 0
       "openclaw_refresh_marker_clear() { :; }",
       "openclaw_refresh_marker_write() { :; }",
       shellFunction("step_openclaw_install").replace(/\n  # Force-reinstall every externally-installed plugin[\s\S]*$/, "\n}"),
+      opts.prelude ?? "",
+      ...(opts.account ? ["__ao_lock"] : []),
       "step_openclaw_install",
     ].join("\n");
     return spawnSync("bash", ["-c", program], {
@@ -377,8 +400,11 @@ exit 0
   it("hands the stage over from inside the npm prefix", () => {
     const p = makePrefix({});
     try {
+      // A stage an earlier root run left, which the parked-core recovery could
+      // not take away first.
+      mkdirSync(path.join(p.prefix, ".openclaw-stage", "lib"), { recursive: true });
       const log = path.join(p.dir, "chown-targets");
-      const r = runStep(p, { npm: "ok", chownLog: log });
+      const r = runStep(p, { npm: "ok", chownLog: log, prelude: "recover_parked_openclaw_core() { :; }" });
       expect(r.status, r.stderr + r.stdout).toBe(0);
       expect(chownTargets(log)).toContain(path.join(realpathSync(p.prefix), ".openclaw-stage"));
     } finally {
@@ -488,6 +514,129 @@ exit 0
       expect(launcherRuns(p)).toEqual([`service ${live(p)}`, `service ${staged(p)}`]);
       expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
     } finally {
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
+  // The stage sits in the npm prefix, an entry in the clawbox user's home:
+  // the account makes it and removes it, after it is handed back.
+  (CAN_LOCK_HOME ? it : it.skip)("makes and removes the stage as the account, on a prefix root cannot write", () => {
+    const p = makePrefix({});
+    try {
+      const aux = path.join(p.dir, "aux");
+      mkdirSync(aux);
+      const account = accountOnlyHome(p.prefix, aux);
+      const r = runStep(p, { npm: "wrong-version", account });
+      unlockTree(p.prefix);
+      expect(r.status).not.toBe(0);
+      expect(r.stderr).toMatch(/not 2026\.9\.4 — leaving the core on the box as it is/);
+      expect(r.stderr).not.toMatch(/Permission denied/);
+      expect(existsSync(path.join(p.prefix, ".openclaw-stage"))).toBe(false);
+      expect(account.rootInHome().filter((l) => l.includes(".openclaw-stage"))).toEqual([]);
+      const stage = path.join(p.prefix, ".openclaw-stage");
+      expect(account.asClawbox().slice(0, 2)).toEqual([`rm -rf -- ${stage}`, `mkdir -p -- ${stage}`]);
+      expect(account.asClawbox().at(-1)).toBe(`rm -rf -- ${stage}`);
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
+    } finally {
+      unlockTree(p.dir);
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
+  (CAN_LOCK_HOME ? it : it.skip)("still starts the gateway on the pre-flight's way out when the stage cannot be removed, under errexit", () => {
+    const p = makePrefix({});
+    try {
+      // Only the removal of a stage npm filled fails: the step's own first
+      // emptying of the stage is bare, as it always was. The prefix is one
+      // only the account can write to, so a root removal standing in for the
+      // account's would be logged.
+      const aux = path.join(p.dir, "aux");
+      mkdirSync(aux);
+      const account = accountOnlyHome(p.prefix, aux);
+      const failRm = 'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__ok_as_clawbox /\')"\n'
+        + 'as_clawbox() { [ "$1" = rm ] && [ -e "${@: -1}/bin" ] && return 1; __ok_as_clawbox "$@"; }';
+      const r = runStep(p, { npm: "ok", preflightFails: true, errexit: true, prelude: failRm, account });
+      unlockTree(p.prefix);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/cannot take over the databases on this box/);
+      expect(p.calls()).toContain("systemctl start clawbox-gateway.service");
+      expect(account.rootInHome().filter((l) => l.includes(".openclaw-stage"))).toEqual([]);
+      expect(existsSync(path.join(p.prefix, ".openclaw-stage", "bin"))).toBe(true);
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
+    } finally {
+      unlockTree(p.dir);
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
+  // Every way out of the step after npm has filled the stage, each with what it
+  // says and whether it brings the gateway back: only the pre-flight does.
+  const FAILURE_PATHS = [
+    { why: "the staged core refuses this Node", npm: "refuses", preflightFails: false,
+      says: /refuses to run on[\s\S]*The gateway is left stopped/, restarts: false },
+    { why: "the staged launcher answers nothing", npm: "empty-launcher", preflightFails: false,
+      says: /answers nothing to --version/, restarts: false },
+    { why: "the staged core is another version", npm: "wrong-version", preflightFails: false,
+      says: /not 2026\.9\.4 — leaving the core on the box as it is/, restarts: false },
+    { why: "the migration pre-flight refuses", npm: "ok", preflightFails: true,
+      says: /cannot take over the databases on this box/, restarts: true },
+  ] as const;
+  type FailurePath = (typeof FAILURE_PATHS)[number];
+  // Named by `why`, unquoted.
+  const BY_WHY = FAILURE_PATHS.map((way) => [way.why, way] as const);
+  const gatewayStart = "systemctl start clawbox-gateway.service";
+
+  /** The step, leaving through `way`, against a prefix only the account can write to. */
+  function runLockedFailure(p: Prefix, way: FailurePath, extra: { errexit?: boolean; prelude?: string } = {}) {
+    const aux = path.join(p.dir, "aux");
+    mkdirSync(aux);
+    const account = accountOnlyHome(p.prefix, aux);
+    const r = runStep(p, { npm: way.npm, preflightFails: way.preflightFails, account, ...extra });
+    unlockTree(p.prefix);
+    return { r, account, stage: path.join(p.prefix, ".openclaw-stage") };
+  }
+
+  it.skipIf(!CAN_LOCK_HOME).each(BY_WHY)("removes the stage as the account when %s", (_why, way) => {
+    const p = makePrefix({});
+    try {
+      const { r, account, stage } = runLockedFailure(p, way);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(way.says);
+      expect(r.stderr).not.toMatch(/Permission denied/);
+      expect(existsSync(stage)).toBe(false);
+      // No root file command stands in for the account's on the stage.
+      expect(account.rootInHome().filter((l) => l.includes(".openclaw-stage"))).toEqual([]);
+      expect(account.asClawbox().at(-1)).toBe(`rm -rf -- ${stage}`);
+      expect(p.calls().includes(gatewayStart)).toBe(way.restarts);
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
+    } finally {
+      unlockTree(p.dir);
+      rmSync(p.dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!CAN_LOCK_HOME).each(BY_WHY)("leaves through its own exit under errexit when %s and the stage cannot be removed", (_why, way) => {
+    // Only the removal of a stage npm filled fails (the step's first emptying
+    // of the stage is bare and must succeed), and the refused call is still
+    // recorded as the account's. It fails with 7, not the path's own 1, so an
+    // errexit at the removal cannot pass for the path's own exit.
+    const failStageRm = 'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__ok_as_clawbox /\')"\n'
+      + 'as_clawbox() { if [ "$1" = rm ] && [ -e "${@: -1}/bin" ]; then '
+      + 'printf \'%s\\n\' "$*" >> "$__AO_CALLS"; return 7; fi; __ok_as_clawbox "$@"; }';
+    const p = makePrefix({});
+    try {
+      const { r, account, stage } = runLockedFailure(p, way, { errexit: true, prelude: failStageRm });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(way.says);
+      // The account's removal was asked for, it failed, and no root removal
+      // took its place: the stage npm filled is still there.
+      expect(account.asClawbox().at(-1)).toBe(`rm -rf -- ${stage}`);
+      expect(account.rootInHome().filter((l) => l.includes(".openclaw-stage"))).toEqual([]);
+      expect(existsSync(path.join(stage, "bin"))).toBe(true);
+      expect(p.calls().includes(gatewayStart)).toBe(way.restarts);
+      expect(spawnSync("bash", [path.join(p.prefix, "bin", "openclaw")], { encoding: "utf-8" }).stdout).toContain("2026.7.1");
+    } finally {
+      unlockTree(p.dir);
       rmSync(p.dir, { recursive: true, force: true });
     }
   });

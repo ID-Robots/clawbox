@@ -274,6 +274,62 @@ export async function readDbMaintenanceStatus(): Promise<DbMaintenanceStatus> {
   };
 }
 
+/**
+ * The helper's record of doctor's run, written the way install.sh writes its
+ * own (`openclaw_db_maintenance record-doctor`): the same script, the same
+ * account, the same places. Nothing is written where the core cannot be named
+ * — no absolute binary to find its package beside — since a verdict for no
+ * core would close the fast path the record opens. Answers whether the helper
+ * wrote it; never throws.
+ */
+async function writeDoctorRecord(command: string[]): Promise<boolean> {
+  try {
+    if (await noOpenclaw()) return false;
+    const { CONFIG_PATH, OPENCLAW_HOME, findOpenclawBin } = await import("./openclaw-config");
+    const { openclawStateDir } = await import("./openclaw-state-store");
+    const bin = findOpenclawBin();
+    if (!path.isAbsolute(bin)) return false;
+    const args = [
+      "-I", helperScript(), ...command,
+      "--state-dir", openclawStateDir(OPENCLAW_HOME),
+      "--config", CONFIG_PATH,
+      "--data-dir", DATA_DIR,
+      "--core-pkg", corePackageJson(bin),
+    ];
+    return await new Promise<boolean>((resolve) => {
+      execFile("python3", args, { timeout: STATUS_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, _out, errOut) => {
+        if (err) console.warn(`[db-maintenance] could not record doctor's run: ${String(errOut || err.message).trim().slice(-300)}`);
+        resolve(!err);
+      });
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Record that `openclaw doctor --fix` completed for the installed core:
+ * `record-doctor --verdict complete`, which stamps the record's `doctor` with
+ * the core's version and the time and recomputes the status from the
+ * databases. Run by the update's gateway check, with the gateway stopped, only
+ * after a run it saw complete. It never records `incomplete`: that closes
+ * install.sh's fast path, and install.sh fails a whole update on that verdict
+ * where the update's own check carries on (`markOpenclawDoctorDue` instead).
+ */
+export async function recordOpenclawDoctorComplete(): Promise<boolean> {
+  return writeDoctorRecord(["record-doctor", "--verdict", "complete", "--source", "update"]);
+}
+
+/**
+ * Mark doctor's recorded run as due again after the update's own `doctor
+ * --fix` did not complete: `doctor-due` keeps the verdict and core install.sh's
+ * fast path reads and drops the time, so the next update's gateway check runs
+ * doctor again instead of trusting a run from before this one.
+ */
+export async function markOpenclawDoctorDue(): Promise<boolean> {
+  return writeDoctorRecord(["doctor-due"]);
+}
+
 export type DbMaintenanceStart =
   | { started: true; survivesRestart: boolean }
   | { started: false; code: "no_openclaw" | "already_running" | "update_in_progress" | "spawn_failed"; detail?: string };

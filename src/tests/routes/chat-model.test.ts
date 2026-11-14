@@ -19,6 +19,9 @@ vi.mock("@/lib/config-store", () => ({
   // The owner's explicit model pick is written here after a successful switch
   // (TASK-713): a picker click is the one place a choice is made.
   getKnown: vi.fn(async () => ({ value: undefined, known: true })),
+  // One strict read of several keys (src/lib/cloud-providers-server.ts); the
+  // suite answers it from the same `getAll` snapshot it hands everything else.
+  getKnownMany: vi.fn(),
   setMany: vi.fn(),
   // The compaction model ClawBox wrote (src/lib/local-compaction-model.ts).
   get: vi.fn(async () => undefined),
@@ -122,7 +125,7 @@ import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { readProviderRunnable } from "@/lib/provider-runnable";
 import { ollamaModelCanChat } from "@/lib/ollama-capabilities";
-import { getKnown, setMany, get as configGet, set as configSet } from "@/lib/config-store";
+import { getKnown, getKnownMany, setMany, get as configGet, set as configSet } from "@/lib/config-store";
 import { recordExplicitModelPick } from "@/lib/explicit-model-pick";
 import { promisify } from "util";
 
@@ -164,6 +167,10 @@ describe("/setup-api/chat/model", () => {
       ai_model_provider: "clawai",
       local_ai_provider: "llamacpp",
       local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+    });
+    vi.mocked(getKnownMany).mockReset().mockImplementation(async (keys: readonly string[]) => {
+      const all = (await getAll()) as Record<string, unknown>;
+      return { values: Object.fromEntries(keys.map((key) => [key, all?.[key]])), known: true };
     });
     vi.mocked(readConfig).mockResolvedValue({
       auth: {
@@ -293,6 +300,97 @@ describe("/setup-api/chat/model", () => {
       "anthropic/claude-opus-5-5",
       "llamacpp/gemma4-e2b-it-q4_0",
     ]);
+  });
+
+  describe("Hide cloud AI providers (TASK-2497)", () => {
+    const ENGINE = {
+      baseUrl: "http://127.0.0.1:18931/v1",
+      modelId: "acme/echo-1",
+      contextWindow: 131072,
+      maxTokens: 4096,
+      imageInput: false,
+      harness: "openclaw",
+      savedAt: "2026-11-12T00:00:00.000Z",
+      previous: { store: {} },
+    };
+    const store = (extra: Record<string, unknown>) => vi.mocked(getAll).mockResolvedValue({
+      ai_model_provider: "clawai",
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+      ...extra,
+    });
+    const ids = async () => ((await (await GET()).json()).options as { id: string; isLocal: boolean }[]);
+
+    it("on: the picker offers the box's own AI alone — no cloud row, no 'Set up in Settings' row", async () => {
+      store({ hide_cloud_providers: true });
+      const options = await ids();
+      expect(options.map((option) => option.id)).toEqual(["llamacpp/gemma4-e2b-it-q4_0"]);
+      expect(options.every((option) => option.isLocal)).toBe(true);
+    });
+
+    it("AUTO on an organisation box whose AI is an external engine hides them by itself", async () => {
+      store({ org_mode: true, external_engine: ENGINE });
+      const options = await ids();
+      expect(options.some((option) => !option.isLocal)).toBe(false);
+      expect(options.some((option) => option.id === "__setup_ai__")).toBe(false);
+    });
+
+    it("on a box with no cloud provider at all, the 'AI Provider - Set up in Settings' row is gone too", async () => {
+      vi.mocked(readConfig).mockResolvedValue({} as never);
+      store({ org_mode: true, external_engine: ENGINE });
+      expect((await ids()).some((option) => option.id === "__setup_ai__")).toBe(false);
+      store({});
+      expect((await ids()).some((option) => option.id === "__setup_ai__")).toBe(true);
+    });
+
+    it("names a cloud model the chat still runs on without offering its row", async () => {
+      // Hidden by hand on a box whose primary is a cloud model: the header must
+      // not read "No chat model" while the box answers on it.
+      store({ hide_cloud_providers: true });
+      const body = await (await GET()).json();
+      expect(body.options.some((option: { isLocal: boolean }) => !option.isLocal)).toBe(false);
+      expect(body.activeOptionId).toBeNull();
+      expect(body.activeModel).toBe(`deepseek/${RETIRED_CHAT_ID}`);
+      expect(body.activeLabel).toBe("ClawBox AI");
+    });
+
+    it("a store that cannot be read counts as hidden on the picker (nothing is guessed)", async () => {
+      vi.mocked(getKnownMany).mockResolvedValue({ values: {}, known: false });
+      const options = await ids();
+      expect(options.some((option) => !option.isLocal)).toBe(false);
+    });
+
+    it("only the picker's own read hides them: the box's own move back to a cloud model still works", async () => {
+      // Removing the engine on an organisation box moves the chat back to the
+      // cloud model it was on before the engine (src/lib/external-engine-ops.ts)
+      // through this very POST. Judged against a list without the cloud rows it
+      // answered 400 "Selected AI provider is not configured" and the engine
+      // could not be removed.
+      store({ org_mode: true, external_engine: ENGINE });
+      const res = await POST(new Request("http://localhost/setup-api/chat/model", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "deepseek/deepseek-v4-flash", automatic: true }),
+      }));
+      expect(res.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalled();
+
+      const { readChatModelStateUnfiltered } = await import("@/app/setup-api/chat/model/route");
+      const unfiltered = await readChatModelStateUnfiltered();
+      expect(unfiltered.options.some((option) => !option.isLocal)).toBe(true);
+      expect(unfiltered.primary.model).toBe("deepseek/deepseek-v4-flash");
+      // …while the picker's read of the same box still shows the box's own AI alone.
+      expect((await ids()).some((option) => !option.isLocal)).toBe(false);
+    });
+
+    it.each([
+      ["an external engine on a normal box", { external_engine: ENGINE }],
+      ["organisation mode without an engine", { org_mode: true }],
+      ["the owner's 'off' on an organisation box running an engine", { org_mode: true, external_engine: ENGINE, hide_cloud_providers: false }],
+    ])("off for %s: the cloud rows stay", async (_label, extra) => {
+      store(extra);
+      expect((await ids()).map((option) => option.id)).toContain("deepseek/deepseek-v4-flash");
+    });
   });
 
   it("names the Local AI row after the model the box actually runs", async () => {

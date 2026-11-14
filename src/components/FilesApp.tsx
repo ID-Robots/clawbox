@@ -105,6 +105,35 @@ const FAVORITES = [
   { labelKey: "files.desktop", icon: "desktop_windows", path: "Desktop" },
 ];
 
+/**
+ * A member of staff on an organisation box sees their own home and the shared
+ * folder (src/lib/files-scope.ts), under `Home/` and `Shared/`: the server says
+ * so with `view: "member"` on every listing. `Shared` is the folder's own
+ * name on disk, shown as it is.
+ */
+const MEMBER_FAVORITES = [
+  { labelKey: "files.home", icon: "home", path: "Home" },
+  { label: "Shared", icon: "folder_shared", path: "Shared" },
+  { labelKey: "files.documents", icon: "description", path: "Home/Documents" },
+  { labelKey: "files.downloads", icon: "download", path: "Home/Downloads" },
+  { labelKey: "files.desktop", icon: "desktop_windows", path: "Home/Desktop" },
+];
+
+type Favorite = { labelKey?: string; label?: string; icon: string; path: string };
+
+/** Whether the last listing this page read was a member's view; shared by the window and its pickers. */
+let memberViewSeen = false;
+
+function noteView(data: unknown): boolean {
+  const member = typeof data === "object" && data !== null && (data as { view?: unknown }).view === "member";
+  memberViewSeen = member;
+  return member;
+}
+
+function favoritesFor(member: boolean): Favorite[] {
+  return member ? MEMBER_FAVORITES : FAVORITES;
+}
+
 function formatDate(iso: string): string {
   try {
     return new Date(iso).toLocaleString(undefined, {
@@ -226,6 +255,7 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
   const screenshotReady = useScreenshotReady();
   const [currentPath, setCurrentPath] = useState("");
   const [files, setFiles] = useState<FileEntry[]>([]);
+  const [memberView, setMemberView] = useState(memberViewSeen);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
@@ -385,6 +415,7 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
       const res = await fetch(`/setup-api/files?dir=${encodeURIComponent(dir)}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Failed to load");
+      setMemberView(noteView(data));
       const sorted = [...(data.files as FileEntry[])].sort((a, b) => {
         if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
         return a.name.localeCompare(b.name);
@@ -1064,7 +1095,7 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
             <div className="px-4 pb-2 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)]">
               {t("files.favorites")}
             </div>
-            {FAVORITES.map((fav) => {
+            {favoritesFor(memberView).map((fav) => {
               const active = currentPath === fav.path;
               return (
                 <button
@@ -1081,7 +1112,7 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
                   }`}
                 >
                   <Icon name={fav.icon} size={18} color={active ? "var(--coral-bright)" : "var(--text-muted)"} />
-                  <span>{t(fav.labelKey)}</span>
+                  <span>{fav.labelKey ? t(fav.labelKey) : fav.label}</span>
                 </button>
               );
             })}
@@ -1987,6 +2018,7 @@ function FolderPickerDialog({
       const res = await fetch(`/setup-api/files?dir=${encodeURIComponent(next)}`);
       const data = await res.json().catch(() => ({})) as { files?: unknown };
       if (request !== requestRef.current) return;
+      if (res.ok) noteView(data);
       if (!res.ok || !Array.isArray(data.files)) throw new Error(String(res.status));
       setFolders((data.files as FileEntry[])
         .filter((f) => f.type === "directory" && (showHidden || !f.name.startsWith(".")))
@@ -2025,7 +2057,7 @@ function FolderPickerDialog({
   };
 
   const segs = dir.split("/").filter(Boolean);
-  const places = FAVORITES.map((f) => ({ key: `fav:${f.path}`, label: t(f.labelKey), icon: f.icon, path: f.path }));
+  const places = favoritesFor(memberViewSeen).map((f) => ({ key: `fav:${f.path}`, label: f.labelKey ? t(f.labelKey) : f.label ?? f.path, icon: f.icon, path: f.path }));
   const blocked = (rel: string) => movingPaths.some((p) => isInsideOrSame(rel, p));
   const ready = state === "ready" && !blocked(dir) && (canConfirm ? canConfirm(dir) : true);
   const chip = "flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors cursor-pointer shrink-0 max-w-[140px]";

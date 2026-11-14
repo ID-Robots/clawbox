@@ -6,6 +6,7 @@
 // config/org-staff-policy.json, and src/tests/unit/org-staff-policy.test.ts runs
 // one case table through both.
 
+const crypto = require("crypto");
 const table = require("../config/org-staff-policy.json");
 
 const STAFF_AGENT_PREFIX = table.agentPrefix;
@@ -74,8 +75,12 @@ function staffAgentConfigured(config, agentId) {
   const tools = entry.tools;
   if (!tools || typeof tools !== "object" || !Array.isArray(tools.allow)) return false;
   const allowed = new Set(table.openclaw.allow);
-  // Never more than the table names: a hand-widened allow-list is not staff.
-  if (!tools.allow.every((tool) => typeof tool === "string" && allowed.has(tool))) return false;
+  // Never more than the table names — but for this member's OWN MCP relay
+  // entries (TASK-2377, src/lib/staff-mcp.ts `staffEntryName`): a
+  // hand-widened allow-list is not staff.
+  const mine = staffMcpAllowPrefix(agentId);
+  const own = (tool) => mine !== null && tool.startsWith(mine) && /^[a-z0-9_-]+__\*$/.test(tool.slice(mine.length));
+  if (!tools.allow.every((tool) => typeof tool === "string" && (allowed.has(tool) || own(tool)))) return false;
   // The entry pins `profile: "full"` so the allow-list is the selection; no
   // `alsoAllow` may widen it.
   if (tools.profile !== "full" || tools.alsoAllow !== undefined) return false;
@@ -84,6 +89,20 @@ function staffAgentConfigured(config, agentId) {
 }
 
 /** The OpenClaw plugin that holds a staff agent's file tools to the member's folder. */
+/**
+ * The start of every MCP relay entry of one member's agent in its allow-list:
+ * `<mcpEntryPrefix><8 hex of the username>-` — src/lib/staff-mcp.ts
+ * `userTag`, pinned to it by org-staff-policy.test.ts. Null for an id that is
+ * not a staff agent's.
+ */
+function staffMcpAllowPrefix(agentId) {
+  if (typeof agentId !== "string" || !agentId.startsWith(STAFF_AGENT_PREFIX)) return null;
+  const name = agentId.slice(STAFF_AGENT_PREFIX.length);
+  if (!USERNAME_RE.test(name)) return null;
+  const tag = crypto.createHash("sha256").update(`clawbox-staff-mcp:${name}`).digest("hex").slice(0, 8);
+  return `${table.mcpEntryPrefix}${tag}-`;
+}
+
 const STAFF_GUARD_PLUGIN_ID = "clawbox-staff-guard";
 
 /**
@@ -106,4 +125,5 @@ module.exports = {
   staffCommandRefusal,
   isStaffCatalogueCommand,
   staffAgentConfigured,
+  staffMcpAllowPrefix,
 };

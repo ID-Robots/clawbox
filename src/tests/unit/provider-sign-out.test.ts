@@ -130,6 +130,16 @@ const cli = vi.hoisted(() => ({
 }));
 cli.CONFIG_PATH = `${tmp}/openclaw/openclaw.json`;
 vi.mock("@/lib/openclaw-config", () => cli);
+// OpenClaw 2026.11.3: the sign-out's logout goes to the gateway's
+// models.authLogout while it runs (src/lib/openclaw-auth-ops.ts, tested on its
+// own); here it takes the offline arm, one `models auth logout` per profile.
+vi.mock("@/lib/openclaw-auth-ops", () => ({
+  providerOfProfileId: (id: string) => id.split(":")[0]?.trim().toLowerCase() ?? "",
+  logoutOpenclawAuthProfiles: async (_provider: string, ids: string[]) => {
+    for (const id of ids) await cli.spawnOpenclawCli(["models", "auth", "logout", id, "--yes"], { timeoutMs: 60_000 });
+    return ids;
+  },
+}));
 vi.mock("@/lib/openclaw-auth-store", () => ({
   readGatewayAuthProfile: vi.fn((id: string) => (box.storeUnreadable
     ? { kind: "unreadable" }

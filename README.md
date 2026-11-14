@@ -37,6 +37,14 @@
   <img src="docs-site/images/4.3/desktop.webp" alt="The ClawBox desktop: app icons down the left, Files open on a project folder, and the Coding Agent in front, its live chart showing a run and its reviewer at work on that project" width="920" />
 </p>
 
+<p align="center">
+  <a href="https://youtu.be/GlAdIWvbpBs">
+    <img src="https://i.ytimg.com/vi/GlAdIWvbpBs/hqdefault.jpg" alt="Watch the video: ClawBox: Your AI Employee That Works 24/7" width="480" />
+  </a>
+  <br/>
+  <a href="https://youtu.be/GlAdIWvbpBs">▶ Watch: <b>ClawBox: Your AI Employee That Works 24/7</b></a>
+</p>
+
 ---
 
 ## What is ClawBox?

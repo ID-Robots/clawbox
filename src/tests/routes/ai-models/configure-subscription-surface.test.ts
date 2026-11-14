@@ -100,6 +100,36 @@ vi.mock("@/lib/openclaw-gateway-ws", () => ({
 // classification real, gateway I/O mocked — see the helper.
 vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
   (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
+// The sign-in guard reads the gateway's credential store directly (OpenClaw
+// 2026.11.3's `models auth list` needs the gateway stopped).
+vi.mock("@/lib/openclaw-auth-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-auth-store")>()),
+  readGatewayAuthProfile: vi.fn(() => ({ kind: "no-store" })),
+}));
+
+// OpenClaw 2026.11.3's credential writes go through src/lib/openclaw-auth-ops.ts
+// (the gateway's RPCs while it runs; its own unit tests cover that). Here they
+// take its offline arm, the CLI argv this file has always asserted.
+vi.mock("@/lib/openclaw-auth-ops", async () => {
+  const { spawnOpenclawCli } = await import("@/lib/openclaw-config");
+  const cli = (args: string[], opts: Record<string, unknown> = {}) => spawnOpenclawCli(args, { timeoutMs: 60_000, ...opts });
+  return {
+    providerOfProfileId: (id: string) => id.split(":")[0]?.trim().toLowerCase() ?? "",
+    saveOpenclawApiKey: async (provider: string, profileId: string, key: string) => {
+      await cli(["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId], { stdinData: key + "\n" });
+      return { via: "cli", profileId };
+    },
+    logoutOpenclawAuthProfiles: async (_provider: string, ids: string[]) => {
+      for (const id of ids) await cli(["models", "auth", "logout", id, "--yes"]);
+      return ids;
+    },
+    setOpenclawAuthOrder: async (provider: string, order: string[] | null) => {
+      await cli(order && order.length ? ["models", "auth", "order", "set", "--provider", provider, ...order] : ["models", "auth", "order", "clear", "--provider", provider]);
+    },
+    withOpenclawGatewayStopped: async <T,>(work: () => Promise<T>) => work(),
+  };
+});
+
 vi.mock("@/lib/openclaw-config", async () => ({
   ...(await import("./config-write-passthrough")).configWritePassthrough,
   // A REAL class, not `vi.fn()` and not an omitted export: the configure route
@@ -163,6 +193,7 @@ vi.mock("@/lib/local-ai-token", () => ({
 
 import { promises as nodeFsPromises } from "fs";
 import { getAll, setMany } from "@/lib/config-store";
+import { readGatewayAuthProfile } from "@/lib/openclaw-auth-store";
 import {
   GatewayNotReadyError,
   readConfig,
@@ -843,9 +874,9 @@ describe("POST /setup-api/ai-models/configure over an existing sign-in", () => {
   });
 
   /**
-   * `openclaw models auth list --json` as the store answers it — the shape
-   * measured on 2026.8.1: `{profiles: [{id, provider, type, label,
-   * expiresAt}]}`.
+   * The gateway's credential store as the guard reads it (read-only, the
+   * row's `type`): OpenClaw 2026.11.3's `models auth list` is refused while
+   * the gateway runs, so the guard no longer asks the CLI.
    *
    * openclaw.json's `auth.profiles` metadata is deliberately left EMPTY in
    * these cases. It is what the first draft of this guard read, and it is a
@@ -855,11 +886,12 @@ describe("POST /setup-api/ai-models/configure over an existing sign-in", () => {
    * there. If the guard ever goes back to the config, these tests go red.
    */
   function profilesInStore(profiles: { id: string; provider: string; type: string }[]) {
-    vi.mocked(spawnOpenclawCli).mockImplementation(async (args) =>
-      Array.isArray(args) && args.includes("list") && args.includes("auth")
-        ? JSON.stringify({ profiles })
-        : "",
-    );
+    vi.mocked(readGatewayAuthProfile).mockImplementation((profileId: string) => {
+      const row = profiles.find((p) => p.id === profileId);
+      return row
+        ? { kind: "present", type: row.type, fingerprint: null, refreshFingerprint: null, expires: null, fenced: false, fence: null } as ReturnType<typeof readGatewayAuthProfile>
+        : { kind: "no-store" };
+    });
   }
 
   /** Did the save reach the CLI verb that would have replaced the credential? */
@@ -916,24 +948,19 @@ describe("POST /setup-api/ai-models/configure over an existing sign-in", () => {
     expect(res.status).toBe(200);
 
     const args = vi.mocked(spawnOpenclawCli).mock.calls.map(([a]) => a as string[]);
-    const read = args.find((a) => a.includes("auth") && a.includes("list"));
     const paste = args.find((a) => a.includes("paste-api-key"));
-    // Neither pins an agent: the core resolves the same one for the READ that
-    // guards and the WRITE that pastes, so the guard cannot end up inspecting
-    // a different store from the one being written.
-    for (const call of [read, paste]) {
-      expect(call).toBeDefined();
-      expect(call).not.toContain("--agent");
-    }
+    // The guard read the store the gateway reads (the default agent's, as the
+    // paste addresses it), and the paste pins no agent either.
+    expect(vi.mocked(readGatewayAuthProfile)).toHaveBeenCalledWith("anthropic:default");
+    expect(paste).toBeDefined();
+    expect(paste).not.toContain("--agent");
   });
 
   it("fails open on a store that answers something other than a profile list", async () => {
     // `JSON.parse("null")` succeeds and `null.profiles` throws, which the
     // handler's catch would turn into a 500 over a save that is perfectly
     // good. A guard that cannot read the box does not refuse.
-    vi.mocked(spawnOpenclawCli).mockImplementation(async (args) =>
-      Array.isArray(args) && args.includes("list") && args.includes("auth") ? "null" : "",
-    );
+    vi.mocked(readGatewayAuthProfile).mockReturnValue({ kind: "unreadable", cause: "SQLITE_CORRUPT" } as ReturnType<typeof readGatewayAuthProfile>);
 
     const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-a-real-key" }));
 
@@ -948,14 +975,10 @@ describe("POST /setup-api/ai-models/configure over an existing sign-in", () => {
     profilesInStore([{ id: "anthropic:default", provider: "anthropic", type: "oauth" }]);
 
     for (const provider of ["llamacpp", "openrouter"]) {
-      vi.mocked(spawnOpenclawCli).mockClear();
+      vi.mocked(readGatewayAuthProfile).mockClear();
       const res = await configurePost(jsonRequest({ provider, apiKey: "sk-or-a-real-key" }));
       expect(res.status).toBe(200);
-      expect(
-        vi.mocked(spawnOpenclawCli).mock.calls.some(
-          ([args]) => Array.isArray(args) && args.includes("auth") && args.includes("list"),
-        ),
-      ).toBe(false);
+      expect(vi.mocked(readGatewayAuthProfile)).not.toHaveBeenCalled();
     }
   });
 

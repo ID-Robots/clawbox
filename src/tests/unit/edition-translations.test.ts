@@ -14,6 +14,7 @@ import { clawaiPitchEn } from "@/lib/edition-translations/en-clawai-pitch";
 import { anthropicAccountsEn } from "@/lib/edition-translations/en-anthropic-accounts";
 import { whatsNewEn } from "@/lib/edition-translations/en-whats-new";
 import { usersEn } from "@/lib/edition-translations/en-users";
+import { cloudProvidersEn } from "@/lib/edition-translations/en-cloud-providers";
 import { dbMaintenanceEn } from "@/lib/edition-translations/en-db-maintenance";
 import { modelAvailabilityEn } from "@/lib/edition-translations/en-model-availability";
 import { jobAlertsEn } from "@/lib/edition-translations/en-job-alerts";
@@ -86,6 +87,9 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // why the assistant paused for it. An owner who cannot read "skipped — the
   // assistant was busy" cannot tell a skipped night from a broken one.
   { name: "Agent databases card", matches: (k) => k.startsWith("dbMaintenance.") },
+  // "Hide cloud AI providers" and the local-first AI providers page
+  // (TASK-2497): shown to an organisation's owner in their own language.
+  { name: "Cloud providers switch and local-first page", matches: (k) => k.startsWith("cloudProviders.") },
   // The chat's line when a model cannot run on the owner's account — a rate
   // limit of zero, a model the provider dropped — and which model the chat was
   // moved to. The one thing that explains why the reply came from another model.
@@ -185,6 +189,8 @@ describe("edition-translations (TASK-458)", () => {
       ["modelAvailabilityEn", modelAvailabilityEn, (k) => k.startsWith("chat.modelUnavailable")],
       ["jobAlertsEn", jobAlertsEn, (k) => k.startsWith("jobAlerts.")],
       ["updateNoticeEn", updateNoticeEn, (k) => k.startsWith("updateNotice.")],
+      // Settings → AI providers on a box whose AI is the owner's own (TASK-2497).
+      ["cloudProvidersEn", cloudProvidersEn, (k) => k.startsWith("cloudProviders.")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {

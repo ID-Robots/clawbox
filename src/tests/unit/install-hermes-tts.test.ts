@@ -212,6 +212,8 @@ function runStep(edition: string, opts: StepOpts = {}) {
     `CLAWBOX_EDITION="${edition}"`,
     "CLAWBOX_USER=clawbox",
     'as_clawbox() { env "$@"; }',
+    // The hand-over walks the real home; this run has none.
+    "hand_over_voice_paths() { :; }",
     // The REAL predicates, so this file pins which one gates which arm: the
     // dual SKU runs both harnesses and has to be registered with both.
     extractShellOneLiner("is_hermes_edition"),

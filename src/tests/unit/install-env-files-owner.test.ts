@@ -3,6 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  accountOnlyHome, CAN_LOCK_HOME, handOverOrder, shellFunctionIfPresent, unlockTree,
+} from "../helpers/account-only-home";
+import { testEnv } from "../helpers/env";
 
 // Runs bash: vitest's 5 s default is not enough on a loaded CI runner
 // (src/tests/unit/test-timeout-hygiene.test.ts).
@@ -528,5 +532,246 @@ describe("ensure_llamacpp_model_cached hands data/llamacpp over only through the
 
     expect(r.status, r.stderr).toBe(0);
     expect(rootChowns(r)).toEqual([]);
+  });
+});
+
+describe("ensure_embed_model_cached hands data/embed over only through the whole checkout", () => {
+  // The llama.cpp cache's twin: data/embed sits below data/, an entry the
+  // account controls, so the same rule holds — a leftover hands back the
+  // checkout whole, a checkout that is all the account's is left alone.
+  const MODEL = "Qwen3-Embedding-0.6B-Q8_0.gguf";
+  const models = () => path.join(project, "data", "embed", "models");
+  const cacheCall = (extra = "") => [
+    extra,
+    installFunction("require_safe_hf_ref"),
+    installFunction("ensure_embed_model_cached"),
+    "ensure_embed_model_cached",
+  ].join("\n");
+  const rootChowns = (r: Run) => [...new Set(
+    r.events.filter((e) => e.who === "root" && e.argv[0] === "chown").map((e) => e.argv.join(" ")),
+  )];
+
+  beforeEach(() => {
+    put(".env", "PORT=80\n", 0o600);
+    fs.mkdirSync(models(), { recursive: true });
+    fs.writeFileSync(path.join(models(), MODEL), "gguf");
+  });
+
+  it("hands back a checkout with leftovers whole, never a path below it", () => {
+    const r = run(cacheCall(), { user: "root" });
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe(`  Memory-search model already cached (${MODEL})\n`);
+    expect(rootChowns(r)).toEqual([`chown -R root:root ${project}`]);
+  });
+
+  it("hands back the checkout for a leftover deep under data/embed when everything above it is the account's", () => {
+    const stray = path.join(models(), "partial");
+    fs.writeFileSync(stray, "");
+    const shims = [
+      `find() { case " $* " in *" $PROJECT_DIR/data/embed "*) echo ${JSON.stringify(stray)}; return 0 ;; esac; `
+        + 'command find "$@"; }',
+      `stat() { if [ "\${@: -1}" = ${JSON.stringify(stray)} ]; then echo nobody; else command stat "$@"; fi; }`,
+    ].join("\n");
+
+    const r = run(cacheCall(shims));
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(rootChowns(r)).toEqual([`chown -R ${os.userInfo().username}:${os.userInfo().username} ${project}`]);
+  });
+
+  it("changes no owner in a checkout that is all the account's", () => {
+    const r = run(cacheCall());
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe(`  Memory-search model already cached (${MODEL})\n`);
+    expect(rootChowns(r)).toEqual([]);
+  });
+});
+
+/**
+ * The model caches' file work — the directories, the superseded GGUF, the
+ * embedder's checksum and its removal — runs as the account, after the
+ * hand-over, against a checkout only `as_clawbox` can write to
+ * (src/tests/helpers/account-only-home.ts). A root `mkdir` or `rm` there fails
+ * with EACCES, and a root command on a checkout path is logged (`rootInHome`).
+ * The account is not the suite's user, so the hand-over fires; root's `chown`
+ * records and changes nothing.
+ */
+describe.skipIf(!CAN_LOCK_HOME)("the model caches are made, checked and cleaned as the account", () => {
+  const GEMMA = "gemma-4-E2B_q4_0-it.gguf";
+  const STALE = "gemma-4-e2b-it-edited-q4_0.gguf";
+  const EMBED = "Qwen3-Embedding-0.6B-Q8_0.gguf";
+  const llamaModels = () => path.join(project, "data", "llamacpp", "models");
+  const embedModels = () => path.join(project, "data", "embed", "models");
+  let aux: string;
+
+  beforeEach(() => {
+    aux = path.join(dir, "aux");
+    fs.mkdirSync(path.join(aux, "bin"), { recursive: true });
+    // `hf download REPO FILE --local-dir DIR`, as the account: a file, or a
+    // link to $HF_LINK when that is set.
+    fs.writeFileSync(
+      path.join(aux, "bin", "hf"),
+      '#!/bin/bash\nif [ -n "${HF_LINK:-}" ]; then ln -s "$HF_LINK" "$5/$3"; else printf gguf > "$5/$3"; fi\n',
+      { mode: 0o755 },
+    );
+    put(".env", "PORT=80\n", 0o600);
+  });
+
+  afterEach(() => unlockTree(dir));
+
+  function runLocked(call: string, prelude = "", env: Record<string, string> = {}) {
+    const account = accountOnlyHome(project, aux);
+    const chowns = path.join(aux, "root-chowns");
+    fs.writeFileSync(chowns, "");
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR=${JSON.stringify(project)}`,
+      'IFACE_ENV="$PROJECT_DIR/data/network.env"',
+      "CLAWBOX_USER=clawbox",
+      account.shell,
+      `chown() { [ -n "\${AS_SERVICE_USER:-}" ] || printf '%s\\n' "$*" >> ${JSON.stringify(chowns)}; }`,
+      // The login shell's download, as the account.
+      'as_clawbox_login() { as_clawbox bash -c "$*"; }',
+      prelude,
+      ...["get_env_setting_or_default", "migrate_env_setting", "require_safe_hf_ref",
+        "prune_superseded_llamacpp_model", "ensure_llamacpp_model_cached", "ensure_embed_model_cached"]
+        .map((name) => installFunction(name)),
+      shellFunctionIfPresent(INSTALL, "hand_over_checkout"),
+      account.recordHandOvers,
+      "__ao_lock",
+      call,
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], {
+      encoding: "utf-8",
+      env: testEnv({ PATH: `${path.join(aux, "bin")}:${process.env.PATH}`, HOME: dir, LC_ALL: "C", ...env }),
+    });
+    return {
+      status: r.status,
+      stdout: r.stdout,
+      stderr: r.stderr,
+      rootInHome: account.rootInHome(),
+      asClawbox: account.asClawbox(),
+      sequence: account.sequence(),
+      chowns: fs.readFileSync(chowns, "utf-8").split("\n").filter(Boolean),
+    };
+  }
+
+  it("ensure_llamacpp_model_cached hands data/llamacpp over, then makes the models directory as the account", () => {
+    fs.mkdirSync(path.join(project, "data", "llamacpp"), { recursive: true });
+
+    const r = runLocked("ensure_llamacpp_model_cached");
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(fs.existsSync(path.join(llamaModels(), GEMMA))).toBe(true);
+    expect(r.stdout).toContain("  Gemma 4 model cached for offline startup");
+    expect(r.rootInHome).toEqual([]);
+    expect(r.chowns).toEqual([`-R clawbox:clawbox ${project}`]);
+    const { handOver, firstWrite } = handOverOrder(r.sequence, "hand_over_checkout data/llamacpp");
+    expect(handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(firstWrite, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
+    expect(r.sequence[firstWrite]).toBe(`mkdir -p -- ${llamaModels()}`);
+  });
+
+  it("prune_superseded_llamacpp_model removes the superseded GGUF as the account and says so", () => {
+    fs.mkdirSync(llamaModels(), { recursive: true });
+    fs.writeFileSync(path.join(llamaModels(), GEMMA), "gguf");
+    fs.writeFileSync(path.join(llamaModels(), STALE), "old");
+
+    const r = runLocked("ensure_llamacpp_model_cached");
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe(`  Gemma 4 model already cached for offline use\n  Removed superseded GGUF ${STALE}\n`);
+    expect(fs.existsSync(path.join(llamaModels(), STALE))).toBe(false);
+    expect(fs.existsSync(path.join(llamaModels(), GEMMA))).toBe(true);
+    expect(r.rootInHome).toEqual([]);
+    expect(r.asClawbox).toContain(`rm -f -- ${path.join(llamaModels(), STALE)}`);
+  });
+
+  it("prune_superseded_llamacpp_model warns, and the step still finishes, when the removal fails", () => {
+    fs.mkdirSync(llamaModels(), { recursive: true });
+    fs.writeFileSync(path.join(llamaModels(), GEMMA), "gguf");
+    fs.writeFileSync(path.join(llamaModels(), STALE), "old");
+    const failRm = [
+      'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"',
+      'as_clawbox() { [ "$1" = rm ] && return 1; __real_as_clawbox "$@"; }',
+    ].join("\n");
+
+    const r = runLocked(`${failRm}\nensure_llamacpp_model_cached`);
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe("  Gemma 4 model already cached for offline use\n");
+    expect(r.stderr).toBe(`  Warning: could not remove the superseded GGUF ${STALE}\n`);
+  });
+
+  it("ensure_embed_model_cached hands data/embed over, then makes the models directory as the account", () => {
+    fs.mkdirSync(path.join(project, "data", "embed"), { recursive: true });
+    // A file .env names instead: fetched unverified, so no checksum here.
+    put(".env", "EMBED_HF_FILE=other.gguf\n", 0o600);
+
+    const r = runLocked("ensure_embed_model_cached");
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toBe("  Downloading the memory-search model (other.gguf, ~639 MB)...\n  Memory-search model cached for offline use\n");
+    expect(fs.existsSync(path.join(embedModels(), "other.gguf"))).toBe(true);
+    expect(r.rootInHome).toEqual([]);
+    // One hand-over of the whole checkout; no chown after the download.
+    expect(r.chowns).toEqual([`-R clawbox:clawbox ${project}`]);
+    const { handOver, firstWrite } = handOverOrder(r.sequence, "hand_over_checkout data/embed");
+    expect(handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
+    expect(r.sequence[firstWrite]).toBe(`mkdir -p -- ${embedModels()}`);
+  });
+
+  // The shipped file is checked against the catalog's sha256. A link the
+  // download leaves at the model's name is read as the account, never by root.
+  const dfPlenty = "df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\nx 1 1 999999999 1%% /\\n'; }";
+
+  it("ensure_embed_model_cached checks the download as the account and deletes a file that does not verify", () => {
+    fs.mkdirSync(embedModels(), { recursive: true });
+    const outside = path.join(dir, "outside-model");
+    fs.writeFileSync(outside, "not the model\n");
+
+    const r = runLocked("ensure_embed_model_cached", dfPlenty, { HF_LINK: outside });
+
+    expect(r.status).toBe(1);
+    const modelPath = path.join(embedModels(), EMBED);
+    expect(r.asClawbox).toContain(`sha256sum -- ${modelPath}`);
+    expect(r.stderr).toMatch(/^Error: the memory-search model did not verify \(sha256 [0-9a-f]{64}, expected [0-9a-f]{64}\); deleted it$/m);
+    expect(fs.existsSync(modelPath) || fs.lstatSync(modelPath, { throwIfNoEntry: false }) !== undefined).toBe(false);
+    expect(fs.readFileSync(outside, "utf-8")).toBe("not the model\n");
+    expect(r.rootInHome).toEqual([]);
+  });
+
+  it("ensure_embed_model_cached reports a download the account cannot read as unreadable, and deletes it", () => {
+    // A link to a file only root could read: the account's hash fails, and the
+    // step says so rather than ending on errexit with nothing said.
+    fs.mkdirSync(embedModels(), { recursive: true });
+    const outside = path.join(dir, "outside-unreadable");
+    fs.writeFileSync(outside, "not the model\n");
+    fs.chmodSync(outside, 0o000);
+
+    const r = runLocked("ensure_embed_model_cached", dfPlenty, { HF_LINK: outside });
+
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/^Error: the memory-search model did not verify \(sha256 unreadable, expected [0-9a-f]{64}\); deleted it$/m);
+    expect(fs.lstatSync(path.join(embedModels(), EMBED), { throwIfNoEntry: false })).toBeUndefined();
+    expect(r.rootInHome).toEqual([]);
+  });
+
+  it("ensure_embed_model_cached says it could not delete a file that does not verify when the removal fails", () => {
+    fs.mkdirSync(embedModels(), { recursive: true });
+    const failRm = [
+      'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"',
+      'as_clawbox() { [ "$1" = rm ] && return 1; __real_as_clawbox "$@"; }',
+    ].join("\n");
+
+    const r = runLocked(`${failRm}\nensure_embed_model_cached`, dfPlenty);
+
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/^Error: the memory-search model did not verify \(sha256 [0-9a-f]{64}, expected [0-9a-f]{64}\); could not delete it$/m);
+    expect(fs.existsSync(path.join(embedModels(), EMBED))).toBe(true);
   });
 });

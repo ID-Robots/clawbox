@@ -44,6 +44,9 @@ vi.mock("@/lib/config-store", () => ({
   get: vi.fn(async () => null),
   set: vi.fn(async () => {}),
   getKnown: vi.fn(async () => ({ value: undefined, known: true })),
+  // One strict read of several keys: the picker asks whether the cloud providers
+  // are hidden (src/lib/cloud-providers-server.ts). Nothing set, store readable.
+  getKnownMany: vi.fn(async () => ({ values: {}, known: true })),
   setMany: vi.fn(),
 }));
 

@@ -269,7 +269,10 @@ describe("step_embed_model — driven against stubs", () => {
       // on the developer's PATH must never download 640 MB inside a unit test.
       `export PATH="${tmp}/bin:$PATH"`,
       `PROJECT_DIR="${project}"`,
+      'IFACE_ENV="$PROJECT_DIR/data/network.env"',
       "CLAWBOX_USER=$(id -un)",
+      // The cache is the account's own work; here, us.
+      'as_clawbox() { "$@"; }',
       `is_test_mode() { ${testMode ? "return 0" : "return 1"}; }`,
       `has_openclaw_harness() { ${hermes ? "return 1" : "return 0"}; }`,
       // as_clawbox_login runs a command string as the clawbox user; here, us.
@@ -284,6 +287,7 @@ describe("step_embed_model — driven against stubs", () => {
         .map(([k, v]) => `${k}) printf '%s' ${shellQuote(v)} ;;`)
         .join(" ")} *) printf '%s' "$3" ;; esac; }`,
       `sed -n '/^require_safe_hf_ref() {/,/^}/p' "$1" > "${tmp}/fn.sh"`,
+      `sed -n '/^hand_over_checkout() {/,/^}/p' "$1" >> "${tmp}/fn.sh"`,
       `sed -n '/^ensure_embed_model_cached() {/,/^}/p' "$1" >> "${tmp}/fn.sh"`,
       `sed -n '/^step_embed_model() {/,/^}/p' "$1" >> "${tmp}/fn.sh"`,
       `. "${tmp}/fn.sh"`,

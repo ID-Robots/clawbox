@@ -190,7 +190,7 @@ See [Multiple Anthropic Accounts](/guides/anthropic-accounts).
 - When ClawKeep refuses a backup, it says why, with the sizes involved.
 - On your own x64 machine, a Cloudflare Tunnel download that stalls no longer holds up the
   install.
-- OpenClaw is updated to 2026.10.9 and Hermes Agent to v0.22.5.
+- OpenClaw is updated to 2026.11.3 and Hermes Agent to v0.23.1.
 - Coding runs can also run on OpenAI, through the Codex CLI: connect an API key or a ChatGPT
   sign-in in the Coding Agent's settings. A run can tell the assistant that started it about a
   question or a blocker while it works, and the chat that started a run hears when it ends.
@@ -229,9 +229,9 @@ See [Multiple Anthropic Accounts](/guides/anthropic-accounts).
   `sudo bash install.sh` over SSH works too; on the Hermes edition System Update is the only
   route.
 - **The move to 4.3 is one-way on OpenClaw.** The update moves OpenClaw's data to the newer
-  format OpenClaw 2026.10.6 and later use, so the box cannot go back to an earlier release
-  afterwards. An update that lacks the disk space for the move stops before it changes OpenClaw
-  and says how much it needs.
+  format OpenClaw 2026.10.6 and later use (2026.11.3 moves it once more), so the box cannot go
+  back to an earlier release afterwards. An update that lacks the disk space for the move stops
+  before it changes OpenClaw and says how much it needs.
 - The update moves the box to Node.js 24.22.1 or newer, the October 2026 Node.js security
   release, on every edition.
 - Sites the assistant was signed in to in its old, separate browser need one sign-in in

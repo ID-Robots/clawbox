@@ -23,6 +23,7 @@ const cjs = require("../../../scripts/org-staff-policy.js") as {
   staffMessageVerdict(message: unknown, options: { inline: boolean }): { ok: boolean; command?: string };
   isStaffCatalogueCommand(name: unknown): boolean;
   staffAgentConfigured(config: unknown, agentId: string): boolean;
+  staffMcpAllowPrefix(agentId: string): string | null;
 };
 
 type Case = [message: string, inline: { ok: boolean; command?: string }, leading: { ok: boolean; command?: string }];
@@ -152,6 +153,23 @@ describe("the table", () => {
   it("keeps its write and read tools inside its allow-lists", () => {
     for (const tool of [...STAFF_OPENCLAW_TOOLS.writeTools, ...STAFF_OPENCLAW_TOOLS.readTools]) expect(STAFF_OPENCLAW_TOOLS.allow).toContain(tool);
     for (const tool of [...STAFF_HERMES_TOOLS.writeTools, ...STAFF_HERMES_TOOLS.readTools]) expect(STAFF_HERMES_TOOLS.allowTools).toContain(tool);
+  });
+});
+
+describe("the relay's readiness check and a member's MCP grants (TASK-2377)", () => {
+  it("passes a member's own relay entries and fails another member's", async () => {
+    const { staffEntryName } = await import("@/lib/staff-mcp");
+    const mine = staffEntryName("maria", "docs");
+    const hashed = staffEntryName("maria", "a-very-long-server-name-for-hashing");
+    const theirs = staffEntryName("ivan", "docs");
+    const entry = staffAgentEntry("/home/clawbox/.openclaw", "maria", [mine, hashed]);
+    expect(cjs.staffMcpAllowPrefix("clawbox-staff-maria")).toBe(mine.slice(0, mine.length - "docs".length));
+    expect(cjs.staffAgentConfigured({ agents: { entries: { "clawbox-staff-maria": entry } } }, "clawbox-staff-maria")).toBe(true);
+    const foreign = staffAgentEntry("/home/clawbox/.openclaw", "maria", [theirs]);
+    expect(cjs.staffAgentConfigured({ agents: { entries: { "clawbox-staff-maria": foreign } } }, "clawbox-staff-maria")).toBe(false);
+    const glob = { ...entry, tools: { ...(entry.tools as object), allow: [...STAFF_OPENCLAW_TOOLS.allow, "cbstaff-*"] } };
+    expect(cjs.staffAgentConfigured({ agents: { entries: { "clawbox-staff-maria": glob } } }, "clawbox-staff-maria")).toBe(false);
+    expect(cjs.staffMcpAllowPrefix("main")).toBeNull();
   });
 });
 

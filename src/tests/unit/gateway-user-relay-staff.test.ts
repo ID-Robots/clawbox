@@ -15,7 +15,11 @@ import { staffAgentEntry } from "@/lib/org-staff-agents";
 const requireCjs = createRequire(import.meta.url);
 const relay = requireCjs("../../../scripts/gateway-user-relay.js") as {
   createRelayState(username: string, options?: { staffAgent?: string | null; staffReady?: () => boolean }): Record<string, unknown> & { connectId: string | null; connected: boolean };
-  filterClientFrame(state: unknown, frame: unknown): { toGateway?: Record<string, unknown>; toClient?: Record<string, unknown>; reset?: { id: string; params: Record<string, unknown> } };
+  filterClientFrame(state: unknown, frame: unknown): {
+    toGateway?: Record<string, unknown>;
+    toClient?: Record<string, unknown>;
+    reset?: { id: string; params: Record<string, unknown>; chat?: { send?: Record<string, unknown>; notice?: Record<string, unknown> } };
+  };
   filterGatewayFrame(state: unknown, frame: unknown): { toClient?: Record<string, unknown> };
   userHello(state: unknown, payload: unknown): Record<string, unknown>;
   staffReadyReader(configPath: string, agentId: string): () => boolean;
@@ -111,14 +115,60 @@ describe("a member of staff's turn", () => {
     expect(refused(relay.filterClientFrame(member(), send(message)))).toContain(command);
   });
 
-  it.each(["/new", "/reasoning", "/reasoning on", "Read /srv/shared/q3.pdf and sum column B"])("passes %j", (message) => {
+  it.each(["/reasoning", "/reasoning on", "Read /srv/shared/q3.pdf and sum column B"])("passes %j", (message) => {
     expect(relay.filterClientFrame(member(), send(message)).toGateway).toBeDefined();
   });
 
-  it("still sends their /new and /reset through the relay's admin reset, for their own key only", () => {
+  it("still sends the chat's own reset through the relay's admin reset, for their own key only", () => {
     const out = relay.filterClientFrame(member(), { type: "req", id: "r", method: "sessions.reset", params: { key: MAIN, reason: "new" } });
     expect(out.reset).toEqual({ id: "r", params: { key: MAIN, reason: "new" } });
     expect(relay.filterClientFrame(member(), { type: "req", id: "r", method: "sessions.reset", params: { key: OLD_MAIN } }).reset).toBeUndefined();
+  });
+});
+
+// TASK-2520: /new is one of the two commands a member of staff may send, and
+// the core refuses it as a chat message from a socket without operator.admin.
+// The relay runs it as the reset of their OWN agent's session; what the staff
+// policy refuses stays refused, before any reset.
+describe("a member of staff's typed /new", () => {
+  it.each([MAIN, TAB])("is run as a reset of their own session on their own agent (%s)", (sessionKey) => {
+    const out = relay.filterClientFrame(member(), send(" /new ", { sessionKey, deliver: true, toolBindings: [{ tool: "exec" }] }));
+    expect(out).toEqual({
+      reset: { id: "s1", params: { key: sessionKey, reason: "new" }, chat: { notice: { runId: "k1", sessionKey, action: "new" } } },
+    });
+  });
+
+  it("is refused on their old key on the owner's agent, and on another member's agent", () => {
+    for (const sessionKey of [OLD_MAIN, "agent:clawbox-staff-bob:clawbox-user-alice", "agent:main:main"]) {
+      const out = relay.filterClientFrame(member(), send("/new", { sessionKey }));
+      expect(out.reset).toBeUndefined();
+      expect(refused(out)).toMatch(/someone else/);
+    }
+  });
+
+  it.each([
+    ["/new gpt-5", "/new <model>"],
+    ["/new: gpt-5", "/new <model>"],
+    ["/new hello there", "/new <model>"],
+    ["/reset", "/reset"],
+    ["/reset hello", "/reset"],
+    ["/reset soft", "/reset"],
+  ])("still refuses %j, and resets nothing for it", (message, command) => {
+    const out = relay.filterClientFrame(member(), send(message));
+    expect(out.reset).toBeUndefined();
+    expect(refused(out)).toContain(command);
+  });
+
+  it("is refused, and resets nothing, while their agent is not configured with the staff policy", () => {
+    const out = relay.filterClientFrame(member(false), send("/new"));
+    expect(out.reset).toBeUndefined();
+    expect(refused(out)).toMatch(/being set up/);
+  });
+
+  it("is refused when the request names another agent", () => {
+    const out = relay.filterClientFrame(member(), send("/new", { agentId: "main" }));
+    expect(out.reset).toBeUndefined();
+    expect(refused(out)).toMatch(/someone else/);
   });
 });
 

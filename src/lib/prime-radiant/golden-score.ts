@@ -81,7 +81,7 @@ import { readVaultSnapshot, type VaultSnapshot } from "./vault";
 export const GOLDEN_TREND_POINTS = 14;
 
 /** A refusal no later call of the night can get past: the check stops there. */
-const MODEL_REFUSALS = new Set(["no_credential", "auth", "refused", "allowance", "aborted"]);
+const MODEL_REFUSALS = new Set(["no_credential", "no_engine", "auth", "refused", "allowance", "aborted"]);
 
 export interface GoldenScoreResult {
   /** Why nothing was asked: `offline`, `disabled`, `no_questions`, `model_unavailable`, `allowance_spent`. */
@@ -192,7 +192,7 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
     result.notes.push(`The vault search failed for ${searchFailed.size} golden question(s); they were answered from the claims' words alone and raise no regression tonight.`);
   }
 
-  const client = options.client ?? flashClient();
+  const client = options.client ?? (await flashClient());
   const verdicts = new Map<string, { verdict: GoldenVerdict; why: string }>();
   // An empty or cut-off answer is asked again in smaller calls, never resent as it was.
   const retry: RetryOptions = {
@@ -248,6 +248,9 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
         // came with it, so it is charged as the whole prompt (~4 characters a token) plus the whole output cap.
         failuresInRow = 0;
         charge(client.model, { promptTokens: Math.ceil((system.length + user.length) / 4), completionTokens: maxTokens, cacheHitTokens: 0 });
+      } else if (kind === "too_long") {
+        // Too long for the box's own model (its window, or its time): asked again in halves, like a capped answer.
+        failuresInRow = 0;
       } else {
         failuresInRow++;
         outages.set(kind, (outages.get(kind) ?? 0) + 1);
@@ -283,7 +286,12 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
   async function judge(batch: readonly GoldenQuestion[], room = goldenMaxTokens(batch.length)): Promise<void> {
     if (halted()) return;
     const out = await judgeOnce(batch, room);
-    if (!out.ok && out.kind !== "bad_response") return;
+    if (!out.ok && out.kind !== "bad_response" && out.kind !== "too_long") return;
+    // One question still too long for the box's own model: more answer room cannot help (the client cuts it to the window).
+    if (!out.ok && out.kind === "too_long" && batch.length === 1) {
+      unanswered++;
+      return;
+    }
     const again = out.ok ? out.missing : batch;
     if (again.length === 0) return;
     if (again.length < batch.length) {
@@ -331,7 +339,7 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
       spent
         ? `The golden-question judge stopped: ${spentText}. Tonight's questions wait for the next night.`
         : refusal
-          ? `ClawBox AI refused the golden-question judge (${refusal}); the check was skipped.`
+          ? `${client.engine === "local" ? "The model on this box" : "ClawBox AI"} refused the golden-question judge (${refusal}); the check was skipped.`
           : "No golden question could be judged tonight; the check was skipped.",
     );
     return skipped;

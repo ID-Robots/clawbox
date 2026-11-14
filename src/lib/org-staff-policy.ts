@@ -12,6 +12,9 @@ import table from "../../config/org-staff-policy.json";
 /** Every member of staff's agent (OpenClaw) and profile (Hermes) id starts with this. */
 export const STAFF_AGENT_PREFIX: string = table.agentPrefix;
 
+/** The prefix of every OpenClaw `mcp.servers` entry ClawBox writes for a member of staff (src/lib/staff-mcp.ts). */
+export const STAFF_MCP_ENTRY_PREFIX: string = table.mcpEntryPrefix;
+
 /** The slash commands a member of staff may send, without the slash. */
 export const STAFF_SLASH_COMMANDS: readonly string[] = Object.freeze([...table.slashCommands]);
 

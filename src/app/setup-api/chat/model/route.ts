@@ -85,6 +85,7 @@ import {
   profileProviderId,
 } from "@/lib/chatgpt-subscription";
 import type { AuthProfileEntries } from "@/lib/subscription-surface";
+import { readCloudProvidersHidden } from "@/lib/cloud-providers-server";
 import {
   chatgptSupportedModelsSentence,
   isClaudeSubscriptionOnly,
@@ -721,7 +722,7 @@ function sortPrimaryOptions(options: ChatModelOption[]) {
  * after the write, so asking the gateway twice per switch bought nothing and,
  * on a slow gateway, cost the connect and method deadlines twice over.
  */
-async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLevels?: boolean } = {}) {
+async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLevels?: boolean; hideCloud?: boolean } = {}) {
   const [configStore, openclawConfig, storedPrimaryModel, gatewayThinkingLevels, newestRefs] = await Promise.all([
     getAll(),
     preloaded ?? readConfig().catch(() => ({} as OpenClawConfig)),
@@ -977,6 +978,13 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
   // pick GPT/Claude/DeepSeek in the chat dropdown while Local-only is
   // lit up, and the chat then quietly talks to the cloud provider.
   const localOnlyMode = !!configStore.local_only_mode;
+  // "Hide cloud AI providers" (src/lib/cloud-providers.ts): no cloud row and
+  // no "AI Provider - Set up in Settings" row either — the box's own AI is
+  // the only choice the picker offers. Only on the picker's own read (GET asks
+  // for it): a POST, the engine's own removal and every other caller still see
+  // every row, or the box could not move the chat back to a cloud model it
+  // had been on ("Selected AI provider is not configured").
+  const cloudHidden = read.hideCloud === true && await readCloudProvidersHidden();
 
   // The owner's per-provider switch. A switched-off provider STAYS in the
   // list, greyed and carrying the reason, rather than vanishing: a row that
@@ -991,9 +999,8 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
       : option;
   };
 
-  const primaryOptions = localOnlyMode
-    ? []
-    : sortPrimaryOptions([...configuredPrimaryOptions.values()]).map(applyOwnerSwitch);
+  const allPrimaryOptions = sortPrimaryOptions([...configuredPrimaryOptions.values()]).map(applyOwnerSwitch);
+  const primaryOptions = localOnlyMode || cloudHidden ? [] : allPrimaryOptions;
   const localOption: ChatModelOption = applyOwnerSwitch(localModel
     ? {
         id: localModel,
@@ -1020,7 +1027,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
         isLocal: true,
       });
 
-  const options = primaryOptions.length > 0
+  const options = primaryOptions.length > 0 || cloudHidden
     ? [...primaryOptions, localOption]
     : [{
         id: "__setup_ai__",
@@ -1061,7 +1068,16 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
           && (!activeUiProvider || option.provider === activeUiProvider),
       ) ?? options.find((option) => option.model === activeModel) ?? null
     : null;
-  const activeLabel = activeOption?.label ?? null;
+  // A cloud model the chat is still running while its rows are hidden is NAMED,
+  // not offered: the header says where the chat is answering, and no hidden
+  // cloud row is in the list to pick.
+  const hiddenActiveOption = !activeOption && cloudHidden && activeModel
+    ? allPrimaryOptions.find(
+        (option) => option.model === canonicalChatModel(activeModel)
+          && (!activeUiProvider || option.provider === activeUiProvider),
+      ) ?? null
+    : null;
+  const activeLabel = activeOption?.label ?? hiddenActiveOption?.label ?? null;
 
   return {
     activeOptionId: activeOption?.id ?? null,
@@ -1228,7 +1244,7 @@ export async function GET() {
     const verdicts = await readProviderRunnable().catch(
       () => new Map<string, ProviderRunnable>(),
     );
-    const state = withoutUnrunnableProviders(await loadChatModelState(), verdicts);
+    const state = withoutUnrunnableProviders(await loadChatModelState(undefined, { hideCloud: true }), verdicts);
     return NextResponse.json(state, {
       headers: { "Cache-Control": "no-store" },
     });

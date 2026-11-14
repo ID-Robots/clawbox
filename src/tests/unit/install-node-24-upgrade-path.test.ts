@@ -294,6 +294,13 @@ const SHIPPED = [
 /** The ambient helpers the sliced steps call, stubbed to do nothing of note. */
 const AMBIENT = [
   "wait_for_apt() { :; }",
+  // step_apt_update's logrotate install has a suite of its own
+  // (install-logrotate.test.ts); stubbed so this one never asks the runner's
+  // real dpkg-query or systemctl.
+  "ensure_logrotate() { :; }",
+  // The document libraries' read-back (install-logrotate.test.ts pins it);
+  // stubbed for the same reason, and answering "installed" keeps that line quiet.
+  "dpkg_installed() { return 0; }",
   "ensure_clawbox_bashrc_path() { :; }",
   "is_hermes_edition() { return 1; }",
   "chown() { :; }",

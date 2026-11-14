@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "events";
 import fs from "fs";
 import path from "path";
-import { CLI_STDOUT, GATEWAY_ANSWER } from "../../fixtures/openclaw-models-list-2026.10.9";
+import { CLI_STDOUT, GATEWAY_ANSWER } from "../../fixtures/openclaw-models-list-2026.11.3";
 
 // ON A JETSON THE CATALOGUE ASKS THE RUNNING GATEWAY, AND THE CLI WHEN IT MUST.
 //

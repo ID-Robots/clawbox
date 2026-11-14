@@ -337,7 +337,12 @@ export function projectGatewayHistory(
       previous.audio = audio;
       continue;
     }
-    chatMsgs.push({ role: "assistant", text, timestamp, images, audio, ...(files.length ? { files } : {}) });
+    // The run that wrote it, off the gateway's own record: what the live final
+    // for the same run is recognised by when this read painted it first
+    // (TASK-2494, `withAssistantReply`).
+    const meta = m.__openclaw && typeof m.__openclaw === "object" ? m.__openclaw as Record<string, unknown> : null;
+    const runId = typeof meta?.runId === "string" && meta.runId ? meta.runId : undefined;
+    chatMsgs.push({ role: "assistant", text, timestamp, images, audio, ...(files.length ? { files } : {}), ...(runId ? { idempotencyKey: runId } : {}) });
   }
   // Current OpenClaw merges TTS supplement records into chat.history, but
   // older supported gateways do not. The session-gated device route reads

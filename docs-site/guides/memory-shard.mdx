@@ -121,6 +121,12 @@ The app shows files, chunks, sources, anything pending and anything that failed,
 index size, when the last pass ran and what triggered it, and live progress through the
 current pass. **Index now** runs an incremental pass; **Full reindex** rebuilds everything.
 
+On the OpenClaw edition, OpenClaw indexes from outside the assistant only while the
+assistant is stopped. So a pass you start pauses the assistant until the pass ends, and it
+starts again by itself, whether the pass finishes, fails or you stop it. In between, the
+running assistant keeps its own index current as your files change, so the daily
+schedule leaves that to it and pauses nothing.
+
 Health is one of three words:
 
 - **Healthy** — the index matches the configured embedding model and is searchable.

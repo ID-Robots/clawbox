@@ -19,7 +19,7 @@
 
 import crypto from "crypto";
 import { estimateUsd, type CostRates } from "./cost-rates";
-import { ALLOWANCE_SPENT, allowanceStopOf, completeWithRetry, flashClient, type AllowanceStop, type FlashClient } from "./flash-client";
+import { ALLOWANCE_SPENT, FlashCallError, allowanceStopOf, completeWithRetry, flashClient, itemsThatFit, type AllowanceStop, type FlashClient } from "./flash-client";
 import { recordPage } from "./identifiers";
 import { recordCost } from "./ingest-store";
 import { classifyRecord, isRecordType, readRecordFrontmatter, recordDate, RECORD_TYPES, type RecordType } from "./records";
@@ -176,10 +176,19 @@ export async function classifyWithModel(
   if (options.cap <= 0) return { ...result, skipped: "disabled" };
   if (options.dryRun) return { ...result, skipped: "dry_run" };
   const items = candidates.slice(0, options.cap);
-  const client = options.client ?? flashClient();
+  const client = options.client ?? (await flashClient());
   const none: string[] = [];
-  for (let at = 0; at < items.length; at += CLASSIFY_BATCH) {
-    const batch = items.slice(at, at + CLASSIFY_BATCH);
+  /** Pages before this index are asked one a call: their batch was too long for the box's own model. */
+  let singlesUntil = 0;
+  for (let at = 0; at < items.length; ) {
+    // As many pages a call as the box's own model's window holds (ClawBox AI: CLASSIFY_BATCH).
+    const from = at;
+    const size = at < singlesUntil ? 1 : itemsThatFit(client.budget, Math.min(CLASSIFY_BATCH, items.length - from), (n) => ({
+      ...buildClassifyPrompt(items.slice(from, from + n)),
+      maxTokens: classifyMaxTokens(n),
+    }));
+    const batch = items.slice(from, from + size);
+    at += batch.length;
     try {
       const { response } = await completeWithRetry(client, { ...buildClassifyPrompt(batch), maxTokens: classifyMaxTokens(batch.length) });
       result.calls += 1;
@@ -204,6 +213,15 @@ export async function classifyWithModel(
         else result.assigned.set(batch[i].path, type);
       }
     } catch (err) {
+      // Too long for the box's own model: the batch is asked again a page at a
+      // time, and a page still too long alone is passed over, never the rest.
+      if (err instanceof FlashCallError && err.kind === "too_long") {
+        if (batch.length > 1) {
+          singlesUntil = from + batch.length;
+          at = from;
+        }
+        continue;
+      }
       // The pages not asked are not remembered: another night asks them (a spent allowance included).
       const spent = allowanceStopOf(err);
       if (spent) {

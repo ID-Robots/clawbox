@@ -9,6 +9,7 @@ import EditionStep from "./EditionStep";
 import UpdateStep from "./UpdateStep";
 import CredentialsStep from "./CredentialsStep";
 import AIModelsStep from "./AIModelsStep";
+import { CloudProvidersWizardGate } from "./CloudProvidersPanel";
 import TelegramStep from "./TelegramStep";
 import StatusMessage from "./StatusMessage";
 import ReconnectingOverlay from "./ReconnectingOverlay";
@@ -853,13 +854,16 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
               <CredentialsStep onNext={() => goToStep(4)} hermes={isHermesEdition} />
             )}
             {currentStep === 4 && !choosingAssistant && (
-              <AIModelsStep
-                providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "xai", "llamacpp"]}
-                defaultProviderId="clawai"
-                title={tr("settings.aiConnectTitle", "Connect AI Provider")}
-                description={t("ai.description")}
-                onNext={() => goToStep(5)}
-              />
+              // "Hide cloud AI providers" (TASK-2497): the box's own AI instead.
+              <CloudProvidersWizardGate onNext={() => goToStep(5)}>
+                <AIModelsStep
+                  providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "xai", "llamacpp"]}
+                  defaultProviderId="clawai"
+                  title={tr("settings.aiConnectTitle", "Connect AI Provider")}
+                  description={t("ai.description")}
+                  onNext={() => goToStep(5)}
+                />
+              </CloudProvidersWizardGate>
             )}
             {/* Local AI step removed from initial setup — owners now reach
                 it via Settings → Local AI on demand. The wizard ships a

@@ -155,12 +155,44 @@ function repeatsShownReply(latestShown: ChatMessage | undefined, reply: ChatMess
 }
 
 /**
+ * Is this reply already on screen under the question it answers?
+ *
+ * The box stores a reply BEFORE the live `final` for it goes out, so any read
+ * of the transcript in between paints it first: the coalesced re-read a
+ * `session.message` push schedules, and — every time — the read a tab switch
+ * makes when the owner comes back to a conversation whose answer is just
+ * landing (TASK-2494). The final then repeats it, word for word, and appending
+ * it put the last answer on screen twice until a refresh.
+ *
+ * Decided by RUN, the reply's stable identity: the history projection reads it
+ * off the gateway's record of each reply, and the live frame names its run
+ * (`idempotencyKey` on both). Words alone cannot decide it — two runs that say
+ * the same thing, a reminder delivered twice, are two replies — so a side with
+ * no run to compare (an older gateway) keeps the append it always had. Looked
+ * for among the bubbles after the latest user turn only. A reply with a spoken
+ * half is left to the audio fold below, and one with a picture or file the
+ * bubble lacks is not this bubble.
+ */
+function shownUnderLatestQuestion(previous: ChatMessage[], reply: ChatMessage): boolean {
+  const run = runIdOf(reply.idempotencyKey);
+  if (!run || !reply.text || reply.audio?.length) return false;
+  for (let i = previous.length - 1; i >= 0; i--) {
+    const shown = previous[i];
+    if (shown.role === "user") return false;
+    if (shown.role !== "assistant" || shown.text !== reply.text || runIdOf(shown.idempotencyKey) !== run) continue;
+    if (within(reply.images, shown.images) && within(reply.files, shown.files)) return true;
+  }
+  return false;
+}
+
+/**
  * The transcript with one finished reply added, whatever produced it.
  *
  * Three rules, in order:
  * 1. A copy of the bubble the transcript re-read already painted with its
  *    media — stripped of it, or carrying the same — is the same reply, and
- *    changes nothing (see above).
+ *    changes nothing (see above). So is a reply already shown, word for word,
+ *    under the question it answers (`shownUnderLatestQuestion`).
  * 2. The spoken half of a reply arrives as a SECOND message repeating the text
  *    of the one already rendered. Appending it verbatim showed the answer
  *    twice, once silent and once playable, so its audio is folded into the
@@ -178,7 +210,7 @@ export function withAssistantReply(
   opts?: { ownClips?: ReadonlySet<string> },
 ): ChatMessage[] {
   const last = previous[previous.length - 1];
-  if (repeatsShownReply(last, reply)) return previous;
+  if (repeatsShownReply(last, reply) || shownUnderLatestQuestion(previous, reply)) return previous;
   const audio = reply.audio ?? [];
   if (reply.text.length > 0 && audio.length > 0 && !(reply.images?.length) && !(reply.files?.length)
       && last && last.role === "assistant" && last.text === reply.text) {

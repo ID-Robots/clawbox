@@ -9,8 +9,8 @@
  *     access token only, in an order that follows the pool (the active account
  *     first, the chat's own sign-in last); a limited account out of the order
  *     while another can answer, or the chat's own subscription sign-in, so no
- *     session core pinned to it stays there, and back at its reset; never a
- *     restart.
+ *     session core pinned to it stays there, and back at its reset; the
+ *     gateway stopped only for a token paste, and once for every account's.
  *  2. NOTHING TAKEN FOR NOTHING — a chat on another provider is never moved;
  *     an unreadable config removes nothing; the owner's own profiles are never
  *     written or removed; a write core refused is owed, not claimed.
@@ -76,7 +76,18 @@ function fakeCore() {
     agent: [] as string[] | null,
     /** `paste-token` wrote the profile, then could not tell the running gateway and exited non-zero. */
     pasteExitsAfterWrite: false,
+    /** OpenClaw 2026.11.3 keeps every other profile of the provider after the order asked for. */
+    orderKeepsOthers: false,
+    /** The gateway could not be stopped and started again around the pastes. */
+    offlineFails: false,
+    /** The gateway could not be STOPPED: the window's work never runs. */
+    stopFails: false,
+    /** The gateway is stopped, the pastes running. */
+    windowOpen: false,
+    /** How long one paste takes — a CLI start-up, on a clock the test has faked. */
+    pasteTakesMs: 0,
   };
+  offlineWindows = 0;
   gw._setGatewayDepsForTests({
     absent: () => false,
     chat: async () => (core.chatOnClaude === null ? null : { onAnthropic: core.chatOnClaude, configOrder: core.configOrder !== null, agent: core.agent }),
@@ -88,7 +99,22 @@ function fakeCore() {
         failures: core.failures,
       }
       : { kind: "unreadable" },
+    // OpenClaw 2026.11.3 takes `paste-token` only offline: the pass's pastes
+    // run in one window with the gateway stopped (counted here).
+    offline: async (work) => {
+      offlineWindows += 1;
+      if (core.stopFails) throw new Error("the gateway is still stopping");
+      core.windowOpen = true;
+      try {
+        const done = await work();
+        if (core.offlineFails) throw new Error("the gateway did not start again");
+        return done;
+      } finally {
+        core.windowOpen = false;
+      }
+    },
     paste: async (profileId, token) => {
+      if (core.pasteTakesMs > 0) vi.setSystemTime(Date.now() + core.pasteTakesMs);
       if (core.refusePaste || core.refusePasteOf.has(profileId)) throw new Error("the auth store is busy");
       core.pastes.push({ profileId, ...token });
       core.profiles.set(profileId, { type: "token", secret: token.access, expires: token.expires });
@@ -107,7 +133,7 @@ function fakeCore() {
     order: async (ids) => {
       if (core.refuseOrder) throw new Error("the auth state is busy");
       core.orders.push([...ids]);
-      core.order = ids.length > 0 ? [...ids] : null;
+      core.order = ids.length > 0 ? [...ids, ...(core.orderKeepsOthers ? [...core.profiles.keys()].filter((id) => !ids.includes(id)) : [])] : null;
       if (core.orderReadsBackOtherwise && core.order) core.order = [...core.order].reverse();
     },
     unsetConfigOrder: async () => {
@@ -168,6 +194,9 @@ const rateLimited = (now = Date.now(), until = now + 30_000): Failure => ({
   cooldownUntil: until, cooldownReason: "rate_limit", disabledUntil: null, disabledReason: null, blockedUntil: null, lastFailureAt: now - 1_000,
 });
 
+/** How many offline windows (gateway stopped) the pool asked for. */
+let offlineWindows = 0;
+
 describe("the pool in the gateway", () => {
   it("puts every Claude account in as its own profile — the access token only — the active one first and the chat's own sign-in last", async () => {
     const core = fakeCore();
@@ -178,6 +207,8 @@ describe("the pool in the gateway", () => {
     expect(core.pastes.map((w) => w.profileId).sort()).toEqual([p(work.id), p(personal.id)].sort());
     expect(core.pastes.find((w) => w.profileId === p(work.id))).toMatchObject({ access: "sk-ant-oat01-work", expires: expect.any(Number) });
     expect(JSON.stringify(core.pastes)).not.toContain("refresh-");
+    // Both pastes in ONE offline window: the gateway is stopped once a pass.
+    expect(offlineWindows).toBe(1);
     expect(core.order).toEqual([p(work.id), p(personal.id), "anthropic:default"]);
     // The chat's own sign-in is never written or taken out.
     expect(core.profiles.get("anthropic:default")?.secret).toBe(OWN);
@@ -188,6 +219,28 @@ describe("the pool in the gateway", () => {
     const asked = core.pastes.length + core.orders.length;
     expect(await gw.keepGatewayMirror()).toBe("fresh");
     expect(core.pastes.length + core.orders.length).toBe(asked);
+    // ...and stops nothing.
+    expect(offlineWindows).toBe(1);
+  });
+
+  it("takes an order the gateway completed with the provider's other profiles as landed (OpenClaw 2026.11.3)", async () => {
+    const core = fakeCore();
+    core.orderKeepsOthers = true;
+    const { work, personal } = await twoClaudeAccounts();
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect(core.order?.slice(0, 2)).toEqual([p(work.id), p(personal.id)]);
+    // A second pass finds the order leading with the pool's and writes nothing.
+    const orders = core.orders.length;
+    expect(await gw.keepGatewayMirror()).toBe("fresh");
+    expect(core.orders.length).toBe(orders);
+  });
+
+  it("fails the pass when the gateway did not start again after the token pastes, whatever the store shows", async () => {
+    const core = fakeCore();
+    core.offlineFails = true;
+    await twoClaudeAccounts();
+    expect(await gw.keepGatewayMirror()).not.toBe("synced");
+    expect(core.pastes.length).toBe(2);
   });
 
   it("moves the order when the pool moves — a limit seen elsewhere, the owner's new order — and never restarts anything", async () => {
@@ -268,6 +321,307 @@ describe("the pool in the gateway", () => {
     expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
   });
 
+  it("renews every other account in the SAME offline window when one comes due — one gateway stop a token lifetime, not one an account", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    expect(offlineWindows).toBe(1);
+    // The accounts were signed in at different times: Work's token is inside
+    // the pool's renewal margin, Personal's has two hours more.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work", 2 * H), email: "work@example.com" });
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 4 * H), email: "me@example.com" });
+    let renewals = 0;
+    const gatewayStopped: boolean[] = [];
+    const anthropic = vi.fn(async () => {
+      renewals += 1;
+      gatewayStopped.push(core.windowOpen);
+      return new Response(JSON.stringify({ access_token: `sk-ant-oat01-renewed-${renewals}`, refresh_token: `r-${renewals}`, expires_in: 28_800 }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", anthropic);
+
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+
+    // Work came due; Personal was renewed beside it, and both went in with
+    // the gateway stopped ONCE.
+    expect(anthropic).toHaveBeenCalledTimes(2);
+    expect(offlineWindows).toBe(2);
+    // Only the renewal that called for the window was made with the gateway
+    // up: Anthropic refuses the token a renewal replaced, so Personal's was
+    // replaced only once the gateway was stopped.
+    expect(gatewayStopped).toEqual([false, true]);
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-renewed-1");
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-renewed-2");
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: work.id, pending: false, fingerprint: fp("sk-ant-oat01-renewed-1") });
+
+    // Their tokens end together now: the next pass has nothing to renew, and
+    // stops nothing.
+    expect(await gw.keepGatewayMirror()).toBe("fresh");
+    expect(anthropic).toHaveBeenCalledTimes(2);
+    expect(offlineWindows).toBe(2);
+  });
+
+  it("renews nothing ahead of time for an account whose token ends with the one going in", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const anthropic = vi.fn(async () => new Response("{}", { status: 500 }));
+    vi.stubGlobal("fetch", anthropic);
+    // The owner signed Work in again: a fresh token, minutes younger than
+    // Personal's. Renewing Personal for that would refuse the copy a coding
+    // run holds, to move its end by minutes.
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 8 * H - 20 * 60_000), email: "me@example.com" });
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+
+    expect(anthropic).not.toHaveBeenCalled();
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal");
+    expect(offlineWindows).toBe(2);
+  });
+
+  it("leaves an account as it is when its renewal ahead of time could not be made — the window still takes the token that was owed", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 5 * H), email: "me@example.com" });
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+    const anthropic = vi.fn().mockRejectedValue(new Error("ENOTFOUND"));
+    vi.stubGlobal("fetch", anthropic);
+
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+
+    expect(anthropic).toHaveBeenCalledTimes(1);
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
+    // Personal's token has five hours in it: it stays, and nothing is marked.
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal");
+    expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("ok");
+    expect(offlineWindows).toBe(2);
+  });
+
+  it("renews an account ahead of time once a margin, however often a window opens beside a token that ends far later", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    let renewals = 0;
+    const anthropic = vi.fn(async () => {
+      renewals += 1;
+      return new Response(JSON.stringify({ access_token: `sk-ant-oat01-work-renewed-${renewals}`, refresh_token: `r-${renewals}`, expires_in: 28_800 }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", anthropic);
+    // The owner signs Personal in with a token that ends in a year: no
+    // renewed token of Work's ever ends as late.
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal-long-lived", 365 * 24 * H), email: "me@example.com" });
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect(anthropic).toHaveBeenCalledTimes(1);
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-renewed-1");
+
+    // ...and again, and again: each is a window, none renews Work once more.
+    for (const access of ["sk-ant-oat01-personal-long-lived-2", "sk-ant-oat01-personal-long-lived-3"]) {
+      await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth(access, 365 * 24 * H), email: "me@example.com" });
+      expect(await gw.keepGatewayMirror()).toBe("synced");
+      expect(core.profiles.get(p(personal.id))?.secret).toBe(access);
+    }
+    expect(offlineWindows).toBe(4);
+    expect(anthropic).toHaveBeenCalledTimes(1);
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-renewed-1");
+  });
+
+  it("renews ONE account, not every account, when the gateway cannot be stopped — the others still answer on the tokens it holds", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // Both inside the pool's renewal margin: their tokens end together, as
+    // they do once a window has taken them together.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work", 2 * H), email: "work@example.com" });
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 2 * H), email: "me@example.com" });
+    const anthropic = vi.fn(async () => new Response(JSON.stringify({ access_token: "sk-ant-oat01-work-renewed", refresh_token: "r-1", expires_in: 28_800 }), { status: 200 }));
+    vi.stubGlobal("fetch", anthropic);
+    core.stopFails = true;
+
+    expect(await gw.keepGatewayMirror()).toBe("failed");
+
+    // The window never opened: Personal was not renewed, so the token the
+    // gateway holds for it is still the one Anthropic takes.
+    expect(anthropic).toHaveBeenCalledTimes(1);
+    expect(core.pastes.filter((w) => w.access.includes("renewed"))).toEqual([]);
+    expect(await pool.gatewayCredentialFor(personal.id, { renew: false })).toMatchObject({ access: "sk-ant-oat01-personal" });
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal");
+
+    // The next pass, the gateway stopping again: Work's owed token goes in
+    // and Personal is renewed beside it, in one window.
+    core.stopFails = false;
+    anthropic.mockImplementation(async () => new Response(JSON.stringify({ access_token: "sk-ant-oat01-personal-renewed", refresh_token: "r-2", expires_in: 28_800 }), { status: 200 }));
+    const windows = offlineWindows;
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect(offlineWindows).toBe(windows + 1);
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-renewed");
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal-renewed");
+  });
+
+  it("renews nothing more once a token renewed in the window could not be pasted — one account lost to it, not the rest", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    const third = await pool.addOAuthAccount({ label: "Team Max", email: "team@example.com", tokens: oauth("sk-ant-oat01-team") });
+    await gw.keepGatewayMirror();
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work", 2 * H), email: "work@example.com" });
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 2 * H), email: "me@example.com" });
+    await pool.replaceCredential(third.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-team", 2 * H), email: "team@example.com" });
+    let renewals = 0;
+    const anthropic = vi.fn(async () => {
+      renewals += 1;
+      return new Response(JSON.stringify({ access_token: `sk-ant-oat01-renewed-${renewals}`, refresh_token: `r-${renewals}`, expires_in: 28_800 }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", anthropic);
+    core.refusePasteOf.add(p(personal.id));
+
+    await gw.keepGatewayMirror();
+
+    // Work (renewed to open the window) went in; Personal was renewed with
+    // the gateway stopped and core would not take it; Team was left alone, on
+    // the token the gateway holds and Anthropic still takes.
+    expect(anthropic).toHaveBeenCalledTimes(2);
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-renewed-1");
+    expect(core.profiles.get(p(third.id))?.secret).toBe("sk-ant-oat01-team");
+    expect(await pool.gatewayCredentialFor(third.id, { renew: false })).toMatchObject({ access: "sk-ant-oat01-team" });
+  });
+
+  it("spends no account that has hours left on a window that cannot write, pass after pass", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    const third = await pool.addOAuthAccount({ label: "Team Max", email: "team@example.com", tokens: oauth("sk-ant-oat01-team") });
+    await gw.keepGatewayMirror();
+    // Work is due; Personal and Team have six hours, three ahead of their margin.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work", 2 * H), email: "work@example.com" });
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 6 * H), email: "me@example.com" });
+    await pool.replaceCredential(third.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-team", 6 * H), email: "team@example.com" });
+    const anthropic = vi.fn(async () => new Response(JSON.stringify({ access_token: "sk-ant-oat01-work-renewed", refresh_token: "r-1", expires_in: 28_800 }), { status: 200 }));
+    vi.stubGlobal("fetch", anthropic);
+    // Core takes no paste at all: its store is busy, pass after pass.
+    core.refusePaste = true;
+
+    await gw.keepGatewayMirror();
+    await gw.keepGatewayMirror();
+
+    // Only Work, which came due, was renewed. One more account a pass would
+    // have left the gateway with a refused token for every one of them.
+    expect(anthropic).toHaveBeenCalledTimes(1);
+    for (const [account, access] of [[personal, "sk-ant-oat01-personal"], [third, "sk-ant-oat01-team"]] as const) {
+      expect(core.profiles.get(p(account.id))?.secret).toBe(access);
+      expect(await pool.gatewayCredentialFor(account.id, { renew: false })).toMatchObject({ access });
+    }
+  });
+
+  it("takes five accounts in one window however long each paste takes — the window's budget is for asking Anthropic", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const core = fakeCore();
+    const accounts = [];
+    for (const name of ["a", "b", "c", "d", "e"]) {
+      accounts.push(await pool.addOAuthAccount({ label: `Max ${name}`, email: `${name}@example.com`, tokens: oauth(`sk-ant-oat01-${name}`) }));
+    }
+    await gw.keepGatewayMirror();
+    for (const [i, account] of accounts.entries()) {
+      await pool.replaceCredential(account.id, { kind: "oauth", tokens: oauth(`sk-ant-oat01-${"abcde"[i]}`, 2 * H), email: `${"abcde"[i]}@example.com` });
+    }
+    let renewals = 0;
+    const gatewayStopped: boolean[] = [];
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      renewals += 1;
+      gatewayStopped.push(core.windowOpen);
+      return new Response(JSON.stringify({ access_token: `sk-ant-oat01-renewed-${renewals}`, refresh_token: `r-${renewals}`, expires_in: 28_800 }), { status: 200 });
+    }));
+    // A CLI start-up on a Jetson: five pastes are a minute.
+    core.pasteTakesMs = 12_000;
+    const windows = offlineWindows;
+
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+
+    expect(gatewayStopped).toEqual([false, true, true, true, true]);
+    expect(offlineWindows).toBe(windows + 1);
+    expect([...core.profiles.values()].filter((profile) => profile.secret.startsWith("sk-ant-oat01-renewed-"))).toHaveLength(5);
+    // All five end together: nothing is left to come due on its own.
+    expect(await gw.keepGatewayMirror()).toBe("fresh");
+    expect(offlineWindows).toBe(windows + 1);
+  });
+
+  it("never pastes a token that is past its end as it stands: the window renews it, or it stays owed", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // The owner signed Work in again; Personal's token ran out meanwhile, and
+    // Anthropic cannot be reached to renew it.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal-ended", -60_000), email: "me@example.com" });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ENOTFOUND")));
+
+    await gw.keepGatewayMirror();
+
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
+    expect(core.pastes.map((w) => w.access)).not.toContain("sk-ant-oat01-personal-ended");
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal");
+  });
+
+  it("renews a due account that is not behind the token going in — beside an owed one that itself ends soon and that core keeps refusing", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // Work's token is owed, refused by core pass after pass, and ends in
+    // 3 h 10 min: not due itself, and too soon for Personal (2 h 50 min, due)
+    // to count as behind it. Personal is read as it is on every pass, so
+    // only the window can renew it.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2", 3 * H + 10 * 60_000), email: "work@example.com" });
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 3 * H - 10 * 60_000), email: "me@example.com" });
+    const anthropic = vi.fn(async () => new Response(JSON.stringify({ access_token: "sk-ant-oat01-personal-renewed", refresh_token: "r-1", expires_in: 28_800 }), { status: 200 }));
+    vi.stubGlobal("fetch", anthropic);
+    core.refusePasteOf.add(p(work.id));
+
+    await gw.keepGatewayMirror();
+
+    expect(anthropic).toHaveBeenCalledTimes(1);
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal-renewed");
+    // Work's own token was not renewed for it, and was pasted (and refused) once.
+    expect(await pool.gatewayCredentialFor(work.id, { renew: false })).toMatchObject({ access: "sk-ant-oat01-work-v2" });
+  });
+
+  it("does not paste a token that ended while the window was open, when it could not be renewed there", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // Both owed. Personal's token has three minutes left when the pass reads
+    // it, Anthropic cannot be reached to renew it, and Work's paste alone
+    // takes four.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal-v2", 3 * 60_000), email: "me@example.com" });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ENOTFOUND")));
+    core.pasteTakesMs = 4 * 60_000;
+
+    await gw.keepGatewayMirror();
+
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
+    expect(core.pastes.map((w) => w.access)).not.toContain("sk-ant-oat01-personal-v2");
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal");
+  });
+
+  it("goes on renewing the other accounts beside one whose owed paste core keeps refusing", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // Work's new token is owed and core refuses it, pass after pass; Personal
+    // comes due meanwhile.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 2 * H), email: "me@example.com" });
+    const anthropic = vi.fn(async () => new Response(JSON.stringify({ access_token: "sk-ant-oat01-personal-renewed", refresh_token: "r-1", expires_in: 28_800 }), { status: 200 }));
+    vi.stubGlobal("fetch", anthropic);
+    core.refusePasteOf.add(p(work.id));
+
+    await gw.keepGatewayMirror();
+
+    expect(anthropic).toHaveBeenCalledTimes(1);
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal-renewed");
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work");
+  });
+
   it("puts a token the pool renewed in — no restart — and owes a write core refused instead of claiming it", async () => {
     const core = fakeCore();
     const { work } = await twoClaudeAccounts();
@@ -341,6 +695,29 @@ describe("a limited account and the sessions core pinned to it", () => {
     await pool.clearLimit(personal.id);
     await gw.syncGatewayNow();
     expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
+  });
+
+  it("on OpenClaw 2026.11.3 takes the owner's sign-in leading a COMPLETED order, the limited accounts at its tail, as landed", async () => {
+    // The gateway takes only an order naming every profile it holds, so the
+    // limited accounts stay in it after the owner's sign-in (out of the lead,
+    // not out of the store); the pass must not call that a failed write.
+    const core = fakeCore();
+    core.orderKeepsOthers = true;
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
+    await pool.markLimited(personal.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    const synced = await gw.syncGatewayNow();
+    expect(synced.status).toBe("ok");
+    expect(core.order?.[0]).toBe("anthropic:default");
+    expect(new Set(core.order?.slice(1))).toEqual(new Set([p(work.id), p(personal.id)]));
+    expect(core.logouts).toEqual([]);
+    // A second pass finds the order leading with what it wants and writes nothing.
+    const orders = core.orders.length;
+    expect(await gw.keepGatewayMirror()).not.toBe("failed");
+    expect(core.orders.length).toBe(orders);
   });
 
   it("keeps every limited account in, by its reset and ahead of it, when the owner's other Anthropic credential is an API key or of a kind the store does not say", async () => {

@@ -50,6 +50,7 @@ let binDir: string;
 let configPath: string;
 let statePath: string;
 let callsPath: string;
+let stdinPath: string;
 let envLogPath: string;
 let modelDir: string;
 let tokenPath: string;
@@ -67,16 +68,20 @@ beforeEach(() => {
   configPath = path.join(dir, "openclaw.json");
   statePath = path.join(dir, "data", "local-embeddings.state");
   callsPath = path.join(dir, "calls.log");
+  stdinPath = path.join(dir, "stdin.log");
   envLogPath = path.join(dir, "env.log");
   modelDir = path.join(dir, "models");
   tokenPath = path.join(dir, ".local-ai-token");
   writeFileSync(configPath, JSON.stringify({ agents: { defaults: {} } }));
 
-  // curl: the proxy. Records the argv (bearer included); answers only while PROXY_UP=1.
+  // curl: the proxy. Records the argv, and the config a call reads on stdin
+  // (`-K -`) before anything can exit and leave its writer a closed pipe;
+  // answers only while PROXY_UP=1.
   writeStub(
     "curl",
     [
       'echo "curl $*" >> "$CALLS_LOG"',
+      'case " $* " in *" -K - "*) cat >> "$STDIN_LOG" ;; esac',
       '# The gateway\'s own /startupz: answers the code a case scripts.',
       'case "$*" in *startupz*) printf "%s" "${STARTUPZ_CODE:-000}"; exit 0 ;; esac',
       'if [ "${PROXY_UP:-1}" != "1" ]; then exit 7; fi',
@@ -185,6 +190,8 @@ type RunOpts = {
   state?: string;
   proxyDown?: boolean;
   noToken?: boolean;
+  /** What the token file holds, when not the fixture TOKEN. */
+  token?: string;
   failOn?: string;
   flockBin?: string;
   stateFile?: string;
@@ -219,6 +226,7 @@ function run(opts: RunOpts = {}) {
   // Each run starts from a clean call log so a second run in the same test
   // cannot inherit the first one's calls.
   rmSync(callsPath, { force: true });
+  rmSync(stdinPath, { force: true });
   rmSync(envLogPath, { force: true });
   const cfg: Record<string, unknown> = {};
   if (opts.provider !== undefined) cfg.provider = opts.provider;
@@ -252,7 +260,7 @@ function run(opts: RunOpts = {}) {
     writeFileSync(path.join(modelDir, GGUF), "gguf");
   }
   if (opts.noToken) rmSync(tokenPath, { force: true });
-  else writeFileSync(tokenPath, TOKEN);
+  else writeFileSync(tokenPath, opts.token ?? TOKEN);
   if (opts.state !== undefined) {
     mkdirSync(path.dirname(statePath), { recursive: true });
     writeFileSync(statePath, opts.state);
@@ -275,6 +283,7 @@ function run(opts: RunOpts = {}) {
       EMBED_PROXY_WAIT_SECONDS: "0",
       PROXY_UP: opts.proxyDown ? "0" : "1",
       CALLS_LOG: callsPath,
+      STDIN_LOG: stdinPath,
       HF_RC: String(opts.hfRc ?? 0),
       HF_NO_FILE: opts.hfNoFile ? "1" : "0",
       SHA_BAD: opts.shaBad ? "1" : "0",
@@ -294,6 +303,8 @@ function run(opts: RunOpts = {}) {
     stdout: res.stdout ?? "",
     stderr: res.stderr ?? "",
     calls,
+    /** What curl read on stdin, every call's config in turn. */
+    stdin: existsSync(stdinPath) ? readFileSync(stdinPath, "utf-8") : "",
     /** The tree-selecting environment the stub CLI saw, one line per call. */
     cliEnv,
     memorySearch: (config.agents?.defaults?.memorySearch ?? {}) as Record<string, unknown>,
@@ -367,10 +378,27 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh", () => {
   });
 
   it("probes the embedder THROUGH the proxy with the service bearer, never at its own port", () => {
+    // The bearer travels on curl's stdin as a config line: every local account
+    // can read a running process's arguments. The request is the same on every host.
     const r = run();
-    expect(probes(r.calls)).toHaveLength(1);
-    expect(probes(r.calls)[0]).toContain(`Authorization: Bearer ${TOKEN}`);
+    expect(probes(r.calls)).toEqual([`curl -fsS --max-time 200 -K - ${PROXY}/models`]);
+    expect(r.calls.filter((c) => c.startsWith("curl") && c.includes(TOKEN))).toEqual([]);
+    expect(r.stdin).toBe(`header = "Authorization: Bearer ${TOKEN}"\n`);
     expect(r.calls.some((c) => c.includes(":8081"))).toBe(false);
+  });
+
+  it.each([
+    ["a quote and a backslash", '0123456789abcdef"\\x', 'header = "Authorization: Bearer 0123456789abcdef\\"\\\\x"\n'],
+    [
+      "a line break and a carriage return",
+      "0123456789abcdef\nx\ry",
+      'header = "Authorization: Bearer 0123456789abcdef\\nx\\ry"\n',
+    ],
+  ])("escapes a bearer holding %s for curl's config line", (_name, token, line) => {
+    const r = run({ token });
+    // The part before any line break: the call log holds one line per call.
+    expect(r.calls.filter((c) => c.startsWith("curl") && c.includes("0123456789abcdef"))).toEqual([]);
+    expect(r.stdin).toBe(line);
   });
 
   it("skips the download when the GGUF is on disk but still configures and reindexes", () => {

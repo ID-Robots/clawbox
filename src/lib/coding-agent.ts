@@ -11667,7 +11667,8 @@ function limitModelOf(run: CodingRun, found: FoundAccountLimit | null): string |
 async function settleLimitScope(run: CodingRun, found: FoundAccountLimit): Promise<void> {
   if (!run.anthropicAccount || found.limit.kind === "credit") return;
   const model = limitModelOf(run, found);
-  const reading = await readAccountUsage(run.anthropicAccount).catch(() => null);
+  // `record: false`: recordAccountLimit records it, with this run — the move is announced as this run's.
+  const reading = await readAccountUsage(run.anthropicAccount, 0, { record: false }).catch(() => null);
   if (!reading) return;
   const now = Date.now();
   const spent = usageForModel(reading, model);

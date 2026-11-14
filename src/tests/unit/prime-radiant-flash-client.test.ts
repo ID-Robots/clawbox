@@ -1,7 +1,8 @@
 /**
  * The Flash client: the request it sends to the ClawBox AI proxy, how each
  * failure is classified, the retry policy, the cost estimate, and which
- * client answers (override → test-mode stub → the real proxy).
+ * client answers (override → test-mode stub → the engine feature-engine.ts
+ * names: ClawBox AI's proxy, or the box's own engine — TASK-2501 PR-C).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -13,14 +14,35 @@ const creds = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/harness/credentials", () => creds);
 
+type Engine = { kind: "clawbox-ai" } | { kind: "local"; engine: typeof LOCAL_ENGINE } | { kind: "none"; reason: "cloud_ai_locked" | "no_credential" };
+const feature = vi.hoisted(() => ({ resolveFeatureEngine: vi.fn() }));
+vi.mock("@/lib/feature-engine", () => feature);
+
+const LOCAL_ENGINE = {
+  kind: "llamacpp" as const,
+  model: "gemma4-e2b-it-q4_0",
+  modelRef: "llamacpp/gemma4-e2b-it-q4_0",
+  chatUrl: "http://127.0.0.1:3005/setup-api/local-ai/llamacpp/v1/chat/completions",
+  authorization: "Bearer local-install-token",
+  contextTokens: 32768,
+  maxOutputTokens: 8192,
+  parallel: 1,
+  imageInput: false as boolean | null,
+};
+
 import {
   FlashCallError,
   backoffMs,
   completeWithRetry,
   createClawboxAiFlashClient,
+  createLocalFlashClient,
   estimateUsd,
   flashAvailable,
   flashClient,
+  flashEngine,
+  flashUnavailableReason,
+  fitsWindow,
+  itemsThatFit,
   readUsage,
   setFlashClientOverride,
   type FlashClient,
@@ -43,6 +65,7 @@ beforeEach(() => {
   creds.resolveClawaiToken.mockReset().mockResolvedValue("claw_test_token");
   creds.noteClawaiCredentialRefused.mockClear();
   creds.proxyRefusedClawaiCredential.mockReset().mockResolvedValue(false);
+  feature.resolveFeatureEngine.mockReset().mockResolvedValue({ kind: "clawbox-ai" } satisfies Engine);
   delete process.env.CLAWBOX_AI_PROXY_URL;
 });
 
@@ -279,19 +302,42 @@ describe("cost estimate", () => {
 
 describe("which client answers", () => {
   it("an override first, then the stub in test mode only, else the proxy", async () => {
-    expect(flashClient().model).toBe("deepseek-v4-flash");
+    expect((await flashClient()).model).toBe("deepseek-v4-flash");
     vi.stubEnv("PRIME_RADIANT_FLASH_STUB", "1");
-    expect(flashClient().model).toBe("deepseek-v4-flash");
+    expect((await flashClient()).model).toBe("deepseek-v4-flash");
     vi.stubEnv("CLAWBOX_TEST_MODE", "1");
-    expect(flashClient().model).toBe(STUB_MODEL);
+    expect((await flashClient()).model).toBe(STUB_MODEL);
     const override: FlashClient = { model: "override", complete: async () => ({ text: "[]", model: "override", usage: readUsage({}) }) };
     setFlashClientOverride(override);
-    expect(flashClient()).toBe(override);
+    expect(await flashClient()).toBe(override);
   });
 
-  it("is available with a credential, an override or the stub", async () => {
-    creds.resolveClawaiToken.mockResolvedValue(null);
+  it("is the box's own engine where the box's AI runs on it, with the engine's budget", async () => {
+    feature.resolveFeatureEngine.mockResolvedValue({ kind: "local", engine: LOCAL_ENGINE } satisfies Engine);
+    const client = await flashClient();
+    expect(client.model).toBe("llamacpp/gemma4-e2b-it-q4_0");
+    expect(client.engine).toBe("local");
+    expect(client.budget).toEqual({ contextTokens: 32768, maxOutputTokens: 8192, parallel: 1 });
+    expect(await flashEngine()).toBe("local");
+    expect(await flashUnavailableReason()).toBeNull();
+  });
+
+  it("answers no_engine on a locked box with no model of its own, and never asks the cloud", async () => {
+    feature.resolveFeatureEngine.mockResolvedValue({ kind: "none", reason: "cloud_ai_locked" } satisfies Engine);
+    const client = await flashClient();
+    await expect(client.complete(req)).rejects.toMatchObject({ kind: "no_engine", retryable: false });
+    expect(creds.resolveClawaiToken).not.toHaveBeenCalled();
+    expect(await flashUnavailableReason()).toBe("cloud_ai_locked");
+    expect(await flashEngine()).toBeNull();
+  });
+
+  it("is available with either engine, an override or the stub; the reason says which is missing", async () => {
+    feature.resolveFeatureEngine.mockResolvedValue({ kind: "none", reason: "no_credential" } satisfies Engine);
     expect(await flashAvailable()).toBe(false);
+    expect(await flashUnavailableReason()).toBe("no_credential");
+    feature.resolveFeatureEngine.mockResolvedValue({ kind: "local", engine: LOCAL_ENGINE } satisfies Engine);
+    expect(await flashAvailable()).toBe(true);
+    feature.resolveFeatureEngine.mockResolvedValue({ kind: "none", reason: "no_credential" } satisfies Engine);
     vi.stubEnv("CLAWBOX_TEST_MODE", "1");
     vi.stubEnv("PRIME_RADIANT_FLASH_STUB", "1");
     expect(await flashAvailable()).toBe(true);
@@ -305,10 +351,138 @@ describe("which client answers", () => {
       { i: 1, path: "upload/notes.txt", kind: "txt", text: "short" },
     ];
     const prompt = buildWriterPrompt(items);
-    const out = await flashClient().complete({ ...prompt, maxTokens: 100 });
+    const out = await (await flashClient()).complete({ ...prompt, maxTokens: 100 });
     const verdicts = parseWriterResponse(out.text, items);
     expect(verdicts.get(0)).toMatchObject({ ok: true, draft: { title: "Acme catalogue", useful: true } });
     expect(verdicts.get(1)).toMatchObject({ ok: true, draft: { useful: false } });
     expect(out.usage.promptTokens).toBeGreaterThan(0);
+  });
+});
+
+describe("the box's own engine as a Flash client", () => {
+  const sized = { system: "s".repeat(2_500), user: "u".repeat(25_000), maxTokens: 48_000 };
+
+  it("posts to the engine, cuts the answer's ceiling to what the window leaves, and records the engine's ref", async () => {
+    const fetchImpl = vi.fn(async () => respond(200, { model: "gemma", choices: [{ message: { content: "[]" }, finish_reason: "stop" }], usage: { prompt_tokens: 11_000, completion_tokens: 50 } }));
+    const client = createLocalFlashClient(LOCAL_ENGINE, { fetchImpl: fetchImpl as unknown as typeof fetch });
+    const out = await client.complete(sized);
+    expect(out).toEqual({ text: "[]", model: "llamacpp/gemma4-e2b-it-q4_0", usage: { promptTokens: 11_000, completionTokens: 50, cacheHitTokens: 0 }, finishReason: "stop" });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(LOCAL_ENGINE.chatUrl);
+    expect((init.headers as Record<string, string>).authorization).toBe("Bearer local-install-token");
+    const body = JSON.parse(String(init.body));
+    // 48,000 asked; the engine answers at most 8,192, and the window has room for that beside ~11k of prompt.
+    expect(body).toMatchObject({ model: "gemma4-e2b-it-q4_0", temperature: 0, max_tokens: 8192, reasoning_effort: "none", stream: false });
+    expect(body.messages).toEqual([{ role: "system", content: sized.system }, { role: "user", content: sized.user }]);
+    expect(creds.resolveClawaiToken).not.toHaveBeenCalled();
+  });
+
+  it("cuts the ceiling to the window's room when the prompt is long, and refuses as too_long before sending when none is left", async () => {
+    const fetchImpl = vi.fn(async () => respond(200, okBody));
+    const client = createLocalFlashClient({ ...LOCAL_ENGINE, contextTokens: 16_384 }, { fetchImpl: fetchImpl as unknown as typeof fetch });
+    await client.complete({ system: "s", user: "u".repeat(30_000), maxTokens: 48_000 });
+    const asked = JSON.parse(String((fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].body)).max_tokens;
+    expect(asked).toBe(16_384 - Math.ceil(1 / 2.5) - 12_000 - 320);
+    fetchImpl.mockClear();
+    await expect(client.complete({ system: "s", user: "u".repeat(40_000), maxTokens: 1_000 })).rejects.toMatchObject({ kind: "too_long", retryable: false });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("words each failure as the box's own engine, in the kinds every pass already reads", async () => {
+    const cases: Array<[Response, string]> = [
+      [respond(400, { error: { type: "exceed_context_size_error", message: "the request exceeds the available context size" } }), "too_long"],
+      [respond(400, { error: "bad request" }), "refused"],
+      [respond(401, { error: "local-ai bearer token required" }), "auth"],
+      [respond(429, "busy"), "rate_limited"],
+      [respond(502, { error: "Failed to start llamacpp" }), "server"],
+      [respond(503, { code: "external_engine_selected" }), "server"],
+      [respond(200, "not json"), "bad_response"],
+      [respond(200, { choices: [{ message: { content: "" }, finish_reason: "length" }] }), "bad_response"],
+    ];
+    for (const [res, kind] of cases) {
+      const client = createLocalFlashClient(LOCAL_ENGINE, { fetchImpl: (async () => res) as unknown as typeof fetch });
+      const err = await client.complete(req).catch((e) => e);
+      expect(err, `${res.status} → ${kind}`).toBeInstanceOf(FlashCallError);
+      expect((err as FlashCallError).kind, `${res.status} → ${kind}`).toBe(kind);
+      expect((err as FlashCallError).message).toMatch(/model on this box/);
+    }
+    const external = createLocalFlashClient({ ...LOCAL_ENGINE, kind: "clawext", modelRef: "clawext/qwen3-32b" }, { fetchImpl: (async () => respond(403, "no")) as unknown as typeof fetch });
+    await expect(external.complete(req)).rejects.toMatchObject({ kind: "auth", message: expect.stringMatching(/External engine refused this box's key/) });
+  });
+
+  it("calls an unreachable engine a network failure, one cut by its time too_long, and one the owner stopped aborted", async () => {
+    const down = createLocalFlashClient(LOCAL_ENGINE, { fetchImpl: (async () => { throw new TypeError("fetch failed"); }) as unknown as typeof fetch });
+    await expect(down.complete(req)).rejects.toMatchObject({ kind: "network", retryable: true });
+
+    const hang = (async (_url: string, init: RequestInit) =>
+      await new Promise<Response>((_resolve, reject) => init.signal!.addEventListener("abort", () => reject(init.signal!.reason)))) as unknown as typeof fetch;
+    const slow = createLocalFlashClient(LOCAL_ENGINE, { fetchImpl: hang, timeoutMs: 20 });
+    await expect(slow.complete(req)).rejects.toMatchObject({ kind: "too_long", retryable: false });
+
+    const stop = new AbortController();
+    const stopped = createLocalFlashClient(LOCAL_ENGINE, { fetchImpl: hang });
+    const pending = stopped.complete({ ...req, signal: stop.signal });
+    stop.abort();
+    await expect(pending).rejects.toMatchObject({ kind: "aborted" });
+  });
+
+  it("is never resent as it was when too long: completeWithRetry asks it once", async () => {
+    const fetchImpl = vi.fn(async () => respond(400, { error: "context size exceeded" }));
+    const client = createLocalFlashClient(LOCAL_ENGINE, { fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(completeWithRetry(client, req, { sleep: async () => undefined })).rejects.toMatchObject({ kind: "too_long" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("sizing a call to a bounded window", () => {
+  const budget = { contextTokens: 4_096, maxOutputTokens: 2_048, parallel: 1 };
+  const build = (n: number) => ({ system: "s".repeat(500), user: "u".repeat(1_000 * n), maxTokens: 256 * n });
+
+  it("fits a request whose prompt, frame and longest answer the window holds, by the client's own estimate", () => {
+    expect(fitsWindow(budget, { system: "s".repeat(500), user: "u".repeat(1_000), maxTokens: 1_000 })).toBe(true);
+    // 200 + 4,000 tokens of prompt: no window left.
+    expect(fitsWindow(budget, { system: "s".repeat(500), user: "u".repeat(10_000), maxTokens: 1 })).toBe(false);
+    // The answer counts up to the engine's own ceiling, not the one asked.
+    expect(fitsWindow(budget, { system: "s", user: "u", maxTokens: 1_000_000 })).toBe(true);
+  });
+
+  it("takes the most items that fit, at least one, and every item with no budget", () => {
+    const n = itemsThatFit(budget, 8, build);
+    expect(n).toBeGreaterThan(1);
+    expect(n).toBeLessThan(8);
+    expect(fitsWindow(budget, build(n))).toBe(true);
+    expect(fitsWindow(budget, build(n + 1))).toBe(false);
+    expect(itemsThatFit({ ...budget, contextTokens: 100 }, 8, build)).toBe(1);
+    expect(itemsThatFit(undefined, 8, build)).toBe(8);
+  });
+});
+
+describe("the box's own engine: what it reads of an answer", () => {
+  it("reads no more than a few KB of a refusal's body", async () => {
+    let pulled = 0;
+    const big = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += 1;
+        if (pulled > 1_000) controller.close();
+        else controller.enqueue(new TextEncoder().encode("x".repeat(1_024)));
+      },
+    });
+    const client = createLocalFlashClient(LOCAL_ENGINE, { fetchImpl: (async () => new Response(big, { status: 400 })) as unknown as typeof fetch });
+    await expect(client.complete(req)).rejects.toMatchObject({ kind: "refused" });
+    expect(pulled).toBeLessThan(20);
+  });
+
+  it("calls an answer cut by the clock while it arrives too_long, never a bad answer to resend", async () => {
+    const stalled = (async (_url: string, init: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("{\"choices\": ["));
+          init.signal!.addEventListener("abort", () => controller.error(init.signal!.reason));
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as unknown as typeof fetch;
+    const client = createLocalFlashClient(LOCAL_ENGINE, { fetchImpl: stalled, timeoutMs: 30 });
+    await expect(client.complete(req)).rejects.toMatchObject({ kind: "too_long" });
   });
 });

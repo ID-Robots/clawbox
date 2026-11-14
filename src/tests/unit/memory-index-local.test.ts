@@ -133,7 +133,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   CONFIG_PATH: `${dataDir}/openclaw.json`,
 }));
 
-import { writeEmbedderPin } from "@/lib/memory-embedder";
+import { readEmbedderPin, writeEmbedderPin } from "@/lib/memory-embedder";
 import {
   EMBED_RETRY_MIN_WAIT_MS,
   EmbeddingUnavailableError,
@@ -586,16 +586,31 @@ describe("the ClawBox AI cloud embedder", () => {
     for (const url of embedCalls.urls) expect(url).toBe("http://127.0.0.1/setup-api/local-ai/embed/v1/embeddings");
   });
 
-  it("ends the pass rather than quietly embedding on the box when the credential is gone", async () => {
-    // A subscription that lapsed, or a credential the portal revoked. Falling
-    // back to the model on this box would write vectors from another model into
-    // an index stamped for the cloud one — a healthy panel over a search that
-    // ranks nothing.
+  it("embeds on the box when the credential is gone, and never into the index the cloud built (TASK-2501 PR-C)", async () => {
+    // A box that runs its local engine only — signed out of ClawBox AI, or
+    // linked for its plan alone — has no account the cloud embedder could
+    // bill. The model on this box answers instead; what keeps its vectors out
+    // of an index stamped for the cloud model is the index identity: the
+    // cloud-built index reads `mismatched`, a scheduled pass leaves it whole
+    // (`IndexRebuildRequiredError`), and only the owner's full reindex
+    // rebuilds it on the box.
+    boxState.clawaiToken = "claw_test";
     await writeEmbedderPin("cloud");
-    boxState.clawaiToken = null;
     write("notes.md", "The deposit is two months' rent.");
-    await expect(runLocalIndexPass("full")).rejects.toThrow(/ClawBox AI credential/i);
+    await runLocalIndexPass("full");
+    for (const url of embedCalls.urls) expect(url).toBe("https://clawbox.test/api/ai/embeddings");
+
+    boxState.clawaiToken = null;
+    embedCalls.urls = [];
+    embedCalls.texts = [];
+    write("more.md", "The lease runs for two years.");
+    await expect(runLocalIndexPass("incremental", undefined, undefined, { mayDiscard: false })).rejects.toBeInstanceOf(IndexRebuildRequiredError);
     expect(embedCalls.texts).toEqual([]);
+
+    await runLocalIndexPass("full");
+    expect(embedCalls.urls).not.toHaveLength(0);
+    for (const url of embedCalls.urls) expect(url).toBe("http://127.0.0.1/setup-api/local-ai/embed/v1/embeddings");
+    expect(await readEmbedderPin()).toBe("cloud");
   });
 
   it("searches with the same embedder the index was built by", async () => {

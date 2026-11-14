@@ -18,10 +18,19 @@
 //     member who learns another's attachment path still cannot open it — and
 //     nothing on the web.
 //
-// Every other agent — the owner's above all — is not this plugin's business:
-// it answers `null` ("no opinion") for them without looking further.
+//   * an MCP tool reaches a member's agent only through a server the owner
+//     GRANTED to that member (TASK-2377, src/lib/staff-mcp.ts): ClawBox writes
+//     one relay entry per member and server (`cbstaff-…`) and records which
+//     entries each staff agent may call in `staff-mcp-grants.json` beside this
+//     plugin. A call to any other server — `clawbox__*` above all — is
+//     refused; a grants file that is missing or unreadable grants nothing.
+//
+// Every other agent — the owner's above all — is not this plugin's business,
+// with one exception: a call to a member's relay entry (which carries THAT
+// member's token) is refused to anyone but that member's agent.
 
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
 
@@ -105,6 +114,61 @@ export function stagedFileOwnedBy(username, real, rootReal, ownersFile) {
     if (typeof owner === "string") return owner === username;
     current = path.dirname(current);
   }
+}
+
+let grantsCache = { file: "", ino: -1, mtimeMs: -1, size: -1, agents: null };
+/**
+ * `{ agentId: [entry, …] }` from the grants file, re-read when it changes; null
+ * when it cannot be read (then nothing is granted). The same one-descriptor
+ * read as the media owners.
+ */
+export function readStaffMcpGrants(file) {
+  let fd;
+  try {
+    fd = openSync(file, "r");
+    const { ino, mtimeMs, size } = fstatSync(fd);
+    if (grantsCache.file === file && grantsCache.ino === ino && grantsCache.mtimeMs === mtimeMs && grantsCache.size === size) return grantsCache.agents;
+    const parsed = JSON.parse(readFileSync(fd, "utf-8"));
+    const agents = parsed && typeof parsed.agents === "object" && !Array.isArray(parsed.agents) ? parsed.agents : null;
+    grantsCache = { file, ino, mtimeMs, size, agents };
+    return agents;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/**
+ * Where the grants file may be, in order: in the installed plugin's folder
+ * under OpenClaw's state directory — where ClawBox writes it — and beside
+ * this module. The state directory comes first because the gateway may load
+ * a plugin from a snapshot of its folder taken at start (its plugin
+ * "generations"), which a file ClawBox writes later never reaches.
+ */
+function defaultGrantsFiles(opts) {
+  const home = opts.home ?? os.homedir();
+  const stateDir = opts.openclawHome ?? process.env.OPENCLAW_STATE_DIR ?? path.join(home, ".openclaw");
+  const files = [path.join(stateDir, "extensions", "clawbox-staff-guard", "staff-mcp-grants.json")];
+  try {
+    files.push(fileURLToPath(new URL("./staff-mcp-grants.json", import.meta.url)));
+  } catch {
+    // not a file URL
+  }
+  return [...new Set(files)];
+}
+
+/**
+ * The MCP server a tool id names, or "" for a tool that is not an MCP tool:
+ * `<server>__<tool>` (OpenClaw's own name), or Tool Search's `mcp:<server>:<tool>`.
+ */
+export function mcpServerOf(toolId) {
+  if (typeof toolId !== "string") return "";
+  const id = toolId.trim();
+  const colon = /^mcp:([^:]+):(.+)$/.exec(id);
+  if (colon) return colon[1];
+  const at = id.indexOf("__");
+  return at > 0 ? id.slice(0, at) : "";
 }
 
 const USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
@@ -215,35 +279,92 @@ function patchPaths(params) {
  * `tools.toolSearch` on, a deferred tool — memory search among them — is
  * reached only through these. The catalog they search and describe is already
  * the agent's policy-filtered one, and the final call returns to OpenClaw's
- * normal policy and hooks; `tool_call` is judged here by the tool it names too.
+ * normal policy and hooks; the dispatcher is judged here by the tool it names
+ * too. OpenClaw 2026.11.3 named the dispatcher `dispatch_action` (its hook sees
+ * that name; `tool_call` is its old name, kept for an older core), and the
+ * dispatcher itself is force-allowed past an agent's `tools.allow`, so this
+ * guard is the only place a member of staff's dispatch is judged.
  */
 const TOOL_SEARCH_READS = new Set(["tool_search", "tool_describe"]);
-const TOOL_SEARCH_CALL = "tool_call";
+const TOOL_SEARCH_CALLS = new Set(["dispatch_action", "tool_call"]);
+/** The dispatcher's own keys: what it names and where the target's arguments sit. */
+const DISPATCH_KEYS = new Set(["id", "toolId", "name", "args", "input"]);
 
-/** The tool a `tool_call` names (`openclaw:core:memory_search` → `memory_search`), or "". */
+/**
+ * The id a dispatch names, as given (`openclaw:core:memory_search`,
+ * `mcp:docs:search`), or "". Read in the core's own order (`id`, then
+ * `toolId`, then `name`) so the guard judges the tool the core will run.
+ */
+function calledToolId(params) {
+  const id = params && typeof params === "object" ? params.id ?? params.toolId ?? params.name : undefined;
+  return typeof id === "string" ? id.trim() : "";
+}
+
+/**
+ * The arguments a dispatch hands its target, as the core reads them: `args`,
+ * else `input`, else the keys flattened beside the id (the core repairs those
+ * from small models); dotted `args.<key>` entries land on top.
+ */
+function dispatchedArgs(params) {
+  const outer = params && typeof params === "object" ? params : {};
+  const isObject = (v) => v && typeof v === "object" && !Array.isArray(v);
+  const base = isObject(outer.args) ? { ...outer.args }
+    : isObject(outer.input) ? { ...outer.input }
+    : Object.fromEntries(Object.entries(outer).filter(([k]) => !DISPATCH_KEYS.has(k) && !k.startsWith("args.")));
+  for (const [k, v] of Object.entries(outer)) if (k.startsWith("args.") && k.length > 5) base[k.slice(5)] = v;
+  return base;
+}
+
+/** The tool a dispatch names (`openclaw:core:memory_search` → `memory_search`), or "". */
 function calledTool(params) {
-  const id = params && typeof params === "object" ? params.id ?? params.name ?? params.tool : undefined;
-  if (typeof id !== "string" || !id.trim()) return "";
-  const parts = id.trim().split(":");
+  const id = calledToolId(params);
+  if (!id) return "";
+  const parts = id.split(":");
   return parts[parts.length - 1];
+}
+
+/**
+ * The verdict on an MCP tool call (TASK-2377): undefined when the call is not
+ * an MCP tool's, null to let it run, a reason to refuse it. `username` is the
+ * calling member of staff, or null for any other agent.
+ */
+function staffMcpVerdict(toolId, username, ctx, opts) {
+  const server = mcpServerOf(toolId);
+  if (!server) return undefined;
+  const prefix = staffPolicyTable().mcpEntryPrefix || "cbstaff-";
+  const isRelayEntry = server.toLowerCase().startsWith(prefix);
+  if (!username) {
+    // The owner's agents: a member's relay entry carries that member's token.
+    return isRelayEntry ? `\`${toolId}\` belongs to a member of staff's own assistant` : undefined;
+  }
+  if (server.toLowerCase() === "clawbox" || !isRelayEntry) return `\`${toolId}\` is not available to members of staff`;
+  const files = "mcpGrants" in opts ? [opts.mcpGrants].filter(Boolean) : defaultGrantsFiles(opts);
+  let agents = null;
+  for (const file of files) {
+    agents = readStaffMcpGrants(file);
+    if (agents) break;
+  }
+  const agentId = `${staffPolicyTable().agentPrefix}${username}`;
+  const granted = agents && Array.isArray(agents[agentId]) ? agents[agentId] : [];
+  return granted.includes(server) ? null : `\`${toolId}\` is not granted to this member of staff`;
 }
 
 export function staffToolCallDenyReason(event, ctx, opts = {}) {
   const username = staffMemberOf(ctx);
-  if (!username) return null;
+  const outerName = typeof event?.toolName === "string" ? event.toolName : "";
+  const dispatching = TOOL_SEARCH_CALLS.has(outerName);
+  const outerMcp = staffMcpVerdict(dispatching ? calledToolId(event?.params) : outerName, username, ctx, opts);
+  if (!username) return outerMcp ?? null;
+  if (outerMcp !== undefined) return outerMcp;
   const policy = staffPolicyTable().openclaw;
-  let toolName = typeof event?.toolName === "string" ? event.toolName : "";
+  let toolName = outerName;
   if (TOOL_SEARCH_READS.has(toolName)) return null;
   let params = event?.params;
-  if (toolName === TOOL_SEARCH_CALL) {
+  if (dispatching) {
     const inner = calledTool(params);
-    if (!inner) return `\`tool_call\` without a tool it names`;
+    if (!inner) return `\`${outerName}\` without a tool it names`;
     toolName = inner;
-    // The target's arguments: nested under `args`, or flat beside the id (the
-    // core repairs flattened arguments from small models, docs/tools/tool-search.md).
-    const outer = params && typeof params === "object" ? params : {};
-    const nested = outer.args && typeof outer.args === "object" && !Array.isArray(outer.args);
-    params = nested ? outer.args : Object.fromEntries(Object.entries(outer).filter(([k]) => !["id", "name", "tool"].includes(k)));
+    params = dispatchedArgs(params);
     event = { ...event, toolName, params, derivedPaths: undefined };
   }
   if (!policy.allow.includes(toolName)) return `\`${toolName || "this tool"}\` is not available to members of staff`;

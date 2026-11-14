@@ -191,15 +191,38 @@ describe("the allowance meter", () => {
 
   it("counts the ClawBox AI calls of the rolling week, never an old Opus row, never older ones", async () => {
     await seedCosts();
-    const meter = await readAllowanceMeter(vault, { now: () => NOW, account: null });
+    const meter = await readAllowanceMeter(vault, { now: () => NOW, account: null, engine: async () => "clawbox-ai" });
     expect(ALLOWANCE_WINDOW_DAYS).toBe(7);
     expect(meter).toEqual({
       countedAgainst: "clawbox-ai",
       windowDays: 7,
       since: daysAgo(7),
       primeRadiant: { calls: 2, tokensIn: 1200, tokensOut: 120, usdEstimate: 0.02 },
+      local: { calls: 0, tokensIn: 0, tokensOut: 0, usdEstimate: 0 },
+      engine: "clawbox-ai",
       account: null,
     });
+  });
+
+  it("leaves the box's own engine out of the ClawBox AI share and counts it on its own (TASK-2501 PR-C)", async () => {
+    await seedCosts();
+    const at = daysAgo(2);
+    recordCost(vault, { runId: "ing-0000000000dd", operation: "ingest.write", model: "llamacpp/gemma4-e2b-it-q4_0", tokensIn: 3000, tokensOut: 300, usdEstimate: 0, at });
+    recordCost(vault, { runId: "run-0000000000ee", operation: "contradiction-judge", model: "ollama/gemma3:4b", tokensIn: 400, tokensOut: 40, usdEstimate: 0, at });
+    recordCost(vault, { runId: "run-0000000000ee", operation: "golden", model: "clawext/qwen3_32b%", tokensIn: 50, tokensOut: 5, usdEstimate: 0, at });
+    // Not one of the engines' refs: a cloud model whose name merely contains one.
+    recordCost(vault, { runId: "run-0000000000ee", operation: "golden", model: "x-llamacpp/y", tokensIn: 7, tokensOut: 1, usdEstimate: 0, at });
+    const meter = await readAllowanceMeter(vault, { now: () => NOW, account: null, engine: async () => "local" });
+    expect(meter.primeRadiant).toEqual({ calls: 3, tokensIn: 1207, tokensOut: 121, usdEstimate: 0.02 });
+    expect(meter.local).toEqual({ calls: 3, tokensIn: 3450, tokensOut: 345, usdEstimate: 0 });
+    expect(meter.engine).toBe("local");
+  });
+
+  it("says no engine writes when none can", async () => {
+    const meter = await readAllowanceMeter(vault, { now: () => NOW, account: null, engine: async () => null });
+    expect(meter.engine).toBeNull();
+    const broken = await readAllowanceMeter(vault, { now: () => NOW, account: null, engine: async () => { throw new Error("boom"); } });
+    expect(broken.engine).toBeNull();
   });
 
   it("is zero, creating nothing, before any call", async () => {

@@ -495,6 +495,51 @@ d("root writes nothing in the clawbox user's home", () => {
   });
 });
 
+/** src/lib/updater.ts's STEP_WARNING_LINE, read from the source: what the updater raises as a warning. */
+function stepWarningLine(): RegExp {
+  const source = fs.readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
+  const m = /^const STEP_WARNING_LINE = \/(.+)\/([a-z]*);$/m.exec(source);
+  if (!m) throw new Error("STEP_WARNING_LINE is not in src/lib/updater.ts");
+  return new RegExp(m[1], m[2]);
+}
+
+d("a stanza the clawbox user cannot append is reported, and the step goes on", () => {
+  // The callers dispatch it under errexit (openclaw_install, coding_harness,
+  // ai_tools_install), where a bare failed append ended the step, and the
+  // update's fixups run it with errexit off, where it passed with no word.
+  const failTee = [
+    'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"',
+    'as_clawbox() { [ "$1" = tee ] && return 1; __real_as_clawbox "$@"; }',
+  ].join("\n");
+
+  it.each([
+    ["the whole stanza", "# empty\n"],
+    ["the ~/.local/bin line", 'export PATH="$HOME/.npm-global/bin:$PATH"\n'],
+  ])("%s", (_name, before) => {
+    fs.writeFileSync(bashrc, before, "utf-8");
+
+    const run = runBashrcHygiene(sandbox, failTee);
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stderr).toContain(`Warning: could not add the PATH lines to ${bashrc}`);
+    const warnings = run.stdout.split("\n").filter((l) => l.startsWith("CLAWBOX-WARN"));
+    expect(warnings).toHaveLength(1);
+    expect(stepWarningLine().exec(warnings[0])?.[1]).toBe("bashrc-path-not-added");
+    expect(read()).toBe(before);
+    expect(run.rootInHome).toEqual([]);
+  });
+
+  it("says nothing of the kind when the append lands", () => {
+    fs.writeFileSync(bashrc, "# empty\n", "utf-8");
+
+    const run = runBashrcHygiene();
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.stdout).not.toContain("CLAWBOX-WARN");
+    expect(run.stderr).not.toContain("could not add the PATH lines");
+  });
+});
+
 d("the collapse reaches an already-shipped box", () => {
   it("runs from ensure_clawbox_bashrc_path, which step_coding_harness calls", () => {
     // step_post_update -> step_coding_harness -> ensure_clawbox_bashrc_path is
