@@ -42,7 +42,12 @@
 
 import { promises as fs } from "fs";
 import path from "./runtime-path";
-import { DATA_DIR, get as configGet, getKnown as configGetKnown, set as configSet } from "@/lib/config-store";
+import {
+  DATA_DIR,
+  get as configGet,
+  getKnown as configGetKnown,
+  setMany as configSetMany,
+} from "@/lib/config-store";
 import { notifyOwner } from "@/lib/email-notify";
 import { jobAlertsEn } from "@/lib/edition-translations/en-job-alerts";
 import { getActiveHarness, type Harness } from "@/lib/harness";
@@ -105,10 +110,6 @@ export async function jobAlertsOff(): Promise<"env" | "pref" | null> {
   return null;
 }
 
-export async function setJobAlertsEnabled(enabled: boolean): Promise<void> {
-  await configSet(`${PREFERENCE_KEY_PREFIX}${JOB_ALERTS_PREF}`, enabled);
-}
-
 // ── Who is told on Telegram (TASK-2543) ─────────────────────────────────────
 
 /**
@@ -159,9 +160,21 @@ export async function readRecipientPick(): Promise<RecipientPick> {
   return { picked: normalizePick(read.value), known: true };
 }
 
-/** Store the owner's pick; null forgets it, back to the default. */
-export async function setJobAlertRecipients(picked: readonly string[] | null): Promise<void> {
-  await configSet(JOB_ALERT_RECIPIENTS_KEY, picked === null ? undefined : normalizePick(picked));
+/**
+ * The card's save: the switch, the pick, or both, in ONE write of the store —
+ * a request that changes both must not be answered "failed" with half of it
+ * kept. A pick of null forgets it, back to the default.
+ */
+export async function saveJobAlertSettings(change: {
+  enabled?: boolean;
+  recipients?: readonly string[] | null;
+}): Promise<void> {
+  const entries: Record<string, unknown> = {};
+  if (change.enabled !== undefined) entries[`${PREFERENCE_KEY_PREFIX}${JOB_ALERTS_PREF}`] = change.enabled;
+  if (change.recipients !== undefined) {
+    entries[JOB_ALERT_RECIPIENTS_KEY] = change.recipients === null ? undefined : normalizePick(change.recipients);
+  }
+  if (Object.keys(entries).length > 0) await configSetMany(entries);
 }
 
 /** What the card's "Telegram recipients" draws (GET|POST /setup-api/job-alerts `recipients`). */

@@ -32,9 +32,11 @@ vi.mock("@/lib/config-store", () => ({
   get: vi.fn(async (key: string) => configValues.get(key)),
   getKnown: vi.fn(async (key: string) =>
     configReadable ? { value: configValues.get(key), known: true } : { value: undefined, known: false }),
-  set: vi.fn(async (key: string, value: unknown) => {
-    if (value === undefined) configValues.delete(key);
-    else configValues.set(key, value);
+  setMany: vi.fn(async (entries: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(entries)) {
+      if (value === undefined) configValues.delete(key);
+      else configValues.set(key, value);
+    }
   }),
 }));
 
@@ -66,7 +68,7 @@ import {
   JOB_ALERT_RECIPIENTS_KEY,
   readJobAlertRecipients,
   readRecipientPick,
-  setJobAlertRecipients,
+  saveJobAlertSettings,
 } from "@/lib/job-alerts";
 import type { JobSource, WatchedJob } from "@/lib/job-alerts-sources";
 import { readJobs } from "@/lib/job-alerts-sources";
@@ -183,21 +185,21 @@ describe("a scheduled-job alert on OpenClaw", () => {
   });
 
   it("a pick: only the picked people, even past the fifth", async () => {
-    await setJobAlertRecipients(["100000006", "100000002"]);
+    await saveJobAlertSettings({ recipients: ["100000006", "100000002"] });
     await alertOnce();
     expect(sentTo()).toEqual(["100000002", "100000006"]);
     expect(logged(info)).toContain("[job-alerts] telegram notice sent to 100000006");
   });
 
   it("a picked sender who is no longer approved is skipped, and the log says so", async () => {
-    await setJobAlertRecipients(["100000001", "100000099"]);
+    await saveJobAlertSettings({ recipients: ["100000001", "100000099"] });
     await alertOnce();
     expect(sentTo()).toEqual(["100000001"]);
     expect(logged(info)).toContain("no longer approved, skipped: 100000099");
   });
 
   it("an empty pick: nobody on Telegram, the desktop notice still goes", async () => {
-    await setJobAlertRecipients([]);
+    await saveJobAlertSettings({ recipients: [] });
     await alertOnce();
     expect(sentTo()).toEqual([]);
     expect(notifyOwner).toHaveBeenCalledTimes(1);
@@ -205,7 +207,7 @@ describe("a scheduled-job alert on OpenClaw", () => {
   });
 
   it("a pick that cannot be read: nobody on Telegram — never the default", async () => {
-    await setJobAlertRecipients(["100000001"]);
+    await saveJobAlertSettings({ recipients: ["100000001"] });
     configReadable = false;
     await alertOnce();
     expect(sentTo()).toEqual([]);
@@ -221,7 +223,7 @@ describe("a scheduled-job alert on OpenClaw", () => {
   });
 
   it("the recovery notice goes to the same pick", async () => {
-    await setJobAlertRecipients(["100000004"]);
+    await saveJobAlertSettings({ recipients: ["100000004"] });
     await alertOnce();
     vi.mocked(readJobs).mockResolvedValue(source("openclaw", [job()]));
     await checkScheduledJobs(NOW + 2 * MIN);
@@ -231,15 +233,15 @@ describe("a scheduled-job alert on OpenClaw", () => {
 
   it("reads the approved senders of the account the bot was taken from", async () => {
     readActiveTelegramBot.mockResolvedValue({ token: TOKEN, known: true, account: "household" });
-    await setJobAlertRecipients(["100000003"]);
+    await saveJobAlertSettings({ recipients: ["100000003"] });
     await alertOnce();
     expect(readTelegramAllowFrom).toHaveBeenCalledWith("household");
     expect(sentTo()).toEqual(["100000003"]);
   });
 
   it("back to the default: forgetting the pick restores the first five", async () => {
-    await setJobAlertRecipients(["100000007"]);
-    await setJobAlertRecipients(null);
+    await saveJobAlertSettings({ recipients: ["100000007"] });
+    await saveJobAlertSettings({ recipients: null });
     expect(configValues.has(JOB_ALERT_RECIPIENTS_KEY)).toBe(false);
     await alertOnce();
     expect(sentTo()).toEqual(FIRST_FIVE);
@@ -258,14 +260,14 @@ describe("a scheduled-job alert on Hermes", () => {
   });
 
   it("a pick: only the picked people; a stale id is skipped", async () => {
-    await setJobAlertRecipients(["100000007", "100000005", "100000098"]);
+    await saveJobAlertSettings({ recipients: ["100000007", "100000005", "100000098"] });
     await alertOnce("hermes");
     expect(sentTo()).toEqual(["100000005", "100000007"]);
     expect(logged(info)).toContain("no longer approved, skipped: 100000098");
   });
 
   it("an empty pick: nobody", async () => {
-    await setJobAlertRecipients([]);
+    await saveJobAlertSettings({ recipients: [] });
     await alertOnce("hermes");
     expect(notifyHermesTelegramUser).not.toHaveBeenCalled();
     expect(notifyOwner).toHaveBeenCalledTimes(1);
@@ -274,7 +276,7 @@ describe("a scheduled-job alert on Hermes", () => {
 
 describe("other notices keep the default fan-out", () => {
   it("a caller that hands in no pick tells the first five, whatever the job alerts' pick is", async () => {
-    await setJobAlertRecipients(["100000007"]);
+    await saveJobAlertSettings({ recipients: ["100000007"] });
     await notifyOwnerTelegram("Your coding run finished.", "coding-agent");
     expect(sentTo()).toEqual(FIRST_FIVE);
   });
@@ -298,11 +300,27 @@ describe("what the Settings card is given", () => {
   it("on OpenClaw lists the allowlist with the names remembered at approval", async () => {
     readTelegramAllowFrom.mockResolvedValue(["100000001", "100000002"]);
     configValues.set("telegram_approved_names", { "100000001": "Globex front desk" });
-    await setJobAlertRecipients(["100000002", "100000099"]);
+    await saveJobAlertSettings({ recipients: ["100000002", "100000099"] });
     const r = await readJobAlertRecipients();
     expect(r.approved).toEqual([{ id: "100000001", name: "Globex front desk" }, { id: "100000002" }]);
     expect(r.picked).toEqual(["100000002", "100000099"]);
     expect(r.effective).toEqual(["100000002"]);
+  });
+
+  it("on OpenClaw with no usable bot token offers nobody — nobody could be sent to", async () => {
+    readActiveTelegramBot.mockResolvedValue({ token: null, known: true, account: "default" });
+    expect((await readJobAlertRecipients()).approved).toEqual([]);
+    readActiveTelegramBot.mockResolvedValue({ token: "not-a-token", known: true, account: "default" });
+    expect((await readJobAlertRecipients()).approved).toEqual([]);
+  });
+
+  it("the switch and the pick are saved together, and null forgets the pick", async () => {
+    await saveJobAlertSettings({ enabled: false, recipients: ["100000002", "100000002", "100000003"] });
+    expect(configValues.get("pref:ui_job_alerts")).toBe(false);
+    expect(configValues.get(JOB_ALERT_RECIPIENTS_KEY)).toEqual(["100000002", "100000003"]);
+    await saveJobAlertSettings({ recipients: null });
+    expect(configValues.has(JOB_ALERT_RECIPIENTS_KEY)).toBe(false);
+    expect(configValues.get("pref:ui_job_alerts")).toBe(false);
   });
 
   it("an unreadable pick reaches nobody, and says so", async () => {

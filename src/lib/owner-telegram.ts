@@ -122,8 +122,13 @@ export async function readOwnerTelegramUsers(): Promise<{ runtime: Harness; user
   if (runtime === "hermes") {
     for (const user of await readHermesApprovedUsers()) add(user.id, user.name);
   } else {
-    const { account } = await readActiveTelegramBot("openclaw");
-    for (const id of await readTelegramAllowFrom(account)) add(id, undefined);
+    // No usable token, no send (see notifyOwnerTelegram's OpenClaw leg): an
+    // allowlist with no bot to speak through reaches nobody, so it offers
+    // nobody to tick either.
+    const { token, account } = await readActiveTelegramBot("openclaw");
+    if (typeof token === "string" && isTelegramBotToken(token)) {
+      for (const id of await readTelegramAllowFrom(account)) add(id, undefined);
+    }
   }
   return { runtime, users };
 }

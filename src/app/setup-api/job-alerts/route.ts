@@ -7,8 +7,7 @@ import {
   isRecipientPick,
   readJobAlertRecipients,
   readJobAlertsStatus,
-  setJobAlertRecipients,
-  setJobAlertsEnabled,
+  saveJobAlertSettings,
   type JobAlertRecipients,
   type JobAlertsStatus,
 } from "@/lib/job-alerts";
@@ -92,8 +91,11 @@ export async function POST(req: Request) {
   if (hasEnabled && typeof fields.enabled !== "boolean") return badRequest();
   if (hasRecipients && !isRecipientPick(fields.recipients)) return badRequest();
   try {
-    if (hasRecipients) await setJobAlertRecipients(fields.recipients as string[] | null);
-    if (hasEnabled) await setJobAlertsEnabled(fields.enabled as boolean);
+    // One write for both halves: never a 502 with one of them kept.
+    await saveJobAlertSettings({
+      ...(hasEnabled ? { enabled: fields.enabled as boolean } : {}),
+      ...(hasRecipients ? { recipients: fields.recipients as string[] | null } : {}),
+    });
   } catch {
     return NextResponse.json({ ok: false, code: "write_failed" }, { status: 502 });
   }
