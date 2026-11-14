@@ -122,6 +122,7 @@ export default function LinkedBoxesPanel() {
   const save = useCallback(async (next: LinkedBox[]): Promise<boolean> => {
     if (!list) return false;
     const before = list;
+    // A read on its way is older than this save…
     generation.current += 1;
     setSaving(true);
     setError(null);
@@ -133,6 +134,9 @@ export default function LinkedBoxesPanel() {
         body: JSON.stringify({ boxes: next }),
       });
       const body = (await res.json().catch(() => null)) as { code?: unknown; boxes?: unknown; self?: { name?: unknown } } | null;
+      // …and again once it has landed: a read that started while it was on
+      // its way may have read the list from before it.
+      generation.current += 1;
       if (!res.ok) {
         setList(before);
         setError((typeof body?.code === "string" && CODE_KEYS[body.code]) || "saveFailed");
@@ -248,7 +252,7 @@ export default function LinkedBoxesPanel() {
       {loadFailed && (
         <div className="flex items-center gap-3">
           <StatusMessage type="error" message={t("settings.linkedBoxes.error.loadFailed")} />
-          <button type="button" onClick={() => { setLoadFailed(false); void load(); }} className="text-sm text-[var(--coral-bright)] cursor-pointer bg-transparent border-none">
+          <button type="button" onClick={() => { setLoadFailed(false); void load(); }} disabled={saving} data-testid="linked-boxes-retry" className="text-sm text-[var(--coral-bright)] cursor-pointer bg-transparent border-none disabled:opacity-40 disabled:cursor-default">
             {t("settings.linkedBoxes.retry")}
           </button>
         </div>
