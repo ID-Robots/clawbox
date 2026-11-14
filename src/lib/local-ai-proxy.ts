@@ -170,7 +170,7 @@ export async function proxyLocalAiRequest(
     return NextResponse.json({ error: "Missing local AI proxy path" }, { status: 400 });
   }
 
-  // Service-to-service auth: openclaw is the only intended caller. middleware.ts
+  // Service-to-service auth: openclaw is the only intended caller. proxy.ts
   // exempts /setup-api/local-ai/<provider>/ so openclaw (which has no session
   // cookie) can reach this route; the bearer check enforces auth here instead.
   if (!verifyLocalAiBearer(request.headers.get("authorization"))) {

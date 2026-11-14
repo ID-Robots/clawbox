@@ -8,7 +8,7 @@ import crypto from "crypto";
  *
  * The MCP server (`mcp/clawbox-mcp.ts`) runs as a stdio subprocess of
  * openclaw and has no session cookie. Once the setup wizard finishes,
- * `src/middleware.ts` gates every `/setup-api/*` request on a valid
+ * `src/proxy.ts` gates every `/setup-api/*` request on a valid
  * HMAC-signed session cookie, so without this carve-out every tool
  * call from a Codex / Claude agent gets 307'd to `/login` — POSTs
  * surface as 405 (the login route is GET-only), GETs receive the

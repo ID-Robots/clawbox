@@ -8,7 +8,7 @@
  *
  * Three places have to agree on what that request IS — the provider that
  * sends it (src/lib/i18n.tsx), the middleware that admits it with no session
- * (src/middleware.ts, an exact match on the raw path and query, never a
+ * (src/proxy.ts, an exact match on the raw path and query, never a
  * prefix) and the route that answers it (src/app/setup-api/preferences/route.ts,
  * which tells a caller with no session nothing but these keys). Each used to
  * spell it as a literal of its own, so a key added to the provider's fetch

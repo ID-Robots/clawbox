@@ -145,7 +145,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  // OWNER ONLY, both halves. `src/middleware.ts` admits any /setup-api/*
+  // OWNER ONLY, both halves. `src/proxy.ts` admits any /setup-api/*
   // request carrying a valid MCP bearer, so without this the AGENT could move
   // the box's clock, both harness zones, OpenClaw's heartbeat active hours and
   // its cron — and a same-site proxied webapp under /apps/<id>/ carrying the

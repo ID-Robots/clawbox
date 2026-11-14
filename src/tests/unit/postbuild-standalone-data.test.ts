@@ -7,7 +7,7 @@ import path from "path";
 /**
  * F-27 — the standalone build must not ship a copy of the runtime data/ tree.
  *
- * Next traces `data/` into `.next/standalone` because middleware.ts (and the
+ * Next traces `data/` into `.next/standalone` because proxy.ts (and the
  * modules it pulls in) resolve `data/` through `process.cwd()`, and Next's own
  * exclude mechanism cannot reach that trace: `outputFileTracingExcludes` is
  * applied per ROUTE only — measured on Next 16.3.3, a route's .nft.json is

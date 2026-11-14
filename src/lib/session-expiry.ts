@@ -6,7 +6,7 @@
  * handful of routes for reasons that have nothing to do with the session: a
  * wrong current password, a refused provider key, a bad login. Only the first
  * kind means "signed out", so the box marks it: the session gate's 401 carries
- * SESSION_EXPIRED_HEADER (src/middleware.ts, src/lib/route-auth.ts), and a
+ * SESSION_EXPIRED_HEADER (src/proxy.ts, src/lib/route-auth.ts), and a
  * socket the box ends because its session ended closes with
  * SESSION_EXPIRED_CLOSE_CODE (scripts/upgrade-session-watch.js, which holds the
  * CommonJS copy of the code).

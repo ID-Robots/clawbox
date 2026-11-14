@@ -354,7 +354,7 @@ const nextConfig: NextConfig = {
         // `strict: true`, so the bare path would match only the slash-less
         // form, and the route handler answers the other one too: the
         // middleware's trailing-slash canonicaliser deliberately leaves an
-        // API path as typed (src/middleware.ts, step 0), so `…/webapps/?app=x`
+        // API path as typed (src/proxy.ts, step 0), so `…/webapps/?app=x`
         // reached the handler under the desktop policy alone — the whole
         // exploit back with one extra character. A double slash is
         // 308-normalised and an encoded or re-cased path is a 404, so the

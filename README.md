@@ -450,7 +450,7 @@ Full runtime topology in the [Architecture reference](https://docs.clawbox.com/t
 │   ├── lib/                Config, network, auth, OAuth, i18n, updater, chat, harness,
 │   │                       coding agent, named tunnel, memory shard, code-projects
 │   ├── tests/              Unit, component and API route tests
-│   └── middleware.ts       Captive portal detection + session auth
+│   └── proxy.ts            Captive portal detection + session auth (Next 16 proxy, formerly middleware.ts)
 ├── production-server.js    Node.js HTTP + WebSocket proxy wrapper
 ├── install-x64.sh          PC installer: x86_64 and arm64 workstations (host preflight, configurable ports)
 └── install.sh              Full system installer (idempotent)

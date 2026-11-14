@@ -1,6 +1,6 @@
 // "Is the PERSON asking, or the agent?"
 //
-// WHY THIS EXISTS AT ALL. src/middleware.ts admits a caller to /setup-api/* on
+// WHY THIS EXISTS AT ALL. src/proxy.ts admits a caller to /setup-api/* on
 // EITHER a session cookie OR the MCP bearer token (step 3c) — deliberately, so
 // the MCP server, which has no cookie, can reach the device's own API. For
 // almost every route that is exactly right: the agent is allowed to read the

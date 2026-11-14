@@ -32,7 +32,7 @@ const osModule = require_("node:os") as { hostname: () => string };
 const realHostname = osModule.hostname;
 const BOX = "krasi-workshop";
 
-describe("middleware Host allow-list", () => {
+describe("proxy Host allow-list", () => {
   let tmpRoot: string;
 
   beforeEach(() => {
@@ -76,12 +76,12 @@ describe("middleware Host allow-list", () => {
   }
 
   async function run(host: string, pathname: string, headers: Record<string, string> = {}, method = "GET") {
-    const { middleware } = await import("@/middleware");
+    const { proxy } = await import("@/proxy");
     const req = new NextRequest(new URL(`http://${host}${pathname}`), {
       method,
       headers: { host, ...headers },
     });
-    return middleware(req);
+    return proxy(req);
   }
 
   async function asOwner(host: string, pathname: string, extra: Record<string, string> = {}, method = "GET") {

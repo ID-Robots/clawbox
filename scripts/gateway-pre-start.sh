@@ -8070,7 +8070,7 @@ fi
 # Ensure the per-install MCP bearer token exists and is wired into the
 # openclaw MCP server registration. The token lets the MCP subprocess
 # (mcp/clawbox-mcp.ts) authenticate back to /setup-api/* on port 80 —
-# without it, middleware.ts 307s every tool call to /login: POSTs
+# without it, proxy.ts 307s every tool call to /login: POSTs
 # surface as 405 ("Method Not Allowed" on the GET-only login route)
 # and GETs receive the login HTML page that JSON.parse chokes on
 # ("Failed to parse JSON"). See src/lib/mcp-token.ts for the matching

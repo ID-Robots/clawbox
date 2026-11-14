@@ -30,7 +30,7 @@ Bun runtime (package management + builds), Node.js 24 (production runtime), Next
 - **Unit tests**: Vitest (`vitest.config.ts`, `vitest.workspace.ts`) — tests in `src/tests/`
 - **E2E tests**: Playwright (`playwright.config.ts`). Every spec mocks `/setup-api/**` in the browser except `e2e/prime-radiant-smoke.spec.ts`, which lets `/setup-api/prime-radiant/**` through to a SECOND copy of the same build that the config starts on port+1 (`e2e/helpers/prime-radiant-server.ts`: `CLAWBOX_TEST_MODE=1` + `PRIME_RADIANT_FLASH_STUB=1`, every root and `HOME` in a temp directory, an edition file naming Hermes so `POST init` writes no OpenClaw config); the spec wipes the vault before each attempt and mints an owner cookie with that server's session secret
 - **Flaky shards**: each vitest shard in `pr-tests-coverage.yml` runs through `scripts/vitest-shard.sh`, which reruns a failed shard ONCE; a pass on the rerun leaves a `::warning::` annotation and a "Flaky vitest shard" job-summary section naming the tests — fix those tests, do not lean on the rerun
-- Test coverage for: config store, network utils, auth, OAuth, system info, updater, gateway proxy, middleware, API routes
+- Test coverage for: config store, network utils, auth, OAuth, system info, updater, gateway proxy, the request proxy (`src/proxy.ts`), API routes
 - **CI** and the bots' scripts: [docs/agents/testing-and-ci.md](docs/agents/testing-and-ci.md); the on-device suite: [docs/nano-hardware-tests.md](docs/nano-hardware-tests.md)
 - **The bench**: `bun run bench` scores the LIVE box per area (chat, desktop, idle, API, Prime Radiant, Memory Shard, files, terminal, a coding run, resources) and overall, through the signed-in kiosk Chrome; `compare before.json after.json` says better/same/worse after an update: [docs/clawbox-bench.md](docs/clawbox-bench.md)
 - **This map**: `node scripts/check-claude-md-no-loss.mjs <base-ref>` proves a move out of a long CLAUDE.md lost no paragraph (CI runs it on every pull request into beta); `src/tests/unit/claude-md-map.test.ts` is the size guard
@@ -51,7 +51,7 @@ Quoted from the area files, where the full paragraph and its reasons are.
 
 ### Routing
 
-After setup completes, the root `/` serves a Chrome-like desktop environment (`src/app/page.tsx`) that includes a window manager, taskbar, and built-in apps. The setup wizard lives at `/setup`. Authentication is enforced via middleware — unauthenticated users are redirected to `/login`.
+After setup completes, the root `/` serves a Chrome-like desktop environment (`src/app/page.tsx`) that includes a window manager, taskbar, and built-in apps. The setup wizard lives at `/setup`. Authentication is enforced by the request proxy (`src/proxy.ts`, the Next 16 file convention that replaced middleware) — unauthenticated users are redirected to `/login`.
 
 Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`, favicons) to the OpenClaw gateway at `127.0.0.1:18789`. A catch-all route (`src/app/[...gateway]/`) handles remaining gateway paths.
 
@@ -61,7 +61,7 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 |---|---|---|
 | `src/app/page.tsx`, `src/components/` | the desktop, its built-in apps and the setup wizard | desktop for the shell, then the feature's own file (each has a Frontend section) |
 | `src/app/setup-api/` | the Next.js route handlers under `/setup-api/` (the gateway owns `/api/*`) | setup-api, then the feature's own file |
-| `src/middleware.ts` | captive portal, session authentication, the update lock | setup-api, multi-user |
+| `src/proxy.ts` | captive portal, session authentication, the update lock | setup-api, multi-user |
 | `src/lib/` | the server libraries and the browser hooks the components share | core-libraries, then the feature's own file |
 | `mcp/` | the MCP server: the agent's interface to the OS, its tool set per edition | mcp, and `mcp/README.md` |
 | `scripts/`, `config/` | the setup AP, the PTY server, the gateway pre-start hook, voice servers, systemd units, root steps | update-and-install, harness-openclaw, voice, terminal, desktop (the x64 desktop session, the performance suite) |
@@ -97,7 +97,7 @@ See `.env.example` for full list. Key variables: `PORT`, `GATEWAY_PORT`, `NETWOR
 
 The area files under `docs/agents/` (moved verbatim out of this file on 2026-10-15; `docs/agents/` holds every per-area note from now on):
 
-- [setup-api.md](docs/agents/setup-api.md) — read this when you touch a route under `src/app/setup-api/` that no feature file below owns, or `src/middleware.ts`.
+- [setup-api.md](docs/agents/setup-api.md) — read this when you touch a route under `src/app/setup-api/` that no feature file below owns, or `src/proxy.ts`.
 - [core-libraries.md](docs/agents/core-libraries.md) — read this when you touch module-level state, a `path` import, the config or KV store, auth, i18n, or any `src/lib/` module no area below owns.
 - [multi-user.md](docs/agents/multi-user.md) — read this when you touch sessions, `/login`, users, organisation mode (`org_mode`), or the access rule of any new route (owner-only is the default).
 - [setup-wizard.md](docs/agents/setup-wizard.md) — read this when you touch the first-boot wizard, `setup/*` or the unified image's edition choice.

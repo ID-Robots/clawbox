@@ -1,7 +1,7 @@
 /**
  * In-handler authentication for /setup-api/* route handlers.
  *
- * Middleware (src/middleware.ts) is the primary gate, but it is one
+ * Middleware (src/proxy.ts) is the primary gate, but it is one
  * hand-maintained list in front of a ~100-route surface: one mis-ordered
  * `startsWith`, one rewrite, one route reached by a path the matcher doesn't
  * cover, and a destructive handler runs unauthenticated. TASK-443's

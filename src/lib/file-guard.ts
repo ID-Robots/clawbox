@@ -40,7 +40,7 @@ export const PROTECTED_HOME_DIRS: readonly string[] = [
   ".codex",
   // ClawKeep keeps its portal token and the device's backup-encryption
   // passphrase in ~/.clawkeep. Its API route is already classed as sensitive
-  // in middleware.ts; this is the same rule applied to the store behind it.
+  // in proxy.ts; this is the same rule applied to the store behind it.
   ".clawkeep",
   ".gnupg",
   ".aws",
