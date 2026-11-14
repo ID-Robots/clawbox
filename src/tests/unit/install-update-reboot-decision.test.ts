@@ -177,7 +177,7 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
    * update_reboot_reasons answers, in order (the step asks before the rebuild
    * and, on the restart arm, once more after it).
    */
-  function runStep(opts: { testMode: boolean; reasons: string[]; current?: boolean }): { status: number | null; events: string[]; out: string } {
+  function runStep(opts: { testMode: boolean; reasons: string[]; current?: boolean; noteFails?: boolean }): { status: number | null; events: string[]; out: string } {
     const events = path.join(tmp, "events");
     const calls = path.join(tmp, "reason-calls");
     const answers = opts.reasons.map((a, i) => `${i}) printf '%s' ${JSON.stringify(a)} ;;`).join(" ");
@@ -198,7 +198,10 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
       `}`,
       "arm_rebuild_checkout_guard() { :; }",
       "disarm_rebuild_checkout_guard() { :; }",
-      // TASK-2517: the build on disk is (or is not) already this checkout's.
+      // TASK-2517: the build on disk is (or is not) already this checkout's,
+      // and the note that tells the update's second half so.
+      `forget_rebuild_kept_build() { echo forget_rebuild_kept_build >> ${JSON.stringify(events)}; }`,
+      `record_rebuild_kept_build() { echo record_rebuild_kept_build >> ${JSON.stringify(events)}; return ${opts.noteFails ? 1 : 0}; }`,
       opts.current
         ? "build_is_current_for_checkout() { echo 'the build on disk is current'; }"
         : "build_is_current_for_checkout() { echo 'the build on disk is not a build of 0123456789ab'; return 1; }",
@@ -278,6 +281,25 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
     expect(r.events.some((e) => e.startsWith("reboot"))).toBe(false);
   });
 
+  it("notes the kept build for the second half, after clearing any older note", () => {
+    const r = runStep({ testMode: false, reasons: [], current: true });
+    const forget = at(r.events, "forget_rebuild_kept_build");
+    expect(forget).toBeGreaterThan(-1);
+    expect(at(r.events, "record_rebuild_kept_build")).toBeGreaterThan(forget);
+    // A rebuild clears it and writes none: only a kept build is noted.
+    for (const f of ["events", "reason-calls"]) fs.rmSync(path.join(tmp, f), { force: true });
+    const rebuilt = runStep({ testMode: false, reasons: [] });
+    expect(at(rebuilt.events, "forget_rebuild_kept_build")).toBeGreaterThan(-1);
+    expect(at(rebuilt.events, "record_rebuild_kept_build")).toBe(-1);
+  });
+
+  it("rebuilds as before when the kept build cannot be noted", () => {
+    const r = runStep({ testMode: false, reasons: [], current: true, noteFails: true });
+    expect(r.status).toBe(0);
+    expect(r.events).toContain("do_rebuild --gateway-to-update");
+    expect(r.out).toContain("the note that tells the update's second half so could not be written");
+  });
+
   it("skips the rebuild and still reboots when a reason says the box needs a boot", () => {
     const r = runStep({ testMode: false, reasons: ["kernel changed"], current: true });
     expect(r.status).toBe(0);
@@ -300,6 +322,9 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
         "step_openclaw_config", "step_clawkeep_install", "step_polkit_rules", "reboot",
         "restart_services_after_update"].map((n) => `${n}() { echo "${n}" >> ${JSON.stringify(events)}; }`),
       "do_rebuild() { return 137; }",
+      "forget_rebuild_kept_build() { :; }",
+      "record_rebuild_kept_build() { :; }",
+      "build_is_current_for_checkout() { echo 'not current'; return 1; }",
       "is_test_mode() { return 1; }",
       "served_build_commit() { :; }",
       "update_reboot_reasons() { :; }",
