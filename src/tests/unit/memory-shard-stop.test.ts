@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { settledMemoryRun } from "@/tests/helpers/memory-run-state";
+import { processStartKey } from "@/lib/process-identity";
 
 /**
  * Stopping a running index pass (`stopMemoryIndex`, behind DELETE on the index
@@ -78,7 +79,8 @@ describe("stopping an index pass", () => {
     const startedAtMs = Date.now();
     await fs.writeFile(path.join(tmpDir, "memory-index-state.json"), JSON.stringify({
       status: "running", mode: "incremental", trigger: "manual", startedAtMs,
-      finishedAtMs: 0, durationMs: 0, error: "", errorCode: "", progress: null, childPid: process.pid,
+      finishedAtMs: 0, durationMs: 0, error: "", errorCode: "", progress: null,
+      childPid: process.pid, childStartKey: processStartKey(process.pid),
     }));
     const { stopMemoryIndex } = await import("@/lib/clawkeep-memory");
     const stop = await stopMemoryIndex();
