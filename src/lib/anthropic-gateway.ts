@@ -731,29 +731,46 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
   //    the owner just added goes in at once;
   //  - so does the active one while another answers, once core refused to
   //    take it back (pasteBackedOff): asked again on a widening interval, not
-  //    with a stop at every keeper pass.
+  //    with a stop at every keeper pass;
+  //  - and a limited one only when no account that can answer goes in with
+  //    this window (the pool going in from nothing: none is held yet). Pasted
+  //    beside one, it was taken out again in the same window — a paste and a
+  //    CLI logout with the gateway stopped, for an account that could only
+  //    have answered with its limit.
   const deferred: AnthropicAccount[] = [];
+  const limitedLater: AnthropicAccount[] = [];
+  const admit = async (account: AnthropicAccount): Promise<void> => {
+    const id = poolProfileId(account.id);
+    // Null: the pool could not hand one out (a store outage, a renewal that
+    // could not be made) — what the gateway holds stays, and is owed.
+    const token = await gatewayCredentialFor(account.id, noWindow || (toPaste.length > 0 && d.offline) ? { renew: false } : {});
+    if (!token) return;
+    const fingerprint = tokenFingerprint(token.access);
+    tokens.set(id, { fingerprint, expires: token.expires });
+    if (ours.some((p) => p.profileId === id && p.fingerprint === fingerprint)) return;
+    // Read as it is, a token can be past its end (the chat was elsewhere for
+    // hours and nobody asked for it). That one is never pasted: the window
+    // renews it, or it stays owed.
+    if (token.expires !== null && token.expires <= now) return;
+    toPaste.push({ id, account: account.id, token });
+  };
   for (const account of wanted) {
     const id = poolProfileId(account.id);
     const inGateway = ours.some((p) => p.profileId === id);
     if (!inGateway && effectiveStatus(account, now) === "limited" && (answersHeld || signInUsable || poolHeld)) continue;
+    if (effectiveStatus(account, now) === "limited") {
+      limitedLater.push(account);
+      continue;
+    }
     const backFromLimit = runtime().limitedOut.has(id) && account.id !== pool.activeId;
     if (!inGateway && answersHeld && (backFromLimit || pasteBackedOff(id, now))) {
       deferred.push(account);
       continue;
     }
-    // Null: the pool could not hand one out (a store outage, a renewal that
-    // could not be made) — what the gateway holds stays, and is owed.
-    const token = await gatewayCredentialFor(account.id, noWindow || (toPaste.length > 0 && d.offline) ? { renew: false } : {});
-    if (!token) continue;
-    const fingerprint = tokenFingerprint(token.access);
-    tokens.set(id, { fingerprint, expires: token.expires });
-    if (ours.some((p) => p.profileId === id && p.fingerprint === fingerprint)) continue;
-    // Read as it is, a token can be past its end (the chat was elsewhere for
-    // hours and nobody asked for it). That one is never pasted: the window
-    // renews it, or it stays owed.
-    if (token.expires !== null && token.expires <= now) continue;
-    toPaste.push({ id, account: account.id, token });
+    await admit(account);
+  }
+  if (!toPaste.some((p) => wanted.some((a) => a.id === p.account && effectiveStatus(a, now) === "ok"))) {
+    for (const account of limitedLater) await admit(account);
   }
   // The minute pass: what is owed stays owed for the keeper's window.
   if (noWindow && toPaste.length > 0) {

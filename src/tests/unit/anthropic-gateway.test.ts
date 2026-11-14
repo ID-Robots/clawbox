@@ -2846,4 +2846,27 @@ describe("TASK-2533 renewal follow-up (the owner's box, 2026-11-14 20:05)", () =
     expect(core.profiles.has(p(delta.id))).toBe(false);
     expect(core.order?.[0]).toBe(p(alpha.id));
   });
+
+  it("R4d — putting the pool in from nothing pastes no limited account beside one that answers: no paste and no logout with the gateway stopped for it (seen on a lab board)", async () => {
+    const core = fakeCore();
+    core.chatOnClaude = false;
+    // As on the lab board: no sign-in of the owner's own beside the pool.
+    core.profiles.delete("anthropic:default");
+    const alpha = await pool.addOAuthAccount({ label: "Alpha Max", email: email(0), tokens: oauth("sk-ant-oat01-alpha") });
+    const delta = await pool.addOAuthAccount({ label: "Delta Max", email: email(3), tokens: oauth("sk-ant-oat01-delta") });
+    await pool.markLimited(delta.id, Date.now() + 2 * H, "session", { source: "owner" });
+    await gw.keepGatewayMirror();
+    expect(core.pastes).toEqual([]);
+
+    const result = await gw.putChatOnPool(async () => {
+      core.chatOnClaude = true;
+      return { ok: true };
+    });
+
+    expect(result.ok).toBe(true);
+    expect(core.pastes.map((x) => x.profileId)).toEqual([p(alpha.id)]);
+    expect(core.logouts).toEqual([]);
+    expect(core.profiles.has(p(delta.id))).toBe(false);
+    expect(core.order?.[0]).toBe(p(alpha.id));
+  });
 });
