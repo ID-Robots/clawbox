@@ -72,6 +72,7 @@ import {
   envInt,
   handleConnection,
 } from "./terminal-sessions.mjs";
+import { terminalDisplayEnv } from "./terminal-display-env.mjs";
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // script is standalone ESM and cannot import the TypeScript helper: an integer
@@ -190,6 +191,7 @@ function spawnShell(asUser, requested) {
   // home folder, as it always was — and the client is told which it got.
   const { shell, refused: shellRefused } = resolveShell(requested.get("shell"), readEtcShells());
   const { cwd, refused: cwdRefused } = resolveCwd(requested.get("cwd"), targetHome);
+  const graphical = terminalDisplayEnv();
   const term = pty.spawn(shell, ["-l"], {
     name: "xterm-256color",
     cols: 80,
@@ -205,9 +207,15 @@ function spawnShell(asUser, requested) {
       PATH: process.env.PATH || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
       LANG: lang,
       POWERLEVEL9K_INSTANT_PROMPT: "quiet",
+      // The web server that starts this has no DISPLAY, so the shell has none
+      // and xdg-open exits 3. scripts/terminal-display-env.mjs finds the one
+      // the owner's Remote Desktop is on, or adds nothing at all.
+      ...graphical,
     },
   });
-  console.log(`[terminal-server] Spawned PTY pid=${term.pid} shell=${shell}`);
+  console.log(
+    `[terminal-server] Spawned PTY pid=${term.pid} shell=${shell}${graphical.DISPLAY ? ` display=${graphical.DISPLAY}` : ""}`,
+  );
   return {
     pty: term,
     info: {
