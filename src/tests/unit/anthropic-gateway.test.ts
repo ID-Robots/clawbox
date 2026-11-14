@@ -2436,6 +2436,45 @@ describe("TASK-2533 second review pass", () => {
     expect(asks.every((i) => i < run)).toBe(true);
   });
 
+  it("a second unnamed bare rate limit inside ten minutes — the swap takes it as the limit — reads every held account before its retry drains", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const THROTTLE = "HTTP 429: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}";
+    const events: string[] = [];
+    let workSpent = false;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).endsWith("/api/oauth/usage")) return new Response("{}", { status: 404 });
+      const token = ((init?.headers as Record<string, string> | undefined)?.Authorization ?? "").replace(/^Bearer /, "");
+      events.push(`usage:${token}`);
+      if (!workSpent) return new Response("{\"error\":\"rate_limited\"}", { status: 429 });
+      const body = token.includes("work")
+        ? { five_hour: { utilization: 100, resets_at: new Date(Date.now() + 2 * H).toISOString() }, seven_day: { utilization: 40, resets_at: null } }
+        : { five_hour: { utilization: 5, resets_at: null }, seven_day: { utilization: 10, resets_at: null } };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+    core.beforeCall = (method) => {
+      if (method === "cron.run") events.push("cron.run");
+    };
+    const job = { id: "foreign", state: { lastStatus: "error", lastError: THROTTLE, lastRunAtMs: Date.now() - 1_000 } };
+    core.cronJobs.push(job);
+    // The first bare 429: a throttle, sent again a minute later.
+    await gw.scanGatewayCrons();
+    // Its retry (or the next scheduled run) is refused the same way, inside the window: the account's cap.
+    workSpent = true;
+    events.length = 0;
+    job.state = { lastStatus: "error", lastError: THROTTLE, lastRunAtMs: Date.now() };
+    await gw.scanGatewayCrons();
+    await swap.whenSwapsSettled();
+
+    expect(await statusOf(work.id)).toBe("limited");
+    const run = events.indexOf("cron.run");
+    const firstAsk = events.findIndex((e) => e.startsWith("usage:"));
+    expect(firstAsk).toBeGreaterThan(-1);
+    expect(run === -1 || firstAsk < run).toBe(true);
+  });
+
   it("an unnamed throttle on a cron keeps its order: its retry is set for a minute later before Anthropic is asked about the accounts", async () => {
     const core = fakeCore();
     gw.startGatewaySwap();

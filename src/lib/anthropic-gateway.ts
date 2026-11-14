@@ -139,7 +139,7 @@ import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 import { classifyAnthropicFailure, DEFAULT_LIMIT_MS, effectiveStatus, type AnthropicLimitKind } from "@/lib/anthropic-limit";
 import { fetchAnthropicUsage, type AnthropicUsageReading } from "@/lib/anthropic-usage";
 import { readGatewayProviderAuth, type GatewayProviderAuthRead, type ProfileFailureState, type ProviderAuthProfile } from "@/lib/openclaw-auth-store";
-import { registerSwapConsumer, reportAnthropicFailure, type FailureOutcome, type SwapContext } from "@/lib/anthropic-swap";
+import { registerSwapConsumer, reportAnthropicFailure, throttleSeenRecently, type FailureOutcome, type SwapContext } from "@/lib/anthropic-swap";
 import { verifyAnthropicKey } from "@/lib/coding-anthropic";
 import { bindCronsToTarget, splitModelRef, type CronBindingRecords, type CronBindingResult, type CronBindingTarget, type CronLostRunReports, type CronRefusals } from "@/lib/anthropic-cron-binding";
 
@@ -1740,10 +1740,13 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
     // account first (once a scan), so a spent active account is the pool's
     // limit — and the swap under way — before the retry below can be sent. A
     // bare rate limit (a throttle, as the swap reads it) keeps its retry a
-    // minute later on the same account, so its ask comes after the report.
+    // minute later on the same account, so its ask comes after the report —
+    // but not a second one inside the throttle window: the swap takes that
+    // one the limit's way, and its retry may drain at once.
     if (!boundAccount) {
       unnamed = true;
-      const throttle = classifyAnthropicFailure(job.lastError, now, { transientRate: true })?.type === "throttled";
+      const throttle = classifyAnthropicFailure(job.lastError, now, { transientRate: true })?.type === "throttled"
+        && !throttleSeenRecently(null, now);
       if (!throttle && !heldRead) {
         heldRead = true;
         await readHeldUsageNow();
