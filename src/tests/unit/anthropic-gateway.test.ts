@@ -72,6 +72,11 @@ function fakeCore() {
     /** Ids whose paste core refuses, whatever `refusePaste` says. */
     refusePasteOf: new Set<string>(),
     refuseOrder: false,
+    /**
+     * OpenClaw 2026.11.3's `models.authOrderSet`: with no stored order and a
+     * config one, the config one is core's order and no stored one is taken over it.
+     */
+    configControlsOrder: false,
     /** `order set` answers OK and the stored order reads back otherwise (core's read raced it). */
     orderReadsBackOtherwise: false,
     /** The `--agent` arguments openclaw.json's roster calls for; null: no `main` in it. */
@@ -168,6 +173,9 @@ function fakeCore() {
     },
     order: async (ids) => {
       if (core.refuseOrder) throw new Error("the auth state is busy");
+      if (core.configControlsOrder && ids.length > 0 && !(core.order && core.order.length > 0) && core.configOrder !== null) {
+        throw new Error("profile priority for provider anthropic is controlled by auth configuration");
+      }
       core.orders.push([...ids]);
       core.order = ids.length > 0 ? [...ids, ...(core.orderKeepsOthers ? [...core.profiles.keys()].filter((id) => !ids.includes(id)) : [])] : null;
       if (core.orderReadsBackOtherwise && core.order) core.order = [...core.order].reverse();
@@ -2202,6 +2210,28 @@ describe("TASK-2533 second review pass", () => {
 
     expect(core.profiles.has(p(personal.id))).toBe(true);
     expect(core.order?.slice(0, 2)).toEqual([p(work.id), p(personal.id)]);
+  });
+
+  it("with no stored order, openclaw.json's order is core's: a move that core refuses to store over it lands there, and is not left owed", async () => {
+    const core = fakeCore();
+    core.tellsConfigOrder = true;
+    core.configControlsOrder = true;
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    // The first paste beside the owner's sign-in starts a config order: the store gets none.
+    await gw.keepGatewayMirror();
+    expect(core.order).toBeNull();
+    expect(core.configOrder?.[0]).toBe(p(work.id));
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: work.id, pending: false });
+
+    await pool.markLimited(work.id, Date.now() + 2 * H, "session", { source: "chat" });
+    await swap.whenSwapsSettled();
+
+    expect(core.configOrder?.[0]).toBe(p(personal.id));
+    expect(core.profiles.has(p(work.id))).toBe(false);
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
+    // Nothing owed: the keeper's next pass is not a failure, and earns no back-off.
+    expect(await gw.keepGatewayMirror()).not.toBe("failed");
   });
 
   it("the minute's back-off holds back only what it already tried: an account limited since is out at once", async () => {

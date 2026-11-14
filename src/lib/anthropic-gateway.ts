@@ -65,14 +65,17 @@
  *    one falls back to openclaw.json's order or profiles and re-admits every
  *    pool account. In that state a session pinned to a limited account still
  *    meets its limit until a reset; an API key is never moved ahead of one.
- *    The CLI's `order set`, not the `models.authOrderSet` RPC: `paste-token`
- *    registers each profile in openclaw.json's
- *    `auth.profiles`, and beside an `anthropic:default` sign-in of another
- *    mode that also writes a CONFIG `auth.order.anthropic`, over which the
- *    RPC refuses ("controlled by auth configuration"). The stored order was
- *    taken to outrank that one for selection, but on 2026.11.3 new automations
- *    were seen captured onto the config order's head instead (the owner's box,
- *    2026-11-14), so the pass keeps openclaw.json's order equal to it too.
+ *    Written with `models.authOrderSet` (the CLI's `order set` when no
+ *    gateway answers, src/lib/openclaw-auth-ops.ts). `paste-token` registers
+ *    each profile in openclaw.json's `auth.profiles`, and beside an
+ *    `anthropic:default` sign-in of another mode it also writes a CONFIG
+ *    `auth.order.anthropic`. Core takes the stored order, else that one; with
+ *    no stored order it refuses to store one over the config one ("controlled
+ *    by auth configuration"), and openclaw.json's order is then the one that
+ *    carries the pool's (syncLocked). On 2026.11.3 new automations were also
+ *    seen captured onto the config order's head while a stored order was there
+ *    (the owner's box, 2026-11-14), so the pass keeps openclaw.json's order
+ *    equal to the stored one in any case.
  *  - ROTATION AND COOLDOWNS: core's. On a rate limit it allows ONE same-provider
  *    profile rotation per turn before model fallback
  *    (`MAX_RATE_LIMIT_PROFILE_ROTATIONS`), so the order matters: the next
@@ -906,6 +909,9 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
   }
   const order = gatewayOrder(pool, held, otherProfiles(after), now);
   let final = after;
+  // openclaw.json's order as it is now, the pass's pastes and logouts in it
+  // (undefined: the reader cannot say).
+  const configNow = chat.configOrderIds !== undefined && d.setConfigOrder ? (await d.chat())?.configOrderIds : undefined;
   // Core said it wrote the order: whatever the read-back shows, taking the
   // pool out later clears it (an order that is not there clears without fuss).
   let orderWritten = false;
@@ -915,10 +921,16 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
     if (reread.kind !== "present") return outcome("failed", "write_lost", changed);
     final = reread;
   }
-  const orderLanded = leadsWith(final.order, order);
-  if (!orderLanded) owed.push("order");
+  const storedLanded = leadsWith(final.order, order);
+  // With no stored order, a config `auth.order.anthropic` IS core's order (it
+  // takes the stored one, else the configured one), and core refuses to store
+  // one over it: "profile priority for provider anthropic is controlled by
+  // auth configuration" (`models.authOrderSet`, OpenClaw 2026.11.3 — seen on a
+  // lab board once logouts had left openclaw.json an order and the store
+  // none). openclaw.json's order, below, carries it then.
+  const configControls = !storedLanded && !(final.order && final.order.length > 0) && Array.isArray(configNow);
 
-  if ((orderLanded || orderWritten) && !marker.stored) {
+  if ((storedLanded || orderWritten) && !marker.stored) {
     marker.stored = true;
     await writeOrderMarker(marker);
   }
@@ -937,11 +949,13 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
   // not hold are the owner's and stay, after the pool's (THE OWNER'S CONFIG
   // ORDER, takeOut gives it back). Only while the reader says what is there.
   let configOk = true;
+  // openclaw.json's order once this pass is done with it.
+  let configAfter: string[] | null = Array.isArray(configNow) ? configNow : null;
   if (chat.configOrderIds !== undefined && d.setConfigOrder) {
     // The stored order as it landed; else the order the pass wanted — never
     // the head the last paste left.
-    const base = orderLanded && final.order ? [...final.order] : order;
-    const current = (await d.chat())?.configOrderIds;
+    const base = storedLanded && final.order ? [...final.order] : order;
+    const current = configNow;
     if (current === undefined) {
       configOk = false;
       owed.push("config order");
@@ -963,6 +977,7 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
         }
         const setConfig = d.setConfigOrder;
         if (snapshotOk && await attempt("openclaw.json's account order", () => setConfig(wantConfig))) {
+          configAfter = wantConfig;
           // One the pool created is the pool's to take out again (takeOut).
           if (current === null && !marker.config) {
             marker.config = true;
@@ -975,6 +990,11 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
       }
     }
   }
+
+  // The order core goes by: the stored one, else openclaw.json's.
+  const effective = final.order && final.order.length > 0 ? final.order : configControls ? configAfter : final.order;
+  const orderLanded = storedLanded || (configControls && leadsWith(configAfter, order));
+  if (!orderLanded) owed.push("order");
 
   // The account the gateway must lead with: the active one, when the gateway
   // can hold it; else the first it holds (an API key or the Terminal sign-in
@@ -997,14 +1017,14 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
   // paste is a lead that has not landed for the paths that read it.
   const leadOk = configOk && (onSignIn
     ? orderLanded
-    : !!targetHeld && final.order?.[0] === targetId && (!targetToken || targetHeld.fingerprint === targetToken.fingerprint));
+    : !!targetHeld && orderLanded && effective?.[0] === targetId && (!targetToken || targetHeld.fingerprint === targetToken.fingerprint));
   // The mirror names the pool account core's stored order actually leads
   // with — the target once its write and the order have landed — `pending`
   // until they have; with the owner's sign-in leading, the account back
   // first, which the chat is still on the pool for. Null only when the
   // gateway holds none of the pool's accounts at all.
   const backFirst = onSignIn ? limitedAll[0] : undefined;
-  const leadingId = (final.order ?? []).find((id) => held.has(id)) ?? (targetHeld ? targetId : null) ?? (backFirst ? poolProfileId(backFirst.id) : null) ?? [...held][0] ?? null;
+  const leadingId = (effective ?? []).find((id) => held.has(id)) ?? (targetHeld ? targetId : null) ?? (backFirst ? poolProfileId(backFirst.id) : null) ?? [...held][0] ?? null;
   const leading = leadingId ? pool.accounts.find((a) => poolProfileId(a.id) === leadingId) ?? null : null;
   const leadingHeld = leadingId ? final.profiles.find((p) => p.profileId === leadingId) : undefined;
   if (leading && leadingHeld?.fingerprint) {
