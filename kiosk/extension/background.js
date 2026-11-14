@@ -238,7 +238,15 @@ async function askDesktopForBoxes() {
       await forgetBoxes();
       return null;
     }
-    return list ? saveBoxes(list) : null;
+    if (!list) return null;
+    const clean = await saveBoxes(list);
+    // The same rule as a kept copy: an answer with no session end, or one that
+    // arrives after it, is used for nothing.
+    if (!(clean.validUntil > Date.now())) {
+      await forgetBoxes();
+      return null;
+    }
+    return clean;
   } catch {
     return null;
   }

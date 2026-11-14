@@ -94,6 +94,8 @@ const RELEASES: readonly { version: string; files: string }[] = [
   { version: "1.6.2", files: "8e827c04002d9040e992d2ab5bf541f7faee19dcbad153ba45d144760cf3d532" },
   // The kept list is used no longer than the session that read it.
   { version: "1.6.3", files: "94d918220f0dc388308170e4a1d903cd6461fb394c17f0b7c9104502940f12f2" },
+  // A list asked of the desktop obeys the same session end before it is used.
+  { version: "1.6.4", files: "1e64d63326e85115078fccc5bf4e3b605f82e8a3690a425efb38db9f81563589" },
 ];
 
 /**
