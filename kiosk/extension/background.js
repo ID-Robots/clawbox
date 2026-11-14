@@ -13,7 +13,8 @@
 //     openDevTools below);
 //   { type: "switchBox", slot } — Ctrl+Shift+<slot> from workspaces.js: show
 //     linked ClawBox <slot>, each in a tab of its own (see switchBox below);
-//   { type: "boxes", selfName, boxes } — the desktop's copy of the list;
+//   { type: "boxes", selfName, boxes, emptyText } — the desktop's copy of
+//     the list; { type: "boxesRevoked" } — forget it (see below);
 //   { type: "pendingIndicator" } — the indicator a switch left for this tab.
 //
 // The desktop is found by URL prefix: the origin of DESKTOP_ORIGINS, which is
@@ -129,8 +130,12 @@ async function goHome() {
 // never navigated, so a box's desktop stays loaded and switching back is
 // instant. The list is the desktop's: workspaces.js reads it there (the
 // owner's session, same origin) and sends it in; the worker keeps the last
-// copy in chrome.storage.local so a switch never waits for the desktop, and
-// asks the desktop tab for it while it has none.
+// copy in chrome.storage.session (memory: gone with the browser) so a switch
+// never waits for the desktop, and asks the desktop tab for it while it has
+// none. The copy is the OWNER'S and lives no longer than their session: the
+// kiosk's own /login (signed out, the session ran out, another person signing
+// in) and a list read the box refuses (401/403) forget it ("boxesRevoked"),
+// so the next person at the kiosk cannot reach the owner's boxes by the keys.
 const MAX_BOXES = 8;
 const MAX_BOX_NAME = 40;
 const BOXES_KEY = "linkedBoxes";
@@ -187,7 +192,7 @@ function tabUrl(t) {
 }
 
 async function storedBoxes() {
-  const got = await chrome.storage.local.get(BOXES_KEY);
+  const got = await chrome.storage.session.get(BOXES_KEY);
   return got[BOXES_KEY] || null;
 }
 
@@ -203,8 +208,12 @@ async function saveBoxes(list) {
     boxes: cleanBoxes(list && list.boxes),
     emptyText: cleanLabel(list && list.emptyText),
   };
-  await chrome.storage.local.set({ [BOXES_KEY]: clean });
+  await chrome.storage.session.set({ [BOXES_KEY]: clean });
   return clean;
+}
+
+function forgetBoxes() {
+  return chrome.storage.session.remove(BOXES_KEY);
 }
 
 async function askDesktopForBoxes() {
@@ -213,6 +222,10 @@ async function askDesktopForBoxes() {
   if (!desk) return null;
   try {
     const list = await chrome.tabs.sendMessage(desk.id, { type: "readBoxes" });
+    if (list && list.revoked) {
+      await forgetBoxes();
+      return null;
+    }
     return list ? saveBoxes(list) : null;
   } catch {
     return null;
@@ -347,6 +360,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // The kiosk's own desktop only: no other page speaks for the list.
         if (!sender.tab || !isDesktop(sender.tab.url) || new URL(sender.tab.url).pathname !== "/") return { ok: false, error: "not from the desktop" };
         await saveBoxes(msg);
+        return { ok: true };
+      case "boxesRevoked":
+        // The kiosk's own pages only (its /login included): a web page's
+        // content script never sends it, and nothing else may clear the list.
+        if (!sender.tab || !isDesktop(sender.tab.url)) return { ok: false, error: "not from the desktop" };
+        await forgetBoxes();
         return { ok: true };
       case "pendingIndicator":
         return takePendingIndicator(sender.tab && sender.tab.id);

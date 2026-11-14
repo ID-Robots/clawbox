@@ -137,6 +137,9 @@
   async function readBoxes() {
     try {
       const res = await fetch(LINKED_BOXES_PATH, { cache: "no-store", credentials: "same-origin" });
+      // Refused (signed out, or not the owner) is not "could not ask": the
+      // worker must forget the owner's list, not keep the last one.
+      if (res.status === 401 || res.status === 403) return { revoked: true };
       if (!res.ok) return null;
       const body = await res.json();
       return {
@@ -151,7 +154,9 @@
 
   async function pushBoxes() {
     const list = await readBoxes();
-    if (list) send({ type: "boxes", selfName: list.selfName, boxes: list.boxes, emptyText: list.emptyText });
+    if (!list) return;
+    if (list.revoked) send({ type: "boxesRevoked" });
+    else send({ type: "boxes", selfName: list.selfName, boxes: list.boxes, emptyText: list.emptyText });
   }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -168,6 +173,12 @@
     }
     return undefined;
   });
+
+  // The kiosk's own sign-in page: the owner signed out or the session ran out,
+  // and whoever signs in next may not be the owner — the list goes.
+  if (DESKTOP_ORIGINS.includes(location.origin + "/") && /^\/login(?:\/|$)/.test(location.pathname)) {
+    send({ type: "boxesRevoked" });
+  }
 
   if (isDesktop) {
     pushBoxes();
