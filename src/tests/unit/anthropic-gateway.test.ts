@@ -456,23 +456,50 @@ describe("the pool in the gateway", () => {
     expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal-renewed");
   });
 
-  it("renews nothing more in a window whose paste core did not confirm", async () => {
+  it("renews nothing more once a token renewed in the window could not be pasted — one account lost to it, not the rest", async () => {
     const core = fakeCore();
     const { work, personal } = await twoClaudeAccounts();
+    const third = await pool.addOAuthAccount({ label: "Team Max", email: "team@example.com", tokens: oauth("sk-ant-oat01-team") });
     await gw.keepGatewayMirror();
     await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work", 2 * H), email: "work@example.com" });
     await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 2 * H), email: "me@example.com" });
-    const anthropic = vi.fn(async () => new Response(JSON.stringify({ access_token: "sk-ant-oat01-work-renewed", refresh_token: "r-1", expires_in: 28_800 }), { status: 200 }));
+    await pool.replaceCredential(third.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-team", 2 * H), email: "team@example.com" });
+    let renewals = 0;
+    const anthropic = vi.fn(async () => {
+      renewals += 1;
+      return new Response(JSON.stringify({ access_token: `sk-ant-oat01-renewed-${renewals}`, refresh_token: `r-${renewals}`, expires_in: 28_800 }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", anthropic);
+    core.refusePasteOf.add(p(personal.id));
+
+    await gw.keepGatewayMirror();
+
+    // Work (renewed to open the window) went in; Personal was renewed with
+    // the gateway stopped and core would not take it; Team was left alone, on
+    // the token the gateway holds and Anthropic still takes.
+    expect(anthropic).toHaveBeenCalledTimes(2);
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-renewed-1");
+    expect(core.profiles.get(p(third.id))?.secret).toBe("sk-ant-oat01-team");
+    expect(await pool.gatewayCredentialFor(third.id, { renew: false })).toMatchObject({ access: "sk-ant-oat01-team" });
+  });
+
+  it("goes on renewing the other accounts beside one whose owed paste core keeps refusing", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // Work's new token is owed and core refuses it, pass after pass; Personal
+    // comes due meanwhile.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal", 2 * H), email: "me@example.com" });
+    const anthropic = vi.fn(async () => new Response(JSON.stringify({ access_token: "sk-ant-oat01-personal-renewed", refresh_token: "r-1", expires_in: 28_800 }), { status: 200 }));
     vi.stubGlobal("fetch", anthropic);
     core.refusePasteOf.add(p(work.id));
 
     await gw.keepGatewayMirror();
 
-    // A window that cannot write Work's token would not write Personal's
-    // either: renewing it would only take a second account from the chat.
     expect(anthropic).toHaveBeenCalledTimes(1);
-    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal");
-    expect(await pool.gatewayCredentialFor(personal.id, { renew: false })).toMatchObject({ access: "sk-ant-oat01-personal" });
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal-renewed");
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work");
   });
 
   it("puts a token the pool renewed in — no restart — and owes a write core refused instead of claiming it", async () => {

@@ -507,9 +507,10 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   // is made with the gateway still up — the one that tells the pass a window
   // is needed at all, and that Anthropic can be reached. The rest are made
   // inside the window (`pasteAll`), the gateway already stopped, each pasted
-  // before the next is renewed: a stop that cannot be made, or that takes
-  // minutes while the gateway finishes what it is answering, costs the chat
-  // one account, as it always did, and never all of them at once.
+  // before the next is renewed, none after one of them could not be pasted: a
+  // stop that cannot be made, or that takes minutes while the gateway finishes
+  // what it is answering, costs the chat one account, as it always did, and a
+  // window that cannot write costs it one more — never all of them at once.
   const tokens = new Map<string, { fingerprint: string; expires: number | null }>();
   const toPaste: { id: string; account: string; token: { access: string; expires: number | null } }[] = [];
   let offlineFailed = false;
@@ -535,42 +536,47 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
       return !!held && held.expires !== null && held.expires < renewBefore;
     };
     const pasteAll = async () => {
-      // A paste core did not confirm: nothing more is renewed in this window.
-      let refused = false;
-      const paste = async (id: string, account: string, token: { access: string; expires: number | null }) => {
-        if (await attempt(`account ${account}'s token`, () => d.paste(id, token, agent))) pasted += 1;
-        else refused = true;
+      const paste = async (id: string, account: string, token: { access: string; expires: number | null }): Promise<boolean> => {
+        const landed = await attempt(`account ${account}'s token`, () => d.paste(id, token, agent));
+        if (landed) pasted += 1;
+        return landed;
       };
-      // What is owed as it stands first: the freshest token is among these,
-      // so a paste has landed before anything is renewed here.
+      // What is owed as it stands first: the freshest token is among these.
       for (const { id, account, token } of toPaste) {
         if (!behind(id)) await paste(id, account, token);
       }
+      // A token renewed in this window that core then did not take: that
+      // account is off the chat until a later pass, and nothing more is
+      // renewed here. A paste refused for a token that was owed anyway stops
+      // nothing — one profile core keeps refusing must not keep every other
+      // account from ever being renewed.
+      let lost = false;
       const renewUntil = Date.now() + WINDOW_RENEWAL_BUDGET_MS;
       const renewed: string[] = [];
       for (const account of wanted) {
         const id = poolProfileId(account.id);
         const held = tokens.get(id);
         if (!held || held.expires === null || !behind(id)) continue;
-        const owed = toPaste.find((p) => p.id === id);
-        let token = owed?.token ?? null;
+        let token = toPaste.find((p) => p.id === id)?.token ?? null;
+        let fresh = false;
         // Inside its margin the pool renews it whoever asks; ahead of it, once
         // a margin at most, whatever keeps the window opening.
         const due = held.expires - now < OAUTH_REFRESH_MARGIN_MS;
         const lately = now - (runtime().earlyRenewedAt.get(account.id) ?? Number.NEGATIVE_INFINITY) < OAUTH_REFRESH_MARGIN_MS;
-        if (!refused && (due || !lately) && Date.now() < renewUntil) {
+        if (!lost && (due || !lately) && Date.now() < renewUntil) {
           // The same token back: no grant to renew with, or Anthropic could
           // not be asked. It stays as it is and comes due on its own.
-          const fresh = await gatewayCredentialFor(account.id, { renewBefore });
-          const fingerprint = fresh ? tokenFingerprint(fresh.access) : held.fingerprint;
-          if (fresh && fingerprint !== held.fingerprint) {
-            tokens.set(id, { fingerprint, expires: fresh.expires });
-            token = fresh;
+          const answer = await gatewayCredentialFor(account.id, { renewBefore });
+          const fingerprint = answer ? tokenFingerprint(answer.access) : held.fingerprint;
+          if (answer && fingerprint !== held.fingerprint) {
+            tokens.set(id, { fingerprint, expires: answer.expires });
+            token = answer;
+            fresh = true;
             if (!due) runtime().earlyRenewedAt.set(account.id, now);
             renewed.push(account.id);
           }
         }
-        if (token) await paste(id, account.id, token);
+        if (token && !(await paste(id, account.id, token)) && fresh) lost = true;
       }
       if (renewed.length > 0) {
         console.error(`[anthropic-gateway] renewed ${renewed.length} more account(s) with the gateway stopped (${renewed.join(", ")}): one stop takes every account's token`);
