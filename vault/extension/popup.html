@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ClawBox Vault</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="top">
+      <img class="logo" src="icons/vault.png" alt="" width="28" height="28" />
+      <div class="brand">
+        <div class="title">ClawBox Vault</div>
+        <div class="subtitle" id="site-label">—</div>
+      </div>
+      <button class="icon-btn" id="btn-lock" title="Lock the vault for this browser" hidden>Lock</button>
+    </header>
+
+    <main>
+      <section class="screen" id="screen-loading">
+        <p class="muted center">Connecting to the vault…</p>
+      </section>
+
+      <section class="screen" id="screen-offline" hidden>
+        <h2>Vault service not running</h2>
+        <p class="muted">The extension talks to the ClawBox Vault service on this machine (<code id="service-url"></code>). Start it on the ClawBox, then try again.</p>
+        <button class="btn primary" id="btn-retry">Try again</button>
+      </section>
+
+      <section class="screen" id="screen-pair" hidden>
+        <h2>Pair this browser</h2>
+        <p class="muted small">The browser on a ClawBox pairs by itself once the vault has a PIN: open <b>ClawBox Vault</b> on the desktop and choose one. To pair with a code instead:</p>
+        <ol class="steps">
+          <li>Open <b>ClawBox Vault</b> on the ClawBox desktop and unlock it.</li>
+          <li>Go to <b>Browser</b>, open <b>Pair with a code instead</b> and click <b>Show pairing code</b>.</li>
+          <li>Type the 6-digit code here.</li>
+        </ol>
+        <form id="form-pair" class="stack" autocomplete="off">
+          <input id="pair-code" class="code-input" inputmode="numeric" maxlength="7" placeholder="000000" aria-label="Pairing code" />
+          <button class="btn primary" type="submit">Pair</button>
+        </form>
+      </section>
+
+      <section class="screen" id="screen-locked" hidden>
+        <h2>Vault locked</h2>
+        <p class="muted">Fills, copies and agent fills are paused for this browser. Enter the vault PIN to unlock.</p>
+        <form id="form-unlock" class="stack" autocomplete="off">
+          <input id="unlock-pin" type="password" placeholder="Vault PIN" aria-label="Vault PIN" autocomplete="off" />
+          <button class="btn primary" type="submit">Unlock</button>
+        </form>
+      </section>
+
+      <section class="screen" id="screen-main" hidden>
+        <div class="tabs" id="tabs" role="tablist" hidden>
+          <button class="tab active" id="tab-btn-logins" role="tab" data-tab="logins">Logins</button>
+          <button class="tab" id="tab-btn-cards" role="tab" data-tab="cards">Cards</button>
+        </div>
+        <div id="tab-logins">
+        <div class="search-row">
+          <input id="search" type="search" placeholder="Search entries" aria-label="Search entries" autocomplete="off" />
+          <button class="btn" id="btn-new" title="Add an entry">+ New</button>
+          <button class="btn" id="btn-gen" title="Password generator">Generate</button>
+        </div>
+        <div id="site-block">
+          <h3>This site</h3>
+          <p class="muted small" id="site-note"></p>
+          <ul class="entries" id="site-list"></ul>
+        </div>
+        <div id="search-block" hidden>
+          <h3>Results</h3>
+          <ul class="entries" id="search-list"></ul>
+        </div>
+        </div>
+        <div id="tab-cards" hidden>
+          <h3>Payment cards</h3>
+          <p class="muted small" id="cards-note"></p>
+          <ul class="entries" id="card-list"></ul>
+          <p class="muted small">Fill types the card into this tab's checkout fields. Add and edit cards in the ClawBox Vault app; numbers and security codes are never shown here.</p>
+        </div>
+      </section>
+
+      <section class="screen" id="screen-edit" hidden>
+        <h2 id="edit-title">New entry</h2>
+        <form id="form-edit" class="stack" autocomplete="off">
+          <label>Name <input id="edit-name" placeholder="example.com/alice" required /></label>
+          <label>Login <input id="edit-login" placeholder="alice@example.com" /></label>
+          <label>URL <input id="edit-url" placeholder="https://example.com/login" /></label>
+          <label
+            >Password
+            <div class="pw-row">
+              <input id="edit-password" type="password" autocomplete="new-password" />
+              <button class="btn" type="button" id="edit-show">Show</button>
+              <button class="btn" type="button" id="edit-generate">Generate</button>
+            </div>
+          </label>
+          <p class="muted small" id="edit-pw-hint"></p>
+          <label>Note <input id="edit-note" /></label>
+          <div class="row end">
+            <button class="btn ghost" type="button" id="edit-cancel">Cancel</button>
+            <button class="btn primary" type="submit">Save</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="screen" id="screen-gen" hidden>
+        <h2>Password generator</h2>
+        <output class="gen-output" id="gen-output"></output>
+        <label class="row"
+          >Length <input id="gen-length" type="range" min="8" max="128" value="24" /> <span id="gen-length-value">24</span></label
+        >
+        <label class="row check"><input id="gen-symbols" type="checkbox" checked /> Symbols (!#$%…)</label>
+        <p class="muted small" id="gen-entropy"></p>
+        <div class="row end">
+          <button class="btn ghost" id="gen-back">Back</button>
+          <button class="btn" id="gen-again">Regenerate</button>
+          <button class="btn primary" id="gen-copy">Copy</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="bottom">
+      <span id="footer-text" class="muted small"></span>
+      <button class="link" id="btn-unpair" hidden>Unpair</button>
+    </footer>
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+    <script src="build/popup.js"></script>
+  </body>
+</html>

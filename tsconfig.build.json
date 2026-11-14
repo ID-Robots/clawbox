@@ -2,7 +2,7 @@
   "extends": "./tsconfig.json",
   "exclude": [
     "node_modules",
-    "mcp",
+    "mcp", "vault",
     "code-source-code",
     "bench",
     "data",

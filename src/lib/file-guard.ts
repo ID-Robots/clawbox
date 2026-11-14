@@ -42,6 +42,12 @@ export const PROTECTED_HOME_DIRS: readonly string[] = [
   // passphrase in ~/.clawkeep. Its API route is already classed as sensitive
   // in middleware.ts; this is the same rule applied to the store behind it.
   ".clawkeep",
+  // ClawBox Vault (vault/): the owner's saved logins as a GnuPG-encrypted pass
+  // store, the unprotected key that decrypts them, and the tokens of the
+  // vault's own clients. Nothing in it is ever read through a file: the vault
+  // service is the only way in, and it has no route that gives the agent a
+  // password.
+  ".clawbox-vault",
   ".gnupg",
   ".aws",
   ".kube",

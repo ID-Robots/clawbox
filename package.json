@@ -7,6 +7,8 @@
     "mcp": "bun run mcp/clawbox-mcp.ts",
     "typecheck:mcp": "tsc -p mcp/tsconfig.json",
     "check:mcp-tools": "bun run mcp/check-tools.ts",
+    "typecheck:vault": "tsc --noEmit -p vault/tsconfig.json",
+    "test:vault": "cd vault && bun test",
     "terminal-server": "node scripts/terminal-server.mjs",
     "dev": "next dev --port ${PORT:-3000} --hostname 0.0.0.0",
     "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",
@@ -53,6 +55,7 @@
     "qrcode.react": "^4.2.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
+    "tldts": "^7.4.18",
     "ws": "^8.22.0"
   },
   "devDependencies": {
@@ -64,6 +67,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/bun": "^1.4.2",
     "@types/busboy": "^1.5.4",
+    "@types/chrome": "^0.3.5",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^20.19.43",
     "@types/prismjs": "1.26.6",
@@ -72,6 +76,7 @@
     "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^9.0.0",
     "eslint-config-next": "16.4.2",
+    "happy-dom": "^20.14.6",
     "jsdom": "^28.1.0",
     "tailwindcss": "^4.3.3",
     "typescript": "5.9.3",

@@ -95,6 +95,7 @@ import {
   type EmailReadabilityWatchOptions,
 } from "./tools/email";
 import { registerLocalAiTools } from "./tools/local-ai";
+import { registerVaultTools } from "./tools/vault";
 import { registerMediaTools } from "./tools/media";
 import { registerOrientationTools } from "./tools/orientation";
 import { registerHermesPluginTools } from "./tools/hermes-plugins";
@@ -295,6 +296,9 @@ export async function buildServer(
   registerSystemTools(reg, ctx);
   registerDesktopTools(reg, ctx);
   registerBrowserTools(reg);
+  // The password manager, beside the browser it types into. No tool in it
+  // returns a password (mcp/tools/vault.ts).
+  registerVaultTools(reg);
   registerMediaTools(reg);
   registerEmailTools(reg, ctx);
   registerCodingTools(reg);

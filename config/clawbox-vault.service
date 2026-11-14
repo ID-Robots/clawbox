@@ -1,0 +1,46 @@
+[Unit]
+Description=ClawBox Vault (password manager, loopback only)
+# The password manager built into ClawBox: a small Bun HTTP service on
+# 127.0.0.1:4796 that keeps the owner's website logins in its own GnuPG-
+# encrypted `pass` store under ~/.clawbox-vault, serves the ClawBox Vault
+# desktop app (the web server proxies it to the owner at /apps/clawbox-vault/),
+# talks to the extension in the box's own browser and answers the assistant's
+# vault_* tools. See vault/README.md and docs/agents/vault.md.
+#
+# A SYSTEM unit under the clawbox user, like the web server and the embedder:
+# it has to be up whenever the box is, with or without a desktop session, and
+# a user unit would live under user@1000.service and share the desktop's
+# memory cap.
+#
+# LOOPBACK ONLY. The service refuses to start on anything but a loopback
+# address (vault/src/server/config.ts), and scripts/start-vault.sh pins it to
+# 127.0.0.1 whatever the environment says. Nothing here reads the project's
+# .env: that file is writable by everything that runs as clawbox, and what the
+# vault does is not for an edited .env to decide.
+After=network.target
+
+[Service]
+Type=simple
+User=clawbox
+Group=clawbox
+WorkingDirectory=/home/clawbox/clawbox/vault
+Environment=HOME=/home/clawbox
+ExecStart=/home/clawbox/clawbox/scripts/start-vault.sh
+# On its first start the service makes its own keyring and store; a box where
+# that cannot be done (pass missing) still runs, and the app says what is
+# missing. A crash is restarted, a clean stop is not a failure.
+Restart=on-failure
+RestartSec=10
+SuccessExitStatus=143 SIGTERM
+TimeoutStopSec=15
+# gpg-agent is started by the first decryption and must stop with the unit.
+KillMode=control-group
+# Everything the service writes is the owner's passwords or the keys to them.
+UMask=0077
+NoNewPrivileges=yes
+# A backstop, not a budget: the service idles around 60 MB.
+MemoryAccounting=yes
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

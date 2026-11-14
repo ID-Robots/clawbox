@@ -1,0 +1,31 @@
+<!doctype html>
+<html><body>
+  <form id="pay-form">
+    <label for="birth-month">Birth month</label>
+    <select id="birth-month" name="dob_month"><option>01</option><option>02</option><option>03</option><option>04</option><option>05</option><option>06</option><option>07</option><option>08</option><option>09</option><option>10</option><option>11</option><option>12</option></select>
+    <div class="caption">Card number</div><input id="number" name="card_no" type="tel">
+    <label for="m">Expiry date</label>
+    <select id="m" name="exp_month">
+      <option value="">MM</option>
+      <option value="1">01 - January</option><option value="2">02 - February</option><option value="3">03 - March</option><option value="4">04 - April</option>
+      <option value="5">05 - May</option><option value="6">06 - June</option><option value="7">07 - July</option><option value="8">08 - August</option>
+      <option value="9">09 - September</option><option value="10">10 - October</option><option value="11">11 - November</option><option value="12">12 - December</option>
+    </select>
+    <select id="y" name="exp_year">
+      <option value="">YYYY</option>
+      <option>2026</option><option>2027</option><option>2028</option><option>2029</option><option>2030</option><option>2031</option><option>2032</option>
+      <option>2033</option><option>2034</option><option>2035</option><option>2036</option>
+    </select>
+    <label for="sec">Security code</label><input id="sec" name="security_code" type="password" maxlength="4">
+    <button type="submit">Place order</button>
+  </form>
+  <form id="split-inputs">
+    <label for="n2">Credit card number</label><input id="n2" name="ccnum">
+    <label for="m2">Month</label><input id="m2" name="ccmonth" placeholder="MM" maxlength="2">
+    <label for="y2">Year</label><input id="y2" name="ccyear" placeholder="YY" maxlength="2">
+  </form>
+  <form id="four-digit">
+    <label for="n3">Card number</label><input id="n3" name="card-number">
+    <label for="e3">Valid thru</label><input id="e3" name="valid" placeholder="MM/YYYY" maxlength="7">
+  </form>
+</body></html>

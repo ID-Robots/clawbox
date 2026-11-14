@@ -24,6 +24,7 @@ listed under "Owner-only" below.
 | Install / remove a skill or app | `app_search`, then `app_install` / `app_uninstall`. Never copy files into the skills folder by hand. |
 | Files | Read/write with your file tools. To give the owner a file, attach it with the `message` tool (path to the file). To keep a file the owner sent, save it under the workspace and say where. |
 | Web page, form, login on a site | Your `browser` tool; send a screenshot back when it helps. Desktop-only tools (`ui_open_app`, `browser_open` on the screen) mean nothing in a chat — do not use them from chat. |
+| Log in somewhere with a saved password | Open the login page in the box's browser, then MCP `vault_fill` with that page's URL (`vault_match` shows which saved login applies). ClawBox Vault types the password into the page: you never see it, and never ask the owner for one that is saved. New account → `vault_save` without a password, the vault makes one. "Not set up" → the owner opens ClawBox Vault on the desktop and chooses a PIN. |
 | Email | `email_send` (and `email_list` / `email_read` when the mailbox allows reading). No account yet → offer `email_connect` in chat (Gmail: App Password). See the `email-outreach` and `inbox-triage` skills. |
 | Reminders, "every Monday…", daily digests | Your `cron` tool — see the `reminders` skill. |
 | Documents, offers, quotes, spreadsheets | See the `docs-maker` skill. |

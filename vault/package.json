@@ -1,0 +1,15 @@
+{
+  "name": "clawbox-vault",
+  "version": "0.2.0",
+  "private": true,
+  "description": "ClawBox Vault: the password manager built into ClawBox (loopback service, browser extension, agent tools)",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/server/main.ts",
+    "build": "bun run scripts/build.ts",
+    "typecheck": "tsc --noEmit -p .",
+    "test": "bun test",
+    "validate:extension": "bun run scripts/validate-manifest.ts",
+    "check": "bun run typecheck && bun run build && bun run validate:extension && bun test"
+  }
+}

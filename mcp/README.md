@@ -137,6 +137,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`, `coding_project_import`) | when the owner switched the coding agent on | same |
 | The coding team's settings (`coding_settings_get`, `coding_settings_set`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
+| ClawBox Vault (`vault_list`, `vault_match`, `vault_fill`, `vault_save`, `vault_generate`, `vault_delete`, `vault_audit`) | yes, full profile | yes, full profile |
 | Prime Radiant (`prime_radiant_*`, 37 tools) | yes | yes |
 | Memory Shard management (`memory_shard_reindex`, `_reindex_stop`, `_sources_*`, `_schedule_*`, `_provider_*`, `_enable`, `_reset`) | yes | yes |
 | Memory Shard search (`memory_shard_search`) | **no** — the index is OpenClaw's, searched in its own turn | yes |
@@ -1467,6 +1468,31 @@ account detail first, never the advice (TASK-2141). Never a credential and
 never an email. Read-only: accounts are added, ordered and re-authenticated by
 the owner in Settings, and the route's writes refuse this bearer 403
 `owner_only`.
+
+### ClawBox Vault (both editions, full profile)
+
+The box's password manager (`vault/`, `mcp/tools/vault.ts`; the rules are in
+`docs/agents/vault.md`). **No tool returns a password.** The tools talk to the
+vault service on `127.0.0.1:4796` with the token in `~/.clawbox-vault/agent-token`.
+
+| Tool | What the agent gets |
+|---|---|
+| `vault_list(query?)` | entry names, usernames, sites, last change |
+| `vault_match(url)` | the entries that belong to a page, exact site first |
+| `vault_fill(url, name?, submit?)` | a status: `filled`, `no_form`, `no_tab`, `origin_mismatch`, `no_entry`, `locked`, `extension_offline`, `timeout` |
+| `vault_save(name, login, url, password?, note?, regenerate?, length?, symbols?)` | the entry name; without `password` the vault generates and stores one |
+| `vault_generate(name?, login?, url?, length?, symbols?, overwrite?)` | "generated and stored as …", or what would be generated |
+| `vault_delete(name, confirm)` | "deleted …"; `confirm` must be `true` |
+| `vault_audit(limit?)` | recent actions: who, what, which entry, which site, result |
+
+- The password of a fill goes from the vault to the extension in the box's
+  browser, which types it into the page. Open the login page first.
+- Until the owner has chosen a vault PIN in the ClawBox Vault app, every tool
+  answers `CONFLICT` ("not set up"): tell the user, do not retry.
+- None declares `readOnly`, so none is in a delegated run's `run-read` server,
+  and none is on the `core` surface.
+- The two card tools (`vault_cards_list`, `vault_card_fill`) are registered only
+  with `CLAWBOX_VAULT_CARDS=1`, which no install sets.
 
 ### What the agent deliberately cannot do
 

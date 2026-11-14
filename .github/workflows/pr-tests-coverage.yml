@@ -166,6 +166,25 @@ jobs:
       - name: MCP tool contract
         run: bun run check:mcp-tools
 
+      # ClawBox Vault (vault/, TASK-2524) is excluded from the root tsconfig
+      # like the MCP server, so this is the only thing that typechecks the
+      # password manager's service, its extension and its desktop app.
+      - name: Vault typecheck
+        run: bun run typecheck:vault
+
+      # The vault's own suite is bun's, not vitest's: it runs the real service
+      # against a real `pass` store (a throwaway key and store per test file,
+      # never the runner's own) and the real MCP server over stdio on both
+      # editions, and greps every reply, log and state file for the test
+      # passwords. That is the proof that no password reaches the assistant, so
+      # it gates a PR here rather than living only on a developer's machine.
+      # `pass` is the one tool the runner image lacks; gpg and git are on it.
+      - name: Vault tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pass
+          bun run test:vault
+
       # ADVISORY, deliberately, and this is the decision the card asked for:
       # eslint reports 18 errors and 123 warnings on beta today, so a blocking
       # step would fail every PR on day one and be switched off again — the same

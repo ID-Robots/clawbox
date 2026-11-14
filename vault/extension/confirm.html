@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>ClawBox Vault: confirm card fill</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="confirm">
+    <header class="top">
+      <img class="logo" src="icons/vault.png" alt="" width="28" height="28" />
+      <div class="brand">
+        <div class="title">ClawBox Vault</div>
+        <div class="subtitle">Agent card fill</div>
+      </div>
+    </header>
+
+    <main>
+      <section id="ask" hidden>
+        <h2>Fill this card for the agent?</h2>
+        <p class="muted">The AI agent asks to type a payment card into the checkout page on this site. Nothing is filled unless you click <b>Confirm</b>; the agent never sees the number.</p>
+        <dl class="kv">
+          <dt>Site</dt>
+          <dd class="host" id="c-host"></dd>
+          <dt>Card</dt>
+          <dd id="c-card"></dd>
+          <dt>Expires</dt>
+          <dd id="c-exp"></dd>
+        </dl>
+        <p class="muted small" id="c-frames" hidden></p>
+        <p class="muted small" id="c-timer"></p>
+        <div class="row end">
+          <button class="btn" id="btn-decline" type="button">Decline</button>
+          <button class="btn primary" id="btn-confirm" type="button" disabled>Confirm</button>
+        </div>
+      </section>
+
+      <section id="gone" hidden>
+        <h2>Request closed</h2>
+        <p class="muted" id="gone-text">This request is no longer open.</p>
+      </section>
+    </main>
+    <script src="build/confirm.js"></script>
+  </body>
+</html>
