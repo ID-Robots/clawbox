@@ -302,7 +302,8 @@ describe("the named tunnel follows the account off the box", () => {
     expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(1);
   });
 
-  it("does not report a revoke when the credential could not be removed", async () => {
+  // Root ignores the folder's mode, so the unlink cannot be refused there.
+  it.skipIf(process.getuid?.() === 0)("does not report a revoke when the credential could not be removed", async () => {
     await storeCredential();
     await configStore.set("clawai_token", undefined);
     // Readable, but its folder refuses the unlink.

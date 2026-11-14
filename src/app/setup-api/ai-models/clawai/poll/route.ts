@@ -225,8 +225,8 @@ async function finishSubscriptionLink(session: ClawAiConnectSession, accessToken
     const current = await readClawAiSession();
     if (current && current.device_id === session.device_id && current.createdAt === session.createdAt) {
       if (current.status === "complete") return NextResponse.json({ status: "complete" });
-      if (current.status === "error" && current.error) {
-        return NextResponse.json({ status: "error", error: current.error });
+      if (current.status === "error") {
+        return NextResponse.json({ status: "error", error: current.error || "Linking the subscription failed. Request a new code and try again." });
       }
       return NextResponse.json({ status: "configuring" });
     }

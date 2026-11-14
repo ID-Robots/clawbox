@@ -304,6 +304,19 @@ describe("/clawai/poll finishing an entitlement link", () => {
     expect(mockWriteSession).not.toHaveBeenCalled();
   });
 
+  it("a lost claim on a session that ended in an error without a sentence still reports an error", async () => {
+    const mine = pendingSession("entitlement");
+    mockReadSession
+      .mockResolvedValueOnce(mine)
+      .mockResolvedValue({ ...mine, status: "error", error: null });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", access_token: TOKEN }), { status: 200 })));
+    const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
+    const body = await (await POST()).json();
+    expect(body.status).toBe("error");
+    expect(body.error).toEqual(expect.any(String));
+    expect(mockLink).not.toHaveBeenCalled();
+  });
+
   it("links nothing when the session was cancelled while the portal answered", async () => {
     mockReadSession
       .mockResolvedValueOnce(pendingSession("entitlement"))
