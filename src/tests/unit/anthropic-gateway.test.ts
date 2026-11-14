@@ -141,6 +141,11 @@ function fakeCore() {
       core.configWrites.push([...ids]);
       core.configOrder = [...ids];
     },
+    setConfigOrderOffline: async (ids) => {
+      if (core.refuseConfigSet) throw new Error("config write refused: the file is locked");
+      core.configWrites.push([...ids]);
+      core.configOrder = [...ids];
+    },
     readProvider: (provider) => ({
       kind: "present",
       profiles: [...core.otherProfiles].filter(([, p]) => p.provider === provider)
@@ -2802,11 +2807,35 @@ describe("TASK-2533 renewal follow-up (the owner's box, 2026-11-14 20:05)", () =
     };
     await gw.keepGatewayMirror();
 
-    // Each paste puts its profile first (the precondition the box met):
-    // the gateway came back with the last account pasted at the head.
-    expect(atRestart?.[0]).toBe(core.pastes.at(-1)?.profileId);
+    // Each paste put its own profile first (on the box: the last one pasted at
+    // the head); the gateway comes back with the pool's order already there.
+    expect(core.pastes.at(-1)?.profileId).not.toBe(p(ids[0]));
+    expect(atRestart).toEqual(order);
     expect(core.order).toEqual(order);
     expect(core.configOrder).toEqual(core.order);
+  });
+
+  it("R3b — the gateway starts again from a renewal of several accounts with openclaw.json's order already the pool's, not the last paste first (seen on a lab board, where that order is core's: no stored order)", async () => {
+    const core = fakeCore();
+    // As on the board: no stored order — core refuses one over openclaw.json's, which IS the order.
+    core.configControlsOrder = true;
+    const ids = await ownersBox(core);
+    await twoSpent(ids);
+    await gw.noteGatewayCooldowns();
+    expect(core.order).toBeNull();
+    const order = [p(ids[0]), p(ids[1]), p(ids[2]), "anthropic:default", "anthropic:manual"];
+    expect(core.configOrder).toEqual(order);
+
+    await renewalDue(ids, "first");
+    let atRestart: string[] | null = null;
+    core.afterWindow = () => {
+      atRestart ??= core.configOrder ? [...core.configOrder] : null;
+    };
+    await gw.keepGatewayMirror();
+
+    expect(core.pastes.at(-1)?.profileId).not.toBe(p(ids[0]));
+    expect(atRestart).toEqual(order);
+    expect(core.configOrder).toEqual(order);
   });
 
   it("R4 — a chat whose CLI binding the renewal invalidated picks an account the pool marks ok, never the limited one it had picked itself before", async () => {

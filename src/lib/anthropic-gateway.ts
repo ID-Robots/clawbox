@@ -119,7 +119,7 @@
 
 import { logoutOpenclawAuthProfiles, setOpenclawAuthOrder, withOpenclawGatewayStopped } from "@/lib/openclaw-auth-ops";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
-import { gatewayIsAbsent, gatewayReadyWaitMs, openclawIsAbsent, readConfigStrict, runOpenclawConfigSet, runOpenclawConfigUnset, spawnOpenclawCli } from "@/lib/openclaw-config";
+import { gatewayIsAbsent, gatewayReadyWaitMs, openclawIsAbsent, readConfigForWrite, readConfigStrict, runOpenclawConfigSet, runOpenclawConfigUnset, spawnOpenclawCli, writeConfig } from "@/lib/openclaw-config";
 import { gatewayWsCall, waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
 import { processStore } from "@/lib/process-store";
 import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
@@ -186,6 +186,8 @@ export interface GatewayDeps {
   unsetConfigOrder: () => Promise<void>;
   /** Write openclaw.json's `auth.order.anthropic` (hot-reloaded by the gateway: no restart). */
   setConfigOrder?: (profileIds: readonly string[]) => Promise<void>;
+  /** The same, straight into the file, while an offline window has the gateway stopped. */
+  setConfigOrderOffline?: (profileIds: readonly string[]) => Promise<void>;
   /** Anthropic's usage windows for one account. Null: could not be asked. */
   usage: (access: string) => Promise<AnthropicUsageReading | null>;
   call: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>;
@@ -353,6 +355,16 @@ const defaultDeps: GatewayDeps = {
     }
   },
   setConfigOrder: (profileIds) => runOpenclawConfigSet([`auth.order.${PROVIDER}`, JSON.stringify([...profileIds]), "--strict-json"]),
+  // The gateway is stopped: its config route is not there, and a CLI start-up
+  // would keep it stopped for seconds more. The box's own writer, which waits
+  // out a gateway that is starting.
+  setConfigOrderOffline: async (profileIds) => {
+    const config = (await readConfigForWrite()) as Record<string, unknown>;
+    const auth = config.auth && typeof config.auth === "object" ? (config.auth as Record<string, unknown>) : {};
+    const order = auth.order && typeof auth.order === "object" ? (auth.order as Record<string, unknown>) : {};
+    config.auth = { ...auth, order: { ...order, [PROVIDER]: [...profileIds] } };
+    await writeConfig(config as Awaited<ReturnType<typeof readConfigForWrite>>);
+  },
   usage: (access) => fetchAnthropicUsage(access),
   // The in-process socket only: a gateway that is not there is skipped this
   // time rather than paid for with a CLI start-up every minute.
@@ -822,6 +834,63 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
       const held = tokens.get(id);
       return !!held && held.expires !== null && held.expires - now < OAUTH_REFRESH_MARGIN_MS;
     };
+    // Before the gateway starts again, a LIMITED account still held goes
+    // out — by the test the logout after the window makes (an account that
+    // answers is in with its current token, or else the owner's own sign-in
+    // answers), read from the store the pastes just wrote. Each paste gives
+    // the profile it renews a new credential, so a Claude CLI session bound
+    // to that profile starts again on its next turn
+    // (`reuse=invalidated:auth-epoch`), and that fresh pick puts the
+    // session's own earlier automatic pick first while the store still
+    // holds that profile (`prependAuthProfilePin`, OpenClaw 2026.11.3).
+    // Logged out only after the restart, a limited account was there for
+    // every turn in between: on the owner's box (2026-11-14 20:05) a chat's
+    // first turn after a renewal ran on a spent account. Rare (the
+    // watcher's minute takes a limited account out), and the gateway is
+    // stopped, so core's CLI does it.
+    const takeLimitedOutInWindow = async (): Promise<void> => {
+      const inWindow = d.read();
+      if (inWindow.kind !== "present") return;
+      const answersInWindow = wanted.some((a) => {
+        if (effectiveStatus(a, now) !== "ok") return false;
+        const held = inWindow.profiles.find((p) => p.profileId === poolProfileId(a.id));
+        const token = tokens.get(poolProfileId(a.id));
+        return !!held && !held.fenced && !!token && held.fingerprint === token.fingerprint && (held.expires === null || held.expires > Date.now());
+      });
+      const signInInWindow = !pool.accounts.some((a) => a.kind === "oauth" && effectiveStatus(a, now) === "ok" && inWindow.profiles.some((p) => p.profileId === poolProfileId(a.id)))
+        && otherProfiles(inWindow).some((p) => isOwnSubscription(p, now));
+      if (!answersInWindow && !signInInWindow) return;
+      for (const profile of inWindow.profiles) {
+        const account = isPoolProfile(profile.profileId) ? pool.accounts.find((a) => poolProfileId(a.id) === profile.profileId) : undefined;
+        if (!account || account.kind !== "oauth" || effectiveStatus(account, now) !== "limited") continue;
+        if (await attempt(`taking ${profile.profileId} out before the gateway starts again`, () => d.logout(profile.profileId, agent))) outInWindow.add(profile.profileId);
+      }
+      if (outInWindow.size > 0) console.error(`[anthropic-gateway] took ${outInWindow.size} limited account(s) out with the gateway stopped, before it starts again: ${[...outInWindow].join(", ")}`);
+    };
+    // ...and openclaw.json's order is the pool's again before the gateway
+    // reads it: each paste put its own profile at that order's head, and with
+    // no stored order it IS core's order (the pass after the window is the
+    // same write, made again only when what landed differs). Without this,
+    // the gateway came back from a renewal of three accounts led by the last
+    // one pasted for half a minute (seen on a lab board). A straight write
+    // of the file: the gateway is stopped. Never over an owner's order the
+    // pool has not recorded yet (the pass after the window records it first).
+    const alignConfigOrderInWindow = async (): Promise<void> => {
+      if (pasted === 0 || !d.setConfigOrderOffline || chat.configOrderIds === undefined) return;
+      const inWindow = d.read();
+      if (inWindow.kind !== "present") return;
+      const current = (await d.chat())?.configOrderIds;
+      if (!Array.isArray(current)) return;
+      const recorded = await readOrderMarker();
+      if ((chat.configOrderIds ?? []).some((id) => !isPoolProfile(id)) && !recorded.config && !recorded.ownerConfig) return;
+      const heldNow = new Set(wanted.map((a) => poolProfileId(a.id)).filter((id) => !outInWindow.has(id) && inWindow.profiles.some((p) => p.profileId === id)));
+      const base = gatewayOrder(pool, heldNow, otherProfiles(inWindow), now);
+      const storeIds = new Set(inWindow.profiles.map((p) => p.profileId));
+      const want = [...base, ...current.filter((id) => !storeIds.has(id) && !base.includes(id) && !isPoolProfile(id))];
+      if (want.length === 0 || (current.length === want.length && current.every((id, i) => id === want[i]))) return;
+      const write = d.setConfigOrderOffline;
+      await attempt("openclaw.json's account order before the gateway starts again", () => write(want));
+    };
     const pasteAll = async () => {
       const paste = async (id: string, account: string, token: { access: string; expires: number | null }): Promise<boolean> => {
         // Asked HERE, not at the pass's start: the stop before this can take
@@ -896,37 +965,8 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
       if (renewed.length > 0) {
         console.error(`[anthropic-gateway] renewed ${renewed.length} more account(s) with the gateway stopped (${renewed.join(", ")}): one stop takes every account's token`);
       }
-      // Before the gateway starts again, a LIMITED account still held goes
-      // out — by the test the logout after the window makes (an account that
-      // answers is in with its current token, or else the owner's own sign-in
-      // answers), read from the store the pastes just wrote. Each paste gives
-      // the profile it renews a new credential, so a Claude CLI session bound
-      // to that profile starts again on its next turn
-      // (`reuse=invalidated:auth-epoch`), and that fresh pick puts the
-      // session's own earlier automatic pick first while the store still
-      // holds that profile (`prependAuthProfilePin`, OpenClaw 2026.11.3).
-      // Logged out only after the restart, a limited account was there for
-      // every turn in between: on the owner's box (2026-11-14 20:05) a chat's
-      // first turn after a renewal ran on a spent account. Rare (the
-      // watcher's minute takes a limited account out), and the gateway is
-      // stopped, so core's CLI does it.
-      const inWindow = d.read();
-      if (inWindow.kind !== "present") return;
-      const answersInWindow = wanted.some((a) => {
-        if (effectiveStatus(a, now) !== "ok") return false;
-        const held = inWindow.profiles.find((p) => p.profileId === poolProfileId(a.id));
-        const token = tokens.get(poolProfileId(a.id));
-        return !!held && !held.fenced && !!token && held.fingerprint === token.fingerprint && (held.expires === null || held.expires > Date.now());
-      });
-      const signInInWindow = !pool.accounts.some((a) => a.kind === "oauth" && effectiveStatus(a, now) === "ok" && inWindow.profiles.some((p) => p.profileId === poolProfileId(a.id)))
-        && otherProfiles(inWindow).some((p) => isOwnSubscription(p, now));
-      if (!answersInWindow && !signInInWindow) return;
-      for (const profile of inWindow.profiles) {
-        const account = isPoolProfile(profile.profileId) ? pool.accounts.find((a) => poolProfileId(a.id) === profile.profileId) : undefined;
-        if (!account || account.kind !== "oauth" || effectiveStatus(account, now) !== "limited") continue;
-        if (await attempt(`taking ${profile.profileId} out before the gateway starts again`, () => d.logout(profile.profileId, agent))) outInWindow.add(profile.profileId);
-      }
-      if (outInWindow.size > 0) console.error(`[anthropic-gateway] took ${outInWindow.size} limited account(s) out with the gateway stopped, before it starts again: ${[...outInWindow].join(", ")}`);
+      await takeLimitedOutInWindow();
+      await alignConfigOrderInWindow();
     };
     try {
       if (d.offline) runtime().windowRan = true;
