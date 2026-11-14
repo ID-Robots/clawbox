@@ -138,7 +138,8 @@ async function storeHoldsNoAccountToken(): Promise<boolean> {
  * provisioned for that account must not go on serving its hostname. Revokes it
  * and drops the tunnel back to the quick one (only restarting a tunnel that is
  * running). A box still holding either token keeps its tunnel: the hostname is
- * the device's under that account. Never throws.
+ * the device's under that account. Never throws. True only when a credential
+ * was on file and has been removed.
  *
  * Called by the unlink at once (`/setup-api/ai-models/subscription-link`), and
  * by every heartbeat that finds no account token, which covers a sign-out.
@@ -147,8 +148,7 @@ export async function revokeNamedTunnelWithoutAccount(reason: string): Promise<b
   try {
     if (!(await storeHoldsNoAccountToken())) return false;
     if (!(await readNamedTunnelCredential())) return false;
-    await revokeNamedTunnel(reason);
-    return true;
+    return await revokeNamedTunnel(reason);
   } catch (err) {
     console.warn("[portal-heartbeat] could not revoke the named tunnel:", err instanceof Error ? err.message : err);
     return false;
@@ -243,12 +243,17 @@ async function restartTunnelIfRunning(reason: string): Promise<void> {
   }
 }
 
-/** Forget the named tunnel and drop back to the quick one. */
-async function revokeNamedTunnel(reason: string): Promise<void> {
+/**
+ * Forget the named tunnel and drop back to the quick one. True only when the
+ * credential was on disk and is now gone: a file that could not be removed is
+ * still served, so it is not reported as revoked.
+ */
+async function revokeNamedTunnel(reason: string): Promise<boolean> {
   hostnameMismatch = false;
-  if (!(await clearNamedTunnelCredential())) return;
+  if (!(await clearNamedTunnelCredential())) return false;
   console.warn(`[portal-heartbeat] named tunnel credential removed (${reason}); back to the quick tunnel`);
   await restartTunnelIfRunning("named tunnel revoked");
+  return true;
 }
 
 /**

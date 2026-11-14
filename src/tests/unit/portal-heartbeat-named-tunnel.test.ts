@@ -302,6 +302,20 @@ describe("the named tunnel follows the account off the box", () => {
     expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(1);
   });
 
+  it("does not report a revoke when the credential could not be removed", async () => {
+    await storeCredential();
+    await configStore.set("clawai_token", undefined);
+    // Readable, but its folder refuses the unlink.
+    await fs.chmod(CF_DIR, 0o500);
+    try {
+      expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(false);
+      expect(await fs.readFile(CRED, "utf-8")).toContain(`hostname=${HOST}`);
+      expect(cloudflaredState.startTunnelService).not.toHaveBeenCalled();
+    } finally {
+      await fs.chmod(CF_DIR, 0o700);
+    }
+  });
+
   it("does not revoke on a store it cannot read — that is not an unpaired box", async () => {
     await storeCredential();
     const configPath = path.join(TEST_ROOT, "data", "config.json");

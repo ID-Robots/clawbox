@@ -13,6 +13,7 @@ import { NextRequest } from "next/server";
 vi.mock("@/lib/clawai-connect", () => {
   const writeClawAiSession = vi.fn();
   const readClawAiSession = vi.fn();
+  let queue: Promise<unknown> = Promise.resolve();
   return {
     createClawAiUserCode: vi.fn(() => "ABCD-1234"),
     createClawAiDeviceId: vi.fn(() => "device-id-xyz"),
@@ -20,13 +21,19 @@ vi.mock("@/lib/clawai-connect", () => {
     CLAWAI_CONFIGURING_TIMEOUT_MS: 3 * 60 * 1000,
     writeClawAiSession,
     readClawAiSession,
-    // The real one's contract over the two mocks: write only while the stored
-    // session is still the owner's.
-    writeClawAiSessionIfCurrent: vi.fn(async (owner: { device_id: string; createdAt: number }, next: unknown) => {
-      const current = (await readClawAiSession()) as { device_id: string; createdAt: number } | null | undefined;
-      if (!current || current.device_id !== owner.device_id || current.createdAt !== owner.createdAt) return false;
-      await writeClawAiSession(next);
-      return true;
+    // The real one's contract over the two mocks: one write at a time, and
+    // only while the stored session is still the owner's (and, when asked,
+    // still in that state).
+    writeClawAiSessionIfCurrent: vi.fn((owner: { device_id: string; createdAt: number }, next: unknown, whileStatus?: string) => {
+      const run = queue.then(async () => {
+        const current = (await readClawAiSession()) as { device_id: string; createdAt: number; status: string } | null | undefined;
+        if (!current || current.device_id !== owner.device_id || current.createdAt !== owner.createdAt) return false;
+        if (whileStatus !== undefined && current.status !== whileStatus) return false;
+        await writeClawAiSession(next);
+        return true;
+      });
+      queue = run.then(() => undefined, () => undefined);
+      return run;
     }),
     clearClawAiSession: vi.fn(),
     isClawAiSessionExpired: vi.fn(() => false),
@@ -244,6 +251,57 @@ describe("/clawai/poll finishing an entitlement link", () => {
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
     expect((await POST()).status).toBe(409);
     expect(stored).toBe(newer);
+  });
+
+  it("links once when two polls read the same pending session before the portal answered either", async () => {
+    let stored: ClawAiConnectSession = pendingSession("entitlement");
+    mockReadSession.mockImplementation(async () => stored);
+    mockWriteSession.mockImplementation(async (s: ClawAiConnectSession) => { stored = s; });
+    mockLink.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      return { ok: true, plan: "pro" };
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", access_token: TOKEN }), { status: 200 })));
+    const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
+    // One link first, so the route's lazy import of the link module is loaded
+    // before two polls race (two concurrent first imports race the mock).
+    await POST();
+    stored = pendingSession("entitlement");
+    mockLink.mockClear();
+    mockWriteSession.mockClear();
+
+    // Both polls are inside the portal request before either answer arrives.
+    let release!: () => void;
+    const bothAsked = new Promise<void>((resolve) => { release = resolve; });
+    let asked = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      if (++asked === 2) release();
+      await bothAsked;
+      return new Response(JSON.stringify({ status: "complete", access_token: TOKEN }), { status: 200 });
+    }));
+    const answers = await Promise.all([POST(), POST()]);
+    const bodies = await Promise.all(answers.map((r) => r.json()));
+
+    expect(mockLink).toHaveBeenCalledTimes(1);
+    expect(writtenStatuses()).toEqual(["configuring", "complete"]);
+    expect(bodies).toContainEqual({ status: "complete" });
+    // The poll that lost the claim reports the winner's state, never an error.
+    for (const b of bodies) expect(["configuring", "complete"]).toContain(b.status);
+    expect(stored.status).toBe("complete");
+  });
+
+  it("a poll that finds the session already claimed reports its ending, not a newer-sign-in error", async () => {
+    const mine = pendingSession("entitlement");
+    mockReadSession
+      .mockResolvedValueOnce(mine) // the poll's own read: still pending
+      .mockResolvedValue({ ...mine, status: "error", error: "refused" }); // another poll finished it meanwhile
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", access_token: TOKEN }), { status: 200 })));
+    const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
+    const res = await POST();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "error", error: "refused" });
+    expect(mockLink).not.toHaveBeenCalled();
+    expect(mockWriteSession).not.toHaveBeenCalled();
   });
 
   it("links nothing when the session was cancelled while the portal answered", async () => {

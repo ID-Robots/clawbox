@@ -155,6 +155,21 @@ describe("clawai-connect — a conditional write (TASK-2501)", () => {
     expect(await connect.readClawAiSession()).toBeNull();
   });
 
+  it("lets only one of two claims from the same state win", async () => {
+    await connect.writeClawAiSession({ ...base, status: "pending" });
+    const claim = { ...base, status: "configuring" as const };
+    const [first, second] = await Promise.all([
+      connect.writeClawAiSessionIfCurrent(base, claim, "pending"),
+      connect.writeClawAiSessionIfCurrent(base, { ...claim, configuringStartedAt: 9_999 }, "pending"),
+    ]);
+    expect([first, second]).toEqual([true, false]);
+    expect(await connect.readClawAiSession()).toEqual(claim);
+    // A finished session is not claimed again either.
+    await connect.writeClawAiSession({ ...base, status: "complete" });
+    expect(await connect.writeClawAiSessionIfCurrent(base, claim, "pending")).toBe(false);
+    expect((await connect.readClawAiSession())?.status).toBe("complete");
+  });
+
   it("writes nothing when there is no session", async () => {
     expect(await connect.writeClawAiSessionIfCurrent(base, base)).toBe(false);
     expect(await connect.readClawAiSession()).toBeNull();

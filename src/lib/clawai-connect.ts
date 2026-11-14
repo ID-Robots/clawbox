@@ -133,15 +133,19 @@ export async function writeClawAiSession(session: ClawAiConnectSession) {
  * Write `next` only while the stored session is still `owner`'s — the same
  * device code, started at the same moment. A finish that waited on the portal
  * must not replace a newer sign-in someone started meanwhile with its own
- * ending. Answers whether it wrote.
+ * ending. With `whileStatus`, the stored session must also still be in that
+ * state: a claim (`pending` → `configuring`) that only one caller can win.
+ * Answers whether it wrote.
  */
 export async function writeClawAiSessionIfCurrent(
   owner: Pick<ClawAiConnectSession, "device_id" | "createdAt">,
   next: ClawAiConnectSession,
+  whileStatus?: ClawAiConnectStatus,
 ): Promise<boolean> {
   return serializedSessionWrite(async () => {
     const current = await readClawAiSession();
     if (!current || current.device_id !== owner.device_id || current.createdAt !== owner.createdAt) return false;
+    if (whileStatus !== undefined && current.status !== whileStatus) return false;
     await writeSessionNow(next);
     return true;
   });

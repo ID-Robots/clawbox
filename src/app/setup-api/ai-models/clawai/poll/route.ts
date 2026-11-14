@@ -217,7 +217,19 @@ async function finishSubscriptionLink(session: ClawAiConnectSession, accessToken
   // so nothing stops a new /clawai/start while the portal answers, and this
   // attempt's ending must never replace that newer session.
   const linking: ClawAiConnectSession = { ...session, status: "configuring", error: null, configuringStartedAt: Date.now() };
-  if (!(await writeClawAiSessionIfCurrent(session, linking))) {
+  // The claim succeeds only from `pending`: of two polls that read the same
+  // pending session before the portal answered either, one links and the
+  // other reports where that link stands, so a superseded link can never
+  // overwrite a finished one with an error.
+  if (!(await writeClawAiSessionIfCurrent(session, linking, "pending"))) {
+    const current = await readClawAiSession();
+    if (current && current.device_id === session.device_id && current.createdAt === session.createdAt) {
+      if (current.status === "complete") return NextResponse.json({ status: "complete" });
+      if (current.status === "error" && current.error) {
+        return NextResponse.json({ status: "error", error: current.error });
+      }
+      return NextResponse.json({ status: "configuring" });
+    }
     return NextResponse.json(
       { status: "error", error: "This ClawBox sign-in was replaced by a newer one. Use the newer code." },
       { status: 410 },
