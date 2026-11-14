@@ -705,6 +705,49 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     for (const leak of leaks) expect(lines[0]).not.toContain(leak);
   });
 
+  /** The core's sentence as the not-ok line carries it, after its fixed prefix. */
+  async function loggedReason(sentence: string): Promise<string> {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warn.mockClear();
+    const { gateway, reload } = await box();
+    gateway.probe = { agentId: "main", provider: "openai-compatible", embedding: { ok: false, error: sentence } };
+    await reload();
+    const line = warn.mock.calls.map((call) => call.join(" ")).find((l) => l.includes("readiness probe")) ?? "";
+    return line.slice(line.indexOf("(doctor.memory.status): ") + "(doctor.memory.status): ".length);
+  }
+
+  it("keeps ordinary text that only looks like a user and password: compact JSON, a model digest", async () => {
+    const json = await loggedReason('embeddings failed {"code":401,"email":"x@y.example"}');
+    expect(json).toContain('"code":401');
+    const digest = await loggedReason(`pull qwen3-embedding:0.6b@sha256:${"5e".repeat(32)} failed`);
+    expect(digest).toContain("qwen3-embedding:0.6b@");
+  });
+
+  // What the redaction's doc says it leaves, pinned so a change to it is seen.
+  it.each([
+    ["a password holding a slash", "connect owner:pa/ss@192.0.2.44:8081 refused", "owner:pa/ss@"],
+    ["a password holding an @", "connect us:p@ss@host.example.com refused", "us:p@"],
+    ["a password holding whitespace", "connect owner:pa ss@host.example.com refused", "owner:pa"],
+    ["a 64-hex run glued to a word character", `refused tok_${"5e".repeat(32)}`, `tok_${"5e".repeat(32)}`],
+    ["a hex run longer than 64", `refused ${"5e".repeat(32)}a`, `${"5e".repeat(32)}a`],
+    ["a loopback address and port", "connect ECONNREFUSED 127.0.0.1:8081", "127.0.0.1:8081"],
+    ["the word after an ordinary Basic, which is taken", "HTTP Basic authentication required", "HTTP Basic [redacted] required"],
+  ])("leaves what its doc says it leaves: %s", async (_case, sentence, kept) => {
+    expect(await loggedReason(sentence)).toContain(kept);
+  });
+
+  it("reads only the head of a very long sentence, and says at most 200 characters of it", async () => {
+    // 40,000 characters with no whitespace and no "@": the shape the patterns
+    // would scan quadratically if they ran on the whole sentence.
+    const long = await loggedReason("ab:cd".repeat(8_000));
+    expect(long).not.toBe("");
+    expect(long.length).toBeLessThanOrEqual(200);
+    const cut = await loggedReason(`${"x".repeat(1_200)} key claw_PLACEHOLDER0000000000`);
+    expect(cut).not.toBe("");
+    expect(cut.length).toBeLessThanOrEqual(200);
+    expect(cut).not.toContain("claw_");
+  });
+
   it("logs the not-ok again after a recovery, and for another embedder setting that fails the same way", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { gateway, reload, invalidated, configure } = await box();
