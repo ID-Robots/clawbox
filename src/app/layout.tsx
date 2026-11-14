@@ -15,7 +15,8 @@ export const metadata: Metadata = {
   title: "ClawBox",
   description: "Personal AI Assistant Device",
   manifest: "/manifest.json",
-  themeColor: "#0a0f1a",
+  // themeColor is the viewport export's (above): Next 16 ignores it here and
+  // warned on every build ("Unsupported metadata themeColor"). TASK-2517.
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "48x48" },

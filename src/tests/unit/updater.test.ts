@@ -4496,7 +4496,7 @@ describe("updater", () => {
       expectNoApplianceOnlyWork();
 
       // The continuation flag carries the serving build, like the appliance's.
-      expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", "rebuilt-build-id");
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({ update_needs_continuation: "rebuilt-build-id" }));
       expect(mockRebuildAsOwner).toHaveBeenCalledTimes(1);
       expect(mockRebuildAsOwner.mock.calls[0][0]).toBe(process.env.CLAWBOX_ROOT);
       const state = updater.getUpdateState();
@@ -4574,8 +4574,13 @@ describe("updater", () => {
       expect(restart?.error).toBe(
         "Rebuild failed: bun run build did not succeed: Error: Build failed because of webpack errors. The previous build was put back.",
       );
-      const flagWrites = mockSet.mock.calls.filter(([key]) => key === "update_needs_continuation").map(([, v]) => v);
-      expect(flagWrites).toEqual(["rebuilt-build-id", undefined]);
+      // Written with the rebuild step's dispatch moment, which this path has
+      // none of (TASK-2517): both keys travel in one write.
+      const flagWrites = mockSetMany.mock.calls
+        .map(([entries]) => entries as Record<string, unknown>)
+        .filter((entries) => "update_needs_continuation" in entries);
+      expect(flagWrites.map((e) => e.update_needs_continuation)).toEqual(["rebuilt-build-id", undefined]);
+      expect(flagWrites.every((e) => "update_rebuild_dispatched" in e && e.update_rebuild_dispatched === undefined)).toBe(true);
       expect(mockRestartUiProcess).not.toHaveBeenCalled();
       expectNoApplianceOnlyWork();
     });
@@ -5671,6 +5676,69 @@ describe("updater", () => {
       const result = await updater.checkContinuation();
 
       expect(result).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toContain("without producing a new build");
+    });
+
+    // TASK-2517: an update whose target is the build already serving keeps that
+    // build (install.sh's build_is_current_for_checkout) and notes so on disk
+    // ("<BUILD_ID> <boot id> <seconds since boot>"); the unchanged BUILD_ID is
+    // then not evidence of a rebuild that never happened.
+    const BOOT = "d967658f-3b5f-4c6d-ac1e-390b669e2fd4";
+    const NEXT_BOOT = "0b7c6f4e-1111-4c6d-ac1e-390b669e2fd4";
+    function keptBuildBox(opts: { note: string; dispatched: unknown; bootNow?: string }): void {
+      mockGet.mockImplementation(async (key: string) => {
+        if (key === "update_needs_continuation") return "build-aaa";
+        if (key === "update_rebuild_dispatched") return opts.dispatched;
+        return undefined;
+      });
+      mockReadFile.mockImplementation(async (file) => {
+        const f = String(file);
+        if (f.endsWith("BUILD_ID")) return "build-aaa\n";
+        if (f.endsWith("rebuild-kept-build")) return opts.note;
+        if (f.endsWith("boot_id")) return `${opts.bootNow ?? BOOT}\n`;
+        throw new Error("ENOENT");
+      });
+    }
+
+    it.each([
+      ["in the same boot, after the dispatch", undefined],
+      // The reboot arm: the step kept the build, then rebooted, and this half
+      // resumes in the next boot. The note binds to the DISPATCH's boot.
+      ["after the reboot arm's reboot", NEXT_BOOT],
+    ])("resumes when this run's rebuild step kept the serving build on purpose, %s (TASK-2517)", async (_when, bootNow) => {
+      updater.resetUpdateState();
+      keptBuildBox({ note: `build-aaa ${BOOT} 1042.17\n`, dispatched: { boot: BOOT, uptime: 1000.5 }, bootNow });
+      const log = vi.spyOn(console, "log");
+
+      expect(await updater.checkContinuation()).toBe(true);
+
+      expect(log.mock.calls.some(([m]) => String(m).includes("The rebuild step kept build build-aaa"))).toBe(true);
+      // Both halves of the record go with the flag.
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({
+        update_needs_continuation: undefined,
+        update_rebuild_dispatched: undefined,
+      }));
+      log.mockRestore();
+      // Let the continuation it started finish here, as the case above does.
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+    });
+
+    it.each([
+      ["a note written before this run dispatched the step", `build-aaa ${BOOT} 999.9\n`, { boot: BOOT, uptime: 1000.5 }],
+      ["a note from another boot than the dispatch's", `build-aaa ${NEXT_BOOT} 1042.17\n`, { boot: BOOT, uptime: 1000.5 }],
+      ["a note naming another build", `build-bbb ${BOOT} 1042.17\n`, { boot: BOOT, uptime: 1000.5 }],
+      ["no dispatch moment recorded", `build-aaa ${BOOT} 1042.17\n`, undefined],
+      ["a dispatch moment of the old shape", `build-aaa ${BOOT} 1042.17\n`, 1000.5],
+      ["a dispatch moment with no boot", `build-aaa ${BOOT} 1042.17\n`, { uptime: 1000.5 }],
+      ["a note of the old shape", "build-aaa 1042.17\n", { boot: BOOT, uptime: 1000.5 }],
+      ["a note that is not one", "kept\n", { boot: BOOT, uptime: 1000.5 }],
+    ])("still reports no new build with %s (TASK-2517)", async (_why, note, dispatched) => {
+      updater.resetUpdateState();
+      keptBuildBox({ note, dispatched });
+
+      expect(await updater.checkContinuation()).toBe(false);
       const state = updater.getUpdateState();
       expect(state.phase).toBe("failed");
       expect(state.error).toContain("without producing a new build");

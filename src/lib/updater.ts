@@ -91,6 +91,12 @@ import {
  */
 const UPDATE_INTERRUPTED_KEY = "update_interrupted_at";
 /**
+ * When this run dispatched its rebuild step — `{ boot, uptime }`: the boot's id
+ * and the seconds since that boot — beside `update_needs_continuation`: what a
+ * note from that step must match to count (rebuildKeptBuild, TASK-2517).
+ */
+const UPDATE_REBUILD_DISPATCHED_KEY = "update_rebuild_dispatched";
+/**
  * Beside the stamp: how the run was cut short and which step it was on, from
  * the lock holder's record (`{ cause, step? }`). Written before the stamp and
  * inert without it — the verdict's wording and the resume both need the stamp
@@ -938,6 +944,66 @@ async function readBuildId(): Promise<string> {
 }
 
 /**
+ * Where install.sh's rebuild step notes that it KEPT the build it found,
+ * because that build already was this checkout's (`record_rebuild_kept_build`,
+ * TASK-2517): "<BUILD_ID> <boot id> <seconds since boot>", root's, on disk —
+ * the reboot arm ends that step with a reboot, and this half then resumes in
+ * the next boot.
+ */
+function rebuildKeptNote(): string {
+  return process.env.CLAWBOX_REBUILD_KEPT_BUILD || "/var/lib/clawbox/rebuild-kept-build";
+}
+
+/** Where this boot's id is read. */
+function bootIdFile(): string {
+  return process.env.CLAWBOX_BOOT_ID_FILE || "/proc/sys/kernel/random/boot_id";
+}
+
+/**
+ * This boot and the seconds since it began, or null where either cannot be
+ * read: the clock the rebuild step's note is written on. Monotonic within the
+ * boot, so a clock step during an update can neither fake nor hide an order.
+ */
+async function bootMoment(): Promise<{ boot: string; uptime: number } | null> {
+  try {
+    const boot = (await readFile(/* turbopackIgnore: true */ bootIdFile(), "utf-8")).trim();
+    const uptime = Number((await readFile("/proc/uptime", "utf-8")).trim().split(/\s+/)[0]);
+    if (!/^[0-9a-f-]{8,64}$/.test(boot) || !Number.isFinite(uptime) || uptime <= 0) return null;
+    return { boot, uptime };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Did THIS run's rebuild step keep the build that is serving, rather than fail
+ * to produce one? The continuation demands a changed BUILD_ID as evidence of a
+ * rebuild; a step that found the build already current (an update with nothing
+ * new) leaves the same one, and says so in its note instead. Only positive
+ * evidence counts: the note names exactly the serving build, and was written in
+ * the boot this run dispatched the step in and after that moment. The note's
+ * boot is compared with the DISPATCH's, never with the boot reading it, so a
+ * kept build that ended in the reboot arm's reboot still counts, while a note an
+ * older run left can never stand for this one (install.sh also clears it at the
+ * top of every rebuild step). Anything unreadable is a no.
+ */
+async function rebuildKeptBuild(buildId: string, dispatched: unknown): Promise<boolean> {
+  if (!buildId || !dispatched || typeof dispatched !== "object") return false;
+  const { boot, uptime } = dispatched as { boot?: unknown; uptime?: unknown };
+  if (typeof boot !== "string" || !boot || typeof uptime !== "number" || !Number.isFinite(uptime) || uptime <= 0) {
+    return false;
+  }
+  let note: string;
+  try {
+    note = (await readFile(/* turbopackIgnore: true */ rebuildKeptNote(), "utf-8")).trim();
+  } catch {
+    return false;
+  }
+  const match = /^([A-Za-z0-9_-]+) ([0-9a-f-]+) ([0-9]+(?:\.[0-9]+)?)$/.exec(note);
+  return !!match && match[1] === buildId && match[2] === boot && Number(match[3]) >= uptime;
+}
+
+/**
  * Wait for the rebuild_reboot root unit to take this process down (it
  * restarts clawbox-setup / reboots the box on success). The old
  * implementation was a blind 30s sleep that resolved SUCCESS — so a rebuild
@@ -962,7 +1028,7 @@ async function waitForRebuildToTakeOver(dispatchedAt: number): Promise<never> {
   }
   // Either way the restart isn't coming — clear the flag so the next server
   // start doesn't "continue" a rebuild that never happened.
-  await set("update_needs_continuation", undefined);
+  await setMany({ update_needs_continuation: undefined, [UPDATE_REBUILD_DISPATCHED_KEY]: undefined });
   throw new Error(message);
 }
 
@@ -1903,7 +1969,12 @@ async function updateClawBoxAndReboot(): Promise<void> {
   // evidence the rebuild actually happened. Without it, a power cycle in the
   // few seconds between unit failure and our watcher noticing would reset the
   // unit's systemd state and let the continuation fake a completed update.
-  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
+  // …and when it dispatched the step, on the boot's own count, so the
+  // continuation can tell this run's "kept the build" note from an older one.
+  await setMany({
+    update_needs_continuation: (await readBuildId()) || "no-previous-build",
+    [UPDATE_REBUILD_DISPATCHED_KEY]: (await bootMoment()) ?? undefined,
+  });
   // Captured before the dispatch, so the failure read below cannot miss a line
   // the unit wrote in its first moments — nor pick up the previous attempt's.
   // Wall clock on purpose, like every journal `--since` here: the journal
@@ -1930,7 +2001,12 @@ async function updateClawBoxAndReboot(): Promise<void> {
  */
 async function updateClawBoxAsOwner(): Promise<void> {
   await syncCheckoutForRebuild();
-  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
+  // No rebuild step runs on this path, so no dispatch moment: cleared, so a
+  // record an appliance run left can never travel with this flag.
+  await setMany({
+    update_needs_continuation: (await readBuildId()) || "no-previous-build",
+    [UPDATE_REBUILD_DISPATCHED_KEY]: undefined,
+  });
   try {
     await rebuildAsOwner(PROJECT_DIR, {
       onCommand: logUpdateCommand,
@@ -1943,7 +2019,7 @@ async function updateClawBoxAsOwner(): Promise<void> {
     // The previous build is back in place (or reclaimed on the next start), so
     // there is no restart to continue from — the same rule as
     // waitForRebuildToTakeOver.
-    await set("update_needs_continuation", undefined);
+    await setMany({ update_needs_continuation: undefined, [UPDATE_REBUILD_DISPATCHED_KEY]: undefined });
     throw new Error(`Rebuild failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   await restartUiProcess();
@@ -6102,6 +6178,7 @@ async function resumeContinuation(): Promise<boolean> {
     await rm(handoverFile, { force: true });
     await setMany({
       update_needs_continuation: undefined,
+      [UPDATE_REBUILD_DISPATCHED_KEY]: undefined,
       [UPDATE_INTERRUPTED_KEY]: undefined,
       [UPDATE_INTERRUPTED_DETAIL_KEY]: undefined,
     });
@@ -6228,12 +6305,16 @@ async function resumeContinuation(): Promise<boolean> {
     return false;
   }
 
+  // Read before the flags go: when this run dispatched its rebuild step.
+  const rebuildDispatchedAt = await get(UPDATE_REBUILD_DISPATCHED_KEY);
+
   // The restart this is resuming is the one the update ASKED FOR: the flag is
   // written by the rebuild step itself. So anything a reader stamped while that
   // replacement was under way describes the update's own normal path, and goes
   // with the flag rather than outliving it.
   await setMany({
     update_needs_continuation: undefined,
+    [UPDATE_REBUILD_DISPATCHED_KEY]: undefined,
     [UPDATE_INTERRUPTED_KEY]: undefined,
     [UPDATE_INTERRUPTED_DETAIL_KEY]: undefined,
   });
@@ -6263,7 +6344,15 @@ async function resumeContinuation(): Promise<boolean> {
   const unitFailed = !ownerRebuilt && rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP));
   const recordedBuildId = typeof needsContinuation === "string" ? needsContinuation : null;
   const currentBuildId = await readBuildId();
-  const buildUnchanged = recordedBuildId !== null && recordedBuildId === currentBuildId;
+  // The same build is evidence of a rebuild that did not happen — unless the
+  // rebuild step kept it on purpose, because it already was this checkout's
+  // (TASK-2517): then its note, written after this run dispatched it, names it.
+  const keptOnPurpose = recordedBuildId !== null && recordedBuildId === currentBuildId && !unitFailed && !ownerRebuilt
+    && (await rebuildKeptBuild(currentBuildId, rebuildDispatchedAt));
+  if (keptOnPurpose) {
+    console.log(`[Updater] The rebuild step kept build ${currentBuildId}: it already was this checkout's build`);
+  }
+  const buildUnchanged = recordedBuildId !== null && recordedBuildId === currentBuildId && !keptOnPurpose;
   // ...and NO build id is never evidence of a build. `do_rebuild` used to
   // delete `.next` before building, so an OOM-killed build left the box with
   // nothing — and an absent id compares UNEQUAL to the recorded one, which the

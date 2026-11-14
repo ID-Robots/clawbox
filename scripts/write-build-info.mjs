@@ -94,6 +94,15 @@ const commit = gitValue("rev-parse", "HEAD");
 // dirtiness; that is a deliberate, separate choice about the tree on disk now,
 // not about the tree this build came from.
 const status = git("status", "--porcelain", "--untracked-files=no");
+// The same probe with executable bits left out: were the CONTENTS of the
+// tracked files the commit's? That is the question install.sh's
+// build_is_current_for_checkout asks before it keeps a build instead of
+// rebuilding it (TASK-2517), and `dirty` cannot answer it on every box: the
+// update's rebuild step makes every scripts/*.sh executable before it builds
+// (step_directories_permissions), some are tracked without the bit, and on a
+// checkout with core.fileMode=true that alone stamped `dirty: true` on every
+// update build. A field of its own, so `dirty` keeps its meaning.
+const contentStatus = git("-c", "core.fileMode=false", "status", "--porcelain", "--untracked-files=no");
 const untrackedOut = git("ls-files", "--others", "--exclude-standard");
 const untracked = untrackedOut === null
   ? null
@@ -104,6 +113,8 @@ const info = {
   shortCommit: commit ? commit.slice(0, 7) : null,
   branch: gitValue("rev-parse", "--abbrev-ref", "HEAD"),
   dirty: status === null ? null : status.length > 0,
+  /** `dirty` without executable bits: the tracked files' contents differed from the commit. */
+  contentDirty: contentStatus === null ? null : contentStatus.length > 0,
   /** How many untracked files sat in the tree at build time. Not part of `dirty` — see above. */
   untracked,
   committedAt: gitValue("log", "-1", "--format=%cI"),

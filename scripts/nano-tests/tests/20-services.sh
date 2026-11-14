@@ -14,7 +14,7 @@
 #     /setup-api/gateway/health answering 200 with available:true. The
 #     dashboard has no public /health: a bare /health is session-gated and
 #     proxied to the gateway, and the MCP bearer opens /setup-api/* only
-#     (src/middleware.ts) — so this documented route is the health answer
+#     (src/proxy.ts) — so this documented route is the health answer
 #     the dashboard gives without a login.
 #   * The dashboard serves its login page (public) with 200.
 #   * On a Hermes box (Settings → Harness → Switch to Hermes) the OpenClaw

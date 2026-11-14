@@ -94,7 +94,7 @@ describe("the edition guards — a refusal has to be tellable from a missing id"
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error?: string; code?: string };
     // The status and the human string are unchanged — the browser and
-    // src/middleware.ts must see exactly what they saw before — but the
+    // src/proxy.ts must see exactly what they saw before — but the
     // machine-readable reason is now on the wire.
     expect(body.error).toBe("Not found");
     expect(body.code).toBe("not_hermes");

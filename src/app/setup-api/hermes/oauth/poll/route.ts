@@ -24,7 +24,7 @@ const POLL_KEYS = ["session_id", "status", "error_message", "expires_at"] as con
 // `ownerGate`, and deliberately so. Middleware refuses it without a session
 // exactly like its three siblings — it is not on the bootstrap allow-list, so
 // the pre-setup answer is 401 either way (TASK-527, asserted in
-// src/tests/middleware/middleware.test.ts). What it does NOT carry is the
+// src/tests/proxy/proxy.test.ts). What it does NOT carry is the
 // second, in-handler check the write routes have.
 //
 // That asymmetry follows what the second line is for. `@/lib/route-auth` exists

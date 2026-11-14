@@ -206,7 +206,7 @@ function getPortalUrl(): string {
       new URL(raw);
       return raw;
     } catch {
-      console.error(`[middleware] Invalid PORTAL_URL: ${raw}, using default`);
+      console.error(`[proxy] Invalid PORTAL_URL: ${raw}, using default`);
     }
   }
   return "http://10.42.0.1/";
@@ -355,7 +355,7 @@ const PUBLIC_EXACT = new Set([
   // it into an unauthenticated proxy to 127.0.0.1:18789 rather than a 404. The
   // file that declares an icon should own its public status.
   //
-  // The drift guard in src/tests/middleware/pwa-icons-public.test.ts derives
+  // The drift guard in src/tests/proxy/pwa-icons-public.test.ts derives
   // the whole set from manifest.json and layout.tsx's metadata object, so a new
   // icon cannot be declared without the gate being opened for it.
   "/icon-192.png",
@@ -369,7 +369,7 @@ const PUBLIC_EXACT = new Set([
   "/portal/subscribe",
 ]);
 
-/** `/apps/<id>/…` — see src/lib/app-proxy.ts. The prefix alone, no import: middleware runs on the edge runtime. */
+/** `/apps/<id>/…` — see src/lib/app-proxy.ts. The prefix alone, no import: this file pulls nothing of app-proxy.ts's in. */
 const APP_PROXY_PREFIX = "/apps/";
 
 function isAppProxyPath(pathname: string): boolean {
@@ -552,9 +552,9 @@ function refuseForeignHost(request: NextRequest, pathname: string): NextResponse
   );
 }
 
-// ─── Middleware ───────────────────────────────────────────────────────────────
+// ─── Proxy (Next's former middleware) ────────────────────────────────────────
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const pathname = request.nextUrl.pathname.toLowerCase();
 
   // 0. Trailing slashes. Next used to canonicalise them itself before
@@ -924,9 +924,6 @@ export async function middleware(request: NextRequest) {
 }
 
 export const config = {
-  // Node runtime: middleware reads data/config.json to detect whether the
-  // setup wizard has finished, which the Edge runtime can't do (no fs).
-  runtime: "nodejs",
   matcher: [
     // Every path but Next's own build output. `fonts/` and `images/` used to be
     // skipped here too, which meant this file never ran for them at all: a
@@ -946,4 +943,8 @@ export const config = {
     // config read per font request, which /login already pays.
     "/((?!_next/static|_next/image).*)",
   ],
+  // No `runtime` key: Next 16's proxy (the file convention that replaced
+  // middleware) always runs on the Node.js runtime and refuses the option. This
+  // file needs Node all the same — it reads data/config.json (fs) to know
+  // whether the setup wizard has finished, which the Edge runtime cannot do.
 };

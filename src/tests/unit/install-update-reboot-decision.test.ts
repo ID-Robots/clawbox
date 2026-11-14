@@ -177,7 +177,7 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
    * update_reboot_reasons answers, in order (the step asks before the rebuild
    * and, on the restart arm, once more after it).
    */
-  function runStep(opts: { testMode: boolean; reasons: string[] }): { status: number | null; events: string[]; out: string } {
+  function runStep(opts: { testMode: boolean; reasons: string[]; current?: boolean; noteFails?: boolean }): { status: number | null; events: string[]; out: string } {
     const events = path.join(tmp, "events");
     const calls = path.join(tmp, "reason-calls");
     const answers = opts.reasons.map((a, i) => `${i}) printf '%s' ${JSON.stringify(a)} ;;`).join(" ");
@@ -198,6 +198,14 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
       `}`,
       "arm_rebuild_checkout_guard() { :; }",
       "disarm_rebuild_checkout_guard() { :; }",
+      // TASK-2517: the build on disk is (or is not) already this checkout's,
+      // and the note that tells the update's second half so.
+      `forget_rebuild_kept_build() { echo forget_rebuild_kept_build >> ${JSON.stringify(events)}; }`,
+      `disarm_gateway_handback() { echo disarm_gateway_handback >> ${JSON.stringify(events)}; }`,
+      `record_rebuild_kept_build() { echo record_rebuild_kept_build >> ${JSON.stringify(events)}; return ${opts.noteFails ? 1 : 0}; }`,
+      opts.current
+        ? "build_is_current_for_checkout() { echo 'the build on disk is current'; }"
+        : "build_is_current_for_checkout() { echo 'the build on disk is not a build of 0123456789ab'; return 1; }",
       fn("step_rebuild_reboot"),
       "step_rebuild_reboot",
     ].join("\n");
@@ -220,9 +228,12 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
   it("restarts the services instead, with no reboot, when nothing needs a boot", () => {
     const r = runStep({ testMode: false, reasons: [] });
     expect(r.status).toBe(0);
-    // The rebuild that gives back what it stopped: no flag.
-    expect(r.events).toContain("do_rebuild ");
+    // The rebuild that gives back what it stopped — except a gateway paused for
+    // the build, which the update's second half stops again and then starts
+    // (TASK-2517).
+    expect(r.events).toContain("do_rebuild --gateway-to-update");
     expect(r.events).not.toContain("do_rebuild --reboot-follows");
+    expect(r.out).toContain("Rebuilding: the build on disk is not a build of 0123456789ab");
     expect(r.events.some((e) => e.startsWith("reboot"))).toBe(false);
     const restart = at(r.events, "restart_services_after_update");
     expect(restart).toBeGreaterThan(at(r.events, "step_polkit_rules"));
@@ -243,7 +254,7 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
     // during the build is a reason the first look could not see.
     const r = runStep({ testMode: false, reasons: ["", "unattended kernel"] });
     expect(r.status).toBe(0);
-    expect(r.events).toContain("do_rebuild ");
+    expect(r.events).toContain("do_rebuild --gateway-to-update");
     expect(at(r.events, "reboot")).toBeGreaterThan(at(r.events, "do_rebuild"));
     expect(at(r.events, "restart_services_after_update")).toBe(-1);
     expect(r.out).toContain("Rebooting: unattended kernel");
@@ -259,6 +270,61 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
     expect(at(r.events, "systemctl restart clawbox-setup.service")).toBeGreaterThan(at(r.events, "step_polkit_rules"));
   });
 
+  it("skips the rebuild when the build on disk is already this checkout's, and still restarts", () => {
+    const r = runStep({ testMode: false, reasons: [], current: true });
+    expect(r.status).toBe(0);
+    expect(r.events.some((e) => e.startsWith("do_rebuild"))).toBe(false);
+    expect(r.out).toContain("No rebuild needed: the build on disk is current");
+    // The rest of the step is unchanged: the redeploy before, the polkit
+    // refresh and the restart that resumes the update's second half after.
+    expect(at(r.events, "step_clawkeep_install")).toBeGreaterThan(-1);
+    expect(at(r.events, "restart_services_after_update")).toBeGreaterThan(at(r.events, "step_polkit_rules"));
+    expect(r.events.some((e) => e.startsWith("reboot"))).toBe(false);
+  });
+
+  it("notes the kept build for the second half, after clearing any older note", () => {
+    const r = runStep({ testMode: false, reasons: [], current: true });
+    const forget = at(r.events, "forget_rebuild_kept_build");
+    expect(forget).toBeGreaterThan(-1);
+    expect(at(r.events, "record_rebuild_kept_build")).toBeGreaterThan(forget);
+    // A rebuild clears it and writes none: only a kept build is noted.
+    for (const f of ["events", "reason-calls"]) fs.rmSync(path.join(tmp, f), { force: true });
+    const rebuilt = runStep({ testMode: false, reasons: [] });
+    expect(at(rebuilt.events, "forget_rebuild_kept_build")).toBeGreaterThan(-1);
+    expect(at(rebuilt.events, "record_rebuild_kept_build")).toBe(-1);
+  });
+
+  it("cancels an earlier update's gateway fallback on every rebuild step, kept build or not", () => {
+    // do_rebuild cancels it too, but a kept build never reaches do_rebuild.
+    const kept = runStep({ testMode: false, reasons: [], current: true });
+    expect(at(kept.events, "disarm_gateway_handback")).toBeGreaterThan(-1);
+    expect(at(kept.events, "disarm_gateway_handback")).toBeLessThan(at(kept.events, "record_rebuild_kept_build"));
+    for (const f of ["events", "reason-calls"]) fs.rmSync(path.join(tmp, f), { force: true });
+    const rebuilt = runStep({ testMode: false, reasons: [] });
+    expect(at(rebuilt.events, "disarm_gateway_handback")).toBeLessThan(at(rebuilt.events, "do_rebuild"));
+  });
+
+  it("rebuilds as before when the kept build cannot be noted", () => {
+    const r = runStep({ testMode: false, reasons: [], current: true, noteFails: true });
+    expect(r.status).toBe(0);
+    expect(r.events).toContain("do_rebuild --gateway-to-update");
+    expect(r.out).toContain("the note that tells the update's second half so could not be written");
+  });
+
+  it("skips the rebuild and still reboots when a reason says the box needs a boot", () => {
+    const r = runStep({ testMode: false, reasons: ["kernel changed"], current: true });
+    expect(r.status).toBe(0);
+    expect(r.events.some((e) => e.startsWith("do_rebuild"))).toBe(false);
+    expect(at(r.events, "reboot")).toBeGreaterThan(at(r.events, "step_polkit_rules"));
+  });
+
+  it("skips the rebuild in test mode too, and restarts the dashboard as test mode always did", () => {
+    const r = runStep({ testMode: true, reasons: [], current: true });
+    expect(r.status).toBe(0);
+    expect(r.events.some((e) => e.startsWith("do_rebuild"))).toBe(false);
+    expect(at(r.events, "systemctl restart clawbox-setup.service")).toBeGreaterThan(at(r.events, "step_polkit_rules"));
+  });
+
   it("neither reboots nor restarts when the rebuild fails", () => {
     const events = path.join(tmp, "events");
     const script = [
@@ -267,6 +333,10 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
         "step_openclaw_config", "step_clawkeep_install", "step_polkit_rules", "reboot",
         "restart_services_after_update"].map((n) => `${n}() { echo "${n}" >> ${JSON.stringify(events)}; }`),
       "do_rebuild() { return 137; }",
+      "forget_rebuild_kept_build() { :; }",
+      "record_rebuild_kept_build() { :; }",
+      "disarm_gateway_handback() { :; }",
+      "build_is_current_for_checkout() { echo 'not current'; return 1; }",
       "is_test_mode() { return 1; }",
       "served_build_commit() { :; }",
       "update_reboot_reasons() { :; }",

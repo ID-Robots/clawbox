@@ -5,7 +5,7 @@ import type { NextRequest } from "next/server";
  * The ClawKeep mutations that are the OWNER's alone: unpairing the device,
  * and deleting, labelling or locking a snapshot.
  *
- * src/middleware.ts admits the MCP bearer to every /setup-api route so the
+ * src/proxy.ts admits the MCP bearer to every /setup-api route so the
  * agent can reach the device's own API — and no MCP tool exists for any of
  * these, yet the bearer reached them all the same. Each route now re-checks
  * with `hasPersonSession` (the cookie, never the bearer) and

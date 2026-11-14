@@ -113,8 +113,8 @@ const BOX_WIDE: [string, string][] = [
   ["POST", "/setup-api/system/update-branch"],
 ];
 
-describe("middleware — organisation mode", () => {
-  let middleware: typeof import("@/middleware").middleware;
+describe("proxy — organisation mode", () => {
+  let proxy: typeof import("@/proxy").proxy;
   let tmpRoot: string;
   const savedUser = process.env.CLAWBOX_USER;
   let configWrites = 0;
@@ -158,7 +158,7 @@ describe("middleware — organisation mode", () => {
     process.env.CLAWBOX_MCP_TOKEN = BEARER;
     delete process.env.CLAWBOX_TEST_MODE;
     writeConfig({ org_mode: true });
-    middleware = (await import("@/middleware")).middleware;
+    proxy = (await import("@/proxy")).proxy;
   });
 
   afterEach(() => {
@@ -173,7 +173,7 @@ describe("middleware — organisation mode", () => {
   it("refuses a member of staff every route group behind the hidden apps and sections — 403, never 401", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
     for (const [group, method, p] of GROUPS) {
-      await expectOwnerOnly(await middleware(request(p, { cookie: alice, method })), `${group}: ${method} ${p}`);
+      await expectOwnerOnly(await proxy(request(p, { cookie: alice, method })), `${group}: ${method} ${p}`);
     }
   });
 
@@ -181,53 +181,53 @@ describe("middleware — organisation mode", () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
     const owner = await sign({ u: "clawbox" });
     for (const [method, p] of BOX_WIDE) {
-      await expectOwnerOnly(await middleware(request(p, { cookie: alice, method })), `member: ${method} ${p}`);
-      expect(passes(await middleware(request(p, { cookie: owner, method }))), `owner: ${method} ${p}`).toBe(true);
+      await expectOwnerOnly(await proxy(request(p, { cookie: alice, method })), `member: ${method} ${p}`);
+      expect(passes(await proxy(request(p, { cookie: owner, method }))), `owner: ${method} ${p}`).toBe(true);
     }
   });
 
   it("leaves a member of staff their chat, their files and their own settings", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
     for (const [method, p] of MEMBER_ROUTES) {
-      expect(passes(await middleware(request(p, { cookie: alice, method }))), `${method} ${p}`).toBe(true);
+      expect(passes(await proxy(request(p, { cookie: alice, method }))), `${method} ${p}`).toBe(true);
     }
   });
 
   it("sends a member of staff's hidden app windows home and opens their three", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
     for (const p of ["/app/terminal", "/app/coding", "/app/store", "/app/clawkeep", "/app/browser"]) {
-      const res = await middleware(request(p, { cookie: alice, document: true }));
+      const res = await proxy(request(p, { cookie: alice, document: true }));
       expect(res.status, p).toBe(307);
       const location = new URL(res.headers.get("location")!);
       expect(location.pathname, p).toBe("/");
       expect(location.searchParams.get("notice"), p).toBe("owner-only");
     }
     for (const p of ["/", "/app/clawbox", "/app/files", "/app/settings"]) {
-      expect(passes(await middleware(request(p, { cookie: alice, document: true }))), p).toBe(true);
+      expect(passes(await proxy(request(p, { cookie: alice, document: true }))), p).toBe(true);
     }
   });
 
   it("keeps everything for the owner, connecting and changing cloud AI providers included", async () => {
     const owner = await sign({ u: "clawbox" });
     for (const [group, method, p] of GROUPS) {
-      expect(passes(await middleware(request(p, { cookie: owner, method }))), `${group}: ${method} ${p}`).toBe(true);
+      expect(passes(await proxy(request(p, { cookie: owner, method }))), `${group}: ${method} ${p}`).toBe(true);
     }
     for (const [method, p] of UPDATES) {
-      expect(passes(await middleware(request(p, { cookie: owner, method }))), `${method} ${p}`).toBe(true);
+      expect(passes(await proxy(request(p, { cookie: owner, method }))), `${method} ${p}`).toBe(true);
     }
-    expect(passes(await middleware(request("/app/terminal", { cookie: owner, document: true })))).toBe(true);
+    expect(passes(await proxy(request("/app/terminal", { cookie: owner, document: true })))).toBe(true);
   });
 
   it("leaves the agent's bearer its tools: the agent is the box's, and is no member of staff", async () => {
     for (const [group, method, p] of GROUPS) {
-      expect(passes(await middleware(request(p, { bearer: true, method }))), `${group}: ${method} ${p}`).toBe(true);
+      expect(passes(await proxy(request(p, { bearer: true, method }))), `${group}: ${method} ${p}`).toBe(true);
     }
   });
 
   it("refuses a member of staff the update routes", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
     for (const [method, p] of UPDATES) {
-      await expectOwnerOnly(await middleware(request(p, { cookie: alice, method })), `${method} ${p}`);
+      await expectOwnerOnly(await proxy(request(p, { cookie: alice, method })), `${method} ${p}`);
     }
   });
 
@@ -235,17 +235,17 @@ describe("middleware — organisation mode", () => {
     writeConfig({});
     const alice = await sign({ u: "alice", sv: ALICE_SV });
     for (const [group, method, p] of GROUPS.filter(([g]) => !["model change", "provider change"].includes(g))) {
-      expect(passes(await middleware(request(p, { cookie: alice, method }))), `${group}: ${method} ${p}`).toBe(true);
+      expect(passes(await proxy(request(p, { cookie: alice, method }))), `${group}: ${method} ${p}`).toBe(true);
     }
     for (const [method, p] of UPDATES) {
-      await expectOwnerOnly(await middleware(request(p, { cookie: alice, method })), `${method} ${p}`);
+      await expectOwnerOnly(await proxy(request(p, { cookie: alice, method })), `${method} ${p}`);
     }
-    expect(passes(await middleware(request("/setup-api/update/status", { cookie: alice })))).toBe(true);
+    expect(passes(await proxy(request("/setup-api/update/status", { cookie: alice })))).toBe(true);
   });
 
   it("refuses a project app's requests that carry a member of staff's cookie, and passes the owner's and the sandbox's", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
-    const asset = (cookie?: string) => middleware(request("/apps/weather/main.js", { cookie }));
+    const asset = (cookie?: string) => proxy(request("/apps/weather/main.js", { cookie }));
     await expectOwnerOnly(await asset(alice), "member's app request");
     expect((await asset(await sign({ u: "clawbox" }))).status).not.toBe(403);
     // The sandboxed document's own requests carry no cookie at all.
@@ -257,7 +257,7 @@ describe("middleware — organisation mode", () => {
 
   it("takes the switch from config.json on the next request, both ways", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
-    const terminal = () => middleware(request("/setup-api/terminal/shells", { cookie: alice }));
+    const terminal = () => proxy(request("/setup-api/terminal/shells", { cookie: alice }));
     expect((await terminal()).status).toBe(403);
     writeConfig({ org_mode: false });
     expect(passes(await terminal())).toBe(true);

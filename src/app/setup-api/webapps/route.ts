@@ -99,7 +99,7 @@ async function appDisplayName(appId: string): Promise<string> {
 
 /**
  * Whether the owner marked this app public — the one case the middleware lets
- * this route answer WITHOUT a session (src/middleware.ts, step 4b), so the one
+ * this route answer WITHOUT a session (src/proxy.ts, step 4b), so the one
  * case whose page must not carry the app's saved data. Unreadable reads as
  * public: the cost of being wrong that way is a page that saves nothing.
  */

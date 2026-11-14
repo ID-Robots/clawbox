@@ -480,7 +480,7 @@ Notes on what the brief asked for and what the box actually offers:
 
 - **`/health`.** The dashboard has no public `/health`: a bare `/health` is
   session-gated and proxied to the gateway, and the MCP bearer opens
-  `/setup-api/*` only (`src/middleware.ts`). The suite asks
+  `/setup-api/*` only (`src/proxy.ts`). The suite asks
   `/setup-api/gateway/health` and `nano-ci health` instead.
 - **ClawBox AI only.** The suite tests the happy path: a box on the ClawBox
   AI plan, which is how every lab board is set up. The chat turn goes through

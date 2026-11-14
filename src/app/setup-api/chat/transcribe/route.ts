@@ -75,7 +75,7 @@ export { TRANSCRIBE_MODEL };
 //
 // Why not more: Next 16 cuts every request body this route can see at 10 MB
 // (`experimental.proxyClientMaxBodySize`, default 10mb, applied because
-// src/middleware.ts matches this path) and hands the handler the truncated
+// src/proxy.ts matches this path) and hands the handler the truncated
 // remainder. The contract used to say 25 MB, and every recording between 10
 // and 25 MB arrived cut off, failed to parse, and was reported as a bad
 // recording rather than a long one. The ceiling has to sit under the

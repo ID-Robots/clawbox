@@ -4,7 +4,7 @@
 // owner's. It now also carries `u` (the Linux username it was issued to) and,
 // for a user other than the owner, `sv` (that user's session version from the
 // registry below). The rule that turns those claims into a person lives HERE,
-// once, and every verifier applies it: src/middleware.ts, src/lib/route-auth.ts,
+// once, and every verifier applies it: src/proxy.ts, src/lib/route-auth.ts,
 // src/lib/owner-session.ts, and — in CommonJS, because WebSocket upgrades never
 // reach Next.js — scripts/session-cookie.js, which session-identity.test.ts
 // runs against the same table.

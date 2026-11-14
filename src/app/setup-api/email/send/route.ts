@@ -6,7 +6,7 @@
 //
 // It is NOT a general mail API: the sender is always the configured account,
 // the body is plain text, there are no attachments, and the whole route sits
-// behind the session/MCP-bearer gate in src/middleware.ts (the /setup-api/email
+// behind the session/MCP-bearer gate in src/proxy.ts (the /setup-api/email
 // subtree is on the pre-auth sensitive list, so it is unreachable during the
 // open-AP setup window).
 //

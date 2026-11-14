@@ -430,7 +430,7 @@ describe.runIf(canRun)("gateway-pre-start's mDNS hostname read", () => {
 });
 
 // The MCP token is the SOLE credential for `/setup-api/*`: `mcp/lib/api.ts`
-// sends it as a bearer and `src/middleware.ts` accepts it. Its `chmod 600` used
+// sends it as a bearer and `src/proxy.ts` accepts it. Its `chmod 600` used
 // to run unguarded under `set -euo pipefail`, so a token file another uid owns
 // — a root update step, a manual repair — returned EPERM and cost the box its
 // gateway on EVERY boot from then on (TASK-657). Guarding it turned that into a

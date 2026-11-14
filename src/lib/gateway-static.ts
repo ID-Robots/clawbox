@@ -2,7 +2,7 @@
  * Which paths are the OpenClaw Control UI's own static files.
  *
  * One list, read by two places that must agree:
- *   - src/middleware.ts, to let them load WITHOUT a session cookie;
+ *   - src/proxy.ts, to let them load WITHOUT a session cookie;
  *   - src/app/[...gateway]/route.ts, to serve them as bytes rather than
  *     answering with the SPA shell.
  *

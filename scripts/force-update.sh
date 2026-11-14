@@ -124,6 +124,8 @@ git_retryable_failure() {
     *"Authentication failed"*|*"terminal prompts disabled"*) return 0 ;;
     *"Could not resolve host"*|*"Connection timed out"*|*"Connection reset"*) return 0 ;;
     *"early EOF"*|*"RPC failed"*|*"unable to access"*) return 0 ;;
+    # git_with_retry's low-speed abort on a stalled transfer.
+    *"Operation too slow"*) return 0 ;;
   esac
   return 1
 }
@@ -134,6 +136,10 @@ git_retryable_failure() {
 # installer, not a library), so this is the same three-attempt shape inline.
 fetch_with_retry() {
   local attempt=1 max="${CLAWBOX_GIT_RETRIES:-3}" delay="${CLAWBOX_GIT_RETRY_DELAY:-3}" out
+  # Seconds under 1000 bytes/s before git ends a transfer as stalled; a number
+  # or the default, as in install.sh's git_with_retry.
+  local low_time="${CLAWBOX_GIT_LOW_SPEED_TIME:-60}"
+  case "$low_time" in ''|*[!0-9]*) low_time=60 ;; esac
   # Both knobs are operator input and both are used as numbers — see
   # install.sh's git_with_retry: a non-numeric `max` makes the break
   # unreachable and a non-numeric `delay` is an unbound-variable error under
@@ -145,7 +151,9 @@ fetch_with_retry() {
     ''|*[!0-9]*) echo "[force-update] CLAWBOX_GIT_RETRY_DELAY is not a number, using 3" >&2; delay=3 ;;
   esac
   while :; do
-    if out="$(run_as_clawbox "$GIT fetch origin" 2>&1)"; then
+    # A stalled transfer ends and is retried rather than waited on (TASK-2517;
+    # install.sh's git_with_retry carries the full reason), with the same knob.
+    if out="$(run_as_clawbox "$GIT -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=$low_time fetch origin" 2>&1)"; then
       [ -z "$out" ] || printf '%s\n' "$out" >&2
       return 0
     fi

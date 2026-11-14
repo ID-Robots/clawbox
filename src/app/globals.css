@@ -144,7 +144,7 @@
      doing two jobs. --bg-deep #111827 is the INSET colour: the well under
      a segmented tab tray (AIModelsStep), the provider-list backing, the
      tier pill tray. The page ground is #0a0f1a, hardcoded three times —
-     setup/page.tsx, layout.tsx's PWA themeColor twice, and page.tsx's
+     setup/page.tsx, layout.tsx's PWA themeColor (viewport), and page.tsx's
      desktop fallback. #0a0f1a wins because it is what the customer's
      browser chrome and splash screen already paint, so anything else
      creates a seam at the edge of the viewport on a phone.
