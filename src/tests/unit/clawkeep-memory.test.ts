@@ -62,8 +62,27 @@ vi.mock("@/lib/memory-shard", async (importOriginal) => ({
   getMemoryShardEnabled: async () => shard.enabled,
 }));
 
+// The two facts about the on-box embedder a status read may ask without
+// waking it: does it answer its health URL, and is its model on disk. A test
+// that sets one gets that answer; null is the real function.
+const { embedder } = vi.hoisted(() => ({ embedder: { healthy: null as boolean | null, installed: null as boolean | null } }));
+vi.mock("@/lib/embed-server", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/embed-server")>();
+  return {
+    ...real,
+    isEmbedHealthy: async (...args: Parameters<typeof real.isEmbedHealthy>) =>
+      embedder.healthy ?? real.isEmbedHealthy(...args),
+    getEmbedProvisioningStatus: async (...args: Parameters<typeof real.getEmbedProvisioningStatus>) => {
+      const status = await real.getEmbedProvisioningStatus(...args);
+      return embedder.installed === null ? status : { ...status, installed: embedder.installed };
+    },
+  };
+});
+
 beforeEach(async () => {
   shard.enabled = true;
+  embedder.healthy = null;
+  embedder.installed = null;
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawkeep-memory-"));
   process.env.CLAWKEEP_DATA_DIR = tmpDir;
   // CLAWKEEP_DATA_DIR is read once at module load, so each test needs a fresh
@@ -462,6 +481,447 @@ describe("what the first Index now click actually runs", () => {
   it("never downgrades an explicit full reindex", async () => {
     const { resolveIndexMode } = await withStatusChunks(512);
     expect(await resolveIndexMode("full")).toBe("full");
+  });
+});
+
+/**
+ * OpenClaw 2026.11.3 refuses `openclaw memory status` while its gateway owns
+ * the state, so the status comes from the gateway's `memory.status` — and that
+ * call never probes the embedder. On a healthy box it answers "degraded" with
+ * "Memory embeddings are pending" for as long as the gateway runs; the pinned
+ * docs (docs/cli/memory.md) say "The provider health returned by
+ * `memory.status` RPC is different from the CLI's aggregate index, source,
+ * embedding, and dreaming diagnostics". The embedder's own probe is
+ * `doctor.memory.status` with `deep: true`.
+ *
+ * `memory.status` below is the answer an 8 GB OpenClaw Jetson gave with a cloud
+ * embedder that answered, a complete vector index and hybrid search hits that
+ * carried vector scores (values masked). The CLI fixture is NOT that shape: its
+ * provider mode is "active", and a test built on it passed while a real box
+ * read otherwise.
+ */
+describe("the status from the running gateway, and the embedder's own probe", () => {
+  const PENDING = "Memory embeddings are pending. Search results may be incomplete.";
+  const CLOUD = "https://api.example.invalid/v1";
+  const PROXY = "http://127.0.0.1/setup-api/local-ai/embed/v1";
+  const MINUTE = 60_000;
+  const OK = { agentId: "main", provider: "openai-compatible", embedding: { ok: true } };
+  const FAILED = { agentId: "main", provider: "openai-compatible", embedding: { ok: false, error: "embedding request timed out" } };
+  const saved = process.env.CLAWBOX_OPENCLAW_HOME;
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env.CLAWBOX_OPENCLAW_HOME;
+    else process.env.CLAWBOX_OPENCLAW_HOME = saved;
+    delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    vi.useRealTimers();
+  });
+
+  const legacyOf = () => ({
+    backend: "builtin", files: 30, chunks: 123, dirty: false,
+    provider: "openai-compatible", model: "text-embedding-3-small", requestedProvider: "openai-compatible",
+    sources: ["memory"], sourceCounts: [{ source: "memory", files: 30, chunks: 123 }],
+    fts: { enabled: true, available: true },
+    vector: { enabled: true, index: { state: "complete" }, dims: 1536 },
+    custom: {
+      searchMode: "hybrid",
+      providerState: { mode: "pending", requestedProvider: "openai-compatible" },
+      indexIdentity: { status: "valid" },
+    },
+  });
+  function gatewayStatus(
+    edit: (legacy: ReturnType<typeof legacyOf>) => void = () => {},
+    top: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const legacy = legacyOf();
+    edit(legacy);
+    return { version: 2, agentId: "main", providerId: "memory-core", status: "degraded", message: PENDING, details: { legacy }, ...top };
+  }
+
+  /**
+   * A box whose gateway answers `memory.status` with `gateway.status` and
+   * `doctor.memory.status` with `gateway.probe` (thrown when it is an Error),
+   * under an openclaw.json that names `provider` at `baseUrl`.
+   */
+  async function box(options: { provider?: string; baseUrl?: string | null; config?: boolean } = {}) {
+    const { provider = "openai-compatible", baseUrl = CLOUD, config = true } = options;
+    const home = path.join(tmpDir, "openclaw-state");
+    await fs.mkdir(home, { recursive: true });
+    const configure = async (embedderAt: { provider?: string; baseUrl?: string | null }) => {
+      const named = { provider, baseUrl, ...embedderAt };
+      await fs.writeFile(path.join(home, "openclaw.json"), JSON.stringify({
+        memory: { search: { provider: named.provider, ...(named.baseUrl ? { remote: { baseUrl: named.baseUrl } } : {}) } },
+      }));
+    };
+    if (config) await configure({});
+    process.env.CLAWBOX_OPENCLAW_HOME = home;
+    // The gateway answers memory.status in every case here; a fall-through to
+    // the CLI would read as the unavailable status, never as a reading.
+    const refuses = path.join(tmpDir, "openclaw-refuses");
+    await fs.writeFile(refuses, "#!/bin/sh\necho 'Cannot admit memory.cli' >&2\nexit 1\n", { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = refuses;
+    vi.resetModules();
+    const mod = await lib();
+    const ws = await import("@/lib/openclaw-gateway-ws");
+    const gateway = {
+      status: gatewayStatus(),
+      probe: OK as Record<string, unknown> | Error,
+      calls: [] as Array<{ method: string; params: Record<string, unknown>; timeoutMs?: number }>,
+    };
+    vi.mocked(ws.gatewayWsCall).mockImplementation(async (method, params, callOptions) => {
+      gateway.calls.push({ method, params, timeoutMs: callOptions?.timeoutMs });
+      if (method === "memory.status") return gateway.status;
+      if (method === "doctor.memory.status") {
+        if (gateway.probe instanceof Error) throw gateway.probe;
+        return gateway.probe;
+      }
+      throw new Error(`no ${method} in this test`);
+    });
+    const probes = () => gateway.calls.filter((call) => call.method === "doctor.memory.status").length;
+    // A reload with no invalidation: a verdict is asked again only when its age says so.
+    const reload = async () => {
+      await mod.warmMemoryStatusCache();
+      return await mod.getMemoryStatus();
+    };
+    // An invalidation (a pass's finish, a provider or source change) and the reload after it.
+    const invalidated = async () => {
+      mod.invalidateMemoryStatusCache();
+      return await reload();
+    };
+    return { gateway, probes, reload, invalidated, configure };
+  }
+
+  it("reads a complete index as healthy, with every chunk a vector, once the embedder's own probe answers ok", async () => {
+    const { gateway, probes, reload } = await box();
+    const status = await reload();
+    const { health, semanticAvailable, chunks, vectors, errorCode, error, provider } = status;
+    expect({ health, semanticAvailable, chunks, vectors, errorCode, error, provider }).toEqual({
+      health: "healthy", semanticAvailable: true, chunks: 123, vectors: 123, errorCode: "", error: "", provider: "openai-compatible",
+    });
+    expect(probes()).toBe(1);
+    // Bounded like the status read (STATUS_TIMEOUT_MS), which outlasts the
+    // core's own 60 s ping: a dead embedder then comes back as the core's
+    // not-ok, never as our timeout.
+    expect(gateway.calls.find((call) => call.method === "doctor.memory.status"))
+      .toEqual({ method: "doctor.memory.status", params: { agentId: "main", deep: true }, timeoutMs: 90_000 });
+  });
+
+  it("keeps the degraded reading when the probe says the embedder does not answer", async () => {
+    const { gateway, reload } = await box();
+    gateway.probe = FAILED;
+    const status = await reload();
+    expect(status.available).toBe(true);
+    expect(status.health).toBe("degraded");
+    expect(status.vectors).toBe(0);
+    expect(status.errorCode).toBe("provider_degraded");
+    // The core's own sentence is for the device log, never the answer.
+    expect(JSON.stringify(status)).not.toContain("embedding request timed out");
+  });
+
+  it("keeps memory.status's reading, never the unavailable status, when the probe cannot be asked", async () => {
+    const { GatewayWsUnavailableError } = await import("@/lib/openclaw-gateway-ws");
+    // A rejected call, and a gateway that is gone by the second request.
+    for (const failure of [new Error("socket hang up"), new GatewayWsUnavailableError("gateway stopped")]) {
+      const { gateway, probes, reload } = await box();
+      gateway.probe = failure;
+      const status = await reload();
+      expect(probes()).toBe(1);
+      expect(status.health).not.toBe("healthy");
+      expect(status.errorCode).not.toBe("status_unavailable");
+      expect(status).toMatchObject({ available: true, files: 30, chunks: 123, provider: "openai-compatible", indexIdentity: "valid" });
+    }
+  });
+
+  it("reads a ready memory.status as it stands and asks no probe", async () => {
+    const { gateway, reload } = await box();
+    gateway.status = gatewayStatus((legacy) => { legacy.custom.providerState.mode = "active"; }, { status: "ready", message: null });
+    const status = await reload();
+    expect(gateway.calls.map((call) => call.method)).toEqual(["memory.status"]);
+    expect(gateway.calls[0].params).toEqual({ agentId: "main" });
+    expect(status.available).toBe(true);
+    expect(status.health).toBe("healthy");
+    expect(status.vectors).toBe(123);
+  });
+
+  const NOT_CHECKED = { agentId: "main", provider: "openai-compatible", embedding: { ok: false, checked: false, error: "memory embedding readiness not checked" } };
+
+  it.each([
+    ["says readiness was not checked", NOT_CHECKED],
+    ["carries no verdict the core would give", { agentId: "main", provider: "openai-compatible", embedding: { ok: "yes" } }],
+  ])("is not healthy on an answer that %s", async (_case, answer) => {
+    const { gateway, reload } = await box();
+    gateway.probe = answer;
+    const status = await reload();
+    expect(status.health).not.toBe("healthy");
+    expect(status.vectors).toBe(0);
+    expect(status.errorCode).not.toBe("status_unavailable");
+  });
+
+  it("keeps an ok verdict over an answer that did not check for under 60 minutes since its last answer, and no longer", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    const { gateway, probes, reload, invalidated } = await box();
+    expect((await reload()).health).toBe("healthy");
+    gateway.probe = NOT_CHECKED;
+    expect((await invalidated()).health).toBe("healthy");
+    expect(probes()).toBe(2);
+    vi.setSystemTime(t0 + 61 * MINUTE);
+    const lapsed = await reload();
+    expect(probes()).toBe(3);
+    expect(lapsed.health).toBe("degraded");
+  });
+
+  it("promotes only the core's pending reading, never one it called degraded itself", async () => {
+    const { gateway, reload } = await box();
+    gateway.status = gatewayStatus((legacy) => { legacy.custom.providerState.mode = "degraded"; }, {
+      message: "Memory embeddings are unavailable. Search results may be incomplete.",
+    });
+    const status = await reload();
+    expect(status.health).toBe("degraded");
+    expect(status.semanticAvailable).toBe(false);
+    expect(status.vectors).toBe(0);
+  });
+
+  it("does not carry an ok verdict over to another embedder setting", async () => {
+    const { probes, reload, invalidated, configure } = await box();
+    expect((await reload()).health).toBe("healthy");
+    // The owner moves the index onto this box while its embedder is asleep.
+    await configure({ baseUrl: PROXY });
+    embedder.healthy = false;
+    embedder.installed = true;
+    const status = await invalidated();
+    expect(probes()).toBe(1);
+    expect(status.health).not.toBe("healthy");
+  });
+
+  it("asks again on the next reload when only the core's own cache has answered", async () => {
+    const { gateway, probes, reload } = await box();
+    gateway.probe = {
+      agentId: "main", provider: "openai-compatible",
+      embedding: { ok: true, checked: true, cached: true, checkedAtMs: 1, cacheExpiresAtMs: 30_001 },
+    };
+    await reload();
+    expect(probes()).toBe(1);
+    gateway.probe = { ...OK, provider: "openai" };
+    const status = await reload();
+    expect(probes()).toBe(2);
+    expect(status.errorCode).toBe("provider_mismatch");
+  });
+
+  it("waits the full window after an uncached ok, even one that names no provider", async () => {
+    const { gateway, probes, reload } = await box();
+    gateway.probe = { agentId: "main", embedding: { ok: true } };
+    expect((await reload()).health).toBe("healthy");
+    await reload();
+    expect(probes()).toBe(1);
+  });
+
+  it.each(["incomplete", "unverified"])("never counts a vector index the core calls %s as searchable, whatever the probe says", async (state) => {
+    const { gateway, reload } = await box();
+    gateway.status = gatewayStatus((legacy) => { legacy.vector.index.state = state; });
+    const status = await reload();
+    expect(status.health).not.toBe("healthy");
+    expect(status.semanticAvailable).toBe(false);
+    expect(status.vectors).toBe(0);
+  });
+
+  it("takes the probe's provider: another one is a fallback, none is an embedder that did not start", async () => {
+    let { gateway, reload } = await box();
+    gateway.probe = { ...OK, provider: "openai" };
+    let status = await reload();
+    expect(status.provider).toBe("openai");
+    expect(status.errorCode).toBe("provider_mismatch");
+    expect(status.health).toBe("degraded");
+    for (const ok of [true, false]) {
+      ({ gateway, reload } = await box());
+      gateway.probe = { agentId: "main", provider: "none", embedding: ok ? { ok } : { ok, error: "no embedding provider" } };
+      status = await reload();
+      expect(status.errorCode).toBe("embedder_unavailable");
+      expect(status.health).toBe("degraded");
+      expect(status.vectors).toBe(0);
+    }
+  });
+
+  it("asks the probe once for a window of reloads, and again at once after an invalidation", async () => {
+    const { probes, reload, invalidated } = await box();
+    await reload();
+    expect(probes()).toBe(1);
+    await reload();
+    expect(probes()).toBe(1);
+    const status = await invalidated();
+    expect(probes()).toBe(2);
+    expect(status.health).toBe("healthy");
+  });
+
+  it("asks an ok verdict again no sooner than 30 minutes after it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    const { probes, reload } = await box();
+    await reload();
+    vi.setSystemTime(t0 + 29 * MINUTE);
+    await reload();
+    expect(probes()).toBe(1);
+    vi.setSystemTime(t0 + 31 * MINUTE);
+    expect((await reload()).health).toBe("healthy");
+    expect(probes()).toBe(2);
+  });
+
+  it("never wakes an on-box embedder that is asleep, and holds an ok verdict only while its model is on disk", async () => {
+    const { probes, reload, invalidated } = await box({ baseUrl: PROXY });
+    embedder.installed = true;
+    embedder.healthy = false;
+    // No verdict yet: not asked, and the reading is the gateway's.
+    let status = await reload();
+    expect(probes()).toBe(0);
+    expect(status.errorCode).toBe("provider_degraded");
+    // Awake: asked.
+    embedder.healthy = true;
+    status = await invalidated();
+    expect(probes()).toBe(1);
+    expect(status.health).toBe("healthy");
+    expect(status.location).toBe("local");
+    // Asleep again and due: not asked; the ok stands while the model is installed.
+    embedder.healthy = false;
+    status = await invalidated();
+    expect(probes()).toBe(1);
+    expect(status.health).toBe("healthy");
+    // The model is gone: the ok ends, still without asking.
+    embedder.installed = false;
+    status = await invalidated();
+    expect(probes()).toBe(1);
+    expect(status.health).toBe("degraded");
+    // And it does not come back by itself when the model does.
+    embedder.installed = true;
+    status = await invalidated();
+    expect(probes()).toBe(1);
+    expect(status.health).toBe("degraded");
+  });
+
+  it("keeps a not-ok verdict over an on-box embedder that is still asleep, however long ago it was asked", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    const { gateway, probes, reload } = await box({ baseUrl: PROXY });
+    embedder.installed = true;
+    embedder.healthy = true;
+    gateway.probe = FAILED;
+    expect((await reload()).health).toBe("degraded");
+    embedder.healthy = false;
+    gateway.probe = OK;
+    for (const later of [11 * MINUTE, 3 * 60 * MINUTE]) {
+      vi.setSystemTime(t0 + later);
+      const status = await reload();
+      expect(probes()).toBe(1);
+      expect(status.health).toBe("degraded");
+      expect(status.errorCode).toBe("provider_degraded");
+    }
+  });
+
+  it("lets a re-ask the core answers not-ok replace an ok verdict", async () => {
+    for (const failed of [FAILED, { agentId: "main", embedding: { ok: false, error: "gateway memory check failed: x" } }]) {
+      const { gateway, reload, invalidated } = await box();
+      expect((await reload()).health).toBe("healthy");
+      gateway.probe = failed;
+      const status = await invalidated();
+      expect(status.health).toBe("degraded");
+      expect(status.errorCode).toBe("provider_degraded");
+      expect(status.vectors).toBe(0);
+    }
+  });
+
+  it("keeps an ok verdict through calls that fail for under 60 minutes since its last answer, and no longer", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    const { gateway, probes, reload } = await box();
+    expect((await reload()).health).toBe("healthy");
+    gateway.probe = new Error("socket hang up");
+    vi.setSystemTime(t0 + 31 * MINUTE);
+    expect((await reload()).health).toBe("healthy");
+    expect(probes()).toBe(2);
+    vi.setSystemTime(t0 + 59 * MINUTE);
+    expect((await reload()).health).toBe("healthy");
+    expect(probes()).toBe(3);
+    // Not asked again yet (10 minutes after the last failed call), and the ok has lapsed.
+    vi.setSystemTime(t0 + 61 * MINUTE);
+    const lapsed = await reload();
+    expect(probes()).toBe(3);
+    expect(lapsed.health).toBe("degraded");
+    expect(lapsed.errorCode).toBe("provider_degraded");
+    // A later ask the core answers ok is a verdict again.
+    gateway.probe = OK;
+    vi.setSystemTime(t0 + 70 * MINUTE);
+    expect((await reload()).health).toBe("healthy");
+    expect(probes()).toBe(4);
+  });
+
+  it.each([
+    ["the handler's own failure", { agentId: "main", embedding: { ok: false, error: "gateway memory check failed: x" } }],
+    ["no memory search manager", { agentId: "main", searchRuntimeRegistered: true, embedding: { ok: false, error: "memory search unavailable" } }],
+  ])("reads an answer that names no provider (%s) as degraded, keeping memory.status's provider", async (_case, answer) => {
+    const { gateway, reload } = await box();
+    gateway.probe = answer;
+    const status = await reload();
+    expect(status.health).toBe("degraded");
+    expect(status.errorCode).toBe("provider_degraded");
+    expect(status.provider).toBe("openai-compatible");
+  });
+
+  it("keeps the provider the last uncached probe named over a cached answer's echo of the configuration", async () => {
+    const { gateway, reload, invalidated } = await box();
+    gateway.probe = { ...OK, provider: "openai" };
+    expect((await reload()).errorCode).toBe("provider_mismatch");
+    gateway.probe = {
+      agentId: "main", provider: "openai-compatible",
+      embedding: { ok: true, checked: true, cached: true, checkedAtMs: 1, cacheExpiresAtMs: 30_001 },
+    };
+    const status = await invalidated();
+    expect(status.provider).toBe("openai");
+    expect(status.errorCode).toBe("provider_mismatch");
+    expect(status.health).toBe("degraded");
+  });
+
+  it("reads a failure the core answers from its own cache as not ok", async () => {
+    const { gateway, reload } = await box();
+    gateway.probe = {
+      agentId: "main", provider: "openai-compatible",
+      embedding: { ok: false, error: "embedding request timed out", checked: true, cached: true, checkedAtMs: 1, cacheExpiresAtMs: 30_001 },
+    };
+    const status = await reload();
+    expect(status.health).toBe("degraded");
+    expect(status.errorCode).toBe("provider_degraded");
+  });
+
+  it.each(["local", "ollama"])("never probes OpenClaw's %s embedder", async (provider) => {
+    const { gateway, probes, reload } = await box({ provider, baseUrl: null });
+    gateway.status = gatewayStatus((legacy) => {
+      legacy.provider = provider;
+      legacy.requestedProvider = provider;
+      legacy.custom.providerState.requestedProvider = provider;
+    });
+    const status = await reload();
+    expect(probes()).toBe(0);
+    expect(status.health).toBe("degraded");
+    expect(status.errorCode).toBe("provider_degraded");
+  });
+
+  it("asks nothing when openclaw.json cannot say which embedder it names", async () => {
+    const { probes, reload } = await box({ config: false });
+    const status = await reload();
+    expect(probes()).toBe(0);
+    expect(status.health).toBe("degraded");
+  });
+
+  it("asks a not-ok verdict again no sooner than 10 minutes after it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    const { gateway, probes, reload } = await box();
+    gateway.probe = FAILED;
+    expect((await reload()).health).toBe("degraded");
+    gateway.probe = OK;
+    vi.setSystemTime(t0 + 9 * MINUTE);
+    expect((await reload()).health).toBe("degraded");
+    expect(probes()).toBe(1);
+    vi.setSystemTime(t0 + 11 * MINUTE);
+    expect((await reload()).health).toBe("healthy");
+    expect(probes()).toBe(2);
   });
 });
 

@@ -177,6 +177,26 @@ describe("memory_shard_status", () => {
     if (unknown.isError) throw new Error("expected a status");
     expect(unknown.text).not.toMatch(/memory_shard_search/);
   });
+
+  it("does not point Hermes on a dual box at memory_shard_search, whose route answers only where there is no OpenClaw", async () => {
+    const saved = process.env.CLAWBOX_EDITION;
+    process.env.CLAWBOX_EDITION = "dual";
+    try {
+      const dual = harness("hermes");
+      expect(dual.get("memory_shard_status").description).not.toMatch(/memory_shard_search/);
+      for (const semanticAvailable of [true, false]) {
+        apiGet.mockResolvedValue({ ...MEMORY, semanticAvailable });
+        const out = await dual.call("memory_shard_status", {});
+        if (out.isError) throw new Error("expected a status");
+        const s = JSON.parse(out.text) as { searchable: unknown; guidance: string };
+        expect(s.searchable).toBe(semanticAvailable);
+        expect(s.guidance).not.toMatch(/memory_shard_search/);
+      }
+    } finally {
+      if (saved === undefined) delete process.env.CLAWBOX_EDITION;
+      else process.env.CLAWBOX_EDITION = saved;
+    }
+  });
 });
 
 describe("local_ai_status", () => {

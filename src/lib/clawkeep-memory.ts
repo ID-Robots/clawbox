@@ -43,6 +43,7 @@ import {
   type LocalIndexProgressReporter,
 } from "@/lib/memory-index-local";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
+import { getEmbedProvisioningStatus, getEmbedProxyBaseUrl, isEmbedHealthy } from "@/lib/embed-server";
 import { memoryStatusTimeoutMs } from "@/lib/memory-status-timeout";
 import { processStore } from "@/lib/process-store";
 import { processStartKey } from "@/lib/process-identity";
@@ -769,22 +770,165 @@ async function memoryStatusFromGateway(agentId: string): Promise<unknown | null>
   const health = asRecord(answer);
   const legacy = asRecord(asRecord(health.details).legacy);
   if (Object.keys(legacy).length === 0) throw new Error("memory status unavailable: the gateway reported no index details");
-  // `vector.available` was the CLI's `--deep` probe; the gateway says the same
-  // thing as its own health (`ready`, else `degraded` with a sentence such as
-  // "Memory embeddings are unavailable"), which stands in for it here.
+  // `vector.available` was the CLI's `--deep` probe, and the gateway's own
+  // health is NOT that probe: it never asks the embedder (see EmbedderVerdict),
+  // so on 2026.11.3 a healthy box reads "degraded", "Memory embeddings are
+  // pending", for as long as the gateway runs. Not ready, the embedder's own
+  // probe decides; with no verdict from it the gateway's reading stands.
+  const ready = cleanString(health.status) === "ready";
   const vector = asRecord(legacy.vector);
   const custom = asRecord(legacy.custom);
-  const ready = cleanString(health.status) === "ready" || embeddingsOnlyPending(legacy);
+  const providerState = asRecord(custom.providerState);
   const message = cleanString(health.message);
+  const verdict = ready ? null : await embedderVerdictFor(agentId, legacy).catch(() => null);
+  const provider = verdict?.provider || cleanString(legacy.provider);
+  // Over a COMPLETE vector index only: the core says "pending" before it says
+  // "incomplete", so a pending reading can sit over an index it has not
+  // finished embedding. "active" is what the CLI's `--deep` answer carried for
+  // the same state, and what `parseMemoryStatus` reads as healthy.
+  const promoted = verdict?.ok === true
+    && cleanString(providerState.mode) === "pending"
+    && cleanString(asRecord(vector.index).state) === "complete"
+    && Boolean(provider) && provider !== "none";
+  const reason = verdict?.ok === false && verdict.error ? verdict.error : message;
   return [{
     agentId,
     status: {
       ...legacy,
       dbPath: openclawAgentDbPath(agentId),
-      vector: { ...vector, available: ready && vector.enabled !== false },
-      custom: !ready && message && !cleanString(custom.providerUnavailableReason) ? { ...custom, providerUnavailableReason: message } : custom,
+      // The provider the probe started, when one named it: a fallback or none
+      // is a verdict of its own (`provider_mismatch`, `embedder_unavailable`).
+      ...(verdict?.provider ? { provider: verdict.provider } : {}),
+      vector: { ...vector, available: (ready || promoted) && vector.enabled !== false },
+      custom: promoted
+        ? { ...custom, providerState: { ...providerState, mode: "active" } }
+        : !ready && reason && !cleanString(custom.providerUnavailableReason) ? { ...custom, providerUnavailableReason: reason } : custom,
     },
   }];
+}
+
+/**
+ * THE EMBEDDER'S OWN ANSWER, for the gateway arm. OpenClaw 2026.11.3's
+ * `memory.status` opens a fresh memory manager per call and reads its status
+ * without starting the embedder, so it says the same thing ("pending") over an
+ * embedder that answers and one that does not. The core's probe over the
+ * running gateway is `doctor.memory.status` with `deep: true` (one tiny embed);
+ * its answer is kept here, in this process, for ONE embedder setting and agent
+ * (`key`) — another key replaces it.
+ *
+ * `ok` is the core's answer: false stands until a probe the core answers ok
+ * replaces it, and null is no verdict (never answered, or an ok that ended).
+ * An ok ends when the calls themselves keep failing for an hour after its last
+ * answer, and, for the on-box embedder, when its model is no longer on disk.
+ * `provider` is the one the last UNCACHED answer named ("" until one did): a
+ * cached answer starts nothing and echoes the configuration.
+ *
+ * Asked again on the next reload after an invalidation (a pass's finish, a
+ * provider, source or cloud-embedder change: `statusGeneration` moved), else no
+ * sooner than 30 minutes after an ok and 10 minutes after anything else.
+ */
+interface EmbedderVerdict {
+  key: string;
+  ok: boolean | null;
+  provider: string;
+  /**
+   * The core's sentence for a not-ok: the provider's reason in the row, which
+   * the API answer never carries (only the embedder-unavailable log line reads it).
+   */
+  error: string;
+  answeredAtMs: number;
+  nextAskAtMs: number;
+  /** `statusGeneration` when it was last asked. */
+  generation: number;
+  /** The last ask could not be made, or the core answered without checking. */
+  lastAskFailed: boolean;
+}
+let embedderVerdict: EmbedderVerdict | null = null;
+const EMBEDDER_OK_REASK_MS = 30 * 60_000;
+const EMBEDDER_RETRY_MS = 10 * 60_000;
+const EMBEDDER_OK_LAPSE_MS = 60 * 60_000;
+
+/**
+ * The verdict that applies to this reading, asked for first when it is due and
+ * may be asked; null when there is none.
+ *
+ * NEVER A WAKE. On ClawBox's own embedder (openai-compatible at the loopback
+ * proxy) the probe goes through the proxy, which starts clawbox-embed.service —
+ * the ~2 GB it stops after ten idle minutes, and a start the box refuses when
+ * memory is short, which would come back as a false "not ready". So it is asked
+ * only while llama-server already answers its health URL, which wakes nothing.
+ * OpenClaw's `local` embedder (a llama.cpp server OpenClaw manages) would be
+ * started by a probe, and `ollama` is a server that check cannot see: neither
+ * is asked at all.
+ */
+async function embedderVerdictFor(agentId: string, legacy: Record<string, unknown>): Promise<EmbedderVerdict | null> {
+  const config = await readEmbeddingConfig();
+  if (!config) return null;
+  const provider = config.provider || cleanString(legacy.requestedProvider);
+  if (provider === "local" || provider === "ollama") return null;
+  const onBox = provider === "openai-compatible"
+    && (config.baseUrl === getEmbedProxyBaseUrl() || isLoopbackBaseUrl(config.baseUrl));
+  const key = JSON.stringify([agentId, config.provider, config.baseUrl, cleanString(legacy.model)]);
+  let held = embedderVerdict?.key === key ? embedderVerdict : null;
+  const due = !held || held.generation !== statusGeneration || Date.now() >= held.nextAskAtMs;
+  if (due && (!onBox || await isEmbedHealthy())) {
+    held = await askEmbedder(key, agentId, held);
+  } else if (onBox && held?.ok === true && !(await getEmbedProvisioningStatus()).installed) {
+    held = embedderVerdict = { ...held, ok: null };
+  }
+  if (held?.ok === true && held.lastAskFailed && Date.now() - held.answeredAtMs >= EMBEDDER_OK_LAPSE_MS) {
+    held = embedderVerdict = { ...held, ok: null };
+  }
+  return held;
+}
+
+/**
+ * One `doctor.memory.status {agentId, deep: true}`, bounded like the status
+ * read: STATUS_TIMEOUT_MS outlasts the core's own 60 s ping, so a dead embedder
+ * comes back as the core's not-ok rather than as a call that failed.
+ *
+ * Every ANSWERED `ok: false` is a not-ok, whatever its sentence: the core's
+ * "gateway memory check failed" also wraps an embedder that could not be
+ * created. A call that could not be made (a socket, a gateway gone or not
+ * ready, the bound) is no verdict, and neither is an answer that says it did
+ * not check (`checked: false`): either keeps what was there.
+ */
+async function askEmbedder(key: string, agentId: string, held: EmbedderVerdict | null): Promise<EmbedderVerdict> {
+  const generation = statusGeneration;
+  const kept = (): EmbedderVerdict => (embedderVerdict = {
+    key,
+    ok: held?.ok ?? null,
+    provider: held?.provider ?? "",
+    error: held?.error ?? "",
+    answeredAtMs: held?.answeredAtMs ?? 0,
+    nextAskAtMs: Date.now() + EMBEDDER_RETRY_MS,
+    generation,
+    lastAskFailed: true,
+  });
+  let answer: Record<string, unknown>;
+  try {
+    const online = await askOpenclawGateway("doctor.memory.status", { agentId, deep: true }, STATUS_TIMEOUT_MS);
+    if (!online.answered) return kept();
+    answer = asRecord(online.result);
+  } catch {
+    return kept();
+  }
+  const embedding = asRecord(answer.embedding);
+  if (typeof embedding.ok !== "boolean" || embedding.checked === false) return kept();
+  const named = cleanString(answer.provider);
+  const provider = named && embedding.cached !== true ? named : held?.provider ?? "";
+  return (embedderVerdict = {
+    key,
+    ok: embedding.ok,
+    provider,
+    error: embedding.ok ? "" : cleanString(embedding.error),
+    answeredAtMs: Date.now(),
+    // An ok that only the core's 30 s cache has given (no uncached answer has
+    // named the provider yet) is asked again on the next reload, uncached.
+    nextAskAtMs: Date.now() + (!embedding.ok ? EMBEDDER_RETRY_MS : embedding.cached === true && !provider ? 0 : EMBEDDER_OK_REASK_MS),
+    generation,
+    lastAskFailed: false,
+  });
 }
 
 /** One `openclaw memory status --agent <agentId> --deep --json` probe, parsed; rejects on a failure or a timeout. */
@@ -1533,7 +1677,8 @@ function reloadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
  * an index a pass has changed since (`cachedStatusUnsettled`) and no pass is
  * going now, the answer is the probe's, not the cache's. That read is the
  * card's flip out of "running", and the probe it waits on is the one the
- * finish already started — ~8 s, up to 90 s on a cold box — so the card
+ * finish already started — ~8 s, up to 90 s on a cold box, and on the gateway
+ * arm the embedder's own probe can add as long again — so the card
  * says "Indexing…" for the length of the probe rather than drawing the
  * mid-rebuild identity for 30 s. `peekMemoryStatus` never waits, and
  * `resolveIndexMode` reads through `lastMemoryStatus` for the same reason.
