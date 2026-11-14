@@ -512,8 +512,8 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   // before the next is renewed, none after one of them could not be pasted: a
   // stop that cannot be made, or that takes minutes while the gateway finishes
   // what it is answering, costs the chat one account, as it always did; a
-  // window that cannot write costs it at most one more, and only one that was
-  // due anyway — never all of them, in one pass or over many.
+  // window that cannot write costs it at most one more a pass, and only one
+  // that was due anyway — never an account that still has hours left.
   const tokens = new Map<string, { fingerprint: string; expires: number | null }>();
   const toPaste: { id: string; account: string; token: { access: string; expires: number | null } }[] = [];
   let offlineFailed = false;
@@ -549,6 +549,10 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     };
     const pasteAll = async () => {
       const paste = async (id: string, account: string, token: { access: string; expires: number | null }): Promise<boolean> => {
+        // Asked HERE, not at the pass's start: the stop before this can take
+        // minutes, and a token that ended meanwhile is not written (core would
+        // offer it for a minute more). It stays owed.
+        if (token.expires !== null && token.expires <= Date.now()) return false;
         const landed = await attempt(`account ${account}'s token`, () => d.paste(id, token, agent));
         if (landed) pasted += 1;
         return landed;

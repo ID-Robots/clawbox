@@ -583,6 +583,26 @@ describe("the pool in the gateway", () => {
     expect(await pool.gatewayCredentialFor(work.id, { renew: false })).toMatchObject({ access: "sk-ant-oat01-work-v2" });
   });
 
+  it("does not paste a token that ended while the window was open, when it could not be renewed there", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // Both owed. Personal's token has three minutes left when the pass reads
+    // it, Anthropic cannot be reached to renew it, and Work's paste alone
+    // takes four.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal-v2", 3 * 60_000), email: "me@example.com" });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ENOTFOUND")));
+    core.pasteTakesMs = 4 * 60_000;
+
+    await gw.keepGatewayMirror();
+
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
+    expect(core.pastes.map((w) => w.access)).not.toContain("sk-ant-oat01-personal-v2");
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal");
+  });
+
   it("goes on renewing the other accounts beside one whose owed paste core keeps refusing", async () => {
     const core = fakeCore();
     const { work, personal } = await twoClaudeAccounts();
