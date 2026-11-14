@@ -99,7 +99,7 @@ function migrate(
   routeIsOurs = true,
   v2 = false,
   opts: MigrateOptions = {},
-): { cfg: Config; changed: boolean; log: string } {
+): { cfg: Config; changed: boolean; log: string; lockApplied: boolean } {
   const profile = opts.clawaiProfile === undefined ? CLAWAI_PROFILE : opts.clawaiProfile;
   const auth = (cfg.auth ?? {}) as { profiles?: Record<string, unknown> };
   const injected = profile !== null && auth.profiles?.[TRANSCRIBE_AUTH_PROFILE] === undefined;
@@ -116,13 +116,13 @@ function migrate(
     `_clawai_proxy_base_url = ${JSON.stringify(PROXY)}`,
     ...(v2 ? ["CLAWBOX_OPENCLAW_V2 = True"] : []),
     POLICY,
-    "print(json.dumps({'cfg': cfg, 'changed': changed}))",
+    "print(json.dumps({'cfg': cfg, 'changed': changed, 'lockApplied': globals().get('_clawbox_lock_applied', False)}))",
   ].join("\n");
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: opts.whisperHome?.home ?? dir };
   if (opts.whisperHome) env.PYTHONPATH = opts.whisperHome.pythonPath;
   else delete env.PYTHONPATH;
   const lines = execFileSync("python3", ["-c", program, file], { encoding: "utf-8", env }).trim().split("\n");
-  const out = JSON.parse(lines[lines.length - 1]) as { cfg: Config; changed: boolean };
+  const out = JSON.parse(lines[lines.length - 1]) as { cfg: Config; changed: boolean; lockApplied: boolean };
   if (injected) {
     const outAuth = out.cfg.auth as { profiles?: Record<string, unknown> };
     const profiles = outAuth.profiles ?? {};
@@ -838,6 +838,34 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh speech-to-text under the loca
     withStore({ ai_cloud_lock: true }, () => {
       const own = { tools: { media: { audio: { baseUrl: "http://192.168.7.9:9000/v1" } } } }; // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
       expect(audio(migrate(own, false).cfg)).toEqual({ baseUrl: "http://192.168.7.9:9000/v1" }); // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
+    });
+  });
+
+  it("marks every change it makes for the lock, so a failed config write cannot start on the cloud config", () => {
+    // The gateway config write exits instead of carrying on when this is set.
+    withStore({ ai_cloud_lock: true }, () => {
+      // The cloud row and our endpoint taken back.
+      expect(migrate({ tools: { media: { audio: { baseUrl: PROXY, models: [LOCAL_CLI, CLOUD] } } } }).lockApplied).toBe(true);
+      // Auto-detection switched off on a box with no engine.
+      expect(migrate({}, false).lockApplied).toBe(true);
+      // Already as the lock wants it: nothing to write, nothing to guard.
+      const settled = migrate({}, false).cfg;
+      expect(migrate(settled, false).lockApplied).toBe(false);
+    });
+    withStore({ ai_cloud_lock: false }, () => {
+      // Unlocked, the same withdrawal-free start is never marked.
+      expect(migrate({}).lockApplied).toBe(false);
+    });
+  });
+
+  it("marks a locked seed: on disk there is no list, and the core would auto-detect one", () => {
+    withStore({ ...ENDPOINT_STORE, ai_cloud_lock: true }, () => {
+      const { cfg, lockApplied } = migrate({});
+      expect(audio(cfg)?.models).toHaveLength(1);
+      expect(lockApplied).toBe(true);
+    });
+    withStore(ENDPOINT_STORE, () => {
+      expect(migrate({}).lockApplied).toBe(false);
     });
   });
 
