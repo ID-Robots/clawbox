@@ -304,12 +304,12 @@ describe("the named tunnel follows the account off the box", () => {
 
   it("a failed restart is not reported as a revoke, and every later pass retries it until the old tunnel is gone", async () => {
     const MODE = path.join(CF_DIR, "tunnel.mode");
-    await storeCredential();
-    // run-tunnel.sh marks the named tunnel it serves.
-    await fs.writeFile(MODE, "named\n");
-    await configStore.set("clawai_token", undefined);
-    cloudflaredState.startTunnelService.mockRejectedValueOnce(new Error("sudo: a password is required"));
     try {
+      await storeCredential();
+      // run-tunnel.sh marks the named tunnel it serves.
+      await fs.writeFile(MODE, "named\n");
+      await configStore.set("clawai_token", undefined);
+      cloudflaredState.startTunnelService.mockRejectedValueOnce(new Error("sudo: a password is required"));
       expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(false);
       // The credential still goes: the next start must not serve it.
       await expect(fs.stat(CRED)).rejects.toThrow();
@@ -336,14 +336,34 @@ describe("the named tunnel follows the account off the box", () => {
 
   it("a stopped tunnel needs no restart: the revoke holds, and a stale mode file on a stopped unit is left alone", async () => {
     const MODE = path.join(CF_DIR, "tunnel.mode");
-    await storeCredential();
-    await configStore.set("clawai_token", undefined);
-    cloudflaredState.getTunnelServiceState.mockResolvedValue("inactive");
     try {
+      await storeCredential();
+      await configStore.set("clawai_token", undefined);
+      cloudflaredState.getTunnelServiceState.mockResolvedValue("inactive");
       expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(true);
       await fs.writeFile(MODE, "named\n");
       expect(await heartbeat.revokeNamedTunnelWithoutAccount("unlinked")).toBe(false);
       expect(cloudflaredState.startTunnelService).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(MODE, { force: true });
+    }
+  });
+
+  it("a revoke the portal asked for whose restart failed is retried by the next heartbeat, with the account still on the box", async () => {
+    const MODE = path.join(CF_DIR, "tunnel.mode");
+    try {
+      await storeCredential();
+      await fs.writeFile(MODE, "named\n");
+      cloudflaredState.startTunnelService.mockRejectedValueOnce(new Error("sudo: a password is required"));
+      // The portal stops reporting a named tunnel for this box.
+      fetchMock.mockResolvedValue(ok({ success: true }));
+      await beat(`https://${HOST}`);
+      await expect(fs.stat(CRED)).rejects.toThrow();
+      expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(1);
+
+      // The ClawBox AI token is still there; the next beat retries the restart all the same.
+      await beat("https://next-beat.trycloudflare.com");
+      expect(cloudflaredState.startTunnelService).toHaveBeenCalledTimes(2);
     } finally {
       await fs.rm(MODE, { force: true });
     }

@@ -150,17 +150,25 @@ export async function revokeNamedTunnelWithoutAccount(reason: string): Promise<b
   try {
     if (!(await storeHoldsNoAccountToken())) return false;
     if (await readNamedTunnelCredential()) return await revokeNamedTunnel(reason);
-    // Nothing on file — but an earlier pass may have removed it and then
-    // failed to restart the tunnel, which leaves the old cloudflared serving
-    // the hostname on the token it was started with. Every later pass retries
-    // that restart until the named tunnel is no longer running.
-    if (!(await staleNamedTunnelRunning())) return false;
-    console.warn(`[portal-heartbeat] the named tunnel still runs without its credential (${reason}); restarting it`);
-    return await restartTunnelIfRunning("named tunnel revoked, retried");
+    return (await retryStaleNamedTunnel(reason)) ?? false;
   } catch (err) {
     console.warn("[portal-heartbeat] could not revoke the named tunnel:", err instanceof Error ? err.message : err);
     return false;
   }
+}
+
+/**
+ * Nothing on file — but an earlier revoke (an unlink, a sign-out, or the
+ * portal's own) may have removed the credential and then failed to restart the
+ * tunnel, which leaves the old cloudflared serving the hostname on the token it
+ * was started with. Every heartbeat and every unlink retries that restart until
+ * the named tunnel is no longer running. Null when no such tunnel runs;
+ * otherwise whether the restart went through.
+ */
+async function retryStaleNamedTunnel(reason: string): Promise<boolean | null> {
+  if (!(await staleNamedTunnelRunning())) return null;
+  console.warn(`[portal-heartbeat] the named tunnel still runs without its credential (${reason}); restarting it`);
+  return restartTunnelIfRunning("named tunnel revoked, retried");
 }
 
 /**
@@ -178,6 +186,10 @@ async function pushNow(tunnelUrl: string): Promise<void> {
       await revokeNamedTunnelWithoutAccount("no ClawBox account is linked to this box");
       return;
     }
+    // A revoke the portal asked for (unpaired, or no named tunnel for this box
+    // any more) leaves the account token on the box, so the retry above never
+    // runs for it: retry here too.
+    await retryStaleNamedTunnel("an earlier revoke could not restart the tunnel").catch(() => null);
 
     const deviceId = await getOrCreateDeviceId();
     const name = deriveDeviceName(deviceId);
