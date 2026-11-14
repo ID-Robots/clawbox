@@ -96,6 +96,15 @@ print(m.get(\"manifest_version\"), len(m.get(\"web_accessible_resources\") or []
   printf "\n"
   cd "$REPO" && bash -c "source scripts/lib/vault-extension.sh; vault_extension_flags" | tr "\n" " "
   printf "\n"
+  # The browser of the box as it runs: its own arguments (the [0] keeps this
+  # script, whose argv holds the pattern, out of the match), its binary, and
+  # whether the worker of the extension is alive in it.
+  args=$(ps -eo args | grep -m1 -- "--remote-debugging-port=1880[0]")
+  bin=$(printf "%s" "$args" | cut -d" " -f1)
+  printf "browserbin=%s\n" "$(basename "${bin:-none}")"
+  printf "browserext=%s\n" "$(printf "%s" "$args" | grep -o -- "--load-extension=[^ ]*" | head -n1 | cut -d= -f2)"
+  printf "browsersw=%s\n" "$(curl -s --max-time 5 http://127.0.0.1:18800/json/list 2>/dev/null | python3 -c "import json, sys
+print(any(t.get(\"type\") == \"service_worker\" and t.get(\"url\", \"\").startswith(\"chrome-extension://\") and t[\"url\"].endswith(\"/build/background.js\") for t in json.load(sys.stdin)))" 2>/dev/null || echo unknown)"
 ')
 f() { printf '%s\n' "$FILES" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -n1; }
 STATUS=$(printf '%s\n' "$FILES" | grep '^{' | head -n1)
@@ -121,10 +130,24 @@ else
   not_ok "the extension folder is incomplete: manifest_version=$(f manifest) worker=$(f worker) web_accessible=$(f war)"
 fi
 if [ -n "$FLAGS" ]; then
-  ok "the browser launcher loads it: $(printf '%s' "$FLAGS" | cut -d' ' -f1)"
+  ok "the launcher's helper names the folder to load: $(printf '%s' "$FLAGS" | cut -d' ' -f1)"
 else
-  not_ok "the browser launcher finds no extension folder to load"
+  not_ok "the launcher's helper finds no extension folder to load"
 fi
+# What the browser actually got and did with it: a flag only asks for loading.
+EXT_DIR=/home/clawbox/.clawbox-vault/extension
+case "$(f browserbin)" in
+  none | '')
+    skip "the box's browser is not running, so the loaded extension could not be confirmed" ;;
+  google-chrome*)
+    skip "the box's browser is branded Google Chrome ($(f browserbin)), which ignores --load-extension: the vault's extension needs Chromium or Chrome for Testing" ;;
+  *)
+    if [ "$(f browserext)" = "$EXT_DIR" ] && [ "$(f browsersw)" = True ]; then
+      ok "the box's browser ($(f browserbin)) runs with --load-extension=$EXT_DIR and the extension's worker is alive in it"
+    else
+      not_ok "the box's browser ($(f browserbin)) has load-extension=$(f browserext) and extension worker=$(f browsersw)"
+    fi ;;
+esac
 if [ "$(printf '%s' "$STATUS" | jq -r '.cards' 2>/dev/null)" = false ]; then
   ok "cards are off"
 else
@@ -175,7 +198,8 @@ AGENT=$(board '
   printf "secret=%s\n" "$([ "${#s}" -ge 40 ] && echo read || echo missing)"
   # The body goes over stdin (printf is a builtin): the secret is never in a process argument list.
   printf "{\"secret\":\"%s\"}" "$s" | curl -sS -o /dev/null -w "%{http_code}\n" --max-time 10 -X POST -H "Content-Type: application/json" -H "Origin: https://evil.example.org" --data-binary @- http://127.0.0.1:4796/api/pair/auto 2>/dev/null
-  curl -sS -o /dev/null -w "%{http_code}\n" --max-time 10 -X POST -H "Content-Type: application/json" -H "Origin: chrome-extension://abcdefghijklmnopabcdefghijklmnop" --data-binary "{\"secret\":\"not-the-secret-0123456789abcdefghijklmnop\"}" http://127.0.0.1:4796/api/pair/auto 2>/dev/null
+  code=$(curl -sS -o /tmp/vault-nano.$$ -w "%{http_code}" --max-time 10 -X POST -H "Content-Type: application/json" -H "Origin: chrome-extension://abcdefghijklmnopabcdefghijklmnop" --data-binary "{\"secret\":\"not-the-secret-0123456789abcdefghijklmnop\"}" http://127.0.0.1:4796/api/pair/auto 2>/dev/null)
+  printf "%s %s\n" "$code" "$(head -c 200 /tmp/vault-nano.$$ | tr "\n" " ")"; rm -f /tmp/vault-nano.$$
 ')
 SECRET_READ=$(printf '%s\n' "$AGENT" | sed -n 's/^secret=//p' | head -n1)
 AGENT=$(printf '%s\n' "$AGENT" | grep -v '^secret=')
@@ -216,10 +240,19 @@ elif [ "$(a 6)" = 403 ]; then
 else
   not_ok "a web origin got HTTP $(a 6) from the pairing route"
 fi
-case "$PIN_SET:$(a 7)" in
+PAIR_CODE=$(a 7 | cut -d' ' -f1)
+case "$PIN_SET:$PAIR_CODE" in
   true:401) ok "an extension with the wrong secret cannot pair" ;;
+  true:409)
+    # The owner unpaired the box's browser: automatic pairing is off until
+    # they pair it again, so no secret, right or wrong, gets in.
+    if a 7 | grep -q auto_pair_off; then
+      ok "automatic pairing is off (the owner unpaired the browser): the pairing route answers 409 auto_pair_off"
+    else
+      not_ok "the pairing route answered 409 to a wrong secret without auto_pair_off: $(a 7 | head -c 200)"
+    fi ;;
   false:409|null:409) ok "nothing can pair before the owner has chosen a PIN (409)" ;;
-  *) not_ok "the pairing route answered HTTP $(a 7) to a wrong secret (pinSet=$PIN_SET)" ;;
+  *) not_ok "the pairing route answered HTTP $PAIR_CODE to a wrong secret (pinSet=$PIN_SET)" ;;
 esac
 
 # ── The tools, through the box's own MCP server ─────────────────────────────

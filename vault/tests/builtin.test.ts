@@ -3,7 +3,7 @@
 // itself (after the owner chose a PIN, never before), cards are off unless
 // switched on, and the extension is built by the service.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../src/server/app";
@@ -343,6 +343,26 @@ describe("the service builds the extension the browser loads", () => {
     expect(manifest.externally_connectable).toBeUndefined();
     expect(manifest.content_security_policy.extension_pages).toContain("connect-src 'self' http://127.0.0.1:4796");
     expect(readFileSync(join(dir, "build/background.js"), "utf8")).toContain("/api/pair/auto");
+  }, 60_000);
+
+  test("the manifest check refuses any CSP source beyond 'self' and the vault's service", async () => {
+    const dir = join(out, "default");
+    if (!existsSync(join(dir, "manifest.json"))) await buildExtension({ repoDir: REPO_DIR, outDir: dir, pairSecret: "s".repeat(43) });
+    const base = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
+    const validate = (csp: string) => {
+      const copy = join(out, `csp-${Math.random().toString(36).slice(2)}`);
+      cpSync(dir, copy, { recursive: true });
+      writeFileSync(join(copy, "manifest.json"), JSON.stringify({ ...base, content_security_policy: { extension_pages: csp } }));
+      const r = Bun.spawnSync(["bun", "run", join(REPO_DIR, "scripts/validate-manifest.ts"), copy], { stdout: "pipe", stderr: "pipe" });
+      return { code: r.exitCode, text: r.stdout.toString() + r.stderr.toString() };
+    };
+    const strict = "script-src 'self'; object-src 'none'";
+    expect(validate(`${strict}; connect-src 'self' http://127.0.0.1:4796`).code).toBe(0);
+    for (const loose of ["connect-src *", "connect-src example.org", "connect-src 'self' https:", "img-src data:", "connect-src http://127.0.0.1:4796/api"]) {
+      const r = validate(`${strict}; ${loose}`);
+      expect(r.code, loose).not.toBe(0);
+      expect(r.text, loose).toContain("allows a source other than 'self'");
+    }
   }, 60_000);
 
   test("cards are compiled out by default and in only on request", async () => {

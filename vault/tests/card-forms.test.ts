@@ -106,6 +106,11 @@ describe("split expiry", () => {
     expect(kinds["birth-month"]).toBeUndefined();
   });
 
+  test("a month select in another form beside the checkout is not an expiry field", async () => {
+    const p = await open(SHOP, { [SHOP]: "checkout-month-elsewhere.html" });
+    expect(kindsById(p.top.document)).toEqual({ cn: "number", em: "expMonth" });
+  });
+
   test("fills selects (value 12 / 2034), two-digit year inputs and an MM/YYYY input", async () => {
     const p = await open(SHOP, { [SHOP]: "checkout-split-expiry.html" });
     fillCardFields(p.top.document, CARD);

@@ -62,7 +62,9 @@ async function api<T>(path: string, init: { method?: string; body?: unknown; sig
   });
   const data = (await res.json().catch(() => ({}))) as T & { error?: string };
   if (!res.ok) {
-    if (res.status === 401) await chrome.storage.local.remove("token");
+    // Only the token this request used is dropped: a pairing that stored a new
+    // one while it was in flight (a long poll lasts 25 s) must survive its 401.
+    if (res.status === 401 && (await token()) === t) await chrome.storage.local.remove("token");
     throw new ApiError(res.status, data.error ?? `HTTP ${res.status}`);
   }
   return data;

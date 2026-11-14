@@ -263,6 +263,24 @@ describe("entries and secrets", () => {
   });
 });
 
+describe("the save prompt with logins that differ only in case", () => {
+  test("updates the entry with exactly that login, and never guesses between two", async () => {
+    const save = (name: string, login: string) =>
+      v.request("/api/agent/save", { token: v.mcpToken, body: { name, login, url: "https://case.example.com/login", password: `Case-Secret-${login}` } });
+    const check = (login: string) =>
+      v.request("/api/ext/check", { token: ext, origin: EXT_ORIGIN, body: { url: "https://case.example.com/login", login, password: "Brand-New-Pass-9" } }).then(body);
+    await save("case.example.com/upper", "Alice");
+    await save("case.example.com/lower", "alice");
+    expect(await check("alice")).toEqual({ kind: "update", name: "case.example.com/lower" });
+    expect(await check("Alice")).toEqual({ kind: "update", name: "case.example.com/upper" });
+    expect(await check("ALICE")).toMatchObject({ kind: "new" });
+    // With one candidate left, a login typed in another case still updates it.
+    await v.request("/api/agent/delete", { token: v.mcpToken, body: { name: "case.example.com/upper", confirm: true } });
+    expect(await check("ALICE")).toEqual({ kind: "update", name: "case.example.com/lower" });
+    await v.request("/api/agent/delete", { token: v.mcpToken, body: { name: "case.example.com/lower", confirm: true } });
+  });
+});
+
 describe("agent fill round trip", () => {
   test("command → extension long-poll → one-time secret → status back to the agent", async () => {
     const poll = v.request("/api/ext/commands?wait=2000", { token: ext, origin: EXT_ORIGIN }).then(body);
@@ -278,6 +296,24 @@ describe("agent fill round trip", () => {
     expect((await v.request("/api/ext/secret", { token: ext, origin: EXT_ORIGIN, body: { commandId: commands[0]!.id } })).status).toBe(404);
     await v.request("/api/ext/result", { token: ext, origin: EXT_ORIGIN, body: { id: commands[0]!.id, status: "filled" } });
     expect(await fill).toEqual({ status: "filled", name: "billing.example.com/ops" });
+  });
+
+  test("an entry edited to another site after the fill was queued releases no secret", async () => {
+    const name = "moving.example.com/ops";
+    await v.request("/api/agent/save", { token: v.mcpToken, body: { name, login: "ops", url: "https://moving.example.com/login", password: "Moving-Secret-1" } });
+    const poll = v.request("/api/ext/commands?wait=2000", { token: ext, origin: EXT_ORIGIN }).then(body);
+    await Bun.sleep(20);
+    const fill = v.request("/api/agent/fill", { token: v.mcpToken, body: { url: "https://moving.example.com/login", name } }).then(body);
+    const { commands } = (await poll) as { commands: Array<{ id: string }> };
+    expect(commands).toHaveLength(1);
+    // Now the entry holds another site's login.
+    await v.request("/api/agent/save", { token: v.mcpToken, body: { name, url: "https://other.example.org/login", password: "Other-Secret-2" } });
+    const secret = await v.request("/api/ext/secret", { token: ext, origin: EXT_ORIGIN, body: { commandId: commands[0]!.id } });
+    expect(secret.status).toBe(403);
+    expect(await secret.text()).not.toContain("Other-Secret-2");
+    await v.request("/api/ext/result", { token: ext, origin: EXT_ORIGIN, body: { id: commands[0]!.id, status: "error", detail: "entry no longer matches this page" } });
+    expect(await fill).toMatchObject({ status: "error", name });
+    await v.request("/api/agent/delete", { token: v.mcpToken, body: { name, confirm: true } });
   });
 
   test("a fill report that carries the password never reaches the agent: the detail is dropped whole", async () => {

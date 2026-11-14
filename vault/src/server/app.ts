@@ -574,9 +574,16 @@ export function createApp(deps: AppDeps) {
       if (body.commandId !== undefined) {
         const cmd = queue.releaseSecret(str(body.commandId) ?? "");
         if (!cmd) throw new HttpError(404, "no such pending fill command");
+        // The entry may have been edited since the fill was queued: what is
+        // released must still belong to the page the fill was asked for.
         const entry = await catalog.read(cmd.name);
+        const entryUrl = entryMatchUrl({ name: cmd.name, url: entry.url });
+        if (!entryUrl || !matchUrl(entryUrl, cmd.url)) {
+          audit.record({ actor: "extension", action: "secret_refused", name: cmd.name, host: hostOf(cmd.url) ?? undefined, detail: "entry no longer matches the page" });
+          throw new HttpError(403, "entry no longer matches this page");
+        }
         audit.record({ actor: "extension", action: "secret_released", name: cmd.name, host: hostOf(cmd.url) ?? undefined, detail: "agent fill" });
-        return json(200, { name: cmd.name, login: entry.login, password: entry.password, entryUrl: cmd.entryUrl, submit: cmd.submit }, cors);
+        return json(200, { name: cmd.name, login: entry.login, password: entry.password, entryUrl, submit: cmd.submit }, cors);
       }
       const name = validateName(body.name);
       const purpose = body.purpose;
@@ -708,7 +715,12 @@ export function createApp(deps: AppDeps) {
             break;
           }
         }
-        if (check.kind === "new" && sameLogin.length && login) check = { kind: "update", name: sameLogin[0]!.name };
+        // The entry to update is the one with exactly this login, or the only
+        // one whose login differs just in case; between "Alice" and "alice"
+        // a capture for "ALICE" picks neither and offers a new entry.
+        const exact = sameLogin.filter((e) => e.login === login);
+        const target = exact.length === 1 ? exact[0] : exact.length === 0 && sameLogin.length === 1 ? sameLogin[0] : undefined;
+        if (check.kind === "new" && login && target) check = { kind: "update", name: target.name };
       }
       return json(200, check, cors);
     }

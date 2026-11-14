@@ -228,8 +228,13 @@ export function findCardFields(doc: Document): CardField[] {
     const c = classifyCardField(el);
     if (c) found.push({ el, ...c });
   }
-  const hasNumber = found.some((f) => f.kind === "number");
-  return found.filter((f) => f.strong || hasNumber);
+  // A field recognised only by its label or options belongs to a card form only
+  // beside a card number: in the number's own form (or, formless, beside a
+  // formless one). A month select in the newsletter form next to the checkout
+  // is not an expiry field. autocomplete="cc-*" fields stand on their own, as a
+  // payment provider's frame holds one of them alone.
+  const numberForms = new Set(found.filter((f) => f.kind === "number").map((f) => f.el.form));
+  return found.filter((f) => f.strong || numberForms.has(f.el.form));
 }
 
 export function cardFieldKinds(doc: Document): CardFieldKind[] {
