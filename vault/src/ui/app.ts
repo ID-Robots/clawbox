@@ -75,6 +75,8 @@ class ApiError extends Error {
     readonly retryAfterMs = 0,
     /** Set when a renamed save failed and the entry stayed under its new name. */
     readonly movedTo?: string,
+    /** A renamed save failed and where the entry is now is not known. */
+    readonly renameUnconfirmed = false,
   ) {
     super(message);
   }
@@ -97,8 +99,9 @@ async function api<T>(path: string, init: { method?: string; body?: unknown } = 
   const data = (await res.json().catch(() => ({}))) as T & { error?: string; retryAfterMs?: number; code?: string; name?: string };
   if (!res.ok) {
     if (res.status === 401 && session && path.startsWith("ui/") && !path.startsWith("ui/pin")) lockScreen("The vault locked itself after a period of inactivity.");
-    const movedTo = data.code === "renamed_not_updated" && typeof data.name === "string" ? data.name : undefined;
-    throw new ApiError(res.status, data.error ?? `HTTP ${res.status}`, data.retryAfterMs ?? 0, movedTo);
+    const renamed = data.code === "renamed_not_updated";
+    const movedTo = renamed && typeof data.name === "string" ? data.name : undefined;
+    throw new ApiError(res.status, data.error ?? `HTTP ${res.status}`, data.retryAfterMs ?? 0, movedTo, renamed && !movedTo);
   }
   return data;
 }
@@ -449,8 +452,16 @@ async function selectEntry(name: string): Promise<void> {
 // ---- add / edit / delete ----------------------------------------------------------------------
 
 let editOriginal: EntryDetail | null = null;
+// Each opening of the dialog is one editing session. A session whose renamed
+// save ended with the entry's whereabouts unknown may not save again: its
+// original name may be gone, and only reopening the entry from the list
+// (which reloads it) says where it is.
+let editSession = 0;
+let unconfirmedEditSession = -1;
+const UNCONFIRMED = "Where this entry is now could not be confirmed. Close this dialog and open it again from the list.";
 
 function openEdit(entry: EntryDetail | null, presetPassword?: string): void {
+  editSession++;
   editOriginal = entry;
   $("edit-title").textContent = entry ? "Edit entry" : "New entry";
   $<HTMLInputElement>("edit-name").value = entry?.name ?? "";
@@ -485,9 +496,14 @@ async function submitEdit(ev: Event): Promise<void> {
     originalName: editOriginal?.name,
     create: !editOriginal,
   };
+  if (editSession === unconfirmedEditSession) {
+    $("edit-error").textContent = UNCONFIRMED;
+    return;
+  }
   // The editor this save came from: the dialog may be closed and another
   // entry opened before the answer arrives.
   const editor = editOriginal;
+  const session = editSession;
   try {
     const out = await api<{ name: string }>("ui/entries", { body });
     $<HTMLInputElement>("edit-password").value = "";
@@ -501,6 +517,9 @@ async function submitEdit(ev: Event): Promise<void> {
     const movedTo = (err as ApiError).movedTo;
     if (movedTo) {
       if (editor && editOriginal === editor) editOriginal = { ...editor, name: movedTo };
+      void loadEntries();
+    } else if ((err as ApiError).renameUnconfirmed) {
+      if (editSession === session) unconfirmedEditSession = session;
       void loadEntries();
     }
   }
@@ -699,7 +718,11 @@ function numberHint(): void {
   }
 }
 
+let cardEditSession = 0; // as editSession, for the card dialog
+let unconfirmedCardSession = -1;
+
 function openCardEdit(card: CardDetail | null): void {
+  cardEditSession++;
   cardOriginal = card;
   $("card-title").textContent = card ? "Edit card" : "New card";
   $<HTMLInputElement>("card-label").value = card?.label ?? "";
@@ -732,7 +755,12 @@ function closeCardEdit(): void {
 async function submitCard(ev: Event): Promise<void> {
   ev.preventDefault();
   const number = digitsOf($<HTMLInputElement>("card-number").value);
+  if (cardEditSession === unconfirmedCardSession) {
+    $("card-error").textContent = UNCONFIRMED;
+    return;
+  }
   const editor = cardOriginal; // see submitEdit
+  const session = cardEditSession;
   const body = {
     originalName: cardOriginal?.name,
     label: $<HTMLInputElement>("card-label").value.trim(),
@@ -754,6 +782,9 @@ async function submitCard(ev: Event): Promise<void> {
     const movedTo = (err as ApiError).movedTo;
     if (movedTo) {
       if (editor && cardOriginal === editor) cardOriginal = { ...editor, name: movedTo };
+      void loadCards();
+    } else if ((err as ApiError).renameUnconfirmed) {
+      if (cardEditSession === session) unconfirmedCardSession = session;
       void loadCards();
     }
   }

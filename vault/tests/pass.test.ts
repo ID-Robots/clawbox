@@ -225,6 +225,25 @@ describe("catalog on the temp store", () => {
     await cards.remove(cardErr.at as string);
   });
 
+  test("an unknown location still carries the warning of an update that could not be undone", async () => {
+    const lost = Object.create(pass) as PassStore;
+    lost.insert = async () => {
+      throw new PassError("pass insert failed and could not be undone", "failed", true);
+    };
+    let moves = 0;
+    lost.move = async (from: string, to: string) => {
+      if (moves++ > 0) throw new PassError("pass mv failed (exit 1)", "failed");
+      return pass.move(from, to);
+    };
+    lost.locate = async () => "unknown";
+    await catalog.save({ name: "lost.example.com/ops", login: "ops", password: "Lost-Secret-1" });
+    const err = (await new Catalog(lost).save({ name: "lost.example.com/ops2" }, { renameFrom: "lost.example.com/ops" }).catch((e: unknown) => e)) as StrandedRenameError;
+    expect(err).toMatchObject({ at: null, contentUncertain: true });
+    expect(err.message).toContain("could not be confirmed");
+    expect(err.message).toContain("may hold the refused update");
+    await catalog.remove("lost.example.com/ops2");
+  });
+
   test("a location that cannot be read, or two copies, is never reported as a place", async () => {
     for (const where of [{ from: "unknown", to: "unknown" }, { from: "present", to: "present" }, { from: "absent", to: "absent" }] as const) {
       const blind = Object.create(pass) as PassStore;

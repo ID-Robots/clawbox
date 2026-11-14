@@ -67,7 +67,7 @@ export class StrandedRenameError extends Error {
     super(
       at
         ? `the save failed after the entry was renamed: "${from}" is now "${at}"${contentUncertain ? ", and it may hold the refused update instead of its previous content" : ", unchanged"}`
-        : `the save failed while the entry was being renamed, and where it is now could not be confirmed ("${from}" or "${to}"); reload the list`,
+        : `the save failed while the entry was being renamed, and where it is now could not be confirmed ("${from}" or "${to}")${contentUncertain ? "; it may hold the refused update instead of its previous content" : ""}; reload the list and open the entry again`,
     );
     this.name = "StrandedRenameError";
   }
