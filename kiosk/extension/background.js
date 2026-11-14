@@ -360,12 +360,15 @@ function queueSwitch(task) {
 async function switchBox(slot, sender) {
   if (!Number.isInteger(slot) || slot < 1 || slot > MAX_BOXES + 1) return { ok: false, error: "no such slot" };
   const revoked = revocations;
-  const stillTheOwners = () => revocations === revoked;
   // Home first: going home never waits on the list, only its indicator does.
   const home = slot === 1 ? await goHome() : null;
   const list = (await storedBoxes()) || (await askDesktopForBoxes()) || { selfName: "", boxes: [] };
-  // Forgotten while this switch read it: none of the owner's boxes.
-  const boxes = stillTheOwners() ? cleanBoxes(list.boxes) : [];
+  // The owner's list may be used only while it was not forgotten since this
+  // switch began AND the session that read it has not ended; asked again
+  // after every await that comes before acting on it.
+  const usable = () => revocations === revoked && Number.isFinite(list.validUntil) && list.validUntil > Date.now();
+  // Forgotten (or run out) while this switch read it: none of the owner's boxes.
+  const boxes = usable() ? cleanBoxes(list.boxes) : [];
   const selfName = boxName(list.selfName) || "ClawBox";
   const names = [selfName, ...boxes.map((b) => b.name)];
   if (slot === 1) {
@@ -379,11 +382,14 @@ async function switchBox(slot, sender) {
     return { ok: true };
   }
   let tab = await tabForBox(box);
-  // Forgotten while the box's tab was looked up: nothing opened or activated.
-  if (!stillTheOwners()) return { ok: false, error: "the list was forgotten" };
+  // Forgotten, or the session ended, while the box's tab was looked up:
+  // nothing opened or activated.
+  if (!usable()) return { ok: false, error: "the list was forgotten" };
   if (tab) await chrome.tabs.update(tab.id, { active: true });
   else tab = await chrome.tabs.create({ url: box.url, active: true });
   await rememberBoxTab(webOrigin(box.url), tab.id);
+  // …and the owner's names go to no indicator past that point either.
+  if (!usable()) return { ok: false, error: "the list was forgotten" };
   await indicate(tab.id, { type: "boxIndicator", slot, kind: "stay", name: box.name, names });
   return { ok: true };
 }

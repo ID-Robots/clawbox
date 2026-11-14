@@ -963,6 +963,44 @@ describe("background.js: switching linked ClawBoxes", () => {
     expect(w.active()).toBe(1);
   });
 
+  it("opens nothing, and sends the owner's names nowhere, once the session that read the list ends mid-switch", async () => {
+    const soon = { ...list, validUntil: Date.now() + 60_000 };
+
+    // The session ends while the switch looks up the box's tab: nothing opened or activated.
+    const w = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { stored: soon });
+    const query = w.chrome.tabs.query.getMockImplementation()!;
+    let release!: () => void;
+    w.chrome.tabs.query.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return query();
+    });
+    const switching = w.call({ type: "switchBox", slot: 2 }, 1);
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    await vi.advanceTimersByTimeAsync(61_000);
+    release();
+    expect(await switching).toEqual({ ok: false, error: "the list was forgotten" });
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(w.chrome.tabs.update).not.toHaveBeenCalled();
+
+    // It ends after the tab was brought up but before the indicator: no names go out.
+    const n = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { stored: { ...list, validUntil: Date.now() + 60_000 } });
+    const set = n.chrome.storage.session.set.getMockImplementation()!;
+    let go!: () => void;
+    // Hold the switch where it records the box's tab, just before the indicator.
+    n.chrome.storage.session.set.mockImplementationOnce(async (items: Record<string, unknown>) => {
+      await new Promise<void>((resolve) => { go = resolve; });
+      return set(items);
+    });
+    const late = n.call({ type: "switchBox", slot: 2 }, 1);
+    await vi.waitFor(() => expect(go).toBeTypeOf("function"));
+    expect(n.active()).toBe(2);
+    await vi.advanceTimersByTimeAsync(61_000);
+    go();
+    expect(await late).toEqual({ ok: false, error: "the list was forgotten" });
+    expect(n.indicators()).toEqual([]);
+    expect(await n.call({ type: "pendingIndicator" }, 2)).toBeNull();
+  });
+
   it("waits for a desktop that never answers no longer than its deadline; home does not wait for it", async () => {
     const w = loadWorker([{ ...DESK, active: false }, { id: 2, url: "https://main.example.com/", active: true }], { ask: () => new Promise(() => {}) });
     const two = w.call({ type: "switchBox", slot: 2 }, 2);

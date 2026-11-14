@@ -98,6 +98,8 @@ const RELEASES: readonly { version: string; files: string }[] = [
   { version: "1.6.4", files: "1e64d63326e85115078fccc5bf4e3b605f82e8a3690a425efb38db9f81563589" },
   // A list read begun before the list was forgotten (or replaced) is never used, a refusal always is; reads have deadlines; newest list wins.
   { version: "1.6.5", files: "3a3e1b04680c64d3ad5652bfce7e0eaa4490350a13b463a2a5dbb0670c9ccc61" },
+  // A switch checks the session end too, before it opens a box and before it sends the names.
+  { version: "1.6.6", files: "fa072b2ee83f8f6d8debc940bf8a5604beb6e06aa288646444d100c0e5983725" },
 ];
 
 /**
