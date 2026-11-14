@@ -1,6 +1,6 @@
 // pass adapter round trip against a TEMPORARY GNUPGHOME and a TEMPORARY store.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Catalog } from "../src/server/catalog";
@@ -104,5 +104,70 @@ describe("catalog on the temp store", () => {
     expect((await catalog.read("github.com/alice-renamed")).password).toBe("gh-pass-1");
     await catalog.remove("github.com/alice-renamed");
     await expect(catalog.remove("github.com/alice-renamed")).rejects.toBeInstanceOf(PassError);
+  });
+});
+
+describe("atomic saves", () => {
+  const tempFiles = () => allFiles(store.storeDir).filter((f) => f.endsWith(".tmp"));
+  const fpr = () => readFileSync(join(store.storeDir, ".gpg-id"), "utf8").trim();
+
+  test("an overwrite replaces the entry file instead of rewriting it in place", async () => {
+    await pass.insert("atomic.example.com/ops", "v0\n");
+    const before = statSync(pass.fileFor("atomic.example.com/ops"));
+    await pass.insert("atomic.example.com/ops", "v1\n");
+    const after = statSync(pass.fileFor("atomic.example.com/ops"));
+    expect(after.ino).not.toBe(before.ino);
+    expect(after.mode & 0o777).toBe(0o600);
+    expect(passShow(store, "atomic.example.com/ops")).toBe("v1\n");
+    expect(tempFiles()).toEqual([]);
+  });
+
+  test("readers beside a writer always decrypt a whole entry", async () => {
+    const versions = Array.from({ length: 8 }, (_, i) => `version-${i}\nlogin: ops\n`);
+    await pass.insert("atomic.example.com/race", "version-0\nlogin: ops\n");
+    const seen: string[] = [];
+    for (const v of versions.slice(1)) {
+      const reads = Array.from({ length: 3 }, () => pass.show("atomic.example.com/race").then((t) => seen.push(t)));
+      await Promise.all([pass.insert("atomic.example.com/race", v), ...reads]);
+    }
+    for (const t of seen) expect(versions).toContain(t);
+    expect(await pass.show("atomic.example.com/race")).toBe("version-7\nlogin: ops\n");
+  }, 60_000);
+
+  test("a failed save keeps the previous entry, leaves no temp file and no commit", async () => {
+    await pass.insert("atomic.example.com/keep", "kept\n");
+    const commits = gitLog(store);
+    const broken = new PassStore({
+      bin: PASS_BIN,
+      storeDir: store.storeDir,
+      env: { ...store.env, PASSWORD_STORE_KEY: "nobody@example.invalid" },
+      log: (l) => logs.push(l),
+    });
+    await expect(broken.insert("atomic.example.com/keep", "lost\n")).rejects.toMatchObject({ code: "failed" });
+    expect(passShow(store, "atomic.example.com/keep")).toBe("kept\n");
+    expect(tempFiles()).toEqual([]);
+    expect(gitLog(store)).toBe(commits);
+    expect(logs.join("\n")).not.toContain("lost");
+  });
+
+  test("recipients come from the nearest .gpg-id, comments stripped, like pass", async () => {
+    mkdirSync(join(store.storeDir, "team"), { recursive: true });
+    writeFileSync(join(store.storeDir, "team", ".gpg-id"), "nobody@example.invalid\n");
+    await expect(pass.insert("team/deep/entry", "x\n")).rejects.toMatchObject({ code: "failed" });
+    expect(await pass.exists("team/deep/entry")).toBe(false);
+    writeFileSync(join(store.storeDir, "team", ".gpg-id"), `# the ops key\n${fpr()}  # trailing note\n\n`);
+    await pass.insert("team/deep/entry", "team secret\n");
+    expect(passShow(store, "team/deep/entry")).toBe("team secret\n");
+    expect(gitLog(store)).toContain("Add given password for team/deep/entry to store.");
+  });
+
+  test("PASSWORD_STORE_SIGNING_KEY refuses an unsigned .gpg-id, as pass does", async () => {
+    const signed = new PassStore({
+      bin: PASS_BIN,
+      storeDir: store.storeDir,
+      env: { ...store.env, PASSWORD_STORE_SIGNING_KEY: fpr() },
+    });
+    await expect(signed.insert("atomic.example.com/signed", "x\n")).rejects.toMatchObject({ code: "failed" });
+    expect(await pass.exists("atomic.example.com/signed")).toBe(false);
   });
 });

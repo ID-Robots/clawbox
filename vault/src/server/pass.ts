@@ -1,9 +1,12 @@
-// Adapter over the `pass` CLI. Writes go through `pass insert -m -f` (stdin),
-// reads through `pass show`, deletes through `pass rm`, renames through
-// `pass mv`; every write is a pass git commit, so history stays. Listing walks
-// the store directory. Plaintext only ever travels over stdin/stdout pipes.
-import { readdir, stat } from "node:fs/promises";
-import { join } from "node:path";
+// Adapter over the `pass` CLI. Reads go through `pass show`, deletes through
+// `pass rm`, renames through `pass mv`. Saves encrypt exactly as
+// `pass insert -m -f` does (same recipients, gpg options and commit message)
+// but publish the ciphertext atomically: see insert(). Every write is a git
+// commit in the store, so history stays. Listing walks the store directory.
+// Plaintext only ever travels over stdin/stdout pipes.
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { validateName } from "../shared/entry";
 
 export class PassError extends Error {
@@ -47,9 +50,13 @@ export class PassStore {
     return env;
   }
 
-  private async run(args: string[], stdin?: string): Promise<RunResult> {
-    const proc = Bun.spawn([this.opts.bin, ...args], {
-      env: this.env(),
+  private run(args: string[], stdin?: string): Promise<RunResult> {
+    return this.exec([this.opts.bin, ...args], this.env(), stdin);
+  }
+
+  private async exec(cmd: string[], env: Record<string, string>, stdin?: string): Promise<RunResult> {
+    const proc = Bun.spawn(cmd, {
+      env,
       stdin: stdin === undefined ? "ignore" : "pipe",
       stdout: "pipe",
       stderr: "pipe",
@@ -107,12 +114,100 @@ export class PassStore {
     return r.stdout;
   }
 
-  /** Create or overwrite an entry with the full multi-line content. */
+  /**
+   * Create or overwrite an entry with the full multi-line content.
+   *
+   * `pass insert` lets gpg write straight into the entry file, so a reader
+   * running beside it could decrypt half a file and an interrupted overwrite
+   * would leave the entry unreadable. Here gpg writes a hidden temp file in the
+   * entry's own folder with the recipients and options `pass insert` would use;
+   * only after encryption succeeded is it synced and renamed over the entry,
+   * then committed with pass's own message. A reader sees the old ciphertext or
+   * the new one, and a failed save leaves the previous entry and no temp file.
+   */
   async insert(name: string, content: string): Promise<void> {
     const n = validateName(name);
     const body = content.endsWith("\n") ? content : `${content}\n`;
-    const r = await this.run(["insert", "-m", "-f", "--", n], body);
-    if (r.code !== 0) this.fail("insert", n, r);
+    const env = this.env();
+    const file = this.fileFor(n);
+    const dir = dirname(file);
+    const mask = umaskOf(env);
+    const gpg = gpgCommand(env);
+    const recipients = await this.recipients(n, env, gpg.bin);
+    await mkdir(dir, { recursive: true, mode: 0o777 & ~mask });
+    const tmp = join(dir, `.${basename(file)}.${randomUUID()}.tmp`);
+    try {
+      const args = [gpg.bin, "-e", ...recipients.flatMap((r) => ["-r", r]), "-o", tmp, ...gpg.opts];
+      const r = await this.exec(args, env, body);
+      if (r.code !== 0) this.fail("insert", n, r);
+      await chmod(tmp, 0o666 & ~mask);
+      await syncPath(tmp);
+      await rename(tmp, file);
+      await syncPath(dir).catch(() => undefined);
+    } finally {
+      await rm(tmp, { force: true });
+    }
+    await this.commit(n, file, `Add given password for ${n} to store.`, env);
+  }
+
+  /** Recipients the way pass picks them: PASSWORD_STORE_KEY, else the nearest .gpg-id. */
+  private async recipients(name: string, env: Record<string, string>, gpgBin: string): Promise<string[]> {
+    const fromEnv = words(env.PASSWORD_STORE_KEY);
+    if (fromEnv.length > 0) return fromEnv;
+    const root = resolve(this.opts.storeDir);
+    let dir = dirname(resolve(root, name));
+    for (;;) {
+      const idFile = join(dir, ".gpg-id");
+      if (await isFile(idFile)) {
+        await this.verifyIdFile(name, idFile, env, gpgBin);
+        const ids = (await readFile(idFile, "utf8"))
+          .split("\n")
+          .map((line) => line.replace(/#.*$/, "").trim())
+          .filter(Boolean);
+        if (ids.length > 0) return ids;
+        break;
+      }
+      if (dir === root || !dir.startsWith(root + sep)) break;
+      dir = dirname(dir);
+    }
+    this.opts.log?.(`pass insert ${name} failed: no gpg id for this entry (pass init)`);
+    throw new PassError("pass insert failed: the store has no gpg id", "failed");
+  }
+
+  /** pass's verify_file: with PASSWORD_STORE_SIGNING_KEY set, a .gpg-id needs a valid signature. */
+  private async verifyIdFile(name: string, idFile: string, env: Record<string, string>, gpgBin: string): Promise<void> {
+    if (!env.PASSWORD_STORE_SIGNING_KEY?.trim()) return;
+    const wanted = words(env.PASSWORD_STORE_SIGNING_KEY).filter((f) => /^[A-F0-9]{40}$/.test(f));
+    let valid: string[] = [];
+    if (await isFile(`${idFile}.sig`)) {
+      const args = [gpgBin, ...words(env.PASSWORD_STORE_GPG_OPTS), "--verify", "--status-fd=1", `${idFile}.sig`, idFile];
+      const r = await this.exec(args, env);
+      valid = [...r.stdout.matchAll(/^\[GNUPG:\] VALIDSIG ([A-F0-9]{40}) .* ([A-F0-9]{40})$/gm)].flatMap((m) => [m[1] ?? "", m[2] ?? ""]);
+    }
+    if (!wanted.some((f) => valid.includes(f))) {
+      this.opts.log?.(`pass insert ${name} failed: the signature of its .gpg-id is missing or invalid`);
+      throw new PassError("pass insert failed: .gpg-id signature", "failed");
+    }
+  }
+
+  /** pass's git_add_file: stage the entry and commit it when the store is a git work tree. */
+  private async commit(name: string, file: string, message: string, env: Record<string, string>): Promise<void> {
+    const genv = { ...env };
+    for (const k of ["GIT_DIR", "GIT_WORK_TREE", "GIT_NAMESPACE", "GIT_INDEX_FILE", "GIT_INDEX_VERSION", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
+      delete genv[k];
+    }
+    genv.GIT_CEILING_DIRECTORIES = resolve(this.opts.storeDir, "..");
+    const git = Bun.which("git", { PATH: genv.PATH ?? "" }) ?? "git";
+    const dir = dirname(file);
+    const inside = await this.exec([git, "-C", dir, "rev-parse", "--is-inside-work-tree"], genv);
+    if (inside.code !== 0 || inside.stdout.trim() !== "true") return;
+    const add = await this.exec([git, "-C", dir, "add", "--", file], genv);
+    if (add.code !== 0) this.fail("insert (git add)", name, add);
+    const status = await this.exec([git, "-C", dir, "status", "--porcelain", "--", file], genv);
+    if (!status.stdout.trim()) return;
+    const sign = (await this.exec([git, "-C", dir, "config", "--bool", "--get", "pass.signcommits"], genv)).stdout.trim() === "true";
+    const done = await this.exec([git, "-C", dir, "commit", ...(sign ? ["-S"] : []), "-m", message], genv);
+    if (done.code !== 0) this.fail("insert (git commit)", name, done);
   }
 
   async remove(name: string): Promise<void> {
@@ -160,5 +255,43 @@ export class PassStore {
     if (opts.under) await walk(join(this.opts.storeDir, validateName(opts.under)), validateName(opts.under));
     else await walk(this.opts.storeDir, "");
     return out.sort((a, b) => a.localeCompare(b));
+  }
+}
+
+/** Whitespace-separated words, as pass splits its unquoted env settings. */
+function words(value: string | undefined): string[] {
+  return (value ?? "").split(/\s+/).filter(Boolean);
+}
+
+/** pass runs under `umask ${PASSWORD_STORE_UMASK:-077}`. */
+function umaskOf(env: Record<string, string>): number {
+  const m = Number.parseInt(env.PASSWORD_STORE_UMASK ?? "", 8);
+  return Number.isInteger(m) && m >= 0 && m <= 0o777 ? m : 0o077;
+}
+
+/** pass's gpg choice and options; --batch always, the vault never has a terminal. */
+function gpgCommand(env: Record<string, string>): { bin: string; opts: string[] } {
+  const PATH = env.PATH ?? "";
+  const gpg2 = Bun.which("gpg2", { PATH });
+  const bin = gpg2 ?? Bun.which("gpg", { PATH }) ?? "gpg";
+  const opts = [...words(env.PASSWORD_STORE_GPG_OPTS), "--quiet", "--yes", "--compress-algo=none", "--no-encrypt-to", "--batch"];
+  if (env.GPG_AGENT_INFO || gpg2) opts.push("--use-agent");
+  return { bin, opts };
+}
+
+async function isFile(path: string): Promise<boolean> {
+  try {
+    return (await stat(path)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+async function syncPath(path: string): Promise<void> {
+  const fh = await open(path, "r");
+  try {
+    await fh.sync();
+  } finally {
+    await fh.close();
   }
 }
