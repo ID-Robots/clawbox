@@ -14,6 +14,12 @@ export class PassError extends Error {
   constructor(
     message: string,
     readonly code: "not_found" | "exists" | "failed",
+    /**
+     * A failed save that could not be undone: the entry may hold the refused
+     * new ciphertext (uncommitted) instead of the previous one. Nothing may
+     * call such an entry unchanged.
+     */
+    readonly unrestored = false,
   ) {
     super(message);
     this.name = "PassError";
@@ -175,8 +181,13 @@ export class PassStore {
           const { git, genv } = gitEnv(env, this.opts.storeDir);
           await this.exec([git, "-C", dir, "reset", "-q", "--", file], genv);
         } catch {
-          this.opts.log?.(`pass insert ${n}: the previous entry could not be put back; it is kept beside it as ${basename(old)}`);
+          this.opts.log?.(
+            kept
+              ? `pass insert ${n}: the save failed and the previous entry could not be put back; it is kept beside it as ${basename(old)}`
+              : `pass insert ${n}: the save failed and the new entry could not be taken away`,
+          );
           kept = false;
+          throw new PassError("pass insert failed and could not be undone", "failed", true);
         }
       }
       throw err;

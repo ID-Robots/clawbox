@@ -50,19 +50,45 @@ export function validateLoginName(name: unknown): string {
 }
 
 /**
- * A renamed save whose update failed and whose rename could not be undone
- * either: the entry is now under `to`, with its previous content (a failed
- * insert leaves the entry as it was). Said in so many words, with the new
- * name, so the caller can retry there instead of under a name that is gone.
+ * A renamed save whose update failed and whose rename could not be undone:
+ * the entry is under `at` (null when it was found under neither name), with
+ * its previous content unless `contentUncertain` (the failed update could not
+ * be undone either). Said in so many words, so the caller can retry where the
+ * entry is instead of under a name that is gone.
  */
 export class StrandedRenameError extends Error {
   constructor(
     readonly from: string,
     readonly to: string,
+    readonly at: string | null,
+    readonly contentUncertain: boolean,
   ) {
-    super(`the update failed and the entry could not be moved back: "${from}" is now "${to}", unchanged`);
+    super(
+      at
+        ? `the update failed and the entry could not be moved back: "${from}" is now "${at}"${contentUncertain ? ", and it may hold the refused update instead of its previous content" : ", unchanged"}`
+        : `the update failed and the entry could not be moved back: it is under neither "${from}" nor "${to}"; reload the list`,
+    );
     this.name = "StrandedRenameError";
   }
+}
+
+/**
+ * Undo the rename of a save whose update failed. `pass mv` can move the file
+ * and fail afterwards (a .gpg-id signature check, its git commit), so a failed
+ * move back is followed by a look at where the entry really is: back home is
+ * a successful undo; anywhere else is a StrandedRenameError naming it.
+ */
+export async function undoRename(store: PassStore, from: string, to: string, cause: unknown): Promise<void> {
+  try {
+    await store.move(to, from);
+    return;
+  } catch {
+    // Looked at below.
+  }
+  const back = await store.exists(from).catch(() => false);
+  const there = await store.exists(to).catch(() => false);
+  if (back && !there) return;
+  throw new StrandedRenameError(from, to, there && !back ? to : null, cause instanceof PassError && cause.unrestored);
 }
 
 export class Catalog {
@@ -177,11 +203,7 @@ export class Catalog {
         // goes back under its old name, where the app will retry it.
         if (movedFrom) {
           this.cache.delete(name);
-          try {
-            await this.store.move(name, movedFrom);
-          } catch {
-            throw new StrandedRenameError(movedFrom, name);
-          }
+          await undoRename(this.store, movedFrom, name, err);
         }
         throw err;
       }

@@ -1,6 +1,6 @@
 // pass adapter round trip against a TEMPORARY GNUPGHOME and a TEMPORARY store.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
 import { CardCatalog } from "../src/server/cards";
@@ -144,7 +144,8 @@ describe("catalog on the temp store", () => {
     await catalog.save({ name: "stuck.example.com/ops", login: "ops", password: "Stuck-Secret-1" });
     const err = await new Catalog(stuck).save({ name: "stuck.example.com/ops2", login: "ops2" }, { renameFrom: "stuck.example.com/ops" }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(StrandedRenameError);
-    expect(err).toMatchObject({ from: "stuck.example.com/ops", to: "stuck.example.com/ops2" });
+    expect(err).toMatchObject({ from: "stuck.example.com/ops", to: "stuck.example.com/ops2", at: "stuck.example.com/ops2", contentUncertain: false });
+    expect(String((err as Error).message)).toContain("unchanged");
     expect(String((err as Error).message)).not.toContain("Stuck-Secret-1");
     // Recoverable: under the new name, with the old content.
     expect(await pass.exists("stuck.example.com/ops")).toBe(false);
@@ -156,10 +157,49 @@ describe("catalog on the temp store", () => {
     const saved = await cards.save({ number: "4242424242424242", exp: "12/34", label: "Stuck card" });
     const cardErr = await new CardCatalog(stuck, catalog).save({ label: "Moved card" }, { name: saved.name }).catch((e: unknown) => e);
     expect(cardErr).toBeInstanceOf(StrandedRenameError);
-    const to = (cardErr as StrandedRenameError).to;
+    const to = (cardErr as StrandedRenameError).at as string;
     expect(await pass.exists(to)).toBe(true);
     expect(await pass.exists(saved.name)).toBe(false);
     await cards.remove(to);
+  });
+
+  test("a move back that fails after moving the file is an undo after all", async () => {
+    const late = Object.create(pass) as PassStore;
+    late.insert = async () => {
+      throw new PassError("pass insert failed (exit 2)", "failed");
+    };
+    // Like pass mv failing on a .gpg-id signature check once the file has moved.
+    let moves = 0;
+    late.move = async (from: string, to: string) => {
+      await pass.move(from, to);
+      if (moves++ > 0) throw new PassError("pass mv failed (exit 1)", "failed");
+    };
+    await catalog.save({ name: "late.example.com/ops", login: "ops", password: "Late-Secret-1" });
+    const err = await new Catalog(late).save({ name: "late.example.com/ops2", login: "ops2" }, { renameFrom: "late.example.com/ops" }).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(StrandedRenameError);
+    expect(err).toMatchObject({ code: "failed" });
+    expect(await pass.exists("late.example.com/ops")).toBe(true);
+    expect(await pass.exists("late.example.com/ops2")).toBe(false);
+    await catalog.remove("late.example.com/ops");
+  });
+
+  test("an update that could not be undone is never called unchanged", async () => {
+    const shaky = Object.create(pass) as PassStore;
+    shaky.insert = async () => {
+      throw new PassError("pass insert failed and could not be undone", "failed", true);
+    };
+    let moves = 0;
+    shaky.move = async (from: string, to: string) => {
+      if (moves++ > 0) throw new PassError("pass mv failed (exit 1)", "failed");
+      return pass.move(from, to);
+    };
+    await catalog.save({ name: "shaky.example.com/ops", login: "ops", password: "Shaky-Secret-1" });
+    const err = (await new Catalog(shaky).save({ name: "shaky.example.com/ops2", login: "ops2" }, { renameFrom: "shaky.example.com/ops" }).catch((e: unknown) => e)) as StrandedRenameError;
+    expect(err).toBeInstanceOf(StrandedRenameError);
+    expect(err).toMatchObject({ at: "shaky.example.com/ops2", contentUncertain: true });
+    expect(err.message).not.toContain("unchanged");
+    expect(err.message).toContain("may hold the refused update");
+    await catalog.remove("shaky.example.com/ops2");
   });
 });
 
@@ -251,5 +291,30 @@ describe("atomic saves", () => {
     });
     await expect(signed.insert("atomic.example.com/signed", "x\n")).rejects.toMatchObject({ code: "failed" });
     expect(await pass.exists("atomic.example.com/signed")).toBe(false);
+  });
+});
+
+describe("a failed save that cannot be undone", () => {
+  // root ignores directory modes, so the folder below could not refuse it.
+  test.skipIf(process.getuid?.() === 0)("is reported as unrestored, never as a plain failure", async () => {
+    const dir = join(store.storeDir, "unrestored.example.com");
+    await pass.insert("unrestored.example.com/ops", "before\n");
+    const hook = join(store.storeDir, ".git", "hooks", "pre-commit");
+    // The commit is refused, and the entry's folder is read-only by then: the
+    // previous ciphertext cannot be renamed back.
+    writeFileSync(hook, `#!/bin/sh\nchmod 555 '${dir}'\nexit 1\n`, { mode: 0o755 });
+    try {
+      const err = await pass.insert("unrestored.example.com/ops", "after\n").catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PassError);
+      expect(err).toMatchObject({ code: "failed", unrestored: true });
+      expect(logs.join("\n")).toContain("could not be put back");
+      expect(logs.join("\n")).not.toContain("after");
+    } finally {
+      rmSync(hook, { force: true });
+      chmodSync(dir, 0o700);
+      Bun.spawnSync(["git", "-C", store.storeDir, "reset", "-q", "--hard"], { env: store.env });
+      for (const f of allFiles(dir)) if (f.endsWith(".old")) rmSync(f, { force: true });
+    }
+    expect(passShow(store, "unrestored.example.com/ops")).toBe("before\n");
   });
 });

@@ -21,7 +21,7 @@ import {
   type ParsedCard,
 } from "../shared/card";
 import { validateName, ValidationError } from "../shared/entry";
-import { StrandedRenameError, type Catalog } from "./catalog";
+import { undoRename, type Catalog } from "./catalog";
 import { PassError, type PassStore } from "./pass";
 
 interface CacheItem {
@@ -209,13 +209,7 @@ export class CardCatalog {
         // The relabel and the update are one save: a failed update puts the
         // card back under its old name.
         this.cache.delete(name);
-        if (movedFrom) {
-          try {
-            await this.store.move(name, movedFrom);
-          } catch {
-            throw new StrandedRenameError(movedFrom, name);
-          }
-        }
+        if (movedFrom) await undoRename(this.store, movedFrom, name, err);
         throw err;
       }
       this.cache.delete(name);

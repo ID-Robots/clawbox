@@ -892,11 +892,12 @@ export function createApp(deps: AppDeps) {
     if (err instanceof ValidationError) return json(400, { error: err.message }, cors);
     if (err instanceof StrandedRenameError) {
       deps.log(`save of ${err.from} failed and its rename to ${err.to} could not be undone`);
-      return json(409, { error: err.message, code: "renamed_not_updated", name: err.to }, cors);
+      return json(409, { error: err.message, code: "renamed_not_updated", ...(err.at ? { name: err.at } : {}) }, cors);
     }
     if (err instanceof PassError) {
       if (err.code === "not_found") return json(404, { error: "entry not found" }, cors);
       if (err.code === "exists") return json(409, { error: "entry already exists" }, cors);
+      if (err.unrestored) return json(502, { error: "the save failed and could not be undone: check the entry (see service log)" }, cors);
       return json(502, { error: "the pass store refused the operation (see service log)" }, cors);
     }
     deps.log(`internal error: ${(err as Error)?.name ?? "Error"}: ${scrubCardData(String((err as Error)?.message ?? "")).slice(0, 200)}`);
