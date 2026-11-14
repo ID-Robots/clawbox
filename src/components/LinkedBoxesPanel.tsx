@@ -134,8 +134,10 @@ export default function LinkedBoxesPanel() {
         setList({ selfName: normalizeBoxName(body?.self?.name) ?? before.selfName, boxes: parseLinkedBoxesRead(body?.boxes) });
       } else {
         // Saved, but the answer could not be read: keep what was sent and
-        // ask the box for its list rather than draw (and later save) none.
-        void load();
+        // ask the box for its list rather than draw (and later save) none —
+        // awaited, so no edit starts (and no later save lands) before the
+        // box's list is on screen.
+        await load();
       }
       window.dispatchEvent(new Event(LINKED_BOXES_CHANGED_EVENT));
       return true;

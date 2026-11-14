@@ -226,7 +226,23 @@ describe("Settings → Linked ClawBoxes", () => {
     }) as unknown as typeof fetch;
     render(<LinkedBoxesPanel />);
     await screen.findByTestId("linked-boxes-row-2");
+    // The read that follows the save answers late: until it has, nothing can be edited.
+    let reads = 0;
+    let releaseRead: () => void = () => {};
+    const viaServer = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === LINKED_BOXES_URL && (!init || !init.method || init.method === "GET")) {
+        reads += 1;
+        await new Promise<void>((r) => { releaseRead = r; });
+      }
+      return (viaServer as (u: string, i?: RequestInit) => Promise<Response>)(url, init);
+    }) as unknown as typeof fetch;
     await addBox("NAS", "http://nas.example.net");
+    await waitFor(() => expect(reads).toBe(1));
+    expect(screen.getByTestId("linked-boxes-name-input")).toBeDisabled();
+    expect(screen.getByTestId("linked-boxes-remove-2")).toBeDisabled();
+    releaseRead();
+    await waitFor(() => expect(screen.getByTestId("linked-boxes-name-input")).not.toBeDisabled());
     // Both boxes, from the box's own answer to the read that followed.
     await waitFor(() => expect(within(screen.getByTestId("linked-boxes-row-3")).getByText("NAS")).toBeInTheDocument());
     expect(within(screen.getByTestId("linked-boxes-row-2")).getByText("Laptop")).toBeInTheDocument();
