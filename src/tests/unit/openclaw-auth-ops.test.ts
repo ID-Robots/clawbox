@@ -17,7 +17,7 @@ vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>()),
   waitForGatewayRpcReady: vi.fn(async () => true),
 }));
-vi.mock("@/lib/gateway-unit-job", () => ({ runUnitJob: vi.fn() }));
+vi.mock("@/lib/gateway-unit-job", () => ({ runUnitJob: vi.fn(), UNIT_JOB_SETTLE_BUDGET_MS: 360_000 }));
 
 import { GatewayRpcError, GatewayWsUnavailableError } from "@/lib/openclaw-gateway-ws";
 import {
@@ -214,6 +214,30 @@ describe("withOpenclawGatewayStopped", () => {
     vi.mocked(waitForGatewayRpcReady).mockResolvedValueOnce(false);
     _setAuthOpsDepsForTests({ stopGateway: async () => undefined });
     await expect(withOpenclawGatewayStopped(async () => "done")).rejects.toThrow(/did not come back/);
+  });
+
+  it("gives up on a slow stop after a minute for a caller answering a request, and waits it out for one that asks to", async () => {
+    const { runUnitJob } = await import("@/lib/gateway-unit-job");
+    vi.mocked(runUnitJob).mockResolvedValue({ kind: "returned" });
+    _setAuthOpsDepsForTests({ startGateway: async () => undefined });
+
+    await withOpenclawGatewayStopped(async () => "done");
+    expect(vi.mocked(runUnitJob).mock.calls.at(-1)?.[2]).toMatchObject({ unit: "clawbox-gateway.service", timeoutMs: 15_000, settleBudgetMs: 45_000 });
+
+    // The account pool's token pastes: the unit may take TimeoutStopSec=330.
+    await withOpenclawGatewayStopped(async () => "done", { waitOutStop: true });
+    expect(vi.mocked(runUnitJob).mock.calls.at(-1)?.[2]).toMatchObject({ unit: "clawbox-gateway.service", timeoutMs: 15_000, settleBudgetMs: 360_000 });
+  });
+
+  it("still fails a stop that outlives even the unit's own budget, the work not run and the gateway started again", async () => {
+    const { runUnitJob } = await import("@/lib/gateway-unit-job");
+    vi.mocked(runUnitJob).mockResolvedValue({ kind: "in-flight", state: null, waitedMs: 360_000 });
+    const startGateway = vi.fn(async () => undefined);
+    _setAuthOpsDepsForTests({ startGateway });
+    const work = vi.fn(async () => "done");
+    await expect(withOpenclawGatewayStopped(work, { waitOutStop: true })).rejects.toThrow(/still stopping/);
+    expect(work).not.toHaveBeenCalled();
+    expect(startGateway).toHaveBeenCalledTimes(1);
   });
 
   it("reports the stop's own failure when the start after it fails too", async () => {

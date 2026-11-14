@@ -753,6 +753,22 @@ describe("the gateway's copy of an account", () => {
     expect((await pool.readAccounts()).find((a) => a.id === max.id)?.status).toBe("ok");
   });
 
+  it("renews nothing for a writer that asks for the token as it is, inside the margin or past its end", async () => {
+    const anthropic = vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: "never", refresh_token: "never", expires_in: 28_800 }), { status: 200 }));
+    vi.stubGlobal("fetch", anthropic);
+    const soon = Date.now() + 3_600_000;
+    const due = await pool.addOAuthAccount({ label: "Due", email: "due@example.com", tokens: { access: "due-access", refresh: "due-refresh", expires: soon } });
+    expect(await pool.gatewayCredentialFor(due.id, { renew: false })).toEqual({ access: "due-access", expires: soon });
+
+    // Past its end, with a grant behind it: the writer renews it itself, so it
+    // is handed out and the account is not marked expired for want of asking.
+    const ended = Date.now() - 60_000;
+    const late = await pool.addOAuthAccount({ label: "Late", email: "late@example.com", tokens: { access: "late-access", refresh: "late-refresh", expires: ended } });
+    expect(await pool.gatewayCredentialFor(late.id, { renew: false })).toEqual({ access: "late-access", expires: ended });
+    expect((await pool.readAccounts()).find((a) => a.id === late.id)?.status).toBe("ok");
+    expect(anthropic).not.toHaveBeenCalled();
+  });
+
   it("forgets a mirror of an account that is no longer on the list", async () => {
     const max = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: { access: "a", refresh: "r", expires: Date.now() + 3_600_000 } });
     await pool.setGatewayMirror({ accountId: max.id, fingerprint: "0123456789abcdef", expiresAt: null, at: Date.now(), pending: false });

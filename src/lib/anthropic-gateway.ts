@@ -106,6 +106,7 @@ import { processStore } from "@/lib/process-store";
 import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
 import {
   gatewayCredentialFor,
+  OAUTH_REFRESH_MARGIN_MS,
   markLimited,
   onLimitReset,
   probeAccountCredential,
@@ -239,7 +240,14 @@ const defaultDeps: GatewayDeps = {
   // OpenClaw 2026.11.3 refuses the CLI's `logout` and `order` while the
   // gateway owns the state: the gateway's own models.authLogout /
   // models.authOrderSet then, the CLI only when no gateway answers.
-  offline: (work) => withOpenclawGatewayStopped(work),
+  // The stop is waited out however long the gateway takes over it (up to its
+  // unit's TimeoutStopSec=330, when it is in the middle of answering): by the
+  // time the window opens the pool has renewed a token and Anthropic refuses
+  // the gateway's copy of it, so a pass that gave up after a minute started
+  // the assistant again with nothing pasted, and the next pass stopped it
+  // again (the owner's box, 2026-11-14: two stops of seven, five minutes
+  // down each).
+  offline: (work) => withOpenclawGatewayStopped(work, { waitOutStop: true }),
   logout: async (profileId, agent) => {
     await logoutOpenclawAuthProfiles(PROVIDER, [profileId], agentIdOf(agent));
   },
@@ -276,6 +284,13 @@ interface GatewayRuntime {
   /** Keeper passes in a row that owed a write, and when the last one did: a box that keeps refusing is not asked every ten minutes for ever. */
   keeperFailures: number;
   keeperFailedAt: number;
+  /**
+   * Per account, when it was last renewed AHEAD of its margin (syncLocked): a
+   * window that keeps opening beside a token that ends far later than a
+   * renewed one ever does (a long-lived token the owner signs in again and
+   * again) would otherwise renew every other account each time.
+   */
+  earlyRenewedAt: Map<string, number>;
 }
 
 function runtime(): GatewayRuntime {
@@ -290,6 +305,7 @@ function runtime(): GatewayRuntime {
     failureSeen: new Map(),
     keeperFailures: 0,
     keeperFailedAt: 0,
+    earlyRenewedAt: new Map(),
   }));
 }
 
@@ -304,6 +320,12 @@ const WATCH_MS = 60_000;
  * to move its end by minutes would refuse the copy a coding run holds for nothing.
  */
 const ALIGN_SLACK_MS = 3 * KEEPER_MS;
+/**
+ * How long the offline window goes on renewing accounts: the gateway is down
+ * while it does, and each renewal is a request to Anthropic (under a second;
+ * twenty at its timeout). An account not reached comes due on its own.
+ */
+const WINDOW_RENEWAL_BUDGET_MS = 30_000;
 /** How far back the first look at the crons reaches: a failure just before a restart still counts. */
 const FIRST_LOOK_BACK_MS = 15 * 60_000;
 /**
@@ -467,9 +489,27 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     return takeOut(d, ours, pool, why, agent, attempt, () => changed);
   }
 
-  // Every account's current access token, in where it is not already. The
-  // tokens are fetched first (a renewal may need the network), and every paste
-  // the pass owes runs in ONE offline window (`d.offline`).
+  // Every account's current access token, in where it is not already, and
+  // every paste the pass owes in ONE offline window (`d.offline`).
+  //
+  // The window stops the assistant and cuts off whatever it was answering, so
+  // a pass that has to open one leaves no account behind for a window of its
+  // own. The pool renews each account as ITS token nears its end, and accounts
+  // signed in at different times come due at different passes: five accounts
+  // were five stops at every renewal (the owner's box, 2026-11-14, the
+  // gateway down every ten minutes for an hour). So every account whose token
+  // ends before the freshest one going in is renewed and goes in beside it.
+  // Their tokens then end together, they come due in the same pass, and the
+  // gateway is stopped once a renewal, however many accounts there are.
+  //
+  // Anthropic refuses a token the moment its renewal replaced it, so a renewal
+  // takes that account away from the gateway until the paste lands. Only ONE
+  // is made with the gateway still up — the one that tells the pass a window
+  // is needed at all, and that Anthropic can be reached. The rest are made
+  // inside the window (`pasteAll`), the gateway already stopped, each pasted
+  // before the next is renewed: a stop that cannot be made, or that takes
+  // minutes while the gateway finishes what it is answering, costs the chat
+  // one account, as it always did, and never all of them at once.
   const tokens = new Map<string, { fingerprint: string; expires: number | null }>();
   const toPaste: { id: string; account: string; token: { access: string; expires: number | null } }[] = [];
   let offlineFailed = false;
@@ -478,52 +518,62 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     const id = poolProfileId(account.id);
     // Null: the pool could not hand one out (a store outage, a renewal that
     // could not be made) — what the gateway holds stays, and is owed.
-    const token = await gatewayCredentialFor(account.id);
+    const token = await gatewayCredentialFor(account.id, toPaste.length > 0 && d.offline ? { renew: false } : {});
     if (!token) continue;
     const fingerprint = tokenFingerprint(token.access);
     tokens.set(id, { fingerprint, expires: token.expires });
     if (ours.some((p) => p.profileId === id && p.fingerprint === fingerprint)) continue;
     toPaste.push({ id, account: account.id, token });
   }
-  // The window stops the assistant and cuts off whatever it was answering, so
-  // a pass that has to open one leaves no account behind for a window of its
-  // own. The pool renews each account as ITS token nears its end, and accounts
-  // signed in at different times come due at different passes: five accounts
-  // were five stops at every renewal (the owner's box, 2026-11-14, the
-  // gateway down every ten minutes for an hour). So every account whose token
-  // ends before the freshest one going in is renewed now and goes in beside
-  // it. Their tokens then end together, the pool renews them in one pass, and
-  // the gateway is stopped once a lifetime, however many accounts there are.
-  if (toPaste.length > 0 && d.offline) {
-    const ends = toPaste.flatMap((p) => (p.token.expires === null ? [] : [p.token.expires]));
-    // No end among the tokens going in: nothing to bring the others to.
-    const renewBefore = ends.length > 0 ? Math.max(...ends) - ALIGN_SLACK_MS : Number.NEGATIVE_INFINITY;
-    const early: string[] = [];
-    for (const account of wanted) {
-      const id = poolProfileId(account.id);
-      const held = tokens.get(id);
-      // No end to compare, or none the pool could hand out a moment ago.
-      if (!held || held.expires === null || held.expires >= renewBefore) continue;
-      // The same token back: no grant to renew with, or Anthropic could not be
-      // asked. It stays as it is and comes due on its own.
-      const token = await gatewayCredentialFor(account.id, { renewBefore });
-      if (!token) continue;
-      const fingerprint = tokenFingerprint(token.access);
-      if (fingerprint === held.fingerprint) continue;
-      tokens.set(id, { fingerprint, expires: token.expires });
-      const due = toPaste.find((p) => p.id === id);
-      if (due) due.token = token;
-      else toPaste.push({ id, account: account.id, token });
-      early.push(account.id);
-    }
-    if (early.length > 0) {
-      console.error(`[anthropic-gateway] renewed ${early.length} account(s) ahead of time (${early.join(", ")}) so that one gateway stop takes every account's token`);
-    }
-  }
   if (toPaste.length > 0) {
+    const ends = toPaste.flatMap((p) => (p.token.expires === null ? [] : [p.token.expires]));
+    // Without a window to share (`d.offline` absent) or an end among the
+    // tokens going in, there is nothing to bring the others to.
+    const renewBefore = d.offline && ends.length > 0 ? Math.max(...ends) - ALIGN_SLACK_MS : Number.NEGATIVE_INFINITY;
+    const behind = (id: string): boolean => {
+      const held = tokens.get(id);
+      return !!held && held.expires !== null && held.expires < renewBefore;
+    };
     const pasteAll = async () => {
-      for (const { id, account, token } of toPaste) {
+      // A paste core did not confirm: nothing more is renewed in this window.
+      let refused = false;
+      const paste = async (id: string, account: string, token: { access: string; expires: number | null }) => {
         if (await attempt(`account ${account}'s token`, () => d.paste(id, token, agent))) pasted += 1;
+        else refused = true;
+      };
+      // What is owed as it stands first: the freshest token is among these,
+      // so a paste has landed before anything is renewed here.
+      for (const { id, account, token } of toPaste) {
+        if (!behind(id)) await paste(id, account, token);
+      }
+      const renewUntil = Date.now() + WINDOW_RENEWAL_BUDGET_MS;
+      const renewed: string[] = [];
+      for (const account of wanted) {
+        const id = poolProfileId(account.id);
+        const held = tokens.get(id);
+        if (!held || held.expires === null || !behind(id)) continue;
+        const owed = toPaste.find((p) => p.id === id);
+        let token = owed?.token ?? null;
+        // Inside its margin the pool renews it whoever asks; ahead of it, once
+        // a margin at most, whatever keeps the window opening.
+        const due = held.expires - now < OAUTH_REFRESH_MARGIN_MS;
+        const lately = now - (runtime().earlyRenewedAt.get(account.id) ?? Number.NEGATIVE_INFINITY) < OAUTH_REFRESH_MARGIN_MS;
+        if (!refused && (due || !lately) && Date.now() < renewUntil) {
+          // The same token back: no grant to renew with, or Anthropic could
+          // not be asked. It stays as it is and comes due on its own.
+          const fresh = await gatewayCredentialFor(account.id, { renewBefore });
+          const fingerprint = fresh ? tokenFingerprint(fresh.access) : held.fingerprint;
+          if (fresh && fingerprint !== held.fingerprint) {
+            tokens.set(id, { fingerprint, expires: fresh.expires });
+            token = fresh;
+            if (!due) runtime().earlyRenewedAt.set(account.id, now);
+            renewed.push(account.id);
+          }
+        }
+        if (token) await paste(id, account.id, token);
+      }
+      if (renewed.length > 0) {
+        console.error(`[anthropic-gateway] renewed ${renewed.length} more account(s) with the gateway stopped (${renewed.join(", ")}): one stop takes every account's token`);
       }
     };
     try {
@@ -1137,4 +1187,5 @@ export function _setGatewayDepsForTests(overrides: Partial<GatewayDeps> | null):
   state.failureSeen.clear();
   state.keeperFailures = 0;
   state.keeperFailedAt = 0;
+  state.earlyRenewedAt.clear();
 }

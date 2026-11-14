@@ -1572,11 +1572,14 @@ function credentialFor(account: AnthropicAccount, now: number): Promise<Anthropi
 /**
  * `credentialFor`'s body, run under that account's lock: every read of the store here is fresh.
  *
- * `renewBefore` (gatewayCredentialFor): an OAuth token that ends before it is
- * renewed now, ahead of the margin. One that could not be renewed is handed
- * out as it is — it has life in it, and the margin's renewal is still to come.
+ * `opts` are gatewayCredentialFor's. `renewBefore`: an OAuth token that ends
+ * before it is renewed now, ahead of the margin; one that could not be renewed
+ * is handed out as it is — it has life in it, and the margin's renewal is
+ * still to come. `renew: false`: nothing is renewed, and a token with a grant
+ * behind it is handed out whatever its end — the caller renews it itself, and
+ * it is not expired for want of asking.
  */
-async function readCredential(account: AnthropicAccount, now: number, renewBefore?: number): Promise<AnthropicCredential | null> {
+async function readCredential(account: AnthropicAccount, now: number, opts: { renewBefore?: number; renew?: boolean } = {}): Promise<AnthropicCredential | null> {
   if (account.kind === "login") {
     if (hasAnthropicLogin()) return { kind: "login", secret: null };
     await markCredentialProblem(account.id, "expired").catch(() => {});
@@ -1596,10 +1599,10 @@ async function readCredential(account: AnthropicAccount, now: number, renewBefor
     return null;
   }
   const stillGood = tokens.expires === null || tokens.expires > now + 10 * 60_000;
-  const wantsRefresh = tokens.refresh !== null && tokens.expires !== null
-    && (tokens.expires - now < OAUTH_REFRESH_MARGIN_MS || (renewBefore !== undefined && tokens.expires < renewBefore));
+  const wantsRefresh = opts.renew !== false && tokens.refresh !== null && tokens.expires !== null
+    && (tokens.expires - now < OAUTH_REFRESH_MARGIN_MS || (opts.renewBefore !== undefined && tokens.expires < opts.renewBefore));
   if (!wantsRefresh) {
-    if (stillGood) return { kind: "oauth", secret: tokens.access };
+    if (stillGood || (opts.renew === false && tokens.refresh !== null)) return { kind: "oauth", secret: tokens.access };
     await markCredentialProblem(account.id, "expired").catch(() => {});
     return null;
   }
@@ -1734,13 +1737,15 @@ async function askAboutCredential(id: string, verifyKey: KeyCheck, probe: Creden
  * not near its end yet — the gateway's writer asks for it so that every
  * account's token ends together (see `syncLocked` there). Anthropic refuses
  * the token a renewal replaced, so this is asked only for a token the caller
- * is about to write over.
+ * is about to write over. `renew: false`: the token the pool holds, renewed
+ * by nobody here — for the same writer, which renews it once the gateway is
+ * stopped rather than while it is still answering on the old one.
  */
-export async function gatewayCredentialFor(id: string, opts: { renewBefore?: number } = {}): Promise<{ access: string; expires: number | null } | null> {
+export async function gatewayCredentialFor(id: string, opts: { renewBefore?: number; renew?: boolean } = {}): Promise<{ access: string; expires: number | null } | null> {
   const account = (await readAccounts()).find((a) => a.id === id);
   if (!account || account.kind !== "oauth") return null;
   return credentialLock(account.id)(async () => {
-    const credential = await readCredential(account, Date.now(), opts.renewBefore);
+    const credential = await readCredential(account, Date.now(), opts);
     if (!credential || credential.kind !== "oauth") return null;
     const stored = await readDeviceSecret({ scope: ANTHROPIC_ACCOUNTS_SCOPE, name: secretName(account.id) });
     const tokens = stored.found ? parseOAuthSecret(stored.value) : null;
