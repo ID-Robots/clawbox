@@ -23,7 +23,8 @@
  * with a model fallback.
  *
  * HARNESS FIRST — every mechanism here is core's own (OpenClaw 2026.10.2;
- * the order filtering below read in 2026.10.3, unchanged in 2026.10.6, the pin):
+ * the order filtering below read in 2026.10.3 and 2026.10.6; the Claude CLI
+ * session and automation rules read in 2026.11.3, the pin now):
  *  - THE PROFILES: `anthropic:clawbox-<pool id>`, written by core's own writer,
  *    `openclaw models auth paste-token --provider anthropic --profile-id <id>
  *    --expires-in <n>s`, the token on stdin. A `token` profile is a bearer core
@@ -44,8 +45,11 @@
  *    bound to whatever the order says, unless that profile is gone
  *    (`selectCliExecutionAuthProfile`, read in the 2026.11.3 package:
  *    "Preserve the session account unless the user selects another or it was
- *    removed"). Taken out with core's own logout (no restart), such a session
- *    moves to the order's lead on its next turn. It goes back in when it can
+ *    removed"; docs/gateway/cli-backends.md: "Existing sessions keep their
+ *    account until you select another or remove its saved profile"). So it is
+ *    taken out with core's own logout (no restart) — once an account that
+ *    answers is in with its current token, else it stays (syncLocked) — and
+ *    by that rule the session takes the order's lead on its next turn. It goes back in when it can
  *    answer: at once when it is the only one that can, else with the next
  *    window the pool opens anyway (a renewal) — never a gateway stop of its
  *    own while another answers. With none that can answer, the owner's own
@@ -65,8 +69,10 @@
  *    registers each profile in openclaw.json's
  *    `auth.profiles`, and beside an `anthropic:default` sign-in of another
  *    mode that also writes a CONFIG `auth.order.anthropic`, over which the
- *    RPC refuses ("controlled by auth configuration") while the stored order
- *    still outranks it for selection.
+ *    RPC refuses ("controlled by auth configuration"). The stored order was
+ *    taken to outrank that one for selection, but on 2026.11.3 new automations
+ *    were seen captured onto the config order's head instead (the owner's box,
+ *    2026-11-14), so the pass keeps openclaw.json's order equal to it too.
  *  - ROTATION AND COOLDOWNS: core's. On a rate limit it allows ONE same-provider
  *    profile rotation per turn before model fallback
  *    (`MAX_RATE_LIMIT_PROFILE_ROTATIONS`), so the order matters: the next
@@ -371,6 +377,22 @@ interface GatewayRuntime {
   usageFailedAt: Map<string, number>;
   /** Per automation, core's refusals of its re-binding (src/lib/anthropic-cron-binding.ts). */
   cronRefusals: CronRefusals;
+  /**
+   * The watcher's minute passes in a row that left the gateway still owing
+   * (gatewayOwesLocked), and when the last one ran: a write core keeps
+   * refusing is asked again on a widening interval, not every minute.
+   */
+  owedPasses: number;
+  owedPassAt: number;
+  /** What the last of those passes left owing (gatewayOwesLocked's key). */
+  owedKey: string | null;
+  /**
+   * Per pool profile, core's refusals of a paste that would have put a
+   * logged-out account back (syncLocked): while another account answers, one
+   * core keeps refusing waits for a window the pool opens anyway instead of a
+   * gateway stop of its own at every keeper pass.
+   */
+  pasteRefusals: Map<string, { count: number; at: number }>;
 }
 
 function runtime(): GatewayRuntime {
@@ -390,6 +412,10 @@ function runtime(): GatewayRuntime {
     usageAnsweredAt: new Map(),
     usageFailedAt: new Map(),
     cronRefusals: new Map(),
+    owedPasses: 0,
+    owedPassAt: 0,
+    owedKey: null,
+    pasteRefusals: new Map(),
   }));
 }
 
@@ -451,6 +477,15 @@ function outcome(status: SwapConsumerOutcome["status"], code: string, count: num
 }
 
 // ── putting the pool in ─────────────────────────────────────────────────────
+
+/**
+ * Core refused to take this logged-out profile back lately: twenty minutes
+ * after the first refusal, forty after the second, … up to two hours.
+ */
+function pasteBackedOff(profileId: string, now: number): boolean {
+  const refused = runtime().pasteRefusals.get(profileId);
+  return !!refused && now - refused.at < Math.min(KEEPER_MS * 2 ** refused.count, MAX_KEEPER_BACKOFF_MS);
+}
 
 /** The pool's accounts the gateway holds that cannot answer now, the first back first. */
 function limitedByReset(pool: PoolState, held: ReadonlySet<string>, now: number): AnthropicAccount[] {
@@ -529,15 +564,21 @@ async function readOrderMarker(): Promise<OrderMarker> {
   return { stored: v.stored === true, config: v.config === true, ...(owner ? { ownerConfig: owner } : {}) };
 }
 
-/** Never throws: a marker that could not be written is said, and never fails a move that landed. */
-async function writeOrderMarker(next: OrderMarker): Promise<void> {
+/**
+ * Never throws: a marker that could not be written is said, and never fails a
+ * move that landed. Answers whether the marker now says `next` — a caller
+ * about to write over something only the marker can give back asks first.
+ */
+async function writeOrderMarker(next: OrderMarker): Promise<boolean> {
   try {
     const before = await readOrderMarker();
     const sameOwner = JSON.stringify(before.ownerConfig ?? null) === JSON.stringify(next.ownerConfig ?? null);
-    if (before.stored === next.stored && before.config === next.config && sameOwner) return;
+    if (before.stored === next.stored && before.config === next.config && sameOwner) return true;
     await configSet(ORDER_MARKER_KEY, next.stored || next.config || next.ownerConfig ? { ...next } : undefined);
+    return true;
   } catch (err) {
     console.error("[anthropic-gateway] could not record which account orders the pool wrote:", err instanceof Error ? err.message : err);
+    return false;
   }
 }
 
@@ -550,8 +591,14 @@ async function writeOrderMarker(next: OrderMarker): Promise<void> {
  * leads with it and its profile holds its current token. Anything else still
  * owed — another account's renewal, a removal — is logged and left to the
  * keeper, and costs no held retry and no "could not be switched".
+ *
+ * `noWindow`: the watcher's minute pass (gatewayOwesLocked) — logouts, the
+ * orders, openclaw.json's order, but never a gateway stop and never a renewal:
+ * a paste it finds owed stays owed for the keeper, whose back-off covers a
+ * paste core keeps refusing. Without it, a refused renewal beside a limited
+ * account still held would stop the assistant every minute.
  */
-async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerOutcome> {
+async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): Promise<SwapConsumerOutcome> {
   const d = deps();
   if (d.absent()) return outcome("skipped", "no_gateway");
   const before = d.read();
@@ -634,27 +681,37 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   // The owner's own subscription sign-in, usable now: with every pool account
   // limited it leads, and it is what answers (THE OWNER'S OWN SIGN-IN).
   const signInUsable = otherProfiles(before.kind === "present" ? before : null).some((p) => isOwnSubscription(p, now));
+  // One of the pool's accounts stays in the gateway (not one this pass logs
+  // out): the order is not empty without the ones out (THE ORDER).
+  const poolHeld = ours.some((p) => wanted.some((a) => poolProfileId(a.id) === p.profileId));
+  // The minute pass opens no window (`noWindow`), so it renews nothing either:
+  // a renewal replaces the token the gateway answers with.
+  const noWindow = opts.noWindow === true && !!d.offline;
   // Pasting means stopping the gateway (OpenClaw 2026.11.3 takes `paste-token`
   // only offline), and every live chat with it. So an account that is NOT in
   // the gateway goes in only when it is worth that (TASK-2533):
-  //  - a limited one never, while an account or the owner's sign-in answers —
-  //    it would only answer with its limit; it is back when it can answer;
+  //  - a limited one never while the gateway holds another of the pool's or
+  //    the owner's sign-in answers — it would only answer with its limit; it is
+  //    back when it can answer;
   //  - one back from its limit, not the active one, while another answers,
   //    waits for a window the pass opens anyway (a renewal; the alignment
   //    below brings every account's renewal into one), instead of a stop of
-  //    its own at every reset.
+  //    its own at every reset;
+  //  - so does the active one while another answers, once core refused to
+  //    take it back (pasteBackedOff): asked again on a widening interval, not
+  //    with a stop at every keeper pass.
   const deferred: AnthropicAccount[] = [];
   for (const account of wanted) {
     const id = poolProfileId(account.id);
     const inGateway = ours.some((p) => p.profileId === id);
-    if (!inGateway && effectiveStatus(account, now) === "limited" && (answersHeld || signInUsable)) continue;
-    if (!inGateway && answersHeld && account.id !== pool.activeId) {
+    if (!inGateway && effectiveStatus(account, now) === "limited" && (answersHeld || signInUsable || poolHeld)) continue;
+    if (!inGateway && answersHeld && (account.id !== pool.activeId || pasteBackedOff(id, now))) {
       deferred.push(account);
       continue;
     }
     // Null: the pool could not hand one out (a store outage, a renewal that
     // could not be made) — what the gateway holds stays, and is owed.
-    const token = await gatewayCredentialFor(account.id, toPaste.length > 0 && d.offline ? { renew: false } : {});
+    const token = await gatewayCredentialFor(account.id, noWindow || (toPaste.length > 0 && d.offline) ? { renew: false } : {});
     if (!token) continue;
     const fingerprint = tokenFingerprint(token.access);
     tokens.set(id, { fingerprint, expires: token.expires });
@@ -664,6 +721,11 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     // renews it, or it stays owed.
     if (token.expires !== null && token.expires <= now) continue;
     toPaste.push({ id, account: account.id, token });
+  }
+  // The minute pass: what is owed stays owed for the keeper's window.
+  if (noWindow && toPaste.length > 0) {
+    console.error(`[anthropic-gateway] ${toPaste.length} token paste(s) owed; left for the keeper's next pass rather than a gateway stop from the watcher`);
+    toPaste.length = 0;
   }
   // A window opens anyway: the deferred accounts go in with it.
   if (toPaste.length > 0) {
@@ -697,6 +759,10 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
         if (token.expires !== null && token.expires <= Date.now()) return false;
         const landed = await attempt(`account ${account}'s token`, () => d.paste(id, token, agent));
         if (landed) pasted += 1;
+        // A logged-out account core would not take back (pasteBackedOff).
+        const refusals = runtime().pasteRefusals;
+        if (landed) refusals.delete(id);
+        else if (!ours.some((p) => p.profileId === id)) refusals.set(id, { count: (refusals.get(id)?.count ?? 0) + 1, at: Date.now() });
         return landed;
       };
       // What is owed and goes in as it stands first — the freshest token is
@@ -785,10 +851,12 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     const token = tokens.get(poolProfileId(a.id));
     return !!held && !held.fenced && !!token && held.fingerprint === token.fingerprint && (held.expires === null || held.expires > Date.now());
   });
-  // With no pool account that answers, the owner's own sign-in answers for
-  // them (it leads the order): a limited account is out for it too, so a
-  // Claude CLI session bound to that account moves to the sign-in.
-  const signInNow = mid.kind === "present" && !pool.accounts.some((a) => a.kind === "oauth" && effectiveStatus(a, now) === "ok")
+  // With no pool account that answers in the gateway, the owner's own sign-in
+  // answers for them — it leads the order then (gatewayOrder, by the same
+  // test) — so a limited account is out for it too, and a Claude CLI session
+  // bound to that account moves to the sign-in.
+  const signInNow = mid.kind === "present"
+    && !pool.accounts.some((a) => a.kind === "oauth" && effectiveStatus(a, now) === "ok" && mid.profiles.some((p) => p.profileId === poolProfileId(a.id)))
     && otherProfiles(mid).some((p) => isOwnSubscription(p, now));
   const takenOut = new Set<string>();
   const unwanted = ours.filter((p) => {
@@ -846,8 +914,10 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   // another mode rewrites to lead with the profile it pasted, so the LAST
   // account pasted — or, with none, onto the first profile registered,
   // whatever the stored order said. Why that path reads it is core's; kept
-  // equal to the stored order (`auth.order` is hot-reloaded: no restart), every
-  // path picks the same account. Ids the config names that the store does
+  // equal to the stored order (`auth.order` is hot-reloaded: no restart), a
+  // path that reads either leads with the same account once both landed — a
+  // write that did not leaves the move `pending`, and the watcher's minute
+  // asks again (gatewayOwesLocked). Ids the config names that the store does
   // not hold are the owner's and stay, after the pool's (THE OWNER'S CONFIG
   // ORDER, takeOut gives it back). Only while the reader says what is there.
   let configOk = true;
@@ -868,12 +938,15 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
         // The owner's own order, before the pool first writes over it: as the
         // pass found it, without what this pass's own pastes put at its head.
         const found = (chat.configOrderIds ?? []).filter((id) => !isPoolProfile(id));
+        let snapshotOk = true;
         if (chat.configOrderIds && found.length > 0 && !marker.config && !marker.ownerConfig) {
           marker.ownerConfig = found;
-          await writeOrderMarker(marker);
+          // Not written over until it is recorded: takeOut gives it back from there.
+          snapshotOk = await writeOrderMarker(marker);
+          if (!snapshotOk) delete marker.ownerConfig;
         }
         const setConfig = d.setConfigOrder;
-        if (await attempt("openclaw.json's account order", () => setConfig(wantConfig))) {
+        if (snapshotOk && await attempt("openclaw.json's account order", () => setConfig(wantConfig))) {
           // One the pool created is the pool's to take out again (takeOut).
           if (current === null && !marker.config) {
             marker.config = true;
@@ -1222,31 +1295,58 @@ async function recordLimit(account: AnthropicAccount, seen: { limitKind: Anthrop
  *    (a usage reading, a coding run), and then no swap comes;
  *  - openclaw.json's order not leading with the stored order's head (a config
  *    write that was refused, or a paste since).
+ * Answers what is owed, as a key the minute's back-off compares (null: nothing).
  */
-async function gatewayOwesLocked(now: number): Promise<boolean> {
+async function gatewayOwesLocked(now: number): Promise<string | null> {
   const d = deps();
   const store = d.read();
-  if (store.kind !== "present") return false;
+  if (store.kind !== "present") return null;
   const pool = await readPoolState();
   const inGateway = (a: AnthropicAccount) => store.profiles.some((p) => p.profileId === poolProfileId(a.id));
   const oauth = pool.accounts.filter((a) => a.kind === "oauth");
+  // The same tests syncLocked's logout makes (signInNow): an account of the
+  // pool that answers in the gateway, else the owner's own sign-in.
   const answers = oauth.some((a) => effectiveStatus(a, now) === "ok" && inGateway(a))
-    || (!oauth.some((a) => effectiveStatus(a, now) === "ok") && otherProfiles(store).some((p) => isOwnSubscription(p, now)));
-  if (answers && oauth.some((a) => effectiveStatus(a, now) === "limited" && inGateway(a))) return true;
-  if (!store.profiles.some((p) => isPoolProfile(p.profileId)) || !store.order?.length) return false;
+    || otherProfiles(store).some((p) => isOwnSubscription(p, now));
+  const limitedIn = answers ? oauth.filter((a) => effectiveStatus(a, now) === "limited" && inGateway(a)).map((a) => a.id).sort() : [];
+  if (limitedIn.length > 0) return `out:${limitedIn.join(",")}`;
+  if (!store.profiles.some((p) => isPoolProfile(p.profileId)) || !store.order?.length) return null;
   const chat = await d.chat();
-  if (!chat?.onAnthropic || chat.configOrderIds === undefined || !d.setConfigOrder) return false;
-  return chat.configOrderIds === null || chat.configOrderIds[0] !== store.order[0];
+  if (!chat?.onAnthropic || chat.configOrderIds === undefined || !d.setConfigOrder) return null;
+  const head = chat.configOrderIds === null ? null : chat.configOrderIds[0] ?? null;
+  return head !== store.order[0] ? `config:${head ?? "none"}>${store.order[0]}` : null;
 }
 
-/** Look at what core recorded, act on it, and bring the gateway's order in line if anything changed. */
+/**
+ * Look at what core recorded, act on it, and bring the gateway's order in line
+ * if anything changed — or if the gateway still owes something the minute
+ * can do without a stop (gatewayOwesLocked; `noWindow`). A minute pass that
+ * leaves the SAME thing owing (core refused the write, or what it needs is a
+ * paste the keeper makes) waits two minutes, then four, … up to the keeper's
+ * ten; anything newly owed — an account limited since — is acted on at once.
+ */
 export function noteGatewayCooldowns(now: number = Date.now()): Promise<number> {
   return runtime().lock(async () => {
     const acted = await noteCooldownsLocked(now);
-    if (acted > 0 || (await gatewayOwesLocked(now))) {
+    const state = runtime();
+    if (acted > 0) {
       await syncLocked();
       await bindCronsLocked();
+      return acted;
     }
+    const owed = await gatewayOwesLocked(now);
+    if (owed === null) {
+      state.owedPasses = 0;
+      state.owedKey = null;
+      return acted;
+    }
+    if (owed === state.owedKey && state.owedPasses > 0 && now - state.owedPassAt < Math.min(WATCH_MS * 2 ** state.owedPasses, KEEPER_MS)) return acted;
+    await syncLocked({ noWindow: true });
+    await bindCronsLocked();
+    const still = await gatewayOwesLocked(Date.now());
+    state.owedPasses = still === null ? 0 : still === owed ? state.owedPasses + 1 : 1;
+    state.owedPassAt = still === null ? 0 : now;
+    state.owedKey = still;
     return acted;
   });
 }
@@ -1315,7 +1415,12 @@ async function bindCronsLocked(): Promise<CronBindingResult | null> {
       && !(p.type === "token" && p.expires !== null && p.expires <= now));
     // The order a turn resolves: the stored one, else openclaw.json's, else the store's own.
     const order = store.order ?? chat.configOrderIds ?? store.profiles.map((p) => p.profileId);
-    const leadId = chat.onAnthropic ? order.find((id) => usable(id)) : undefined;
+    // A limited account of the pool's is no lead while another is usable: an
+    // order write that did not land can leave one at the head (it is still in
+    // the store when its logout waits for an account that answers).
+    const limitedPool = (id: string) => isPoolProfile(id)
+      && pool.accounts.some((a) => poolProfileId(a.id) === id && effectiveStatus(a, now) === "limited");
+    const leadId = chat.onAnthropic ? order.find((id) => usable(id) && !limitedPool(id)) ?? order.find((id) => usable(id)) : undefined;
     const lead = leadId ? usable(leadId) : undefined;
     // With the pool in, every Anthropic job is the box's to bind. With it out,
     // only the ones the box adopted: onto what leads now, or given back.
@@ -1407,8 +1512,15 @@ async function readHeldUsageNow(): Promise<void> {
     const held = pool.accounts.filter((a) => a.kind === "oauth" && effectiveStatus(a, now) === "ok"
       && store.profiles.some((p) => p.profileId === poolProfileId(a.id)));
     await Promise.all(held.map(async (a) => {
-      const reading = await readAccountUsage(a.id, USAGE_RETRY_MS);
-      if (reading) state.usageAnsweredAt.set(a.id, now);
+      // Asked now: a reading taken before the turn failed says nothing about
+      // it (an ask already in flight is shared, readAccountUsage).
+      const reading = await readAccountUsage(a.id, 0);
+      if (reading) {
+        state.usageAnsweredAt.set(a.id, now);
+        state.usageFailedAt.delete(a.id);
+      } else {
+        state.usageFailedAt.set(a.id, now);
+      }
     }));
   } catch {
     // The watcher's ticks ask again.
@@ -1497,7 +1609,12 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
     if (job.lastRunAtMs === null || job.lastRunAtMs <= since) continue;
     newest = Math.max(newest, job.lastRunAtMs);
     if (job.lastStatus !== "error" || !mentionsAnthropic(job.lastError)) continue;
-    const bound = bindings[job.id]?.profileId;
+    // The account THAT run used: only an adoption core had confirmed before
+    // it started names it. A provisional record names the account the job is
+    // being moved to, and a re-binding after the run (the swap that the same
+    // limit caused) names the account it was moved to — neither ran it.
+    const record = bindings[job.id];
+    const bound = record && !record.provisional && (record.boundAt ?? record.at) <= job.lastRunAtMs ? record.profileId : null;
     const boundAccount = bound && isPoolProfile(bound) ? pool.accounts.find((a) => poolProfileId(a.id) === bound) ?? null : null;
     if (!boundAccount) unnamed = true;
     const result = await reportAnthropicFailure({
@@ -1552,6 +1669,12 @@ export async function reportChatFailure(input: ChatFailure): Promise<FailureOutc
   const anthropic = provider === PROVIDER || (model !== null && /^(?:anthropic\/)?claude/.test(model))
     || (provider === null && mentionsAnthropic(`${detail ?? ""} ${errorMessage ?? ""}`));
   if (!anthropic) return null;
+  // The turn names no account, and a Claude CLI limit leaves no cooldown on
+  // OpenClaw 2026.11.3: Anthropic's word on every held account first (a
+  // session can be bound to one that is not the lead), so a spent one is the
+  // pool's limit — and out of the gateway in the pass below — before the
+  // retry is sent to the same session.
+  await readHeldUsageNow();
   // What core recorded for this very turn, into the pool first: the move it
   // causes is the swap the retry below waits for.
   await noteGatewayCooldowns().catch((err: unknown) => {
@@ -1650,4 +1773,8 @@ export function _setGatewayDepsForTests(overrides: Partial<GatewayDeps> | null):
   state.usageAnsweredAt.clear();
   state.usageFailedAt.clear();
   state.cronRefusals.clear();
+  state.owedPasses = 0;
+  state.owedPassAt = 0;
+  state.owedKey = null;
+  state.pasteRefusals.clear();
 }

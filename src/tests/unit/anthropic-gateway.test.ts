@@ -8,9 +8,10 @@
  *  1. THE POOL IN THE GATEWAY — every Claude account is its own profile, the
  *     access token only, in an order that follows the pool (the active account
  *     first, the chat's own sign-in last); a limited account out of the
- *     gateway while another can answer, or the chat's own subscription
- *     sign-in, so no session bound to it stays there (TASK-2533), and back
- *     when it can answer, with no stop of its own while another does; the
+ *     gateway (core's logout) while another can answer with its current
+ *     token, or the chat's own subscription sign-in — core's rule moves a
+ *     Claude CLI session off a removed profile (TASK-2533) — and back when it
+ *     can answer, with no stop of its own while another does; the
  *     gateway stopped only for a token paste, and once for every account's.
  *  2. NOTHING TAKEN FOR NOTHING — a chat on another provider is never moved;
  *     an unreadable config removes nothing; the owner's own profiles are never
@@ -273,6 +274,8 @@ beforeEach(async () => {
   swap._resetAnthropicSwapForTests();
   announceAnthropicLimit.mockClear();
   (await import("@/lib/anthropic-cron-binding"))._resetCronBindingForTests();
+  // No test reaches Anthropic: a usage ask nobody stubbed gets no answer.
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 503 })));
 });
 
 afterEach(() => {
@@ -752,7 +755,7 @@ describe("a limited account and the sessions core pinned to it", () => {
   // account left in the order, even last, kept answering the sessions pinned
   // to it with the provider's limit text whenever core's own backoff lapsed.
   // Left out of the order, core drops that pin on the session's next turn.
-  it("takes a limited account out of the gateway while another can answer — a Claude CLI session bound to it moves only then — and pastes it back at the reset", async () => {
+  it("logs a limited account out of the gateway while another can answer — core's way to move a Claude CLI session bound to it — and pastes it back at the reset", async () => {
     // TASK-2533: on OpenClaw 2026.11.3 a Claude CLI run keeps its session on
     // the account its CLI session was bound to whatever the order says,
     // unless that profile is gone; and core records no cooldown for a CLI
@@ -1209,7 +1212,7 @@ describe("what core saw", () => {
 describe("failed gateway turns", () => {
   const LIMIT = "All models failed (1): anthropic/claude-opus-5-5: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"You've hit your weekly limit · resets Mon 9am\"}}";
 
-  it("runs a cron (a heartbeat is one) that died on the limit once more, on the account the pool moved to", async () => {
+  it("runs a cron (a heartbeat is one) that died on the limit once more, on the account the pool moved to (a limit core recorded a cooldown for; T3 is the Claude CLI case, which records none)", async () => {
     const core = fakeCore();
     gw.startGatewaySwap();
     const { work, personal } = await twoClaudeAccounts();
@@ -1986,5 +1989,296 @@ describe("TASK-2533 adversarial (production 2026-11-14)", () => {
     vi.setSystemTime(Date.now() + 11 * 60_000);
     await gw.bindGatewayCrons();
     expect(job.payload.model).toBe(`anthropic/claude-sonnet-5-5@${p(work.id)}`);
+  });
+});
+
+describe("TASK-2533 second review pass", () => {
+  const LIMIT_TEXT = "anthropic/claude-opus-5-5: You've hit your weekly limit · resets Mon 9am";
+  /** Anthropic's usage endpoint: the tokens named spent, every other one with room. */
+  const usageSpentFor = (spentTokens: string[], resetsAt: number) => vi.fn(async (url: string, init?: RequestInit) => {
+    if (!String(url).endsWith("/api/oauth/usage")) return new Response("{}", { status: 404 });
+    const token = ((init?.headers as Record<string, string> | undefined)?.Authorization ?? "").replace(/^Bearer /, "");
+    const body = spentTokens.includes(token)
+      ? { five_hour: { utilization: 100, resets_at: new Date(resetsAt).toISOString() }, seven_day: { utilization: 40, resets_at: null } }
+      : { five_hour: { utilization: 5, resets_at: null }, seven_day: { utilization: 10, resets_at: null } };
+    return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+  });
+  const statusOf = async (id: string) => (await pool.readPoolState()).accounts.find((a) => a.id === id)?.status;
+
+  it("the watcher's minute never stops the gateway: a renewal core refuses beside a limited account still held waits for the keeper, asked on a widening interval", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // Personal's renewal: core refuses its paste, so the gateway holds its replaced token.
+    core.refusePasteOf.add(p(personal.id));
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal-v2"), email: "me@example.com" });
+    await pool.markLimited(work.id, Date.now() + 2 * H, "session", { source: "chat" });
+    await swap.whenSwapsSettled();
+    // Nothing that answers is in with its current token: Work stays (precondition).
+    expect(core.profiles.has(p(work.id))).toBe(true);
+    const windows = offlineWindows;
+    const lists = () => core.calls.filter((c) => c.method === "cron.list").length;
+    const before = lists();
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    for (let minute = 1; minute <= 7; minute += 1) {
+      vi.setSystemTime(t0 + minute * 60_000);
+      await gw.noteGatewayCooldowns();
+    }
+    expect(offlineWindows).toBe(windows);
+    // Minutes 1, 3 and 7: two minutes after a pass that left it owing, then four.
+    expect(lists() - before).toBe(3);
+
+    // The keeper's window takes the renewal; Work is out with it.
+    core.refusePasteOf.clear();
+    vi.setSystemTime(t0 + 11 * 60_000);
+    await gw.keepGatewayMirror();
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal-v2");
+    expect(core.profiles.has(p(work.id))).toBe(false);
+  });
+
+  it("a cron limit from a run made before the job was moved is not blamed on the account it was moved to", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    addCron(core, { id: "inbox" });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "inbox")).toBe(p(work.id));
+    // The run on Work dies on Work's limit...
+    const job = core.crons.get("inbox") as FakeCron;
+    job.state = { lastStatus: "error", lastError: LIMIT_TEXT, lastRunAtMs: Date.now() };
+    // ...and the pool learns it first from elsewhere: it moves to Personal, and the job with it.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 1_000);
+    await pool.markLimited(work.id, Date.now() + 24 * H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+    expect(job.binding?.profileId).toBe(p(personal.id));
+
+    await gw.scanGatewayCrons();
+    await swap.whenSwapsSettled();
+
+    expect(await statusOf(personal.id)).toBe("ok");
+    expect((await pool.readPoolState()).activeId).toBe(personal.id);
+  });
+
+  it("a cron limit is not blamed on the account a refused adoption was moving the job to", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    addCron(core, { id: "inbox" });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "inbox")).toBe(p(work.id));
+    // The pool moves to Personal; core refuses the job's adoption, so its record stays provisional.
+    core.refuseCronUpdate.add(`anthropic/claude-opus-5-5@${p(personal.id)}`);
+    await pool.markLimited(work.id, Date.now() + 24 * H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+    const job = core.crons.get("inbox") as FakeCron;
+    expect(job.binding?.profileId).toBe(p(work.id));
+    // Its next run is still Work's, and dies on Work's limit.
+    job.state = { lastStatus: "error", lastError: LIMIT_TEXT, lastRunAtMs: Date.now() + 1_000 };
+
+    await gw.scanGatewayCrons(Date.now() + 2_000);
+    await swap.whenSwapsSettled();
+
+    expect(await statusOf(personal.id)).toBe("ok");
+  });
+
+  it("binds the automations to an account that answers, not to a limited one an order write left at the head", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    addCron(core, { id: "inbox" });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "inbox")).toBe(p(work.id));
+    // The order cannot be written, and Work stays in: Personal's renewal was refused.
+    core.refuseOrder = true;
+    core.refusePasteOf.add(p(personal.id));
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal-v2"), email: "me@example.com" });
+    await pool.markLimited(work.id, Date.now() + 2 * H, "session", { source: "chat" });
+    await swap.whenSwapsSettled();
+    expect(core.order?.[0]).toBe(p(work.id));
+    expect(core.profiles.has(p(work.id))).toBe(true);
+
+    await gw.bindGatewayCrons();
+
+    expect(runCron(core, "inbox")).toBe(p(personal.id));
+  });
+
+  it("with no sign-in of the owner's, pastes no limited account back when the last that answers runs out", async () => {
+    const core = fakeCore();
+    core.profiles.delete("anthropic:default");
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+    expect(core.profiles.has(p(work.id))).toBe(false);
+    const windows = offlineWindows;
+    const pastes = core.pastes.length;
+
+    await pool.markLimited(personal.id, Date.now() + H, "session", { source: "chat" });
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+
+    expect(core.pastes.slice(pastes).map((x) => x.profileId)).not.toContain(p(work.id));
+    expect(offlineWindows).toBe(windows);
+    // The order is never emptied: the one held stays.
+    expect(core.order?.[0]).toBe(p(personal.id));
+  });
+
+  it("takes a limited account out for the owner's sign-in when the account that could answer is not in the gateway", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    core.refusePasteOf.add(p(personal.id));
+    await gw.keepGatewayMirror();
+    expect(core.profiles.has(p(personal.id))).toBe(false);
+
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+
+    expect(core.order?.[0]).toBe("anthropic:default");
+    expect(core.profiles.has(p(work.id))).toBe(false);
+  });
+
+  it("backs off taking the active account back while core keeps refusing it and another answers, and asks again later", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work } = await twoClaudeAccounts();
+    await pool.setReturnToPrimary(true);
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + H, "session", { source: "chat" });
+    await swap.whenSwapsSettled();
+    expect(core.profiles.has(p(work.id))).toBe(false);
+
+    core.refusePasteOf.add(p(work.id));
+    await pool.clearLimit(work.id); // its reset: back to the first account
+    await swap.whenSwapsSettled();
+    expect((await pool.readPoolState()).activeId).toBe(work.id);
+    await gw.syncGatewayNow();
+    const windows = offlineWindows;
+    for (let i = 0; i < 3; i += 1) await gw.keepGatewayMirror();
+    expect(offlineWindows).toBe(windows);
+
+    core.refusePasteOf.clear();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 41 * 60_000);
+    await gw.keepGatewayMirror();
+    expect(core.profiles.has(p(work.id))).toBe(true);
+  });
+
+  it("a desktop chat that died on a limit reads every held account first: a spent one that is not the lead is out before the turn is sent again", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    expect((await pool.readPoolState()).gateway?.accountId).toBe(work.id);
+    vi.stubGlobal("fetch", usageSpentFor(["sk-ant-oat01-personal"], Date.now() + 2 * H));
+    let personalHeldAtRetry: boolean | null = null;
+    core.beforeCall = (method) => {
+      if (method === "chat.send") personalHeldAtRetry = core.profiles.has(p(personal.id));
+    };
+
+    await gw.reportChatFailure({ errorMessage: "You've hit your limit · resets 5pm", provider: "anthropic", sessionKey: "agent:main:desk", message: "hello" });
+    await swap.whenSwapsSettled();
+
+    expect(await statusOf(personal.id)).toBe("limited");
+    expect(core.logouts).toContain(p(personal.id));
+    expect(personalHeldAtRetry === null || personalHeldAtRetry === false).toBe(true);
+  });
+
+  it("the minute's back-off holds back only what it already tried: an account limited since is out at once", async () => {
+    const core = fakeCore();
+    core.tellsConfigOrder = true;
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    expect(core.configOrder?.[0]).toBe(p(work.id));
+    // openclaw.json is locked and a paste since put Personal at its head: owed, and refused every minute.
+    core.refuseConfigSet = true;
+    core.configOrder = [p(personal.id), p(work.id), "anthropic:default"];
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    for (let minute = 1; minute <= 3; minute += 1) {
+      vi.setSystemTime(t0 + minute * 60_000);
+      await gw.noteGatewayCooldowns();
+    }
+    // Personal, not the active account, runs out (a usage reading): no swap comes.
+    await pool.markLimited(personal.id, Date.now() + 2 * H, "session", { source: "chat" });
+    await swap.whenSwapsSettled();
+    expect((await pool.readPoolState()).activeId).toBe(work.id);
+    vi.setSystemTime(t0 + 4 * 60_000);
+    await gw.noteGatewayCooldowns();
+
+    expect(core.logouts).toContain(p(personal.id));
+  });
+
+  it("a run that started while its job was being moved is not blamed on the account the move had not yet given it", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    addCron(core, { id: "inbox" });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "inbox")).toBe(p(work.id));
+    const job = core.crons.get("inbox") as FakeCron;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    // The swap's re-binding: a scheduled run starts on Work after the pass began and before core took the update.
+    core.beforeCall = (method, params) => {
+      const model = ((params.patch as { payload?: { model?: string | null } } | undefined)?.payload ?? {}).model;
+      if (method !== "cron.update" || typeof model !== "string" || !model.includes(p(personal.id))) return;
+      vi.setSystemTime(Date.now() + 1);
+      job.state = { lastStatus: "error", lastError: LIMIT_TEXT, lastRunAtMs: Date.now() };
+      vi.setSystemTime(Date.now() + 1);
+    };
+    await pool.markLimited(work.id, Date.now() + 24 * H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+    core.beforeCall = null;
+    expect(job.binding?.profileId).toBe(p(personal.id));
+
+    await gw.scanGatewayCrons();
+    await swap.whenSwapsSettled();
+
+    expect(await statusOf(personal.id)).toBe("ok");
+  });
+
+  it("a desktop chat's limit is read fresh: a reading with room taken before the turn failed does not stand in for one", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    vi.stubGlobal("fetch", usageSpentFor([], 0));
+    await pool.readAccountUsage(personal.id); // the owner's card, a minute before
+    vi.stubGlobal("fetch", usageSpentFor(["sk-ant-oat01-personal"], Date.now() + 2 * H));
+
+    await gw.reportChatFailure({ errorMessage: "You've hit your limit · resets 5pm", provider: "anthropic", sessionKey: "agent:main:desk", message: "hello" });
+    await swap.whenSwapsSettled();
+
+    expect(await statusOf(personal.id)).toBe("limited");
+    expect(core.logouts).toContain(p(personal.id));
+  });
+
+  it("with no sign-in of the owner's, a limited account goes back in when the only other one held leaves: the order is never emptied", async () => {
+    const core = fakeCore();
+    core.profiles.delete("anthropic:default");
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+    expect(core.profiles.has(p(work.id))).toBe(false);
+
+    // Personal can no longer answer at all (its grant was refused): it leaves the gateway.
+    await pool.markCredentialProblem(personal.id, "revoked");
+    await swap.whenSwapsSettled();
+    // One pass after it: the swap's, or the owner's next change.
+    if (core.profiles.has(p(personal.id))) await gw.syncGatewayNow();
+
+    // In that same pass — not one keeper interval later with nothing held.
+    expect(core.profiles.has(p(personal.id))).toBe(false);
+    expect(core.profiles.has(p(work.id))).toBe(true);
+    expect(core.order?.[0]).toBe(p(work.id));
   });
 });

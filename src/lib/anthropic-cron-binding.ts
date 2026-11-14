@@ -120,7 +120,14 @@ export interface CronBindingRecord {
   /** `payload.model` before the box first touched the job: what it is given back when the pool leaves. */
   original?: string | null;
   revision: string | null;
+  /** The pass that adopted it (a run lost to its account after this is run again). */
   at: number;
+  /**
+   * When core had confirmed the adoption — its updates answered, later than
+   * `at`: a run that started before this still ran on the job's previous
+   * account, so its limit is not this account's (scanGatewayCrons).
+   */
+  boundAt?: number;
   /** When the box last ran a lost run of this job again. */
   retriedAt?: number;
   /**
@@ -463,6 +470,7 @@ export async function bindCronsToTarget(
       original: plan.original,
       revision,
       at: adopting ? now : (base?.at ?? now),
+      boundAt: adopting ? Date.now() : (base?.boundAt ?? base?.at ?? now),
       ...(base?.retriedAt !== undefined ? { retriedAt: base.retriedAt } : {}),
     };
     dirty = true;
