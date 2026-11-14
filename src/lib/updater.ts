@@ -2001,7 +2001,12 @@ async function updateClawBoxAndReboot(): Promise<void> {
  */
 async function updateClawBoxAsOwner(): Promise<void> {
   await syncCheckoutForRebuild();
-  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
+  // No rebuild step runs on this path, so no dispatch moment: cleared, so a
+  // record an appliance run left can never travel with this flag.
+  await setMany({
+    update_needs_continuation: (await readBuildId()) || "no-previous-build",
+    [UPDATE_REBUILD_DISPATCHED_KEY]: undefined,
+  });
   try {
     await rebuildAsOwner(PROJECT_DIR, {
       onCommand: logUpdateCommand,
@@ -2014,7 +2019,7 @@ async function updateClawBoxAsOwner(): Promise<void> {
     // The previous build is back in place (or reclaimed on the next start), so
     // there is no restart to continue from — the same rule as
     // waitForRebuildToTakeOver.
-    await set("update_needs_continuation", undefined);
+    await setMany({ update_needs_continuation: undefined, [UPDATE_REBUILD_DISPATCHED_KEY]: undefined });
     throw new Error(`Rebuild failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   await restartUiProcess();

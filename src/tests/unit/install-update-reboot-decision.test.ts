@@ -201,6 +201,7 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
       // TASK-2517: the build on disk is (or is not) already this checkout's,
       // and the note that tells the update's second half so.
       `forget_rebuild_kept_build() { echo forget_rebuild_kept_build >> ${JSON.stringify(events)}; }`,
+      `disarm_gateway_handback() { echo disarm_gateway_handback >> ${JSON.stringify(events)}; }`,
       `record_rebuild_kept_build() { echo record_rebuild_kept_build >> ${JSON.stringify(events)}; return ${opts.noteFails ? 1 : 0}; }`,
       opts.current
         ? "build_is_current_for_checkout() { echo 'the build on disk is current'; }"
@@ -293,6 +294,16 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
     expect(at(rebuilt.events, "record_rebuild_kept_build")).toBe(-1);
   });
 
+  it("cancels an earlier update's gateway fallback on every rebuild step, kept build or not", () => {
+    // do_rebuild cancels it too, but a kept build never reaches do_rebuild.
+    const kept = runStep({ testMode: false, reasons: [], current: true });
+    expect(at(kept.events, "disarm_gateway_handback")).toBeGreaterThan(-1);
+    expect(at(kept.events, "disarm_gateway_handback")).toBeLessThan(at(kept.events, "record_rebuild_kept_build"));
+    for (const f of ["events", "reason-calls"]) fs.rmSync(path.join(tmp, f), { force: true });
+    const rebuilt = runStep({ testMode: false, reasons: [] });
+    expect(at(rebuilt.events, "disarm_gateway_handback")).toBeLessThan(at(rebuilt.events, "do_rebuild"));
+  });
+
   it("rebuilds as before when the kept build cannot be noted", () => {
     const r = runStep({ testMode: false, reasons: [], current: true, noteFails: true });
     expect(r.status).toBe(0);
@@ -324,6 +335,7 @@ d("step_rebuild_reboot: reboots only for a reason, otherwise restarts", () => {
       "do_rebuild() { return 137; }",
       "forget_rebuild_kept_build() { :; }",
       "record_rebuild_kept_build() { :; }",
+      "disarm_gateway_handback() { :; }",
       "build_is_current_for_checkout() { echo 'not current'; return 1; }",
       "is_test_mode() { return 1; }",
       "served_build_commit() { :; }",

@@ -79,6 +79,7 @@ function runStep(rebuildRc: number, rebuildBody?: string): { status: number | nu
     fn("restore_checkout_to_served_build"),
     // The rebuild skip (TASK-2517) has its own suite: here the build is never current.
     "forget_rebuild_kept_build() { :; }",
+    "disarm_gateway_handback() { :; }",
     "record_rebuild_kept_build() { :; }",
     "build_is_current_for_checkout() { echo 'not current'; return 1; }",
     fn("step_rebuild_reboot"),

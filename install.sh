@@ -3160,10 +3160,11 @@ report_gateway_build_pause() {
 # (GATEWAY_HANDBACK_UNIT) starts it GATEWAY_HANDBACK_S seconds later unless
 # something else has touched it since the pause: it acts only while the
 # gateway is still inactive (or failed) with the very InactiveEnterTimestamp the
-# pause left, and while no root update step runs. gateway_verify's start, a
-# harness swap's stop and an operator's start or stop all move that stamp, and a
-# quiesce masks the unit, so the net can only ever start a gateway nobody has
-# asked about since the build stopped it. Anything this cannot arm is the old
+# pause left, and while no root update step, no gateway quiesce and no OpenClaw
+# process runs. Every START moves that stamp (gateway_verify's, an operator's),
+# a quiesce holds the unit's start condition off, and the waits below cover the
+# work that runs beside a gateway already stopped, so the net can only ever
+# start a gateway nobody has started or worked on since the build stopped it. Anything this cannot arm is the old
 # behaviour: the gateway is started here.
 GATEWAY_HANDBACK_UNIT="clawbox-gateway-handback"
 GATEWAY_HANDBACK_S="${CLAWBOX_GATEWAY_HANDBACK_S:-900}"
@@ -3172,18 +3173,28 @@ case "$GATEWAY_HANDBACK_S" in ''|*[!0-9]*) GATEWAY_HANDBACK_S=900 ;; esac
 # the gateway under one, and it does not give up because of one either.
 GATEWAY_HANDBACK_RECHECK_S="${CLAWBOX_GATEWAY_HANDBACK_RECHECK_S:-60}"
 case "$GATEWAY_HANDBACK_RECHECK_S" in ''|*[!0-9]*) GATEWAY_HANDBACK_RECHECK_S=60 ;; esac
+# config/clawbox-gateway-maintenance.sh's guard: present while the updater holds
+# the gateway quiesced.
+GATEWAY_MAINTENANCE_GUARD="${CLAWBOX_GATEWAY_MAINTENANCE_GUARD:-/run/clawbox-gateway-maintenance}"
 # What the timer runs, as root, with the stamp the pause left as $1 and the
 # recheck interval as $2: while a root update step runs it waits and looks
 # again rather than ending, so a deadline that falls inside a long step (a
 # continuation whose process died in post_update) still starts the gateway
-# once the step is over. Inline in
+# once the step is over. It waits the same way while the updater's maintenance
+# guard ($3, /run/clawbox-gateway-maintenance: a quiesce in progress) is up, and
+# while any OpenClaw process runs: a `systemctl stop` of a gateway that is
+# already stopped moves no stamp, so a doctor --fix or an offline auth edit the
+# web server runs beside the stopped gateway would otherwise not be seen — and
+# with the gateway down, a process naming openclaw is someone working on it.
+# (`[o]penclaw`, so the pattern never matches this script's own command line.)
+# Inline in
 # this root-owned file (the mirror's copy), never a script of the tree's. ONE
 # line: systemd writes a transient unit's command into a unit file under
 # /run/systemd/transient, and a newline in it splits the ExecStart= there
 # ("Missing '=', ignoring line"), as the first board run of this showed. No
 # `${` and no `%` either: systemd expands both in a command line.
 # shellcheck disable=SC2016  # expanded by the timer's own shell
-GATEWAY_HANDBACK_SCRIPT='while :; do state=$(systemctl show clawbox-gateway.service -p ActiveState --value 2>/dev/null); case "$state" in inactive|failed) ;; *) exit 0 ;; esac; [ -n "$1" ] && [ "$(systemctl show clawbox-gateway.service -p InactiveEnterTimestampMonotonic --value 2>/dev/null)" = "$1" ] || exit 0; if systemctl list-units --no-legend --plain --state=active,activating,deactivating "clawbox-root-update@*" 2>/dev/null | grep -q .; then sleep "$2" || sleep 60; continue; fi; echo "clawbox-gateway.service was paused for an update build and nothing has started it since: starting it"; exec systemctl start --no-block clawbox-gateway.service; done'
+GATEWAY_HANDBACK_SCRIPT='while :; do state=$(systemctl show clawbox-gateway.service -p ActiveState --value 2>/dev/null); case "$state" in inactive|failed) ;; *) exit 0 ;; esac; [ -n "$1" ] && [ "$(systemctl show clawbox-gateway.service -p InactiveEnterTimestampMonotonic --value 2>/dev/null)" = "$1" ] || exit 0; if systemctl list-units --no-legend --plain --state=active,activating,deactivating "clawbox-root-update@*" 2>/dev/null | grep -q . || [ -e "$3" ] || pgrep -f "[o]penclaw" >/dev/null 2>&1; then sleep "$2" || sleep 60; continue; fi; echo "clawbox-gateway.service was paused for an update build and nothing has started it since: starting it"; exec systemctl start --no-block clawbox-gateway.service; done'
 
 disarm_gateway_handback() {
   # The service too: it may be inside its recheck loop.
@@ -3211,7 +3222,7 @@ arm_gateway_handback() {
   systemd-run --quiet --collect --unit="$GATEWAY_HANDBACK_UNIT" \
     --on-boot="$((up + GATEWAY_HANDBACK_S))s" --timer-property=AccuracySec=10s \
     --timer-property=RemainAfterElapse=no \
-    /bin/sh -c "$GATEWAY_HANDBACK_SCRIPT" sh "$stamp" "$GATEWAY_HANDBACK_RECHECK_S" >/dev/null 2>&1
+    /bin/sh -c "$GATEWAY_HANDBACK_SCRIPT" sh "$stamp" "$GATEWAY_HANDBACK_RECHECK_S" "$GATEWAY_MAINTENANCE_GUARD" >/dev/null 2>&1
 }
 
 hand_paused_gateway_to_update() {
@@ -15735,6 +15746,9 @@ step_rebuild_reboot() {
   # rebuild that never happened.
   local current_why="" build_kept=0
   forget_rebuild_kept_build
+  # And a gateway fallback an earlier update armed: do_rebuild cancels it too,
+  # but a kept build never reaches do_rebuild.
+  disarm_gateway_handback
   if current_why="$(build_is_current_for_checkout)"; then
     if record_rebuild_kept_build; then
       build_kept=1
