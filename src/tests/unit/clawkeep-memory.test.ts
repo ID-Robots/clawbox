@@ -716,17 +716,35 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     return line.slice(line.indexOf("(doctor.memory.status): ") + "(doctor.memory.status): ".length);
   }
 
-  it("keeps ordinary text that only looks like a user and password: compact JSON, a model digest", async () => {
+  it("keeps compact JSON's status code, and takes a model digest's name:tag as it would a user and password", async () => {
     const json = await loggedReason('embeddings failed {"code":401,"email":"x@y.example"}');
     expect(json).toContain('"code":401');
+    // Accepted: `name:tag@` reads exactly like `user:password@`, and a doubt is redacted.
     const digest = await loggedReason(`pull qwen3-embedding:0.6b@sha256:${"5e".repeat(32)} failed`);
-    expect(digest).toContain("qwen3-embedding:0.6b@");
+    expect(digest).not.toContain("qwen3-embedding:0.6b");
+    expect(digest).toContain("[redacted]@sha256:");
+  });
+
+  // Whatever follows the host. A dotted host under a letter TLD is already
+  // taken by the e-mail rule, so the address after the `@` here is one that
+  // only the user and password rule itself can take the password before.
+  it.each([
+    ["a host followed by a colon and text", "connect owner:hunter2pw@host: refused"],
+    ["an address followed by a colon and text", "connect owner:hunter2pw@192.0.2.10: timeout"],
+    ["an address followed by a query", "connect owner:hunter2pw@192.0.2.10?x=1 failed"],
+    ["an address followed by a fragment", "connect owner:hunter2pw@192.0.2.10#frag failed"],
+    ["an IPv6 literal", "connect owner:hunter2pw@[2001:db8::1]:8080 refused"],
+    ["a host followed by any other character", "connect owner:hunter2pw@host>"],
+  ])("takes the password out of a scheme-less user and password before %s", async (_case, sentence) => {
+    const reason = await loggedReason(sentence);
+    expect(reason).not.toBe("");
+    expect(reason).not.toContain("hunter2pw");
   });
 
   // What the redaction's doc says it leaves, pinned so a change to it is seen.
   it.each([
     ["a password holding a slash", "connect owner:pa/ss@192.0.2.44:8081 refused", "owner:pa/ss@"],
-    ["a password holding an @", "connect us:p@ss@host.example.com refused", "us:p@"],
+    ["the part of a password after its first @", "connect us:p@ss@192.0.2.45 refused", "[redacted]@ss@"],
     ["a password holding whitespace", "connect owner:pa ss@host.example.com refused", "owner:pa"],
     ["a 64-hex run glued to a word character", `refused tok_${"5e".repeat(32)}`, `tok_${"5e".repeat(32)}`],
     ["a hex run longer than 64", `refused ${"5e".repeat(32)}a`, `${"5e".repeat(32)}a`],

@@ -1618,19 +1618,21 @@ function coreEmbedderFailure(raw: unknown, agentId: string): string {
  *
  * Taken out, in order: every `scheme://` run (an endpoint goes whole, user and
  * password with it); paths under the usual roots; the word after `Basic` (6 or
- * more characters, also after an ordinary "Basic"); `user:password@` before a
- * host written without a scheme, when neither half holds whitespace, `/`, `@`,
- * a quote, a comma or a brace and a host name or address (with an optional
- * port) follows; a run of exactly 64 hex digits standing alone. Then
- * `sanitizeText`: the credential shapes and named values it knows, e-mail
- * addresses, IP addresses other than loopback, home paths, query strings, and
- * host names under the TLDs it lists.
+ * more characters, also after an ordinary "Basic"); `user:password@` written
+ * without a scheme, when neither half holds whitespace, `/`, `@`, a quote, a
+ * comma or a brace and the `@` is followed by a letter, a digit, `_` or `[`
+ * (whatever comes after the host: a doubt is redacted) — which also takes the
+ * `name:tag@` of a model digest such as `qwen3-embedding:0.6b@sha256:…`; a run
+ * of exactly 64 hex digits standing alone. Then `sanitizeText`: the credential
+ * shapes and named values it knows, e-mail addresses, IP addresses other than
+ * loopback, home paths, query strings, and host names under the TLDs it lists.
  *
- * What stays: a password holding whitespace, `/`, `@`, a quote, a comma or a
- * brace (the pair is not matched; the host after it may still go, as above);
- * a 64-hex run glued to a word character, or longer than 64; a loopback
- * `address:port`; the port of any other bare `address:port`; a host written
- * without a scheme under a TLD `sanitizeText` does not list.
+ * What stays: a password holding whitespace, `/`, a quote, a comma or a brace
+ * (the pair is not matched; the host after it may still go, as above); of a
+ * password holding `@`, the part after its first `@` (unless a later rule takes
+ * it with the host); a 64-hex run glued to a word character, or longer than 64;
+ * a loopback `address:port`; the port of any other bare `address:port`; a host
+ * written without a scheme under a TLD `sanitizeText` does not list.
  */
 function redactCoreSentence(said: string): string {
   const head = said.slice(0, 1_000);
@@ -1639,7 +1641,7 @@ function redactCoreSentence(said: string): string {
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[endpoint]")
     .replace(/(?:~|\/(?:home|root|tmp|var|srv|opt|usr|etc|mnt|media|data))\/\S*/g, "[path]")
     .replace(/\bBasic\s+[A-Za-z0-9+/=._~-]{6,}/gi, "Basic [redacted]")
-    .replace(/[^\s:@/"',{}]+:[^\s@/"',{}]+@(?=[\w.-]+(?::\d+)?(?:$|[\s/"',;)\]}]))/g, "[redacted]@")
+    .replace(/[^\s:@/"',{}]+:[^\s@/"',{}]+@(?=[\w[])/g, "[redacted]@")
     .replace(/\b[0-9a-f]{64}\b/gi, "[redacted]")
     .replace(/\s+/g, " ");
   // `sanitizeText`'s cap adds an ellipsis past 200; the line keeps 200.
