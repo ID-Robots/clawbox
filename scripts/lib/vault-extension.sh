@@ -23,6 +23,43 @@ vault_extension_dir() {
   printf '%s\n' "$dir"
 }
 
+# Give a vault that is starting RIGHT NOW the moment it needs to build the
+# folder. An update restarts the browser in the same breath as it first starts
+# the vault (install.sh restart_services_after_update), and a box boots both
+# at once; without this the browser of that start would come up without the
+# extension and keep running that way until someone closed it.
+#
+# Waits a second at a time, at most LIMIT seconds (default 20), and only when a
+# folder can still be expected: the vault's unit is starting, has been up for
+# less than a minute, or is enabled and about to be started. A vault that has
+# been up for a while without building one is not going to, and every browser
+# start would pay for it. Never fails: a browser without the extension still
+# beats no browser.
+vault_extension_wait() {
+  local limit="${1:-20}" waited=0 state entered now
+  [ -z "$(vault_extension_dir)" ] || return 0
+  state="$(systemctl show clawbox-vault.service -p ActiveState --value 2>/dev/null || true)"
+  case "$state" in
+    activating) ;;
+    active)
+      entered="$(systemctl show clawbox-vault.service -p ActiveEnterTimestampMonotonic --value 2>/dev/null || true)"
+      now="$(awk '{ printf "%d", $1 * 1000000 }' /proc/uptime 2>/dev/null || true)"
+      case "$entered" in '' | *[!0-9]*) return 0 ;; esac
+      case "$now" in '' | *[!0-9]*) return 0 ;; esac
+      [ $((now - entered)) -lt 60000000 ] || return 0
+      ;;
+    *)
+      systemctl is-enabled --quiet clawbox-vault.service 2>/dev/null || return 0
+      ;;
+  esac
+  while [ "$waited" -lt "$limit" ]; do
+    sleep 1
+    waited=$((waited + 1))
+    [ -z "$(vault_extension_dir)" ] || return 0
+  done
+  return 0
+}
+
 # The browser flags that load it, one per line, or nothing.
 #
 # The path is fixed, so the extension keeps its id, and with it its pairing,

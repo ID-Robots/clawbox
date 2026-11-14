@@ -3,7 +3,7 @@
 // itself (after the owner chose a PIN, never before), cards are off unless
 // switched on, and the extension is built by the service.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp } from "../src/server/app";
@@ -310,6 +310,8 @@ describe("the service builds the extension the browser loads", () => {
     }
     expect(JSON.parse(readFileSync(join(dir, "pairing.json"), "utf8"))).toEqual({ secret: "s".repeat(43) });
     expect(statSync(join(dir, "pairing.json")).mode & 0o777).toBe(0o600);
+    // Every file landed by rename: nothing half-written is left for a browser that starts meanwhile.
+    expect(readdirSync(dir).concat(readdirSync(join(dir, "build"))).filter((f) => f.endsWith(".tmp"))).toEqual([]);
     expect(statSync(dir).mode & 0o777).toBe(0o700);
     const manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
     expect(manifest.manifest_version).toBe(3);

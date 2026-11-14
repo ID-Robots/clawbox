@@ -7,7 +7,7 @@
 // That file is mode 600 and no web page can read it (the manifest lists no
 // web_accessible_resources), so only a browser running as the box user gets a
 // token without a pairing code.
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const DEFAULT_SERVICE = "http://127.0.0.1:4796";
@@ -33,6 +33,18 @@ export function assertLoopbackService(service: string): string {
   return service;
 }
 
+/**
+ * Every file lands by rename. The browser may be starting at this very moment
+ * (an update restarts it together with this service) and must load either the
+ * file that was there or the new one, never the first half of a script.
+ */
+function writeAtomic(file: string, data: string | Uint8Array, mode = 0o600): void {
+  const tmp = `${file}.tmp`;
+  writeFileSync(tmp, data, { mode });
+  chmodSync(tmp, mode);
+  renameSync(tmp, file);
+}
+
 export async function buildExtension(opts: ExtensionBuildOptions): Promise<void> {
   const service = assertLoopbackService((opts.service ?? DEFAULT_SERVICE).replace(/\/$/, ""));
   const src = join(opts.repoDir, "extension");
@@ -54,10 +66,10 @@ export async function buildExtension(opts: ExtensionBuildOptions): Promise<void>
       },
     });
     if (!result.success) throw new Error(`extension build failed (${name}): ${result.logs.map((l) => l.message).join("; ")}`);
-    writeFileSync(join(opts.outDir, "build", `${name}.js`), await result.outputs[0]!.text());
+    writeAtomic(join(opts.outDir, "build", `${name}.js`), await result.outputs[0]!.text());
   }
 
-  for (const file of STATIC_FILES) copyFileSync(join(src, file), join(opts.outDir, file));
+  for (const file of STATIC_FILES) writeAtomic(join(opts.outDir, file), new Uint8Array(readFileSync(join(src, file))));
 
   const manifest = JSON.parse(readFileSync(join(src, "manifest.json"), "utf8")) as {
     name: string;
@@ -65,12 +77,8 @@ export async function buildExtension(opts: ExtensionBuildOptions): Promise<void>
   };
   manifest.content_security_policy.extension_pages = manifest.content_security_policy.extension_pages.replace(DEFAULT_SERVICE, service);
   if (opts.nameSuffix) manifest.name = `${manifest.name} ${opts.nameSuffix}`;
-  writeFileSync(join(opts.outDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-
-  // Replaced by rename: the browser reads either the old secret or the new one, never half a file.
-  const pairing = join(opts.outDir, "pairing.json");
-  const tmp = `${pairing}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(opts.pairSecret ? { secret: opts.pairSecret } : {})}\n`, { mode: 0o600 });
-  chmodSync(tmp, 0o600);
-  renameSync(tmp, pairing);
+  writeAtomic(join(opts.outDir, "pairing.json"), `${JSON.stringify(opts.pairSecret ? { secret: opts.pairSecret } : {})}\n`);
+  // The manifest LAST: the launcher loads the folder only once it is complete
+  // (scripts/lib/vault-extension.sh), and the manifest is what it looks for first.
+  writeAtomic(join(opts.outDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 }

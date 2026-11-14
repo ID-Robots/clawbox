@@ -322,9 +322,70 @@ describe("the extension is preloaded in the box's own browser", () => {
     expect(flags({ CLAWBOX_VAULT_HOME: path.join(home, "no-vault-here") })).toEqual([]);
   });
 
+  /** Run vault_extension_wait with a stub systemctl; returns how long it took, in ms. */
+  function waitMs(opts: { state: string; enabled: boolean; upForS?: number; limit?: number; home: string; appearAfterS?: number }): number {
+    const bin = path.join(home, `bin-${Math.random().toString(36).slice(2)}`);
+    fs.mkdirSync(bin, { recursive: true });
+    const uptimeUs = Math.floor(Number(fs.readFileSync("/proc/uptime", "utf8").split(" ")[0]) * 1_000_000);
+    const entered = uptimeUs - (opts.upForS ?? 0) * 1_000_000;
+    fs.writeFileSync(
+      path.join(bin, "systemctl"),
+      [
+        "#!/bin/sh",
+        'case "$*" in',
+        `  *ActiveState*) echo "${opts.state}" ;;`,
+        `  *ActiveEnterTimestampMonotonic*) echo "${entered}" ;;`,
+        `  *is-enabled*) exit ${opts.enabled ? 0 : 1} ;;`,
+        "esac",
+        "exit 0",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const dir = path.join(opts.home, ".clawbox-vault", "extension");
+    const started = Date.now();
+    execFileSync(
+      "bash",
+      [
+        "-c",
+        // The folder is finished by a background writer, as the vault's first build would.
+        'set -euo pipefail; source "$1"; if [ "$3" != none ]; then (sleep "$3"; mkdir -p "$4/build"; for f in manifest.json popup.html build/background.js build/content.js build/popup.js; do echo x > "$4/$f"; done) & fi; vault_extension_wait "$2"; vault_extension_flags | head -n 1',
+        "_",
+        LIB,
+        String(opts.limit ?? 5),
+        opts.appearAfterS === undefined ? "none" : String(opts.appearAfterS),
+        dir,
+      ],
+      { encoding: "utf8", env: testEnv({ PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, HOME: opts.home }) },
+    );
+    return Date.now() - started;
+  }
+
+  it("waits for a vault that is just starting to build the folder, and not for one that will not", () => {
+    const fresh = (name: string) => fs.mkdtempSync(path.join(home, `${name}-`));
+    // Starting right now (an update, a boot): the browser gets the extension of this very start.
+    const coming = fresh("coming");
+    const took = waitMs({ state: "activating", enabled: true, home: coming, appearAfterS: 1 });
+    expect(took).toBeGreaterThanOrEqual(900);
+    expect(took).toBeLessThan(4500);
+    expect(fs.existsSync(path.join(coming, ".clawbox-vault", "extension", "manifest.json"))).toBe(true);
+    // Enabled and about to be started, or up for a few seconds: the same.
+    expect(waitMs({ state: "inactive", enabled: true, home: fresh("queued"), appearAfterS: 1 })).toBeGreaterThanOrEqual(900);
+    expect(waitMs({ state: "active", enabled: true, upForS: 3, home: fresh("young"), appearAfterS: 1 })).toBeGreaterThanOrEqual(900);
+    // No vault on this box, or one that has been up for minutes with no folder: no wait at all.
+    expect(waitMs({ state: "inactive", enabled: false, home: fresh("none") })).toBeLessThan(900);
+    expect(waitMs({ state: "active", enabled: true, upForS: 600, home: fresh("old") })).toBeLessThan(900);
+    // And it gives up at the limit rather than holding the browser back.
+    const gaveUp = waitMs({ state: "activating", enabled: true, home: fresh("never"), limit: 2 });
+    expect(gaveUp).toBeGreaterThanOrEqual(1900);
+    expect(gaveUp).toBeLessThan(5000);
+  });
+
   it("is passed to the browser by the launcher, which no other flag of that kind fights", () => {
     expect(LAUNCH).toContain('source "$(dirname "${BASH_SOURCE[0]}")/lib/vault-extension.sh"');
     expect(LAUNCH).toContain("mapfile -t EXTENSION_FLAGS < <(vault_extension_flags)");
+    expect(LAUNCH.indexOf("vault_extension_wait ")).toBeGreaterThan(-1);
+    expect(LAUNCH.indexOf("vault_extension_wait ")).toBeLessThan(LAUNCH.indexOf("mapfile -t EXTENSION_FLAGS"));
     const exec = LAUNCH.slice(LAUNCH.lastIndexOf("exec env DISPLAY="));
     expect(exec).toContain('"${EXTENSION_FLAGS[@]}" \\');
     // Chromium keeps only the LAST --disable-features: a second one would undo this one.

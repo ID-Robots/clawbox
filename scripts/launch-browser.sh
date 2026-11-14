@@ -354,6 +354,7 @@ fi
 # ClawBox Vault's extension, preloaded when the vault service has built it
 # (scripts/lib/vault-extension.sh says where, and why only a complete folder).
 EXTENSION_FLAGS=()
+vault_extension_wait "${CLAWBOX_VAULT_EXTENSION_WAIT_S:-20}"
 mapfile -t EXTENSION_FLAGS < <(vault_extension_flags)
 if [ "${#EXTENSION_FLAGS[@]}" -gt 0 ]; then
   echo "Extension: ClawBox Vault (${EXTENSION_FLAGS[0]#--load-extension=})"
