@@ -306,7 +306,7 @@ LEAKS=$(board '
   log=$(journalctl -u clawbox-vault.service --no-pager 2>/dev/null)
   jrc=$?
   # Lines of the service itself, not the "-- No entries --" notes of journalctl.
-  records=$(printf "%s\n" "$log" | grep -cv "^-- " || true)
+  records=$(printf "%s\n" "$log" | grep -cvE "^(-- |[[:space:]]*$)" || true)
   n=0
   [ -n "$t" ] && n=$((n + $(printf "%s" "$log" | grep -cF -- "$t")))
   [ -n "$s" ] && n=$((n + $(printf "%s" "$log" | grep -cF -- "$s")))
