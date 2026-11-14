@@ -7,9 +7,10 @@
  *
  *  1. THE POOL IN THE GATEWAY — every Claude account is its own profile, the
  *     access token only, in an order that follows the pool (the active account
- *     first, the chat's own sign-in last); a limited account out of the order
- *     while another can answer, or the chat's own subscription sign-in, so no
- *     session core pinned to it stays there, and back at its reset; the
+ *     first, the chat's own sign-in last); a limited account out of the
+ *     gateway while another can answer, or the chat's own subscription
+ *     sign-in, so no session bound to it stays there (TASK-2533), and back
+ *     when it can answer, with no stop of its own while another does; the
  *     gateway stopped only for a token paste, and once for every account's.
  *  2. NOTHING TAKEN FOR NOTHING — a chat on another provider is never moved;
  *     an unreadable config removes nothing; the owner's own profiles are never
@@ -97,6 +98,8 @@ function fakeCore() {
     chatModel: "anthropic/claude-opus-5-5",
     /** The chat reader says what openclaw.json's order is (the production reader does). */
     tellsConfigOrder: false,
+    /** openclaw.json cannot be written (a locked file, a config conflict). */
+    refuseConfigSet: false,
     configWrites: [] as string[][],
     /** `cron.update` calls core refuses, by step value (`null` is a clear). */
     refuseCronUpdate: new Set<string | null>(),
@@ -116,6 +119,7 @@ function fakeCore() {
       ...(core.tellsConfigOrder ? { configOrderIds: core.configOrder ? [...core.configOrder] : null } : {}),
     }),
     setConfigOrder: async (ids) => {
+      if (core.refuseConfigSet) throw new Error("config write refused: the file is locked");
       core.configWrites.push([...ids]);
       core.configOrder = [...ids];
     },
@@ -772,9 +776,16 @@ describe("a limited account and the sessions core pinned to it", () => {
     expect(offlineWindows).toBe(windows);
     expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
 
-    // Back (here by the owner's clear): pasted in again, its current token, after the active account.
+    // Back (here by the owner's clear) while Personal answers: no stop of its
+    // own for it — it waits for the next window the pool opens anyway.
     await pool.clearLimit(work.id);
     await gw.syncGatewayNow();
+    expect(core.profiles.has(p(work.id))).toBe(false);
+    expect(offlineWindows).toBe(windows);
+    // Personal's renewal opens one: Work goes in with it, its current token, after the active account.
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal-v2"), email: "me@example.com" });
+    await gw.keepGatewayMirror();
+    expect(offlineWindows).toBe(windows + 1);
     expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
     expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]);
   });
@@ -788,14 +799,13 @@ describe("a limited account and the sessions core pinned to it", () => {
     await pool.markLimited(personal.id, Date.now() + H, "session");
     await swap.whenSwapsSettled();
     const synced = await gw.syncGatewayNow();
-    // A session core pinned to a spent account drops that pin on its next
-    // turn, and the sign-in answers it.
+    // The sign-in leads, and the spent accounts are out of the store, so a
+    // Claude CLI session bound to one moves to the sign-in on its next turn
+    // (TASK-2533: on 2026.11.3 out of the order alone it stayed).
     expect(core.order).toEqual(["anthropic:default"]);
     expect(synced.status).toBe("ok");
-    // Out of the order, not out of the store, and the chat is still the pool's.
-    expect(core.logouts).toEqual([]);
-    expect(core.profiles.has(p(work.id))).toBe(true);
-    expect(core.profiles.has(p(personal.id))).toBe(true);
+    expect([...core.logouts].sort()).toEqual([p(work.id), p(personal.id)].sort());
+    // The chat is still the pool's, on the account back first.
     expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
     expect(await gw.keepGatewayMirror()).not.toBe("failed");
     expect(core.order).toEqual(["anthropic:default"]);
@@ -805,10 +815,9 @@ describe("a limited account and the sessions core pinned to it", () => {
     expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
   });
 
-  it("on OpenClaw 2026.11.3 takes the owner's sign-in leading a COMPLETED order, the limited accounts at its tail, as landed", async () => {
-    // The gateway takes only an order naming every profile it holds, so the
-    // limited accounts stay in it after the owner's sign-in (out of the lead,
-    // not out of the store); the pass must not call that a failed write.
+  it("on OpenClaw 2026.11.3 takes the owner's sign-in leading a COMPLETED order as landed — the limited accounts out of the store", async () => {
+    // The gateway takes only an order naming every profile it holds; with the
+    // limited accounts out of the store, that is the owner's own.
     const core = fakeCore();
     core.orderKeepsOthers = true;
     gw.startGatewaySwap();
@@ -819,9 +828,8 @@ describe("a limited account and the sessions core pinned to it", () => {
     await swap.whenSwapsSettled();
     const synced = await gw.syncGatewayNow();
     expect(synced.status).toBe("ok");
-    expect(core.order?.[0]).toBe("anthropic:default");
-    expect(new Set(core.order?.slice(1))).toEqual(new Set([p(work.id), p(personal.id)]));
-    expect(core.logouts).toEqual([]);
+    expect(core.order).toEqual(["anthropic:default"]);
+    expect(core.logouts.length).toBe(2);
     // A second pass finds the order leading with what it wants and writes nothing.
     const orders = core.orders.length;
     expect(await gw.keepGatewayMirror()).not.toBe("failed");
@@ -889,7 +897,7 @@ describe("a limited account and the sessions core pinned to it", () => {
     expect(core.orders.every((ids) => ids.length > 0)).toBe(true);
   });
 
-  it("puts an account back in at its reset, without waiting for the keeper", async () => {
+  it("leaves an account back from its reset out while another answers — no gateway stop of its own — and puts it in at once when it is the only one that can answer", async () => {
     const core = fakeCore();
     gw.startGatewaySwap();
     const { work, personal } = await twoClaudeAccounts();
@@ -897,9 +905,14 @@ describe("a limited account and the sessions core pinned to it", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     await pool.markLimited(work.id, Date.now() + H, "weekly");
     await vi.waitFor(() => expect(core.order).toEqual([p(personal.id), "anthropic:default"]));
-    // The pool's reset wake comes 20 s past the reset; the keeper's ten-minute pass does not run here.
+    const windows = offlineWindows;
+    // The pool's reset wake comes 20 s past the reset; Personal answers, so no stop for Work.
     await vi.advanceTimersByTimeAsync(H + 30_000);
-    await vi.waitFor(() => expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]));
+    await vi.waitFor(() => expect(core.order).toEqual([p(personal.id), "anthropic:default"]));
+    expect(offlineWindows).toBe(windows);
+    // Personal runs out: Work is the one that can answer, and goes in at once.
+    await pool.markLimited(personal.id, Date.now() + H, "session");
+    await vi.waitFor(() => expect(core.order?.[0]).toBe(p(work.id)));
   });
 });
 
@@ -1540,11 +1553,7 @@ describe("automations follow the pool across a swap and a renewal (TASK-2533, Op
     await gw.keepGatewayMirror();
     expect((core.crons.get("inbox") as FakeCron).payload.model).toBe(`anthropic/claude-opus-5-5@${p(work.id)}`);
     core.refuseCronUpdate.clear();
-    // A refused job is asked again after its back-off, not every minute.
-    await gw.bindGatewayCrons();
-    expect((core.crons.get("inbox") as FakeCron).payload.model).toBe(`anthropic/claude-opus-5-5@${p(work.id)}`);
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(Date.now() + 11 * 60_000);
+    // One refusal is asked again on the next pass (TASK-2533 review F6).
     await gw.bindGatewayCrons();
     const job = core.crons.get("inbox") as FakeCron;
     expect(job.payload.model).toBeUndefined();
@@ -1703,5 +1712,267 @@ describe("automations follow the pool across a swap and a renewal (TASK-2533, Op
     const n = asked.length;
     await gw.lookAtLeadUsage();
     expect(asked.length).toBe(n);
+  });
+});
+
+describe("TASK-2533 adversarial (production 2026-11-14)", () => {
+  const fiveAccounts = async (names = ["Alpha", "Bravo", "Charlie", "Delta", "Echo"]) => {
+    const ids: string[] = [];
+    for (const name of names) {
+      ids.push((await pool.addOAuthAccount({ label: `${name} Max`, email: `${name.toLowerCase()}@example.com`, tokens: oauth(`sk-ant-oat01-${name.toLowerCase()}`) })).id);
+    }
+    return ids;
+  };
+
+  it("T1 — keeps a config order that predates the pool led by the active account, its own entries kept, and gives it back when the pool leaves", async () => {
+    const core = fakeCore();
+    core.tellsConfigOrder = true;
+    // The owner's order from before the pool (marker `config` stays false): one id only the config names.
+    core.configOrder = ["anthropic:default", "anthropic:owner-extra"];
+    const ids = await fiveAccounts();
+    await gw.keepGatewayMirror();
+    const active = (await pool.readPoolState()).activeId as string;
+    expect(core.order?.[0]).toBe(p(active));
+    // Five pastes left Echo first; the pass must put the active account back at the head.
+    expect(core.configOrder?.[0]).toBe(p(active));
+    expect(core.configOrder).toContain("anthropic:owner-extra");
+    expect(ids).toHaveLength(5);
+    core.chatOnClaude = false;
+    await gw.syncGatewayNow();
+    expect(core.configOrder).toEqual(["anthropic:default", "anthropic:owner-extra"]);
+  });
+
+  it("T2 — a refused write of openclaw.json's order leaves the move pending, and the watcher's next minute puts the active account back at its head", async () => {
+    const core = fakeCore();
+    core.tellsConfigOrder = true;
+    const ids = await fiveAccounts(["Alpha", "Bravo", "Charlie"]);
+    await gw.keepGatewayMirror();
+    const active = (await pool.readPoolState()).activeId as string;
+    expect(active).toBe(ids[0]);
+    expect(core.configOrder?.[0]).toBe(p(active));
+
+    core.refuseConfigSet = true;
+    // Charlie's renewal: its paste puts it at the head of the config order.
+    await pool.replaceCredential(ids[2], { kind: "oauth", tokens: oauth("sk-ant-oat01-charlie-v2"), email: "charlie@example.com" });
+    await gw.keepGatewayMirror();
+    expect(core.configOrder?.[0]).toBe(p(ids[2])); // precondition: the head is the last paste
+    // New CLI sessions and cron-isolated runs follow this order on 2026.11.3: the lead has not landed for them.
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: active, pending: true });
+
+    core.refuseConfigSet = false;
+    await gw.noteGatewayCooldowns();
+    await gw.bindGatewayCrons();
+    expect(core.configOrder?.[0]).toBe(p(active));
+  });
+
+  it("T3 — records the lead's limit at once when an automation the box bound to it dies on the limit (no core cooldown, usage unreadable)", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    addCron(core, { id: "inbox" });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "inbox")).toBe(p(work.id));
+    // Anthropic's usage endpoint is rate-limited (seen in production); core records no cooldown for a CLI limit.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{\"error\":\"rate_limited\"}", { status: 429 })));
+    const job = core.crons.get("inbox") as FakeCron;
+    job.state = { lastStatus: "error", lastError: "anthropic/claude-opus-5-5: You've hit your weekly limit · resets Mon 9am", lastRunAtMs: Date.now() };
+
+    await gw.scanGatewayCrons();
+    await swap.whenSwapsSettled();
+
+    const state = await pool.readPoolState();
+    expect(state.accounts.find((a) => a.id === work.id)?.status).toBe("limited");
+    expect(state.activeId).toBe(personal.id);
+    expect(runCron(core, "inbox")).toBe(p(personal.id));
+  });
+
+  it("T4 — learns a spent window on a held account that is not the lead: its CLI-bound sessions stay on it on 2026.11.3", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    expect((await pool.readPoolState()).gateway?.accountId).toBe(work.id);
+    const resetsAt = Date.now() + 2 * H;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (!String(url).endsWith("/api/oauth/usage")) return new Response("{}", { status: 404 });
+      const token = ((init?.headers as Record<string, string> | undefined)?.Authorization ?? "").replace(/^Bearer /, "");
+      const body = token.includes("personal")
+        ? { five_hour: { utilization: 100, resets_at: new Date(resetsAt).toISOString() }, seven_day: { utilization: 40, resets_at: null } }
+        : { five_hour: { utilization: 5, resets_at: null }, seven_day: { utilization: 10, resets_at: null } };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+
+    // The watcher's looks over the next ten minutes (one account a tick would do).
+    for (let i = 0; i < 10; i += 1) await gw.lookAtLeadUsage(Date.now() + i * 60_000 + 10 * 60_000);
+    await swap.whenSwapsSettled();
+
+    expect((await pool.readPoolState()).accounts.find((a) => a.id === personal.id)?.status).toBe("limited");
+    await gw.keepGatewayMirror();
+    expect(core.profiles.has(p(personal.id))).toBe(false);
+  });
+
+  it("T5 — takes a held account out within the watcher's minute when the pool records its limit without moving the active one", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    expect((await pool.readPoolState()).activeId).toBe(work.id);
+    // No live request from the lead look below.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{\"error\":\"rate_limited\"}", { status: 429 })));
+
+    // A usage reading (or a coding run) records Personal's week spent; Work stays active.
+    await pool.markLimited(personal.id, Date.now() + 24 * H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+    // The watcher's minute pass, no keeper pass.
+    await gw.noteGatewayCooldowns();
+    await gw.lookAtLeadUsage();
+    await gw.bindGatewayCrons();
+
+    expect(core.logouts).toEqual([p(personal.id)]);
+  });
+
+  it("T6 — pastes no limited account back, and stops nothing, when the last answering account runs out", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+    expect(core.profiles.has(p(work.id))).toBe(false);
+    const windows = offlineWindows;
+    const pastes = core.pastes.length;
+
+    await pool.markLimited(personal.id, Date.now() + H, "session", { source: "chat" });
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+
+    expect(core.order?.[0]).toBe("anthropic:default");
+    // Work cannot answer anyone: pasting it back costs a gateway stop for nothing.
+    expect(core.pastes.slice(pastes).map((x) => x.profileId)).not.toContain(p(work.id));
+    expect(offlineWindows).toBe(windows);
+  });
+
+  it("T7 — backs off a paste-back core keeps refusing instead of stopping the assistant every ten minutes while another account answers", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + H, "session", { source: "chat" });
+    await swap.whenSwapsSettled();
+    expect(core.profiles.has(p(work.id))).toBe(false);
+
+    core.refusePasteOf.add(p(work.id));
+    await pool.clearLimit(work.id); // its reset (Personal stays active)
+    await gw.syncGatewayNow();
+    expect((await pool.readPoolState()).activeId).toBe(personal.id);
+    const windows = offlineWindows;
+    for (let i = 0; i < 3; i += 1) await gw.keepGatewayMirror();
+
+    expect(offlineWindows - windows).toBeLessThan(3);
+  });
+
+  it("T8 — marks nothing on a 429 or 401 usage answer, and asks again within two minutes rather than ten", async () => {
+    fakeCore();
+    const { work } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    let status = 429;
+    const asked: number[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (!String(url).endsWith("/api/oauth/usage")) return new Response("{}", { status: 404 });
+      asked.push(status);
+      return new Response("{\"error\":\"no\"}", { status });
+    }));
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    await gw.lookAtLeadUsage();
+    expect((await pool.readPoolState()).accounts.find((a) => a.id === work.id)?.status).toBe("ok");
+
+    status = 401;
+    vi.setSystemTime(t0 + 2 * 60_000);
+    await gw.lookAtLeadUsage();
+    expect((await pool.readPoolState()).accounts.find((a) => a.id === work.id)?.status).toBe("ok");
+    expect(asked).toEqual([429, 401]);
+  });
+
+  it("T9 — a reading another caller took nine minutes ago does not push the lead's next real ask to twenty minutes", async () => {
+    fakeCore();
+    gw.startGatewaySwap();
+    const { work } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    let spentNow = false;
+    let asks = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (!String(url).endsWith("/api/oauth/usage")) return new Response("{}", { status: 404 });
+      asks += 1;
+      const body = spentNow
+        ? { five_hour: { utilization: 100, resets_at: new Date(Date.now() + 2 * H).toISOString() }, seven_day: { utilization: 40, resets_at: null } }
+        : { five_hour: { utilization: 5, resets_at: null }, seven_day: { utilization: 10, resets_at: null } };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+    }));
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    await pool.readAccountUsage(work.id); // the owner's card, or a move's room read
+    spentNow = true; // the five-hour window runs out right after
+    vi.setSystemTime(t0 + 9 * 60_000);
+    await gw.lookAtLeadUsage();
+    vi.setSystemTime(t0 + 18.5 * 60_000);
+    await gw.lookAtLeadUsage();
+    await swap.whenSwapsSettled();
+
+    expect(asks).toBeGreaterThan(1);
+    expect((await pool.readPoolState()).accounts.find((a) => a.id === work.id)?.status).toBe("limited");
+  });
+
+  it("T10 — a rebind refused right after the swap that logged its account out is asked again on the next minute", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    addCron(core, { id: "inbox" });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "inbox")).toBe(p(work.id));
+
+    // The scheduler is still loading after the pass's stop/start: the first update is refused.
+    core.refuseCronUpdate.add(`anthropic/claude-opus-5-5@${p(personal.id)}`);
+    await pool.markLimited(work.id, Date.now() + 2 * H, "session", { source: "chat" });
+    await swap.whenSwapsSettled();
+    expect(core.profiles.has(p(work.id))).toBe(false);
+
+    core.refuseCronUpdate.clear();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 60_000);
+    await gw.bindGatewayCrons();
+
+    expect(runCron(core, "inbox")).toBe(p(personal.id));
+  });
+
+  it("T11 — when the stored order does not read back, openclaw.json's head is the account that should lead, never the last one pasted", async () => {
+    const core = fakeCore();
+    core.tellsConfigOrder = true;
+    core.orderReadsBackOtherwise = true;
+    const ids = await fiveAccounts();
+    await gw.keepGatewayMirror();
+    const active = (await pool.readPoolState()).activeId as string;
+    expect(core.pastes.at(-1)?.profileId).toBe(p(ids[4])); // precondition: Echo pasted last
+    expect([core.order?.[0], p(active)]).toContain(core.configOrder?.[0]);
+  });
+
+  it("F6 — backs a job off only after core refused it twice in a row, and never while its account has left the gateway", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    const job = addCron(core, { id: "inbox", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-sonnet-5-5" } });
+    core.refuseCronUpdate.add(`anthropic/claude-sonnet-5-5@${p(work.id)}`);
+    await gw.keepGatewayMirror();
+    await gw.bindGatewayCrons();
+    const asked = () => core.calls.filter((c) => c.method === "cron.update" && c.params.id === "inbox").length;
+    const twice = asked();
+    expect(twice).toBe(2);
+    // Twice refused, its account still in: not asked every minute.
+    await gw.bindGatewayCrons();
+    expect(asked()).toBe(twice);
+    core.refuseCronUpdate.clear();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 11 * 60_000);
+    await gw.bindGatewayCrons();
+    expect(job.payload.model).toBe(`anthropic/claude-sonnet-5-5@${p(work.id)}`);
   });
 });

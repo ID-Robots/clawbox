@@ -72,8 +72,17 @@ const BINDING_FAILURE_RE = /no recorded inference account|inference account was 
 /** A run lost to its account is run again once in this long, and only when it is this recent: its moment has passed. */
 export const BINDING_RETRY_WINDOW_MS = 2 * 60 * 60_000;
 
-/** A job whose update core refused is not asked again for this long (a busy scheduler, an agent core resolves otherwise). */
+/**
+ * A job whose update core refused TWICE in a row is not asked again for this
+ * long (an agent core resolves otherwise, a job core will not take). One
+ * refusal is asked again on the next pass: right after a stop and start the
+ * scheduler may still be loading, and the job is bound to an account that may
+ * have just left the gateway.
+ */
 export const REFUSED_BACKOFF_MS = 10 * 60_000;
+
+/** Per job: when core last refused its update, and how many times in a row. */
+export type CronRefusals = Map<string, { at: number; count: number }>;
 
 /** `cron.list` answers at most this many jobs a page. */
 const LIST_PAGE = 200;
@@ -192,6 +201,13 @@ export interface CronPlanInput {
   now: number;
 }
 
+export interface CronBindingRun {
+  /** Refusals per job, kept by the caller across passes (the gateway's process store). */
+  refused?: CronRefusals;
+  /** The profiles the gateway holds now: a job recorded on one that left is never held back by a refusal. */
+  heldProfiles?: ReadonlySet<string>;
+}
+
 /**
  * Which jobs to adopt onto `target`, and how. Pure: the box's records and
  * `cron.list` in, the updates out.
@@ -297,12 +313,12 @@ async function listAll(call: CronBindingDeps["call"]): Promise<{ jobs: CronJobDe
   return { jobs, complete: false };
 }
 
-/** Jobs whose update core refused, and when (per process: a restart asks again). */
-const refusedAt = new Map<string, number>();
+/** Refusals when the caller keeps none (per module copy: the gateway passes its process store's). */
+const ownRefusals: CronRefusals = new Map();
 
 /** Test seam: forget which jobs core refused. */
 export function _resetCronBindingForTests(): void {
-  refusedAt.clear();
+  ownRefusals.clear();
 }
 
 /**
@@ -312,8 +328,9 @@ export function _resetCronBindingForTests(): void {
  */
 export async function bindCronsToTarget(
   deps: CronBindingDeps,
-  input: Omit<CronPlanInput, "jobs" | "records" | "now" | "skip"> & { now?: number },
+  input: Omit<CronPlanInput, "jobs" | "records" | "now" | "skip"> & CronBindingRun & { now?: number },
 ): Promise<CronBindingResult> {
+  const refusedAt = input.refused ?? ownRefusals;
   const now = input.now ?? Date.now();
   const result: CronBindingResult = { bound: 0, released: 0, owed: 0, rerun: 0, unread: false };
   let listed: { jobs: CronJobDefinition[]; complete: boolean };
@@ -347,8 +364,13 @@ export async function bindCronsToTarget(
       }
     }
   }
-  const skip = new Set([...refusedAt].filter(([, at]) => now - at < REFUSED_BACKOFF_MS).map(([id]) => id));
-  const plans = planCronBindings({ ...input, jobs, records, skip, now });
+  const skip = new Set([...refusedAt].filter(([id, r]) => {
+    if (r.count < 2 || now - r.at >= REFUSED_BACKOFF_MS) return false;
+    const on = records[id]?.profileId;
+    return !(on && input.heldProfiles && !input.heldProfiles.has(on));
+  }).map(([id]) => id));
+  const { refused: _refused, heldProfiles: _held, ...planInput } = input;
+  const plans = planCronBindings({ ...planInput, jobs, records, skip, now });
   for (const plan of plans) {
     const { job } = plan;
     if (plan.release && plan.steps.length === 0) {
@@ -389,7 +411,7 @@ export async function bindCronsToTarget(
         revision = revisionOf(reply);
         landed += 1;
       } catch (err) {
-        refusedAt.set(job.id, now);
+        refusedAt.set(job.id, { at: now, count: (refusedAt.get(job.id)?.count ?? 0) + 1 });
         console.error(`[anthropic-cron-binding] core did not take automation ${job.id}'s account (${step === null ? "clearing the model" : step}):`, err instanceof Error ? err.message : err);
         break;
       }
