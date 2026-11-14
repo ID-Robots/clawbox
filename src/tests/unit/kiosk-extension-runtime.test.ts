@@ -605,6 +605,20 @@ describe("workspaces.js", () => {
     const refused = load("http://127.0.0.1:3005/", { listStatus: 403 });
     await flushMicrotasks();
     expect(sent(refused).filter((m) => m.type === "boxes")).toEqual([]);
+    // Refused is not "could not ask": the worker is told to forget the list.
+    expect(sent(refused)).toContainEqual({ type: "boxesRevoked" });
+    const down = load("http://127.0.0.1:3005/", { listStatus: 502 });
+    await flushMicrotasks();
+    expect(sent(down).filter((m) => m.type === "boxes" || m.type === "boxesRevoked")).toEqual([]);
+  });
+
+  it("on the kiosk's own sign-in page, has the worker forget the owner's list; never on another site's", async () => {
+    const own = load("http://localhost:3005/login?next=%2F");
+    await flushMicrotasks();
+    expect(sent(own)).toContainEqual({ type: "boxesRevoked" });
+    const other = load("https://main.example.com/login");
+    await flushMicrotasks();
+    expect(sent(other).filter((m) => m.type === "boxesRevoked")).toEqual([]);
   });
 });
 
@@ -615,11 +629,13 @@ describe("background.js: switching linked ClawBoxes", () => {
     let tabs = start.map((t) => ({ ...t }));
     let nextId = 100;
     const listening = new Set(opts.listening ?? start.map((t) => t.id));
-    const local: Record<string, unknown> = opts.stored ? { linkedBoxes: opts.stored } : {};
-    const session: Record<string, unknown> = {};
+    // The list lives in session storage (memory), never in local storage.
+    const local: Record<string, unknown> = {};
+    const session: Record<string, unknown> = opts.stored ? { linkedBoxes: opts.stored } : {};
     const area = (data: Record<string, unknown>) => ({
       get: vi.fn(async (key: string) => (key in data ? { [key]: JSON.parse(JSON.stringify(data[key])) } : {})),
       set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(data, JSON.parse(JSON.stringify(items))); }),
+      remove: vi.fn(async (key: string) => { delete data[key]; }),
     });
     let onMessage: ((msg: unknown, sender: unknown, respond: (r: unknown) => void) => unknown) | null = null;
     const event = () => ({ addListener: () => {} });
@@ -668,6 +684,7 @@ describe("background.js: switching linked ClawBoxes", () => {
       call,
       chrome,
       local,
+      session,
       tabs: () => tabs,
       active: () => tabs.find((t) => t.active)?.id,
       listen: (id: number) => listening.add(id),
@@ -744,7 +761,7 @@ describe("background.js: switching linked ClawBoxes", () => {
     const w = loadWorker([DESK], { desktopList: list });
     await w.call({ type: "switchBox", slot: 2 });
     expect(w.chrome.tabs.create).toHaveBeenCalledWith({ url: "https://main.example.com/", active: true });
-    expect(w.local.linkedBoxes).toEqual({ ...list, emptyText: "" });
+    expect(w.session.linkedBoxes).toEqual({ ...list, emptyText: "" });
   });
 
   it("says an empty slot in the box's own words when the desktop gave them", async () => {
@@ -756,7 +773,26 @@ describe("background.js: switching linked ClawBoxes", () => {
   it("never takes the kiosk's own desktop for a box of the list", async () => {
     const w = loadWorker([DESK]);
     await w.call({ type: "boxes", selfName: "laptop", boxes: [{ name: "Me", url: "http://localhost:3005/" }, list.boxes[0]] }, 1);
-    expect((w.local.linkedBoxes as { boxes: unknown[] }).boxes).toEqual([list.boxes[0]]);
+    expect((w.session.linkedBoxes as { boxes: unknown[] }).boxes).toEqual([list.boxes[0]]);
+  });
+
+  it("keeps the owner's list no longer than their session: the kiosk's sign-in page or a refused read forgets it", async () => {
+    const w = loadWorker([{ id: 1, url: "http://localhost:3005/login" }, { id: 2, url: "https://main.example.com/" }], { stored: list });
+    // Not from a web page…
+    expect(await w.call({ type: "boxesRevoked" }, 2)).toEqual({ ok: false, error: "not from the desktop" });
+    expect(w.session.linkedBoxes).toEqual(list);
+    // …but from the kiosk's own /login.
+    expect(await w.call({ type: "boxesRevoked" }, 1)).toEqual({ ok: true });
+    expect(w.session.linkedBoxes).toBeUndefined();
+    expect(w.local.linkedBoxes).toBeUndefined();
+    await w.call({ type: "switchBox", slot: 2 }, 2);
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+
+    // The desktop asked for the list and the box refused it: nothing kept, nothing opened.
+    const r = loadWorker([DESK], { desktopList: { revoked: true } });
+    await r.call({ type: "switchBox", slot: 2 });
+    expect(r.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(r.session.linkedBoxes).toBeUndefined();
   });
 
   it("runs quick presses one after the other: one tab per box, the last key wins", async () => {
@@ -780,7 +816,7 @@ describe("background.js: switching linked ClawBoxes", () => {
     const w = loadWorker([DESK, { id: 2, url: "https://evil.example/" }]);
     expect(await w.call({ type: "boxes", selfName: "x", boxes: [{ name: "Evil", url: "https://evil.example/" }] }, 2))
       .toEqual({ ok: false, error: "not from the desktop" });
-    expect(w.local.linkedBoxes).toBeUndefined();
+    expect(w.session.linkedBoxes).toBeUndefined();
     await w.call({
       type: "boxes",
       selfName: "laptop",
@@ -793,7 +829,7 @@ describe("background.js: switching linked ClawBoxes", () => {
         ...Array.from({ length: 10 }, (_, i) => ({ name: `B${i}`, url: `https://b${i}.example/` })),
       ],
     }, 1);
-    const kept = w.local.linkedBoxes as { selfName: string; boxes: { name: string; url: string }[] };
+    const kept = w.session.linkedBoxes as { selfName: string; boxes: { name: string; url: string }[] };
     expect(kept.selfName).toBe("laptop");
     expect(kept.boxes[0]).toEqual({ name: "Main", url: "https://main.example.com/" });
     expect(kept.boxes).toHaveLength(8);
