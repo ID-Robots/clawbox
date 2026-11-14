@@ -133,9 +133,13 @@ export function useBoxSwitcher(enabled: boolean): { indicator: BoxSwitcherIndica
   useEffect(() => {
     if (!enabled) return;
     let live = true;
+    // Only the newest ask's answer counts: an older one still on its way when
+    // Settings saved must not put the old list back over the new one.
+    let asked = 0;
     const load = () => {
+      const mine = ++asked;
       void fetchList().then((answer) => {
-        if (live && answer) setList(answer);
+        if (live && answer && mine === asked) setList(answer);
       });
     };
     // Again whenever Settings saves it (here or in another window, which the

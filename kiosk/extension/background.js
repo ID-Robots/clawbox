@@ -279,6 +279,16 @@ async function takePendingIndicator(tabId) {
   return ind && Date.now() - (ind.at || 0) <= PENDING_TTL_MS ? ind : null;
 }
 
+// One switch at a time, in the order the keys were pressed: two quick presses
+// of the same number must not each find no tab and open two, and a slower
+// earlier switch must not finish after a later one and leave its tab in front.
+let switchQueue = Promise.resolve();
+function queueSwitch(task) {
+  const run = switchQueue.then(task, task);
+  switchQueue = run.catch(() => undefined);
+  return run;
+}
+
 async function switchBox(slot, sender) {
   if (!Number.isInteger(slot) || slot < 1 || slot > MAX_BOXES + 1) return { ok: false, error: "no such slot" };
   const list = (await storedBoxes()) || (await askDesktopForBoxes()) || { selfName: "", boxes: [] };
@@ -332,7 +342,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await chrome.tabs.create({ url: START_PAGE, active: true });
         return { ok: true };
       case "switchBox":
-        return switchBox(msg.slot, sender);
+        return queueSwitch(() => switchBox(msg.slot, sender));
       case "boxes":
         // The kiosk's own desktop only: no other page speaks for the list.
         if (!sender.tab || !isDesktop(sender.tab.url) || new URL(sender.tab.url).pathname !== "/") return { ok: false, error: "not from the desktop" };

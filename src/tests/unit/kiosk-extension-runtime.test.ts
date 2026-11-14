@@ -759,6 +759,14 @@ describe("background.js: switching linked ClawBoxes", () => {
     expect((w.local.linkedBoxes as { boxes: unknown[] }).boxes).toEqual([list.boxes[0]]);
   });
 
+  it("runs quick presses one after the other: one tab per box, the last key wins", async () => {
+    const w = loadWorker([DESK], { stored: list });
+    await Promise.all([w.call({ type: "switchBox", slot: 2 }), w.call({ type: "switchBox", slot: 2 })]);
+    expect(w.chrome.tabs.create).toHaveBeenCalledTimes(1);
+    await Promise.all([w.call({ type: "switchBox", slot: 2 }), w.call({ type: "switchBox", slot: 1 })]);
+    expect(w.active()).toBe(1);
+  });
+
   it("keeps the session maps whole under quick presses", async () => {
     const w = loadWorker([DESK], { stored: list, listening: [1] });
     await Promise.all([w.call({ type: "switchBox", slot: 2 }), w.call({ type: "switchBox", slot: 3 })]);

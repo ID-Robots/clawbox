@@ -98,7 +98,6 @@ export default function LinkedBoxesPanel() {
   const hereOrigin = typeof window !== "undefined" ? window.location.origin : "";
 
   const load = useCallback(async () => {
-    setLoadFailed(false);
     try {
       const res = await fetch(LINKED_BOXES_URL, { cache: "no-store" });
       if (!res.ok) throw new Error(String(res.status));
@@ -131,7 +130,13 @@ export default function LinkedBoxesPanel() {
         setError((typeof body?.code === "string" && CODE_KEYS[body.code]) || "saveFailed");
         return false;
       }
-      setList({ selfName: normalizeBoxName(body?.self?.name) ?? before.selfName, boxes: parseLinkedBoxesRead(body?.boxes) });
+      if (Array.isArray(body?.boxes)) {
+        setList({ selfName: normalizeBoxName(body?.self?.name) ?? before.selfName, boxes: parseLinkedBoxesRead(body?.boxes) });
+      } else {
+        // Saved, but the answer could not be read: keep what was sent and
+        // ask the box for its list rather than draw (and later save) none.
+        void load();
+      }
       window.dispatchEvent(new Event(LINKED_BOXES_CHANGED_EVENT));
       return true;
     } catch {
@@ -141,7 +146,7 @@ export default function LinkedBoxesPanel() {
     } finally {
       setSaving(false);
     }
-  }, [list]);
+  }, [list, load]);
 
   const ownOrigins = useMemo(() => {
     const set = new Set<string>();
@@ -233,7 +238,7 @@ export default function LinkedBoxesPanel() {
       {loadFailed && (
         <div className="flex items-center gap-3">
           <StatusMessage type="error" message={t("settings.linkedBoxes.error.loadFailed")} />
-          <button type="button" onClick={() => void load()} className="text-sm text-[var(--coral-bright)] cursor-pointer bg-transparent border-none">
+          <button type="button" onClick={() => { setLoadFailed(false); void load(); }} className="text-sm text-[var(--coral-bright)] cursor-pointer bg-transparent border-none">
             {t("settings.linkedBoxes.retry")}
           </button>
         </div>
@@ -301,7 +306,7 @@ export default function LinkedBoxesPanel() {
                 onChange={(e) => { setName(e.target.value); setError(null); }}
                 maxLength={MAX_BOX_NAME_LENGTH}
                 placeholder={t("settings.linkedBoxes.namePlaceholder")}
-                disabled={full}
+                disabled={full || saving}
                 data-testid="linked-boxes-name-input"
                 className="px-3.5 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none placeholder-white/20 focus:border-orange-400/60 disabled:opacity-40"
               />
@@ -318,7 +323,7 @@ export default function LinkedBoxesPanel() {
                 onChange={(e) => { setUrl(e.target.value); setError(null); }}
                 maxLength={MAX_BOX_URL_LENGTH}
                 placeholder="https://laptop.example.com"
-                disabled={full}
+                disabled={full || saving}
                 data-testid="linked-boxes-url-input"
                 className="px-3.5 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none placeholder-white/20 focus:border-orange-400/60 disabled:opacity-40"
               />

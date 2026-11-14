@@ -197,6 +197,25 @@ describe("on the box the owner started from", () => {
     });
   });
 
+  it("an older answer still on its way never puts the old list back over the saved one", async () => {
+    const answers: Array<(r: Response) => void> = [];
+    fetchMock = vi.fn(() => new Promise<Response>((r) => { answers.push(r); }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    render(<Harness />);
+    await waitFor(() => expect(answers).toHaveLength(1));
+    act(() => { window.dispatchEvent(new Event(LINKED_BOXES_CHANGED_EVENT)); });
+    await waitFor(() => expect(answers).toHaveLength(2));
+    const list = (url: string) => new Response(JSON.stringify({ self: { name: "main" }, boxes: [{ name: "B", url }] }), { status: 200 });
+    // The newer answer lands first, the older one after it.
+    await act(async () => { answers[1](list("http://new.example.net/")); });
+    await act(async () => { answers[0](list("http://old.example.net/")); });
+    await waitFor(() => {
+      press(2);
+      expect(assign).toHaveBeenCalled();
+    });
+    expect(String(assign.mock.calls.at(-1)?.[0])).toMatch(/^http:\/\/new\.example\.net\/#/);
+  });
+
   it("reads the list again when the desktop is shown again", async () => {
     render(<Harness />);
     await loaded();
