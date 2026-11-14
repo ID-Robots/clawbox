@@ -88,6 +88,8 @@ const RELEASES: readonly { version: string; files: string }[] = [
   { version: "1.5.3", files: "c05f89216307470adbaf94161ceebf6f4d267c3a55182c0a8a1b23fa0ad7b257" },
   // Ctrl+Shift+1 … 9: the linked-box switcher (workspaces.js, `storage`).
   { version: "1.6.0", files: "87e7fa523b9069c7de0a1c1f7faf21701516741aaf7de1db1d3b159ea4332b33" },
+  // One switch at a time, in the order the keys were pressed.
+  { version: "1.6.1", files: "f47af3210c8cfdb790619ad9d8b8c3f96d0f52593c3682252505fd6df2d3a298" },
 ];
 
 /**

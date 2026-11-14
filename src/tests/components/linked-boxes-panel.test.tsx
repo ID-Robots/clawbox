@@ -211,5 +211,41 @@ describe("Settings → Linked ClawBoxes", () => {
     fail = false;
     fireEvent.click(screen.getByText(tx("settings.linkedBoxes.retry")));
     expect(await screen.findByTestId("linked-boxes-row-1")).toBeInTheDocument();
+    expect(screen.queryByText(tx("settings.linkedBoxes.error.loadFailed"))).toBeNull();
+  });
+
+  it("a save the box answered without a readable list keeps the list and reads it again", async () => {
+    server.boxes = [{ name: "Laptop", url: "https://laptop.example.com/" }];
+    const ok = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === LINKED_BOXES_URL && init?.method === "PUT") {
+        server.boxes = (JSON.parse(String(init.body)) as { boxes: Box[] }).boxes;
+        return new Response("not json", { status: 200 });
+      }
+      return (ok as (u: string, i?: RequestInit) => Promise<Response>)(url, init);
+    }) as unknown as typeof fetch;
+    render(<LinkedBoxesPanel />);
+    await screen.findByTestId("linked-boxes-row-2");
+    await addBox("NAS", "http://nas.example.net");
+    // Both boxes, from the box's own answer to the read that followed.
+    await waitFor(() => expect(within(screen.getByTestId("linked-boxes-row-3")).getByText("NAS")).toBeInTheDocument());
+    expect(within(screen.getByTestId("linked-boxes-row-2")).getByText("Laptop")).toBeInTheDocument();
+    expect(server.boxes.map((b) => b.name)).toEqual(["Laptop", "NAS"]);
+  });
+
+  it("takes no typing while a save is on its way", async () => {
+    let finish: (r: Response) => void = () => {};
+    const ok = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === LINKED_BOXES_URL && init?.method === "PUT") return new Promise<Response>((r) => { finish = r; });
+      return (ok as (u: string, i?: RequestInit) => Promise<Response>)(url, init);
+    }) as unknown as typeof fetch;
+    render(<LinkedBoxesPanel />);
+    await screen.findByTestId("linked-boxes-add-form");
+    await addBox("Laptop", "https://laptop.example.com");
+    await waitFor(() => expect(screen.getByTestId("linked-boxes-name-input")).toBeDisabled());
+    expect(screen.getByTestId("linked-boxes-url-input")).toBeDisabled();
+    finish(new Response(JSON.stringify({ self: { name: "mainbox" }, boxes: [{ name: "Laptop", url: "https://laptop.example.com/" }] }), { status: 200 }));
+    await waitFor(() => expect(screen.getByTestId("linked-boxes-name-input")).not.toBeDisabled());
   });
 });
