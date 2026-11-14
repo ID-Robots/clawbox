@@ -174,7 +174,8 @@ export function createApp(deps: AppDeps) {
     }
     if (!auth.extension()) return { status: "extension_offline", name, detail: "no extension is paired" };
     if (auth.extensionLocked()) return { status: "locked", name };
-    const result = await withoutSecret(await queue.submit({ url, name, entryUrl: entryUrl!, submit }), name);
+    const before = await passwordOf(name);
+    const result = await withoutSecret(await queue.submit({ url, name, entryUrl: entryUrl!, submit }), name, before);
     return detail && result.status === "filled" ? { ...result, detail } : result;
   }
 
@@ -183,18 +184,30 @@ export function createApp(deps: AppDeps) {
    * moment. Whatever it reports, the entry's password does not travel on to
    * the agent in it: a detail that contains it is dropped whole.
    */
-  async function withoutSecret(result: FillResult, name: string): Promise<FillResult> {
+  async function withoutSecret(result: FillResult, name: string, before: string | null): Promise<FillResult> {
     if (!result.detail) return result;
-    let password = "";
-    try {
-      password = (await catalog.read(name)).password;
-    } catch {
-      password = "";
+    const after = await passwordOf(name);
+    // Fails closed: when either password cannot be read (the entry was
+    // deleted, or is unreadable) the detail cannot be checked, so it is dropped.
+    if (before === null || after === null) {
+      deps.log(`fill detail for ${name} could not be checked (entry unreadable) and was dropped`);
+    } else if (result.detail.includes(before) || result.detail.includes(after)) {
+      deps.log(`fill detail for ${name} held a secret and was dropped`);
+    } else {
+      return result;
     }
-    if (!password || !result.detail.includes(password)) return result;
-    deps.log(`fill detail for ${name} held a secret and was dropped`);
     const { detail: _dropped, ...rest } = result;
     return rest;
+  }
+
+  /** The entry's password, or null when it cannot be read. */
+  async function passwordOf(name: string): Promise<string | null> {
+    try {
+      const pw = (await catalog.read(name)).password;
+      return pw || null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -279,7 +292,9 @@ export function createApp(deps: AppDeps) {
         if (claim.reason === "bad_origin") throw new HttpError(403, "pairing is only open to a Chrome extension");
         throw new HttpError(401, claim.reason === "invalid_code" ? "wrong pairing code" : "no pairing code is active");
       }
+      // The extension this pairing replaced may still hold a poll open.
       queue.cancelAll("extension_offline");
+      queue.disconnect();
       audit.record({ actor: "extension", action: "paired", detail: ctx.origin ?? undefined });
       return json(200, { token: claim.token }, corsFor(ctx.origin));
     }
@@ -296,6 +311,7 @@ export function createApp(deps: AppDeps) {
         throw new HttpError(401, "wrong pairing secret");
       }
       queue.cancelAll("extension_offline");
+      queue.disconnect();
       audit.record({ actor: "extension", action: "paired", detail: `${ctx.origin ?? ""} (this box's browser)` });
       return json(200, { token: claim.token }, corsFor(ctx.origin));
     }
@@ -514,8 +530,12 @@ export function createApp(deps: AppDeps) {
     }
     if (m === "POST" && path === "/api/ext/unpair") {
       requireExt(ctx, { unlocked: false });
+      // As from the desktop: an unpair the browser's auto-pairing undid a
+      // moment later would be no unpair.
+      auth.setAutoPair(false);
       auth.unpair();
       queue.cancelAll("extension_offline");
+      queue.disconnect();
       audit.record({ actor: "extension", action: "unpaired" });
       return json(200, { ok: true }, cors);
     }
@@ -753,12 +773,20 @@ export function createApp(deps: AppDeps) {
       if ((await catalog.exists(name)) && body.overwrite !== true) {
         throw new HttpError(409, "entry exists: pass overwrite=true to replace its password (pass git history keeps the old one)");
       }
-      const out = await catalog.save({
-        name,
-        login: str(body.login),
-        url: str(body.url),
-        password: generatePassword({ length, symbols }),
-      });
+      // Checked again inside the catalog's lock: of two requests for one new
+      // name, the second must get the 409, not replace the first's password.
+      let out: Awaited<ReturnType<typeof catalog.save>>;
+      try {
+        out = await catalog.save(
+          { name, login: str(body.login), url: str(body.url), password: generatePassword({ length, symbols }) },
+          { mustBeNew: body.overwrite !== true },
+        );
+      } catch (err) {
+        if (err instanceof ValidationError && err.message === "entry already exists") {
+          throw new HttpError(409, "entry exists: pass overwrite=true to replace its password (pass git history keeps the old one)");
+        }
+        throw err;
+      }
       audit.record({ actor: "agent", action: out.created ? "create" : "update", name, host: hostOf(str(body.url)) ?? undefined, detail: "generated password" });
       return json(200, { stored: true, name, created: out.created, length, symbols });
     }

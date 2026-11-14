@@ -33,6 +33,13 @@ async function decide(decision: "confirm" | "decline"): Promise<void> {
 async function main(): Promise<void> {
   const d = await ask<ConfirmDetails>({ type: "confirm:details", id });
   if (d.error) return gone(d.error);
+  if (d.via === "chip") {
+    // The pick was made on the page, which the page could have staged: the
+    // choice counts only once it is confirmed here, in the extension's window.
+    $("c-subtitle").textContent = "Card fill";
+    $("c-title").textContent = "Fill this card on this page?";
+    $("c-lead").textContent = "You picked this card from ClawBox Vault's card chip on the checkout page. Nothing is filled unless you click Confirm in this window.";
+  }
   $("c-host").textContent = d.host;
   $("c-card").textContent = `${d.label} — ${BRAND[d.brand] ?? "Card"} •••• ${d.last4}`;
   $("c-exp").textContent = d.exp;

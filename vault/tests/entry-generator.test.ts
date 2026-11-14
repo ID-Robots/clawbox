@@ -20,6 +20,16 @@ describe("pass entry format", () => {
     expect(e.extra).toEqual(["customer-id: 1234", "free text line"]);
     expect(serializeEntry(e)).toBe(text);
   });
+  test("a cleared field does not come back from a second line of it", () => {
+    const e = parseEntry("pw\nlogin: alice\nlogin: bob\nurl: https://a.example\nurl: https://b.example\ncustomer-id: 7\n");
+    expect(e.login).toBe("alice");
+    expect(serializeEntry(e)).toBe("pw\nlogin: alice\nurl: https://a.example\nlogin: bob\nurl: https://b.example\ncustomer-id: 7\n");
+    e.login = "";
+    const again = parseEntry(serializeEntry(e));
+    expect(again.login).toBe("");
+    expect(again.url).toBe("https://a.example");
+    expect(again.extra).toEqual(["url: https://b.example", "customer-id: 7"]);
+  });
   test("serializes only present fields, in the documented order", () => {
     expect(serializeEntry({ password: "p", login: "l", url: "", twofa: "", note: "n", extra: [] })).toBe("p\nlogin: l\nnote: n\n");
   });

@@ -37,10 +37,13 @@ export interface CardData {
 }
 
 export interface CardFillOutcome {
-  status: "filled" | "no_form";
+  /** "error": the page has card fields, but none of them took its value. */
+  status: "filled" | "no_form" | "error";
   filled?: CardFieldKind[];
   /** Fields the page has but the card cannot fill (e.g. no stored security code). */
   missing?: CardFieldKind[];
+  /** Fields that refused the value put into them (a mask or a select without it). */
+  rejected?: CardFieldKind[];
   detail?: string;
 }
 
@@ -130,24 +133,38 @@ const MONTH_NAMES: string[][] = [
   ["януари", "февруари", "март", "април", "май", "юни", "юли", "август", "септември", "октомври", "ноември", "декември"],
 ];
 
-/** Month 1-12 an option stands for ("05", "5", "May", "Mai", "05 - Май"), or null. */
-function monthOfOption(opt: HTMLOptionElement): number | null {
-  for (const raw of [opt.value, opt.text]) {
-    const v = raw.trim().toLowerCase();
-    const num = /^(\d{1,2})(\s|$|[-./])/.exec(v);
-    if (num) {
-      const n = Number(num[1]);
-      if (n >= 1 && n <= 12) return n;
-      continue;
-    }
-    const word = /^[\p{L}]+/u.exec(v)?.[0] ?? "";
-    if (word.length < 3) continue;
-    for (const names of MONTH_NAMES) {
-      const i = names.findIndex((n) => n.startsWith(word));
-      if (i >= 0) return i + 1;
-    }
+/**
+ * Month 1-12 an option stands for ("05", "5", "May", "Mai", "05 - Май"), or
+ * null. The label the human sees comes first; the value only when the label
+ * names no month, read as 0-11 in a select numbered that way.
+ */
+function monthOfOption(opt: HTMLOptionElement, zeroBased = false): number | null {
+  return monthOfText(opt.text, false) ?? monthOfText(opt.value, zeroBased);
+}
+
+function monthOfText(raw: string, zeroBased: boolean): number | null {
+  const v = raw.trim().toLowerCase();
+  const num = /^(\d{1,2})(\s|$|[-./])/.exec(v);
+  if (num) {
+    const n = Number(num[1]) + (zeroBased ? 1 : 0);
+    return n >= 1 && n <= 12 ? n : null;
+  }
+  const word = /^[\p{L}]+/u.exec(v)?.[0] ?? "";
+  if (word.length < 3) return null;
+  for (const names of MONTH_NAMES) {
+    const i = names.findIndex((n) => n.startsWith(word));
+    if (i >= 0) return i + 1;
   }
   return null;
+}
+
+/** A month select whose values run 0-11 (January is "0", no "12"). */
+function zeroBasedMonths(sel: HTMLSelectElement): boolean {
+  const nums = Array.from(sel.options)
+    .map((o) => o.value.trim())
+    .filter((v) => /^\d{1,2}$/.test(v))
+    .map(Number);
+  return nums.includes(0) && !nums.includes(12);
 }
 
 /** Four-digit year an option stands for ("2034", "34"), or null. */
@@ -367,6 +384,7 @@ export function fillCardFields(doc: Document, data: CardData): CardFillOutcome {
   if (!fields.length) return { status: "no_form" };
   const filled = new Set<CardFieldKind>();
   const missing = new Set<CardFieldKind>();
+  const rejected = new Set<CardFieldKind>();
   const e = data.exp ? expParts(data.exp) : null;
   const digits = data.number ? digitsOf(data.number) : "";
   const brand = data.brand || (digits ? cardBrand(digits) : "");
@@ -378,8 +396,9 @@ export function fillCardFields(doc: Document, data: CardData): CardFillOutcome {
 
   const numbers = fields.filter((f) => f.kind === "number");
   if (numbers.length) {
-    if (digits && fillNumber(numbers, digits)) filled.add("number");
-    else if (!digits) missing.add("number");
+    if (!digits) missing.add("number");
+    else if (fillNumber(numbers, digits)) filled.add("number");
+    else rejected.add("number");
   }
   for (const f of fields) {
     const el = f.el;
@@ -408,7 +427,10 @@ export function fillCardFields(doc: Document, data: CardData): CardFillOutcome {
         break;
       case "expMonth":
         if (e) {
-          if (isSelect(el)) ok = chooseOption(el, (o) => monthOfOption(o) === e.month);
+          if (isSelect(el)) {
+            const zb = zeroBasedMonths(el);
+            ok = chooseOption(el, (o) => monthOfOption(o, zb) === e.month);
+          }
           else ok = fillChecked(el, maxLen(el) === 1 ? String(e.month) : e.mm, (v) => Number(digitsOf(v)) === e.month);
         }
         break;
@@ -436,9 +458,14 @@ export function fillCardFields(doc: Document, data: CardData): CardFillOutcome {
     }
     if (ok) filled.add(f.kind);
     else if (ok === null) missing.add(f.kind);
+    else rejected.add(f.kind);
   }
-  for (const k of filled) missing.delete(k);
-  return { status: "filled", filled: [...filled], missing: [...missing] };
+  for (const k of filled) {
+    missing.delete(k);
+    rejected.delete(k);
+  }
+  if (!filled.size && rejected.size) return { status: "error", filled: [], missing: [...missing], rejected: [...rejected], detail: "the card fields did not take the values" };
+  return { status: "filled", filled: [...filled], missing: [...missing], ...(rejected.size ? { rejected: [...rejected] } : {}) };
 }
 
 // ---- frames ------------------------------------------------------------------------------
@@ -518,7 +545,7 @@ export function readTypedCard(doc: Document, scope: ParentNode = doc): TypedCard
   } else {
     const mEl = valueOf("expMonth");
     const yEl = valueOf("expYear");
-    const month = mEl ? (isSelect(mEl) ? monthOfOption(selectedText(mEl)!) : Number(digitsOf(mEl.value))) : null;
+    const month = mEl ? (isSelect(mEl) ? monthOfOption(selectedText(mEl)!, zeroBasedMonths(mEl)) : Number(digitsOf(mEl.value))) : null;
     const year = yEl ? (isSelect(yEl) ? yearOfOption(selectedText(yEl)!) : Number(digitsOf(yEl.value))) : null;
     if (month && month >= 1 && month <= 12 && year) {
       const y = year < 100 ? 2000 + year : year;

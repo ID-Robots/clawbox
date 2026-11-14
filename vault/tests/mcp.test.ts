@@ -178,23 +178,38 @@ async function mcpSession(
     { jsonrpc: "2.0", method: "notifications/initialized" },
     ...requests,
   ];
-  // Like a real client: send a request, wait for its reply, then the next.
-  for (const r of all) {
-    proc.stdin.write(`${JSON.stringify(r)}\n`);
-    await proc.stdin.flush();
-    if (!("id" in r)) continue;
-    lines++;
-    const side = during(r.id as number);
-    const deadline = Date.now() + 25_000;
-    while ((stdout.match(/\n/g)?.length ?? 0) < lines && Date.now() < deadline) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      stdout += decoder.decode(value);
+  // One read, given up at the deadline: a server that falls silent cannot hold the test past it.
+  const readBefore = async (deadline: number) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<{ done: true; value: undefined }>((resolve) => {
+      timer = setTimeout(() => resolve({ done: true, value: undefined }), Math.max(0, deadline - Date.now()));
+    });
+    try {
+      return await Promise.race([reader.read(), late]);
+    } finally {
+      clearTimeout(timer);
     }
-    await side;
+  };
+  try {
+    // Like a real client: send a request, wait for its reply, then the next.
+    for (const r of all) {
+      proc.stdin.write(`${JSON.stringify(r)}\n`);
+      await proc.stdin.flush();
+      if (!("id" in r)) continue;
+      lines++;
+      const side = during(r.id as number);
+      const deadline = Date.now() + 25_000;
+      while ((stdout.match(/\n/g)?.length ?? 0) < lines && Date.now() < deadline) {
+        const { value, done } = await readBefore(deadline);
+        if (done) break;
+        stdout += decoder.decode(value);
+      }
+      await side;
+    }
+    proc.stdin.end();
+  } finally {
+    proc.kill();
   }
-  proc.stdin.end();
-  proc.kill();
   const stderr = await new Response(proc.stderr).text();
   const replies = stdout.trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Reply);
   return { byId: new Map(replies.map((r) => [r.id, r])), stdout, stderr };

@@ -264,7 +264,10 @@ export class Auth {
     }
     this.pairing = null;
     const token = randomToken();
-    this.state.extension = { origin, tokenHash: sha256(token), pairedAt: new Date(this.now()).toISOString(), locked: false };
+    // A browser that lost its token and pairs again keeps the lock it had:
+    // only the PIN (/api/ext/unlock or the desktop) lifts it.
+    const locked = this.state.extension?.locked ?? false;
+    this.state.extension = { origin, tokenHash: sha256(token), pairedAt: new Date(this.now()).toISOString(), locked };
     this.persist();
     return { ok: true, token };
   }

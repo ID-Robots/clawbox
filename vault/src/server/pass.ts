@@ -86,6 +86,14 @@ export class PassStore {
     }
   }
 
+  private async isFolder(name: string): Promise<boolean> {
+    try {
+      return (await stat(join(this.opts.storeDir, validateName(name)))).isDirectory();
+    } catch {
+      return false;
+    }
+  }
+
   async mtime(name: string): Promise<Date> {
     return (await stat(this.fileFor(name))).mtime;
   }
@@ -119,6 +127,9 @@ export class PassStore {
     const b = validateName(to);
     if (!(await this.exists(a))) throw new PassError("entry not found", "not_found");
     if (await this.exists(b)) throw new PassError("target entry exists", "exists");
+    // `pass mv a b` with a folder b moves a INTO it (and can replace b/a.gpg):
+    // a name that is a folder is no free target.
+    if (await this.isFolder(b)) throw new PassError("target is a folder", "exists");
     const r = await this.run(["mv", "--", a, b]);
     if (r.code !== 0) this.fail("mv", `${a} -> ${b}`, r);
   }

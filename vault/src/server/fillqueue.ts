@@ -85,6 +85,8 @@ export class FillQueue {
   async poll(waitMs: number, signal?: AbortSignal): Promise<FillCommand[]> {
     this.activePolls++;
     try {
+      // A poll whose caller is already gone must not take the next command.
+      if (signal?.aborted) return [];
       if (this.queue.length) return this.take();
       return await new Promise<FillCommand[]>((resolve) => {
         const done = (cmds: FillCommand[]) => {

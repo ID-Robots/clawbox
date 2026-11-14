@@ -217,6 +217,12 @@ async function search(query: string): Promise<void> {
   if (!q) return;
   const res = await ask<{ entries: EntryView[] }>({ type: "popup:search", query: q });
   if (seq !== searchSeq) return;
+  // Locked from the desktop while the popup was open: back to the unlock screen.
+  if (res.status === 423) return void refresh();
+  if (res.error) {
+    renderList($("search-list"), [], { allowFill: false });
+    return toast(res.error, "bad");
+  }
   renderList($("search-list"), res.entries ?? [], { allowFill: false });
 }
 
@@ -279,12 +285,17 @@ async function submitEdit(ev: SubmitEvent): Promise<void> {
     password: $<HTMLInputElement>("edit-password").value || undefined,
     note: $<HTMLInputElement>("edit-note").value.trim() || undefined,
   };
-  const res = await ask<{ name: string }>({ type: "popup:save", entry, mode: editing.mode });
+  // The answer belongs to this editor: if it was cancelled and another opened
+  // meanwhile, that one is left as it is.
+  const submitted = editing;
+  const res = await ask<{ name: string }>({ type: "popup:save", entry, mode: submitted.mode });
   if (res.error) return toast(res.error, "bad");
-  $<HTMLInputElement>("edit-password").value = "";
   toast(`Saved ${res.name}.`);
-  editing = null;
-  show("main");
+  if (editing === submitted) {
+    $<HTMLInputElement>("edit-password").value = "";
+    editing = null;
+    show("main");
+  }
   await loadSite();
 }
 

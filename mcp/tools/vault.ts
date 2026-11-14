@@ -118,7 +118,18 @@ function vaultCall(timeoutMs: number): VaultCall {
       }
       throw new ToolError("ENDPOINT_DOWN", "ClawBox Vault is not answering on this box.", "Tell the user the vault service is not running. Do not retry in a loop.");
     }
-    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    let data: Record<string, unknown>;
+    try {
+      const parsed: unknown = await res.json();
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+      data = parsed as Record<string, unknown>;
+    } catch {
+      // An answer that cannot be read is not an empty one: never report "no entries" for it.
+      if (res.status === 503) {
+        throw new ToolError("ENDPOINT_DOWN", "ClawBox Vault's password store is not available on this box.", "Tell the user to open ClawBox Vault on the desktop: it says what is missing.");
+      }
+      throw new ToolError("INTERNAL", `ClawBox Vault sent an answer that could not be read (HTTP ${res.status}).`, "Try once more; if it happens again, tell the user.");
+    }
     if (res.status === 409 && data.code === "not_set_up") {
       throw new ToolError("CONFLICT", "ClawBox Vault is not set up yet: the owner has not chosen a vault PIN.", SET_UP_NEXT);
     }

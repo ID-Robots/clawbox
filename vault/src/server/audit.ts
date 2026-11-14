@@ -33,12 +33,22 @@ export class AuditLog {
       const size = fstatSync(fd).size;
       // Truncated only once the whole log is in audit.jsonl.1: a copy cut
       // short (a full disk) keeps the log as it was, one line longer.
-      if (size > MAX_BYTES && this.rotate(fd, size)) ftruncateSync(fd, 0);
+      if (size > MAX_BYTES && this.tryRotate(fd, size)) ftruncateSync(fd, 0);
       writeSync(fd, `${JSON.stringify(rec)}\n`);
     } catch (err) {
       console.error(`audit log write failed: ${(err as Error).message}`);
     } finally {
       if (fd >= 0) closeSync(fd);
+    }
+  }
+
+  /** A rotation that fails is reported and leaves the log whole; the record is still appended. */
+  private tryRotate(fd: number, size: number): boolean {
+    try {
+      return this.rotate(fd, size);
+    } catch (err) {
+      console.error(`audit log rotation failed: ${(err as Error).message}`);
+      return false;
     }
   }
 

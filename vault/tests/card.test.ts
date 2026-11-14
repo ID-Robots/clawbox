@@ -182,9 +182,21 @@ describe("scrubber", () => {
     expect(containsCardNumber(`{"n":"${VISA}"}`)).toBe(true);
   });
 
+  test("a number whose groups are split by repeated spaces or dashes is still found", () => {
+    for (const t of ["4242  4242 4242 4242", "4242   4242   4242   4242", "4242 - 4242 - 4242 - 4242", "4242--4242--4242--4242"]) {
+      expect(containsCardNumber(t)).toBe(true);
+      expect(redactCardNumbers(`card ${t} end`)).toBe("card [redacted] end");
+      expect(scrubCardData(`card ${t}`)).not.toMatch(/4242.*4242.*4242.*4242/);
+      expect(() => validateCardText(`work ${t}`, "label", 100)).toThrow();
+    }
+  });
+
   test("leaves timestamps, short numbers and Luhn-invalid digit runs alone", () => {
     const keep = ["2026-10-31T10:12:34.567Z", "order 12345", "4242424242424241", "id 1234567890123", "last 4: 4242", "exp 12/34"];
-    for (const t of keep.filter((x) => !containsCardNumber(x))) expect(redactCardNumbers(t)).toBe(t);
+    for (const t of keep) {
+      expect(containsCardNumber(t)).toBe(false);
+      expect(redactCardNumbers(t)).toBe(t);
+    }
     expect(redactCardNumbers("2026-10-31T10:12:34.567Z")).toBe("2026-10-31T10:12:34.567Z");
     expect(redactCardNumbers("4242424242424241")).toBe("4242424242424241");
   });

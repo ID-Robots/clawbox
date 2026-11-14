@@ -313,8 +313,8 @@ export function cardTag(meta: Pick<CardMeta, "label" | "last4">): string {
 
 export const REDACTED = "[redacted]";
 
-/** Runs of digits with single spaces or dashes between them: "4242 4242-4242". */
-const DIGIT_RUN = /\d(?:[ -]?\d)*/g;
+/** Runs of digits with spaces or dashes between them: "4242 4242-4242", "4242  4242". */
+const DIGIT_RUN = /\d(?:[ -]*\d)*/g;
 
 /**
  * Character ranges of Luhn-valid 13–19 digit card numbers in `text`: whole

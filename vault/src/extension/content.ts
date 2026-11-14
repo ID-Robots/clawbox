@@ -66,7 +66,10 @@ function capture(scope: ParentNode): void {
   if (key === lastCapture) return;
   lastCapture = key;
   if (creds.password) {
-    void send({ type: "content:capture", url: location.href, login: creds.login, password: creds.password });
+    // A capture the vault could not take (locked, offline) may be offered again.
+    void send({ type: "content:capture", url: location.href, login: creds.login, password: creds.password }).then((r) => {
+      if (!(r as { accepted?: boolean } | undefined)?.accepted && lastCapture === key) lastCapture = "";
+    });
   } else {
     void send({ type: "content:capture-login", url: location.href, login: creds.login });
   }
@@ -100,7 +103,9 @@ function captureCard(scope: ParentNode): void {
   const key = `${card.number.slice(-4)}\u0000${card.exp}\u0000${card.number.length}`;
   if (key === lastCardCapture) return;
   lastCardCapture = key;
-  void send({ type: "content:card-capture", url: location.href, ...card });
+  void send({ type: "content:card-capture", url: location.href, ...card }).then((r) => {
+    if (!(r as { accepted?: boolean } | undefined)?.accepted && lastCardCapture === key) lastCardCapture = "";
+  });
 }
 
 function buttonLike(el: Element | null): Element | null {
@@ -164,19 +169,24 @@ function presentSave(prompt: SavePrompt): void {
 
 let chipFor: HTMLInputElement | null = null;
 let removeChip: (() => void) | null = null;
+let chipAskedAt = 0;
+// A "no chip" answer (locked, unpaired, no card yet, no answer) is asked again
+// after this long, on the next change to the page or focus on the field.
+const CHIP_RECHECK_MS = 5_000;
 
 async function updateChip(): Promise<void> {
   if (!CARDS_ENABLED) return;
   if (isVaultPage() || !isSecureOrLocal(location.protocol, location.hostname)) return;
   const field = cardNumberField(document);
-  if (field === chipFor) return;
+  if (field === chipFor && (!field || removeChip || Date.now() - chipAskedAt < CHIP_RECHECK_MS)) return;
   removeChip?.();
   removeChip = null;
   chipFor = field;
   if (!field) return;
+  chipAskedAt = Date.now();
   // The background shows it only when paired, unlocked, with a card, in a frame a fill may reach.
   const ok = (await send({ type: "content:card-chip" })) as { show?: boolean } | undefined;
-  if (!ok?.show || chipFor !== field) return;
+  if (!ok?.show || chipFor !== field || removeChip) return;
   removeChip = mountCardChip(document, field, () => void send({ type: "content:card-chip-click" }));
 }
 
@@ -192,9 +202,23 @@ function scheduleChip(): void {
 
 function watchForCardFields(): void {
   const ours = (n: Node) => n.nodeType === 1 && (n as Element).tagName.startsWith("CLAWBOX-VAULT");
+  // Not our own chip coming and going; anything else may show, hide, add or
+  // remove a card field: a field revealed by a class or style change, or the
+  // field that had the chip taken away.
+  const relevant = (r: MutationRecord) => {
+    if (ours(r.target)) return false;
+    if (r.type === "attributes") return true;
+    const added = Array.from(r.addedNodes);
+    const removed = Array.from(r.removedNodes);
+    return (added.length > 0 && !added.every(ours)) || (removed.length > 0 && !removed.every(ours));
+  };
   new MutationObserver((records) => {
-    if (records.some((r) => !ours(r.target) && !Array.from(r.addedNodes).every(ours))) scheduleChip();
+    if (records.some(relevant)) scheduleChip();
   }).observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ["autocomplete", "hidden", "style", "class", "type"] });
+  // Focus on a field asks again too: after an unlock the page itself may not change.
+  document.addEventListener("focusin", (e) => {
+    if (e.target instanceof HTMLInputElement) scheduleChip();
+  }, true);
   scheduleChip();
 }
 

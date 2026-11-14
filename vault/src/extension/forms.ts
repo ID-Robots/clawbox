@@ -71,8 +71,17 @@ function inputs(scope: ParentNode): HTMLInputElement[] {
   return Array.from(scope.querySelectorAll("input")) as HTMLInputElement[];
 }
 
+// A masked card security code is no account password: never filled with one,
+// never captured as one (whether cards are on or not).
+const CARD_CODE_RE = /(?:^|[^a-z])(?:cvv2?|cvc2?|csc|cvn|cid|security[\s_-]?code)(?:[^a-z]|$)/i;
+
+function isCardCodeField(input: HTMLInputElement): boolean {
+  if (/(?:^|\s)cc-/.test(ac(input))) return true;
+  return CARD_CODE_RE.test([input.name, input.id, input.placeholder, input.getAttribute("aria-label") ?? ""].join(" "));
+}
+
 function isPasswordField(input: HTMLInputElement): boolean {
-  return input.type === "password" && !ac(input).includes("one-time-code");
+  return input.type === "password" && !ac(input).includes("one-time-code") && !isCardCodeField(input);
 }
 
 function labelText(input: HTMLInputElement): string {

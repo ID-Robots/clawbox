@@ -173,7 +173,8 @@ AGENT=$(board '
   curl -sS -o /dev/null -w "%{http_code}\n" --max-time 10 http://127.0.0.1:4796/api/agent/entries 2>/dev/null
   s=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get(\"secret\", \"\"))" "$HOME/.clawbox-vault/extension/pairing.json" 2>/dev/null)
   printf "secret=%s\n" "$([ "${#s}" -ge 40 ] && echo read || echo missing)"
-  curl -sS -o /dev/null -w "%{http_code}\n" --max-time 10 -X POST -H "Content-Type: application/json" -H "Origin: https://evil.example.org" --data-binary "{\"secret\":\"$s\"}" http://127.0.0.1:4796/api/pair/auto 2>/dev/null
+  # The body goes over stdin (printf is a builtin): the secret is never in a process argument list.
+  printf "{\"secret\":\"%s\"}" "$s" | curl -sS -o /dev/null -w "%{http_code}\n" --max-time 10 -X POST -H "Content-Type: application/json" -H "Origin: https://evil.example.org" --data-binary @- http://127.0.0.1:4796/api/pair/auto 2>/dev/null
   curl -sS -o /dev/null -w "%{http_code}\n" --max-time 10 -X POST -H "Content-Type: application/json" -H "Origin: chrome-extension://abcdefghijklmnopabcdefghijklmnop" --data-binary "{\"secret\":\"not-the-secret-0123456789abcdefghijklmnop\"}" http://127.0.0.1:4796/api/pair/auto 2>/dev/null
 ')
 SECRET_READ=$(printf '%s\n' "$AGENT" | sed -n 's/^secret=//p' | head -n1)
@@ -303,13 +304,18 @@ LEAKS=$(board '
   t=$(tr -d "\r\n" < "$HOME/.clawbox-vault/agent-token")
   s=$(python3 -c "import json, sys; print(json.load(open(sys.argv[1])).get(\"secret\", \"\"))" "$HOME/.clawbox-vault/extension/pairing.json" 2>/dev/null)
   log=$(journalctl -u clawbox-vault.service --no-pager 2>/dev/null)
+  jrc=$?
+  # Lines of the service itself, not the "-- No entries --" notes of journalctl.
+  records=$(printf "%s\n" "$log" | grep -cv "^-- " || true)
   n=0
   [ -n "$t" ] && n=$((n + $(printf "%s" "$log" | grep -cF -- "$t")))
   [ -n "$s" ] && n=$((n + $(printf "%s" "$log" | grep -cF -- "$s")))
-  printf "%s %s %s\n" "$n" "$(printf "%s\n" "$log" | wc -l)" "$([ "${#t}" -ge 40 ] && [ "${#s}" -ge 40 ] && echo both || echo unread)"
+  printf "%s %s %s %s\n" "$n" "$records" "$([ "${#t}" -ge 40 ] && [ "${#s}" -ge 40 ] && echo both || echo unread)" "$jrc"
 ')
 if [ "$(printf '%s' "$LEAKS" | cut -d' ' -f3)" != both ]; then
   not_ok "the agent token or the pairing secret could not be read on the board, so the journal was not searched for it"
+elif [ "$(printf '%s' "$LEAKS" | cut -d' ' -f4)" != 0 ] || [ "$(printf '%s' "$LEAKS" | cut -d' ' -f2)" = 0 ]; then
+  not_ok "the service's journal could not be read (journalctl exit $(printf '%s' "$LEAKS" | cut -d' ' -f4), $(printf '%s' "$LEAKS" | cut -d' ' -f2) records), so it was not searched"
 elif [ "$(printf '%s' "$LEAKS" | cut -d' ' -f1)" = 0 ]; then
   ok "neither the agent token nor the pairing secret is in the service's journal ($(printf '%s' "$LEAKS" | cut -d' ' -f2) lines read)"
 else

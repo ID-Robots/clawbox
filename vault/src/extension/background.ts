@@ -8,7 +8,7 @@
 // Cards are filled only on an explicit user action: a click in the popup, a
 // pick in the in-page picker (opened from the chip), or the human's Confirm in
 // the confirmation window of an agent card fill. Nothing is filled on load.
-import { defaultEntryName, isFillAllowedUrl, originOf, parseWebUrl, registrableDomain } from "../shared/domain";
+import { defaultEntryName, isFillAllowedUrl, matchUrl, originOf, parseWebUrl } from "../shared/domain";
 import type { FillCommand, SaveCheck } from "../shared/types";
 import type { CardData, CardFieldKind, GuardedCardOutcome } from "./cardforms";
 import { CARDS_ENABLED } from "./flags";
@@ -197,24 +197,46 @@ async function ensureOffscreen(): Promise<void> {
   });
 }
 
-async function copyToClipboard(text: string, clearAfter: boolean): Promise<void> {
-  await ensureOffscreen();
-  await chrome.runtime.sendMessage({ target: "offscreen", type: "copy", text });
-  if (clearAfter) {
-    if (clearTimer) clearTimeout(clearTimer);
-    clearTimer = setTimeout(() => void clearClipboard(), CLIPBOARD_CLEAR_MS);
-    // Backup in case the worker is stopped before the timer fires.
-    await chrome.alarms.create("clipboard-clear", { delayInMinutes: CLIPBOARD_CLEAR_MS / 60_000 });
-  }
+// Copies and clears run one at a time, and each clear belongs to the copy that
+// set it: a clear that comes due after a newer copy leaves that copy alone.
+// The offscreen document stays open for the next copy (Chrome allows one).
+let clipboardQueue: Promise<unknown> = Promise.resolve();
+let clipboardCopy = 0;
+
+function onClipboard<T>(op: () => Promise<T>): Promise<T> {
+  const next = clipboardQueue.then(op, op);
+  clipboardQueue = next.catch(() => undefined);
+  return next;
 }
 
-async function clearClipboard(): Promise<void> {
-  if (clearTimer) clearTimeout(clearTimer);
-  clearTimer = null;
-  await chrome.alarms.clear("clipboard-clear");
-  await ensureOffscreen();
-  await chrome.runtime.sendMessage({ target: "offscreen", type: "clear" }).catch(() => undefined);
-  await chrome.offscreen.closeDocument().catch(() => undefined);
+function copyToClipboard(text: string, clearAfter: boolean): Promise<void> {
+  return onClipboard(async () => {
+    await ensureOffscreen();
+    const res = (await chrome.runtime.sendMessage({ target: "offscreen", type: "copy", text })) as { ok?: boolean } | undefined;
+    if (res?.ok !== true) throw new Error("The browser did not let the vault write the clipboard.");
+    const copy = ++clipboardCopy;
+    if (clearTimer) clearTimeout(clearTimer);
+    clearTimer = null;
+    if (clearAfter) {
+      clearTimer = setTimeout(() => void clearClipboard(copy), CLIPBOARD_CLEAR_MS);
+      // Backup in case the worker is stopped before the timer fires.
+      await chrome.alarms.create("clipboard-clear", { delayInMinutes: CLIPBOARD_CLEAR_MS / 60_000 });
+    } else {
+      await chrome.alarms.clear("clipboard-clear");
+    }
+  });
+}
+
+/** Clears the clipboard; with `copy`, only while that copy is still the latest. */
+function clearClipboard(copy?: number): Promise<void> {
+  return onClipboard(async () => {
+    if (copy !== undefined && copy !== clipboardCopy) return;
+    if (clearTimer) clearTimeout(clearTimer);
+    clearTimer = null;
+    await chrome.alarms.clear("clipboard-clear");
+    await ensureOffscreen();
+    await chrome.runtime.sendMessage({ target: "offscreen", type: "clear" }).catch(() => undefined);
+  });
 }
 
 // ---- captured logins (save bar) -------------------------------------------------------
@@ -242,10 +264,25 @@ async function setSession<T>(key: string, value: Record<string, T>): Promise<voi
   await chrome.storage.session.set({ [key]: value });
 }
 
+// Every change to a session map is a read, a change and a write of the whole
+// map; two at once would lose one of them (two tabs' captures, say). They run
+// one at a time per map. `change` must not wait on the network.
+const sessionQueues = new Map<string, Promise<unknown>>();
+function updateSession<T, R = void>(key: string, change: (map: Record<string, T>) => R): Promise<R> {
+  const run = async () => {
+    const map = await getSession<T>(key);
+    const out = change(map);
+    await setSession(key, map);
+    return out;
+  };
+  const next = (sessionQueues.get(key) ?? Promise.resolve()).then(run, run);
+  sessionQueues.set(key, next.catch(() => undefined));
+  return next;
+}
+
+/** The matching rule fills use: one site, and on localhost or an IP the same host and port. */
 function sameSite(a: string, b: string): boolean {
-  const ua = parseWebUrl(a);
-  const ub = parseWebUrl(b);
-  return Boolean(ua && ub && registrableDomain(ua.hostname) === registrableDomain(ub.hostname));
+  return matchUrl(a, b) !== null;
 }
 
 function isVaultUrl(url: string): boolean {
@@ -260,8 +297,10 @@ function promptOf(c: Capture): SavePrompt | null {
   return null;
 }
 
-async function onCapture(tabId: number, url: string, login: string, password: string): Promise<void> {
-  if (isVaultUrl(url) || !isFillAllowedUrl(url) || !(await token())) return;
+/** False when the vault could not be asked (locked, unpaired, offline): the page may offer the same login again. */
+async function onCapture(tabId: number, url: string, login: string, password: string): Promise<boolean> {
+  if (isVaultUrl(url) || !isFillAllowedUrl(url)) return true;
+  if (!(await token())) return false;
   if (!login) {
     const pending = (await getSession<PendingLogin>("pendingLogins"))[tabId];
     if (pending && Date.now() - pending.at < 5 * 60_000 && sameSite(pending.url, url)) login = pending.login;
@@ -270,24 +309,25 @@ async function onCapture(tabId: number, url: string, login: string, password: st
   try {
     check = await api<SaveCheck | { kind: "ignore" }>("/api/ext/check", { body: { url, login, password } });
   } catch {
-    return; // locked, unpaired or offline: nothing to offer
+    return false; // locked, unpaired or offline: nothing to offer
   }
-  if (check.kind === "ignore" || check.kind === "same") return;
-  const captures = await getSession<Capture>("captures");
+  if (check.kind === "ignore" || check.kind === "same") return true;
   const capture: Capture = { url, login, password, at: Date.now(), check };
-  captures[tabId] = capture;
-  await setSession("captures", captures);
+  await updateSession<Capture>("captures", (captures) => {
+    captures[tabId] = capture;
+  });
   const prompt = promptOf(capture);
   if (prompt) await chrome.tabs.sendMessage(tabId, { type: "show-save", prompt }, { frameId: 0 }).catch(() => undefined);
+  return true;
 }
 
 async function pendingPrompt(tabId: number): Promise<SavePrompt | null> {
-  const captures = await getSession<Capture>("captures");
-  const c = captures[tabId];
+  const c = (await getSession<Capture>("captures"))[tabId];
   if (!c) return null;
   if (Date.now() - c.at > CAPTURE_TTL_MS) {
-    delete captures[tabId];
-    await setSession("captures", captures);
+    await updateSession<Capture>("captures", (captures) => {
+      if (captures[tabId]?.at === c.at) delete captures[tabId];
+    });
     return null;
   }
   return promptOf(c);
@@ -308,8 +348,9 @@ async function saveCapture(tabId: number, name: string): Promise<{ ok: boolean; 
         mode: isNew ? "create" : "update",
       },
     });
-    delete captures[tabId];
-    await setSession("captures", captures);
+    await updateSession<Capture>("captures", (map) => {
+      if (map[tabId]?.at === c.at) delete map[tabId];
+    });
     return { ok: true, name: out.name };
   } catch (err) {
     return { ok: false, error: err instanceof ApiError ? err.message : "Could not save." };
@@ -317,9 +358,9 @@ async function saveCapture(tabId: number, name: string): Promise<{ ok: boolean; 
 }
 
 async function dropCapture(tabId: number): Promise<void> {
-  const captures = await getSession<Capture>("captures");
-  delete captures[tabId];
-  await setSession("captures", captures);
+  await updateSession<Capture>("captures", (captures) => {
+    delete captures[tabId];
+  });
 }
 
 // ---- cards ------------------------------------------------------------------------------
@@ -365,6 +406,7 @@ const KIND_TEXT: Partial<Record<string, string>> = { number: "number", exp: "exp
 async function fillCardFrames(tabId: number, plan: Extract<CardPlan, { status: "ok" }>, secret: CardSecret): Promise<CardFillReply> {
   const filled = new Set<string>();
   const missing = new Set<string>();
+  const rejected = new Set<string>();
   let refused = 0;
   for (const t of plan.targets) {
     let r: GuardedCardOutcome | undefined;
@@ -386,11 +428,20 @@ async function fillCardFrames(tabId: number, plan: Extract<CardPlan, { status: "
     }
     for (const k of r.filled ?? []) filled.add(k);
     for (const k of r.missing ?? []) missing.add(k);
+    for (const k of r.rejected ?? []) rejected.add(k);
   }
-  for (const k of filled) missing.delete(k);
-  if (!filled.size) return refused ? { status: "origin_mismatch", detail: "the frame refused the card" } : { status: "no_form" };
-  const words = [...new Set([...filled].map((k) => KIND_TEXT[k] ?? k))];
-  const notes = [`filled ${words.join(", ")}`];
+  for (const k of filled) {
+    missing.delete(k);
+    rejected.delete(k);
+  }
+  const textOf = (kinds: Set<string>) => [...new Set([...kinds].map((k) => KIND_TEXT[k] ?? k))].join(", ");
+  if (!filled.size) {
+    if (refused) return { status: "origin_mismatch", detail: "the frame refused the card" };
+    if (rejected.size) return { status: "error", detail: `the page's card fields did not take the ${textOf(rejected)}` };
+    return { status: "no_form" };
+  }
+  const notes = [`filled ${textOf(filled)}`];
+  if (rejected.size) notes.push(`the page did not take the ${textOf(rejected)}: check it`);
   if (missing.has("cvc")) notes.push("no security code stored: type it");
   if (plan.skipped) notes.push(`${plan.skipped} frame(s) from other sites left alone`);
   return { status: "filled", filled: [...filled], missing: [...missing], detail: notes.join("; ") };
@@ -420,6 +471,7 @@ interface PendingConfirm {
   cmd: FillCommand;
   host: string;
   paymentHosts: string[];
+  via: "agent" | "chip";
   windowId?: number;
   resolve: (d: Decision) => void;
 }
@@ -431,11 +483,11 @@ const CONFIRM_URL = chrome.runtime.getURL("confirm.html");
  * The human's Confirm is what starts an agent card fill in that tab: only then
  * may it reach the tab's payment provider frames, which the window names.
  */
-function askHuman(cmd: FillCommand, host: string, paymentHosts: string[]): Promise<Decision> {
+function askHuman(cmd: FillCommand, host: string, paymentHosts: string[], via: "agent" | "chip" = "agent"): Promise<Decision> {
   return new Promise((resolve) => {
     let done = false;
     const left = Date.parse(cmd.confirmBy ?? "") - Date.now();
-    const pending: PendingConfirm = { cmd, host, paymentHosts, resolve: (d) => finish(d) };
+    const pending: PendingConfirm = { cmd, host, paymentHosts, via, resolve: (d) => finish(d) };
     const finish = (d: Decision) => {
       if (done) return;
       done = true;
@@ -494,6 +546,7 @@ function handleConfirm(msg: ConfirmMessage): unknown {
       exp: c?.exp ?? "",
       paymentHosts: p.paymentHosts,
       remainingMs: Math.max(0, Date.parse(p.cmd.confirmBy ?? "") - Date.now() || 0),
+      via: p.via,
     };
     return details;
   }
@@ -524,43 +577,46 @@ function cardPromptOf(c: CardCapture): CardSavePrompt {
   return { kind: c.check.kind, label, brand: c.check.brand, last4: c.check.last4, exp: c.check.exp, host, hasCvv: Boolean(c.cvv) };
 }
 
-async function onCardCapture(tabId: number, frameOrigin: string | null, tabUrl: string | undefined, msg: Extract<ContentMessage, { type: "content:card-capture" }>): Promise<void> {
+/** False when the vault could not be asked (locked, unpaired, offline): the page may offer the same card again. */
+async function onCardCapture(tabId: number, frameOrigin: string | null, tabUrl: string | undefined, msg: Extract<ContentMessage, { type: "content:card-capture" }>): Promise<boolean> {
   const url = String(msg.url ?? "");
-  if (isVaultUrl(url) || !isFillAllowedUrl(url) || !(await token())) return;
+  if (isVaultUrl(url) || !isFillAllowedUrl(url)) return true;
+  if (!(await token())) return false;
   // Only the page's own frames (top or same-origin) report typed cards.
   const top = originOf(tabUrl);
-  if (!top || originOf(url) !== top || frameOrigin !== top) return;
+  if (!top || originOf(url) !== top || frameOrigin !== top) return true;
   const typed = { number: String(msg.number ?? "").slice(0, 32), exp: String(msg.exp ?? "").slice(0, 10), cardholder: String(msg.cardholder ?? "").slice(0, 100), cvv: String(msg.cvv ?? "").slice(0, 4) };
   let check: CardCheck;
   try {
     check = await api<CardCheck>("/api/ext/card-check", { body: { url, number: typed.number, exp: typed.exp, cardholder: typed.cardholder } });
   } catch {
-    return;
+    return false;
   }
-  if (check.kind !== "new" && check.kind !== "update") return;
-  const captures = await getSession<CardCapture>("cardCaptures");
+  if (check.kind !== "new" && check.kind !== "update") return true;
   const capture: CardCapture = { url, ...typed, at: Date.now(), check };
-  captures[tabId] = capture;
-  await setSession("cardCaptures", captures);
+  await updateSession<CardCapture>("cardCaptures", (captures) => {
+    captures[tabId] = capture;
+  });
   await chrome.tabs.sendMessage(tabId, { type: "show-card-save", prompt: cardPromptOf(capture) }, { frameId: 0 }).catch(() => undefined);
+  return true;
 }
 
 async function pendingCardPrompt(tabId: number): Promise<CardSavePrompt | null> {
-  const captures = await getSession<CardCapture>("cardCaptures");
-  const c = captures[tabId];
+  const c = (await getSession<CardCapture>("cardCaptures"))[tabId];
   if (!c) return null;
   if (Date.now() - c.at > CAPTURE_TTL_MS) {
-    delete captures[tabId];
-    await setSession("cardCaptures", captures);
+    await updateSession<CardCapture>("cardCaptures", (captures) => {
+      if (captures[tabId]?.at === c.at) delete captures[tabId];
+    });
     return null;
   }
   return cardPromptOf(c);
 }
 
 async function dropCardCapture(tabId: number): Promise<void> {
-  const captures = await getSession<CardCapture>("cardCaptures");
-  delete captures[tabId];
-  await setSession("cardCaptures", captures);
+  await updateSession<CardCapture>("cardCaptures", (captures) => {
+    delete captures[tabId];
+  });
 }
 
 /** Stored only now, after the human clicked Save in the card save bar. */
@@ -582,6 +638,8 @@ async function saveCardCapture(tabId: number, label: string, saveCvv: boolean): 
 // The picker opens only from a chip click; the pick must come back from the
 // top frame of the same tab with the ticket handed out for that click.
 const PICKER_TTL_MS = 2 * 60_000;
+// How long the confirmation of a chip pick stays open.
+const CHIP_CONFIRM_MS = 60_000;
 
 async function handleCardContent(msg: ContentMessage, sender: chrome.runtime.MessageSender): Promise<unknown> {
   const tabId = sender.tab!.id!;
@@ -598,9 +656,9 @@ async function handleCardContent(msg: ContentMessage, sender: chrome.runtime.Mes
       if (!chipAllowed(frameId, frameOrigin ?? undefined, tabUrl) || isVaultUrl(tabUrl ?? "")) return null;
       const cards = (await cardList()).map(pickerView);
       const nonce = crypto.randomUUID();
-      const pickers = await getSession<{ nonce: string; at: number }>("pickers");
-      pickers[tabId] = { nonce, at: Date.now() };
-      await setSession("pickers", pickers);
+      await updateSession<{ nonce: string; at: number }>("pickers", (pickers) => {
+        pickers[tabId] = { nonce, at: Date.now() };
+      });
       await chrome.tabs.sendMessage(tabId, { type: "show-card-picker", host: parseWebUrl(tabUrl)?.host ?? "", cards, nonce }, { frameId: 0 });
       return null;
     }
@@ -611,16 +669,37 @@ async function handleCardContent(msg: ContentMessage, sender: chrome.runtime.Mes
         return { status: "error", detail: "Click the card chip again." };
       }
       if (!tabUrl) return { status: "no_tab" };
-      const reply = await userCardFill(tabId, tabUrl, String(msg.name ?? ""), "chip");
+      const name = String(msg.name ?? "");
+      // The pick happened on the page, which can stage a click on the picker:
+      // the card is released only after Confirm in the extension's own window.
+      const card = (await cardList()).find((c) => c.name === name);
+      if (!card) return { status: "error", detail: "That card is not in the vault any more." };
+      const plan = planCardFill(await probeCardFrames(tabId), tabUrl, { allowPaymentFrames: true });
+      if (plan.status !== "ok") return plan;
+      const paymentHosts = [...new Set(plan.targets.filter((t) => t.paymentFrame).map((t) => new URL(t.origin).host))];
+      const pick: FillCommand = {
+        id: crypto.randomUUID(),
+        kind: "card",
+        url: tabUrl,
+        name,
+        entryUrl: plan.topOrigin,
+        submit: false,
+        createdAt: new Date().toISOString(),
+        card: { label: card.label, brand: card.brand, last4: card.last4, exp: card.exp },
+        confirmBy: new Date(Date.now() + CHIP_CONFIRM_MS).toISOString(),
+      };
+      const decision = await askHuman(pick, parseWebUrl(tabUrl)?.host ?? "", paymentHosts, "chip");
+      if (decision !== "confirm") return { status: "declined", detail: decision === "timeout" ? "Nobody confirmed: nothing was filled." : "Declined: nothing was filled." };
+      const reply = await userCardFill(tabId, tabUrl, name, "chip");
       if (reply.status === "filled") {
-        delete pickers[tabId];
-        await setSession("pickers", pickers);
+        await updateSession<{ nonce: string; at: number }>("pickers", (p) => {
+          if (p[tabId]?.nonce === ticket.nonce) delete p[tabId];
+        });
       }
       return reply;
     }
     case "content:card-capture":
-      await onCardCapture(tabId, frameOrigin, tabUrl, msg);
-      return null;
+      return { accepted: await onCardCapture(tabId, frameOrigin, tabUrl, msg) };
     case "content:pending-card-save":
       return frameId === 0 ? pendingCardPrompt(tabId) : null;
     case "content:card-save":
@@ -641,13 +720,12 @@ async function handleContent(msg: ContentMessage, sender: chrome.runtime.Message
   }
   switch (msg.type) {
     case "content:capture":
-      await onCapture(tabId, msg.url, String(msg.login ?? ""), String(msg.password ?? ""));
-      return null;
+      return { accepted: await onCapture(tabId, msg.url, String(msg.login ?? ""), String(msg.password ?? "")) };
     case "content:capture-login": {
       if (isVaultUrl(msg.url)) return null;
-      const pending = await getSession<PendingLogin>("pendingLogins");
-      pending[tabId] = { url: msg.url, login: String(msg.login ?? "").slice(0, 500), at: Date.now() };
-      await setSession("pendingLogins", pending);
+      await updateSession<PendingLogin>("pendingLogins", (pending) => {
+        pending[tabId] = { url: msg.url, login: String(msg.login ?? "").slice(0, 500), at: Date.now() };
+      });
       return null;
     }
     case "content:pending-save":
@@ -845,13 +923,11 @@ chrome.windows.onRemoved.addListener((windowId) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   void dropCapture(tabId);
   void dropCardCapture(tabId);
-  void getSession<{ nonce: string; at: number }>("pickers").then((p) => {
+  void updateSession<{ nonce: string; at: number }>("pickers", (p) => {
     delete p[tabId];
-    return setSession("pickers", p);
   });
-  void getSession<PendingLogin>("pendingLogins").then((p) => {
+  void updateSession<PendingLogin>("pendingLogins", (p) => {
     delete p[tabId];
-    return setSession("pendingLogins", p);
   });
 });
 

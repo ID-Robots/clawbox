@@ -98,11 +98,12 @@ export class CardCatalog {
         exp: card.exp,
         label: card.label || defaultLabel(card.number),
       };
+      this.cache.set(name, item);
     } catch (err) {
       if (err instanceof PassError && err.code === "not_found") throw err;
-      // Unreadable cards still list by name; the adapter logged why.
+      // Unreadable cards still list by name; the adapter logged why. Not
+      // cached: the next lookup tries to decrypt it again.
     }
-    this.cache.set(name, item);
     return this.metaFromCache(name, item, mtime);
   }
 

@@ -322,6 +322,9 @@ describe("the extension is preloaded in the box's own browser", () => {
     expect(flags({ CLAWBOX_VAULT_HOME: path.join(home, "no-vault-here") })).toEqual([]);
   });
 
+  /** What vault_extension_flags printed after the last waitMs (its first line). */
+  let lastFlag = "";
+
   /** Run vault_extension_wait with a stub systemctl; returns how long it took, in ms. */
   function waitMs(opts: { state: string; enabled: boolean; upForS?: number; limit?: number; home: string; appearAfterS?: number }): number {
     const bin = path.join(home, `bin-${Math.random().toString(36).slice(2)}`);
@@ -344,12 +347,13 @@ describe("the extension is preloaded in the box's own browser", () => {
     );
     const dir = path.join(opts.home, ".clawbox-vault", "extension");
     const started = Date.now();
-    execFileSync(
+    lastFlag = execFileSync(
       "bash",
       [
         "-c",
-        // The folder is finished by a background writer, as the vault's first build would.
-        'set -euo pipefail; source "$1"; if [ "$3" != none ]; then (sleep "$3"; mkdir -p "$4/build"; for f in manifest.json popup.html build/background.js build/content.js build/popup.js; do echo x > "$4/$f"; done) & fi; vault_extension_wait "$2"; vault_extension_flags | head -n 1',
+        // The folder is finished by a background writer, as the vault's first build would. Its
+        // streams go to /dev/null, so it never holds the output pipe this call reads open.
+        'set -euo pipefail; source "$1"; if [ "$3" != none ]; then (sleep "$3"; mkdir -p "$4/build"; for f in manifest.json popup.html build/background.js build/content.js build/popup.js; do echo x > "$4/$f"; done) </dev/null >/dev/null 2>&1 & fi; vault_extension_wait "$2"; vault_extension_flags | head -n 1',
         "_",
         LIB,
         String(opts.limit ?? 5),
@@ -357,7 +361,7 @@ describe("the extension is preloaded in the box's own browser", () => {
         dir,
       ],
       { encoding: "utf8", env: testEnv({ PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, HOME: opts.home }) },
-    );
+    ).trim();
     return Date.now() - started;
   }
 
@@ -369,6 +373,7 @@ describe("the extension is preloaded in the box's own browser", () => {
     expect(took).toBeGreaterThanOrEqual(900);
     expect(took).toBeLessThan(4500);
     expect(fs.existsSync(path.join(coming, ".clawbox-vault", "extension", "manifest.json"))).toBe(true);
+    expect(lastFlag).toBe(`--load-extension=${path.join(coming, ".clawbox-vault", "extension")}`);
     // Enabled and about to be started, or up for a few seconds: the same.
     expect(waitMs({ state: "inactive", enabled: true, home: fresh("queued"), appearAfterS: 1 })).toBeGreaterThanOrEqual(900);
     expect(waitMs({ state: "active", enabled: true, upForS: 3, home: fresh("young"), appearAfterS: 1 })).toBeGreaterThanOrEqual(900);
@@ -377,6 +382,7 @@ describe("the extension is preloaded in the box's own browser", () => {
     expect(waitMs({ state: "active", enabled: true, upForS: 600, home: fresh("old") })).toBeLessThan(900);
     // And it gives up at the limit rather than holding the browser back.
     const gaveUp = waitMs({ state: "activating", enabled: true, home: fresh("never"), limit: 2 });
+    expect(lastFlag).toBe("");
     expect(gaveUp).toBeGreaterThanOrEqual(1900);
     expect(gaveUp).toBeLessThan(5000);
   });

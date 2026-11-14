@@ -73,7 +73,13 @@ const csp = String(manifest.content_security_policy?.extension_pages ?? "");
 if (!csp) fail("content_security_policy.extension_pages is required");
 const scriptSrc = /script-src([^;]*)/.exec(csp)?.[1]?.trim() ?? "";
 if (scriptSrc !== "'self'") fail(`script-src must be exactly 'self' (got "${scriptSrc}")`);
-if (/unsafe-(eval|inline)|https?:\/\/(?!127\.0\.0\.1:4796)/.test(csp)) fail("CSP allows unsafe or remote sources");
+if (/unsafe-(eval|inline)/.test(csp)) fail("CSP allows unsafe sources");
+// The only URL source allowed is the vault's own loopback service, on whichever
+// port the build was pointed at (CLAWBOX_VAULT_EXT_SERVICE): a whole source, not a prefix.
+for (const src of csp.split(/[\s;]+/).filter((t) => /^[a-z][a-z0-9+.-]*:/i.test(t))) {
+  const m = /^http:\/\/127\.0\.0\.1:(\d{1,5})$/.exec(src);
+  if (!m || Number(m[1]) < 1 || Number(m[1]) > 65535) fail(`CSP allows a remote source: ${src}`);
+}
 if (!/object-src 'none'/.test(csp)) fail("CSP must set object-src 'none'");
 
 // Bundles: no eval / Function constructor / remote imports / analytics.

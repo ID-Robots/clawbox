@@ -101,11 +101,12 @@ export class Catalog {
       const parsed = parseEntry(await this.store.show(name));
       login = parsed.login;
       url = parsed.url;
+      this.cache.set(name, { mtimeMs: mtime.getTime(), login, url });
     } catch (err) {
       if (err instanceof PassError && err.code === "not_found") throw err;
-      // Unreadable entries still list by name; the error is logged by the adapter.
+      // Unreadable entries still list by name; the error is logged by the
+      // adapter. Not cached: the next lookup tries to decrypt it again.
     }
-    this.cache.set(name, { mtimeMs: mtime.getTime(), login, url });
     return metaOf(name, { login, url }, mtime);
   }
 
@@ -143,6 +144,8 @@ export class Catalog {
 
       let source = name;
       if (opts.renameFrom && opts.renameFrom !== name) {
+        // Checked before anything moves: a failed save must leave the entry where it was.
+        if (opts.mustBeNew) throw new ValidationError("a new entry cannot be renamed from another");
         const from = validateLoginName(opts.renameFrom);
         if (await this.store.exists(name)) throw new ValidationError("an entry with the new name already exists");
         await this.store.move(from, name);

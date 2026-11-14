@@ -522,7 +522,10 @@ install_vault_service() {
     echo "  ClawBox Vault is not in this checkout yet; its service arrives with the next update"
     return 0
   fi
-  cat > "$vault_unit" <<VAULT_UNIT
+  # Written beside the live unit and moved over it whole: a write that fails
+  # (a full disk) leaves the unit that runs now as it is.
+  local tmp="$vault_unit.tmp.$$"
+  if ! cat > "$tmp" <<VAULT_UNIT
 [Unit]
 Description=ClawBox Vault (password manager, loopback only)
 After=network.target
@@ -547,7 +550,12 @@ MemoryMax=512M
 [Install]
 WantedBy=multi-user.target
 VAULT_UNIT
-  systemctl daemon-reload
+  then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$vault_unit" || { rm -f "$tmp"; return 1; }
+  systemctl daemon-reload || return 1
   systemctl enable clawbox-vault.service >/dev/null 2>&1 || return 1
   # --no-block: the caller is an install or an update step, and the service
   # needs the build's packages; it restarts itself until they are there.

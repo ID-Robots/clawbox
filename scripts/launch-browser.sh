@@ -357,7 +357,13 @@ EXTENSION_FLAGS=()
 vault_extension_wait "${CLAWBOX_VAULT_EXTENSION_WAIT_S:-20}"
 mapfile -t EXTENSION_FLAGS < <(vault_extension_flags)
 if [ "${#EXTENSION_FLAGS[@]}" -gt 0 ]; then
-  echo "Extension: ClawBox Vault (${EXTENSION_FLAGS[0]#--load-extension=})"
+  # Asked for, not confirmed: the browser itself decides. Branded Google
+  # Chrome may refuse --load-extension (a release that drops the feature switch
+  # in vault_extension_flags); Chromium and Chrome for Testing take it.
+  echo "Extension: ClawBox Vault requested with --load-extension (${EXTENSION_FLAGS[0]#--load-extension=})"
+  case "$(basename "$CHROMIUM")" in
+    google-chrome*) echo "  Note: $CHROMIUM is branded Google Chrome, which may ignore --load-extension; ClawBox Vault's extension is certain to load in Chromium or Chrome for Testing" ;;
+  esac
 else
   echo "Extension: none (ClawBox Vault has not built its extension yet)"
 fi

@@ -59,7 +59,7 @@ let dir = "";
 let tokenFile = "";
 const seen: Seen[] = [];
 /** How the fake service answers the next requests. */
-let mode: "leaky" | "not_set_up" | "store_down" | "wrong_token" = "leaky";
+let mode: "leaky" | "not_set_up" | "store_down" | "wrong_token" | "garbled" = "leaky";
 let restore: () => void;
 
 function leakyAnswer(method: string, url: string, body: Record<string, unknown>): unknown {
@@ -92,6 +92,10 @@ beforeAll(async () => {
       if (mode === "not_set_up") return send(409, { error: "ClawBox Vault is not set up yet", code: "not_set_up" });
       if (mode === "store_down") return send(503, { error: "the password store is not available: pass is not installed on this box", code: "store_unavailable" });
       if (mode === "wrong_token") return send(401, { error: "invalid agent token" });
+      if (mode === "garbled") {
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end('{"entries": [');
+      }
       const url = req.url ?? "";
       return send(url.startsWith("/api/agent/") && !url.includes("nothing") ? 200 : 404, leakyAnswer(req.method ?? "", url, body));
     });
@@ -252,6 +256,11 @@ describe("what the agent is told when the vault cannot answer", () => {
     const down = await family("openclaw").call("vault_list", {});
     expect(down.isError && down.error.code).toBe("ENDPOINT_DOWN");
 
+    mode = "garbled";
+    // An answer that cannot be read is an error, never an empty vault.
+    const garbled = await family("openclaw").call("vault_list", {});
+    expect(garbled.isError && garbled.error.code).toBe("INTERNAL");
+    if (garbled.isError) expect(garbled.error.message).toContain("could not be read");
     mode = "wrong_token";
     const wrong = await family("openclaw").call("vault_list", {});
     expect(wrong.isError).toBe(false);

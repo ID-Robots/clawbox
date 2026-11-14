@@ -87,7 +87,10 @@ async function api<T>(path: string, init: { method?: string; body?: unknown } = 
     },
     body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
     cache: "no-store",
-    credentials: "omit",
+    // The ClawBox route in front of the service lets a request through only
+    // with the owner's session cookie (src/components/VaultApp.tsx); it hands
+    // the service no cookie, only this PIN session's bearer.
+    credentials: "same-origin",
   });
   const data = (await res.json().catch(() => ({}))) as T & { error?: string; retryAfterMs?: number };
   if (!res.ok) {
@@ -266,8 +269,26 @@ async function submitGate(ev: Event): Promise<void> {
   $<HTMLInputElement>("gate-pin2").value = "";
   $("gate").hidden = true;
   $("shell").hidden = false;
-  await Promise.all([loadInfo(), loadEntries()]);
   showView("entries");
+  await loadShell();
+}
+
+/** The first loads after unlocking. A failure (the store not ready, say) is shown with a Retry, never an empty shell. */
+async function loadShell(): Promise<void> {
+  try {
+    await Promise.all([loadInfo(), loadEntries()]);
+  } catch (err) {
+    $("detail").replaceChildren(
+      h(
+        "div",
+        { class: "placeholder" },
+        h("p", { class: "muted", text: `The vault could not be loaded: ${(err as Error).message}` }),
+        btn("Retry", () => void loadShell(), "btn"),
+      ),
+    );
+    return;
+  }
+  if (!selected) resetDetail();
 }
 
 // ---- views --------------------------------------------------------------------------------
@@ -341,17 +362,24 @@ function resetDetail(): void {
   $("detail").replaceChildren(h("div", { class: "placeholder" }, h("p", { class: "muted", text: "Select an entry to see its details." })));
 }
 
+let entryRequest = 0;
+
 async function selectEntry(name: string): Promise<void> {
   selected = name;
   renderEntries();
-  clearTimeout(revealTimer);
+  // The previous entry's detail (and any password it shows) goes now, not
+  // when this one arrives: a request that fails must not leave it on screen.
+  resetDetail();
+  const request = ++entryRequest;
   let d: EntryDetail;
   try {
     d = await api<EntryDetail>(`ui/entry?name=${encodeURIComponent(name)}`);
   } catch (err) {
-    toast((err as Error).message, "bad");
+    if (request === entryRequest) toast((err as Error).message, "bad");
     return;
   }
+  // An answer for an entry selected before the current one is dropped.
+  if (request !== entryRequest) return;
   const secret = h("span", { class: "secret", text: "••••••••••••" });
   const revealBtn = btn("Reveal", () => void toggleReveal());
   let shown = false;
@@ -595,17 +623,22 @@ function secretRow(name: string, field: "number" | "cvv", masked: string, show: 
   return [span, reveal, copy];
 }
 
+let cardRequest = 0;
+
 async function selectCard(name: string): Promise<void> {
   selectedCard = name;
   renderCards();
-  clearCardTimers();
+  // As for entries: the shown card goes first, and a late answer is dropped.
+  resetCardDetail();
+  const request = ++cardRequest;
   let d: CardDetail;
   try {
     d = await api<CardDetail>(`ui/card?name=${encodeURIComponent(name)}`);
   } catch (err) {
-    toast((err as Error).message, "bad");
+    if (request === cardRequest) toast((err as Error).message, "bad");
     return;
   }
+  if (request !== cardRequest) return;
   const kv = h("dl", { class: "kv" });
   const row = (label: string, ...value: Node[]) => kv.append(h("dt", { text: label }), h("dd", {}, ...value));
   const groups = d.brand === "amex" ? "•••• •••••• •" : "•••• •••• ••••";

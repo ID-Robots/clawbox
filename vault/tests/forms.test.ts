@@ -63,6 +63,18 @@ describe("plain login form", () => {
     expect(readTypedCredentials(p.top.document.getElementById("login")!)).toEqual({ login: "typed@example.com", password: "typed-pass" });
   });
 
+  test("a masked card security code is no password: not filled as one, not captured as one", async () => {
+    const p = await open("https://shop.example.com/checkout", { "https://shop.example.com/checkout": "checkout-masked-cvv.html" });
+    expect(findLoginForm(p.top.document)).toBeNull();
+    input(p.top, "email").value = "buyer@example.com";
+    input(p.top, "cvc").value = "123";
+    input(p.top, "sec").value = "456";
+    const typed = readTypedCredentials(p.top.document.getElementById("pay")!);
+    expect(typed?.password ?? "").toBe("");
+    expect(await fillLogin(p.top.document, { login: LOGIN, password: PASSWORD })).toEqual({ status: "no_form" });
+    expect(input(p.top, "cvc").value).toBe("123");
+  });
+
   test("no login form on a content page", async () => {
     const p = await open("https://bank.example.com/invoices", { "https://bank.example.com/invoices": "no-form.html" });
     expect(findLoginForm(p.top.document)).toBeNull();

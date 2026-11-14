@@ -49,6 +49,8 @@ export interface ConfirmDetails {
   paymentHosts: string[];
   /** Milliseconds until the request lapses. */
   remainingMs: number;
+  /** Who asked: the agent, or the human's own pick from the card chip on the page. */
+  via?: "agent" | "chip";
 }
 
 export type OffscreenMessage =

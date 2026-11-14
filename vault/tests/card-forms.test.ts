@@ -119,6 +119,25 @@ describe("split expiry", () => {
     expect(el<HTMLSelectElement>(p.top, "birth-month").selectedIndex).toBe(0);
   });
 
+  test("a month select numbered 0-11 is read and filled by its labels: December is December", async () => {
+    const p = await open(SHOP, { [SHOP]: "checkout-zero-month.html" });
+    fillCardFields(p.top.document, CARD);
+    expect(el<HTMLSelectElement>(p.top, "m").value).toBe("11");
+    expect(el<HTMLSelectElement>(p.top, "y").value).toBe("2034");
+    el<HTMLSelectElement>(p.top, "m").value = "0";
+    expect(readTypedCard(p.top.document, el(p.top, "pay-form"))?.exp).toBe("01/34");
+  });
+
+  test("fields that refuse every value are a failed fill, not an empty success", async () => {
+    const p = await open(SHOP, { [SHOP]: "checkout-zero-month.html" });
+    // A mask that throws away whatever is put in.
+    for (const id of ["number"]) el(p.top, id).addEventListener("input", (ev) => ((ev.target as HTMLInputElement).value = ""));
+    const out = fillCardFields(p.top.document, { number: CARD.number });
+    expect(out.status).toBe("error");
+    expect(out.filled).toEqual([]);
+    expect(out.rejected).toContain("number");
+  });
+
   test("single-digit months pick the right option", async () => {
     const p = await open(SHOP, { [SHOP]: "checkout-split-expiry.html" });
     fillCardFields(p.top.document, { ...CARD, exp: "03/31" });

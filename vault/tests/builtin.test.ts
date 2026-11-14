@@ -219,6 +219,29 @@ describe("the box's own browser pairs by itself", () => {
     expect((await auto(v.auth.autoPairSecret)).status).toBe(200);
     expect(v.auth.extension()?.origin).toBe(EXT_ORIGIN);
   });
+
+  test("a locked browser that pairs again stays locked: only the PIN lifts the lock", async () => {
+    const token = (await json(await auto(v.auth.autoPairSecret))).token as string;
+    expect((await v.request("/api/ext/lock", { token, origin: EXT_ORIGIN, body: {} })).status).toBe(200);
+    expect(v.auth.extensionLocked()).toBe(true);
+    // The browser lost its token and pairs again with the secret.
+    const again = (await json(await auto(v.auth.autoPairSecret))).token as string;
+    expect(v.auth.extensionLocked()).toBe(true);
+    expect(await json(await v.request("/api/ext/status", { token: again, origin: EXT_ORIGIN }))).toMatchObject({ paired: true, locked: true });
+    expect((await v.request("/api/ext/unlock", { token: again, origin: EXT_ORIGIN, body: { pin: PIN } })).status).toBe(200);
+    expect(v.auth.extensionLocked()).toBe(false);
+  });
+
+  test("Unpair from the browser holds too: auto-pairing is switched off with it", async () => {
+    const token = (await json(await auto(v.auth.autoPairSecret))).token as string;
+    expect((await v.request("/api/ext/unpair", { token, origin: EXT_ORIGIN, body: {} })).status).toBe(200);
+    expect(v.auth.extension()).toBeNull();
+    expect(v.auth.autoPairEnabled()).toBe(false);
+    const refused = await auto(v.auth.autoPairSecret);
+    expect(refused.status).toBe(409);
+    expect((await json(refused)).code).toBe("auto_pair_off");
+    expect((await v.request("/api/ui/pairing/auto", { body: {}, token: ui })).status).toBe(200);
+  });
 });
 
 describe("cards are off unless switched on", () => {

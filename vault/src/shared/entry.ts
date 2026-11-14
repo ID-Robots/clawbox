@@ -37,14 +37,23 @@ const FIELD_KEYS: Record<string, keyof EntryFields> = {
   note: "note",
 };
 
+const FIELD_LINE = /^([A-Za-z0-9]+):\s?(.*)$/;
+
+/** The known field a "key: value" line sets, if any (never the password). */
+function fieldOf(line: string): Exclude<keyof EntryFields, "password"> | undefined {
+  const m = FIELD_LINE.exec(line);
+  const key = m ? FIELD_KEYS[m[1]!.toLowerCase()] : undefined;
+  return key && key !== "password" ? key : undefined;
+}
+
 export function parseEntry(text: string): ParsedEntry {
   const lines = text.replace(/\r\n/g, "\n").split("\n");
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
   const entry: ParsedEntry = { password: lines[0] ?? "", login: "", url: "", twofa: "", note: "", extra: [] };
   for (const line of lines.slice(1)) {
-    const m = /^([A-Za-z0-9]+):\s?(.*)$/.exec(line);
-    const key = m ? FIELD_KEYS[m[1]!.toLowerCase()] : undefined;
-    if (m && key && key !== "password" && entry[key] === "") {
+    const m = FIELD_LINE.exec(line);
+    const key = fieldOf(line);
+    if (m && key && entry[key] === "") {
       entry[key] = m[2]!.trim();
     } else {
       entry.extra.push(line);
@@ -59,7 +68,13 @@ export function serializeEntry(entry: ParsedEntry): string {
   if (entry.url) lines.push(`url: ${entry.url}`);
   if (entry.twofa) lines.push(`2fa: ${entry.twofa}`);
   if (entry.note) lines.push(`note: ${entry.note}`);
-  lines.push(...entry.extra);
+  // A second "login:" (or url, 2fa, note) line is kept while the field has a
+  // value, as the first one wins on reading. Once the field is cleared it is
+  // dropped too, or the next read would bring the field back from it.
+  lines.push(...entry.extra.filter((line) => {
+    const key = fieldOf(line);
+    return !key || entry[key] !== "";
+  }));
   return lines.join("\n") + "\n";
 }
 

@@ -18,8 +18,7 @@ const MAX_BODY = 64 * 1024;
 export async function readJson(req: Request): Promise<Record<string, unknown>> {
   const type = req.headers.get("content-type") ?? "";
   if (!type.toLowerCase().startsWith("application/json")) throw new HttpError(415, "expected application/json");
-  const text = await req.text();
-  if (text.length > MAX_BODY) throw new HttpError(413, "body too large");
+  const text = await readBounded(req);
   let body: unknown;
   try {
     body = JSON.parse(text);
@@ -29,6 +28,33 @@ export async function readJson(req: Request): Promise<Record<string, unknown>> {
   }
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "expected a JSON object");
   return body as Record<string, unknown>;
+}
+
+/** The body as text, read no further than MAX_BODY bytes: a larger one is cut off with a 413. */
+async function readBounded(req: Request): Promise<string> {
+  const declared = Number(req.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > MAX_BODY) throw new HttpError(413, "body too large");
+  if (!req.body) return "";
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_BODY) {
+      await reader.cancel().catch(() => undefined);
+      throw new HttpError(413, "body too large");
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    all.set(c, at);
+    at += c.byteLength;
+  }
+  return new TextDecoder().decode(all);
 }
 
 export function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
