@@ -100,6 +100,8 @@ const RELEASES: readonly { version: string; files: string }[] = [
   { version: "1.6.5", files: "3a3e1b04680c64d3ad5652bfce7e0eaa4490350a13b463a2a5dbb0670c9ccc61" },
   // A switch checks the session end too, before it opens a box and before it sends the names.
   { version: "1.6.6", files: "fa072b2ee83f8f6d8debc940bf8a5604beb6e06aa288646444d100c0e5983725" },
+  // The indicator is never drawn into a page still being parsed (it broke a React page's hydration).
+  { version: "1.6.7", files: "d01d07ff6c8d48b466a3ccbdb1c8d65d2570f4f8f1531152afffe69017bf5156" },
 ];
 
 /**

@@ -96,6 +96,14 @@
 
   function showIndicator(ind) {
     if (window.top !== window || !ind || !Number.isInteger(ind.slot)) return;
+    // Never into a page still being parsed: a tab a switch opened asks for its
+    // indicator at document_start, and a node put among the server's HTML
+    // before the page's own script has hydrated it leaves a React page — the
+    // other box's desktop — never hydrated, blank. Drawn once parsing is done.
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => showIndicator(ind), { once: true });
+      return;
+    }
     const names = Array.isArray(ind.names) ? ind.names : [];
     const count = Math.min(9, Math.max(names.length, ind.slot));
     if (!host) {

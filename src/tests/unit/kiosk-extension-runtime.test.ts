@@ -579,6 +579,26 @@ describe("workspaces.js", () => {
     expect(root?.querySelector(".text")?.textContent).toBe("2 · Laptop");
   });
 
+  it("never draws into a page still being parsed: the indicator waits for DOMContentLoaded", async () => {
+    // A node put among the server's HTML before the page hydrates it left the
+    // other box's desktop (a React page) never hydrated, blank, on the lab boards.
+    Object.defineProperty(document, "readyState", { configurable: true, get: () => "loading" });
+    try {
+      const w = load("https://laptop.example.com/", { pending: { type: "boxIndicator", slot: 2, kind: "stay", name: "Laptop", names: ["main", "Laptop"] } });
+      await flushMicrotasks();
+      expect(document.getElementById("clawbox-kiosk-workspaces")).toBeNull();
+      // One the worker sends while the page loads waits the same way, still answered.
+      expect(w.message({ type: "boxIndicator", slot: 2, kind: "stay", name: "Laptop", names: ["main", "Laptop"] }).answer()).toEqual({ ok: true });
+      expect(document.getElementById("clawbox-kiosk-workspaces")).toBeNull();
+    } finally {
+      delete (document as unknown as { readyState?: string }).readyState;
+    }
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    const host = document.getElementById("clawbox-kiosk-workspaces");
+    expect(host?.parentElement).toBe(document.body);
+    expect(host?.shadowRoot?.querySelector(".text")?.textContent).toBe("2 · Laptop");
+  });
+
   it("on the kiosk's own desktop, reads the list and hands it to the worker — again when Settings saves it", async () => {
     const list = {
       self: { name: "laptop" },
