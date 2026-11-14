@@ -102,6 +102,8 @@ const RELEASES: readonly { version: string; files: string }[] = [
   { version: "1.6.6", files: "fa072b2ee83f8f6d8debc940bf8a5604beb6e06aa288646444d100c0e5983725" },
   // The indicator is never drawn into a page still being parsed (it broke a React page's hydration).
   { version: "1.6.7", files: "d01d07ff6c8d48b466a3ccbdb1c8d65d2570f4f8f1531152afffe69017bf5156" },
+  // A kept indicator (the owner's box names) is dropped with the list and never handed out past its session.
+  { version: "1.6.8", files: "e57e1294e0b35c6a4b920c1fcb72a2c94752c7bf8c9f54c91c6d69592429b526" },
 ];
 
 /**

@@ -241,7 +241,8 @@ async function saveBoxes(list) {
 
 function forgetBoxes() {
   listGeneration++;
-  return chrome.storage.session.remove(BOXES_KEY);
+  // Nor are any of the owner's box names kept for a tab still loading.
+  return Promise.all([chrome.storage.session.remove(BOXES_KEY), sessionUpdate(PENDING_KEY, () => ({}))]);
 }
 
 /** The owner's list forgotten: no switch under way and no answer still out may use it. */
@@ -321,17 +322,22 @@ function rememberBoxTab(origin, tabId) {
 }
 
 // The indicator goes to the tab now on screen; one that is still loading has
-// nobody listening yet, so it is kept for that tab to ask for.
-async function indicate(tabId, indicator) {
+// nobody listening yet, so it is kept for that tab to ask for. It names the
+// owner's boxes, so a kept one is handed out only while the list it came from
+// was not forgotten since (`revocations`) and its session (`validUntil`, when
+// it came from the owner's list) has not ended; forgetting the list drops
+// every kept one (forgetBoxes).
+async function indicate(tabId, indicator, validUntil) {
   if (tabId == null) return;
   try {
     await chrome.tabs.sendMessage(tabId, indicator);
   } catch {
     const now = Date.now();
+    const rev = revocations;
     await sessionUpdate(PENDING_KEY, (pending) => {
       // Only what is still fresh: a tab that never loaded leaves nothing behind.
       const kept = Object.fromEntries(Object.entries(pending).filter(([, ind]) => ind && now - (ind.at || 0) <= PENDING_TTL_MS));
-      kept[String(tabId)] = { ...indicator, at: now };
+      kept[String(tabId)] = { ...indicator, at: now, rev, validUntil: Number.isFinite(validUntil) ? validUntil : null };
       return kept;
     });
   }
@@ -344,7 +350,13 @@ async function takePendingIndicator(tabId) {
     ind = pending[String(tabId)] || null;
     return Object.fromEntries(Object.entries(pending).filter(([id]) => id !== String(tabId)));
   });
-  return ind && Date.now() - (ind.at || 0) <= PENDING_TTL_MS ? ind : null;
+  if (!ind || Date.now() - (ind.at || 0) > PENDING_TTL_MS) return null;
+  if (ind.rev !== revocations || (ind.validUntil !== null && !(ind.validUntil > Date.now()))) return null;
+  const shown = { ...ind };
+  delete shown.at;
+  delete shown.rev;
+  delete shown.validUntil;
+  return shown;
 }
 
 // One switch at a time, in the order the keys were pressed: two quick presses
@@ -372,13 +384,13 @@ async function switchBox(slot, sender) {
   const selfName = boxName(list.selfName) || "ClawBox";
   const names = [selfName, ...boxes.map((b) => b.name)];
   if (slot === 1) {
-    await indicate(home && home.id, { type: "boxIndicator", slot, kind: "stay", name: selfName, names });
+    await indicate(home && home.id, { type: "boxIndicator", slot, kind: "stay", name: selfName, names }, list.validUntil);
     return { ok: true };
   }
   const box = boxes[slot - 2];
   if (!box) {
     const text = cleanLabel(list.emptyText).replace("{n}", String(slot));
-    await indicate(sender.tab && sender.tab.id, { type: "boxIndicator", slot, kind: "empty", name: null, names, ...(text ? { text } : {}) });
+    await indicate(sender.tab && sender.tab.id, { type: "boxIndicator", slot, kind: "empty", name: null, names, ...(text ? { text } : {}) }, list.validUntil);
     return { ok: true };
   }
   let tab = await tabForBox(box);
@@ -390,7 +402,7 @@ async function switchBox(slot, sender) {
   await rememberBoxTab(webOrigin(box.url), tab.id);
   // …and the owner's names go to no indicator past that point either.
   if (!usable()) return { ok: false, error: "the list was forgotten" };
-  await indicate(tab.id, { type: "boxIndicator", slot, kind: "stay", name: box.name, names });
+  await indicate(tab.id, { type: "boxIndicator", slot, kind: "stay", name: box.name, names }, list.validUntil);
   return { ok: true };
 }
 

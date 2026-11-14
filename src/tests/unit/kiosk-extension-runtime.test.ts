@@ -845,6 +845,29 @@ describe("background.js: switching linked ClawBoxes", () => {
     expect(w.indicators().at(-1)).toEqual([1, expect.objectContaining({ slot: 1, kind: "stay", name: "laptop" })]);
   });
 
+  it("hands a kept indicator, with the owner's names, to nobody once the list is forgotten or its session ended", async () => {
+    // Forgotten (signed out) while the opened tab is still loading.
+    const w = loadWorker([DESK], { stored: list, listening: [1] });
+    await w.call({ type: "switchBox", slot: 3 });
+    const opened = w.active()!;
+    expect(Object.keys(w.session.linkedBoxIndicators as object)).toEqual([String(opened)]);
+    expect(await w.call({ type: "boxesRevoked" }, 1)).toEqual({ ok: true });
+    expect(w.session.linkedBoxIndicators).toEqual({});
+    expect(await w.call({ type: "pendingIndicator" }, opened)).toBeNull();
+
+    // The session that read the list ends before the tab asks (inside the 15 s a kept one lasts).
+    const e = loadWorker([DESK], { stored: { ...list, validUntil: Date.now() + 5_000 }, listening: [1] });
+    await e.call({ type: "switchBox", slot: 3 });
+    const tab = e.active()!;
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(await e.call({ type: "pendingIndicator" }, tab)).toBeNull();
+
+    // Inside both, it is handed over as it was drawn — nothing of the bookkeeping with it.
+    const ok = loadWorker([DESK], { stored: list, listening: [1] });
+    await ok.call({ type: "switchBox", slot: 3 });
+    expect(await ok.call({ type: "pendingIndicator" }, ok.active()!)).toEqual({ type: "boxIndicator", slot: 3, kind: "stay", name: "NAS", names: ["laptop", "Main", "NAS"] });
+  });
+
   it("an empty slot says so on the tab the key was pressed on, and opens nothing", async () => {
     const w = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { stored: list });
     await w.call({ type: "switchBox", slot: 6 }, 2);
