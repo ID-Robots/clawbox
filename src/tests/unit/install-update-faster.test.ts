@@ -337,8 +337,10 @@ d("hand_paused_gateway_to_update: one start of the gateway, by gateway_verify", 
     expect(args.some((a) => a.startsWith("--on-active"))).toBe(false);
     expect(args).toContain("--timer-property=RemainAfterElapse=no");
     expect(args).toContain("--collect");
-    // The stamp the pause left travels to the timer as its $1.
-    expect(args[args.length - 2]).toBe("123456789");
+    // The stamp the pause left travels to the timer as its $1, the recheck
+    // interval as its $2.
+    expect(args[args.length - 3]).toBe("123456789");
+    expect(args[args.length - 2]).toBe("60");
     expect(args).toContain("/bin/sh");
   });
 
@@ -370,23 +372,33 @@ d("hand_paused_gateway_to_update: one start of the gateway, by gateway_verify", 
 
 d("the gateway's fallback start: only a gateway nobody has touched since the pause", () => {
   /** Runs GATEWAY_HANDBACK_SCRIPT the way the timer does, with a fake systemctl first on PATH. */
-  function fire(box: { state: string; stamp: string; rootSteps?: string }, armed = "123456789"): { calls: string; out: string } {
+  /**
+   * `rootStepLooks`: how many of the script's looks find a root update step
+   * running (all of them when `rootSteps` is set and this is absent).
+   */
+  function fire(box: { state: string; stamp: string; rootSteps?: string; rootStepLooks?: number; stampAfterWait?: string }, armed = "123456789"): { calls: string; out: string } {
     const bin = path.join(tmp, "bin");
     const calls = path.join(tmp, "systemctl.calls");
+    const looks = path.join(tmp, "root-step.looks");
     fs.mkdirSync(bin, { recursive: true });
+    const busy = box.rootSteps ?? (box.rootStepLooks ? "clawbox-root-update@post_update.service loaded active running X\n" : "");
     fs.writeFileSync(path.join(bin, "systemctl"), [
       "#!/bin/sh",
       `echo "$*" >> ${JSON.stringify(calls)}`,
       'case "$*" in',
       `  *"-p ActiveState"*) echo ${JSON.stringify(box.state)} ;;`,
-      `  *"-p InactiveEnterTimestampMonotonic"*) echo ${JSON.stringify(box.stamp)} ;;`,
-      `  list-units*) printf '%s' ${JSON.stringify(box.rootSteps ?? "")} ;;`,
+      `  *"-p InactiveEnterTimestampMonotonic"*) if [ -s ${JSON.stringify(looks)} ] && [ -n ${JSON.stringify(box.stampAfterWait ?? "")} ]; then echo ${JSON.stringify(box.stampAfterWait ?? "")}; else echo ${JSON.stringify(box.stamp)}; fi ;;`,
+      "  list-units*)",
+      `    n=$(cat ${JSON.stringify(looks)} 2>/dev/null || echo 0); n=$((n + 1)); echo $n > ${JSON.stringify(looks)}`,
+      `    if [ ${box.rootStepLooks ?? (box.rootSteps ? 1_000_000 : 0)} -ge "$n" ]; then printf '%s' ${JSON.stringify(busy)}; fi ;;`,
       "esac",
       "exit 0",
     ].join("\n"), { mode: 0o755 });
+    // A recheck interval of 0, so a loop costs the suite nothing; a test
+    // that would loop for ever is ended by the timeout below.
     const script = [
       handbackSettings(),
-      `PATH=${JSON.stringify(bin)}:$PATH /bin/sh -c "$GATEWAY_HANDBACK_SCRIPT" sh ${JSON.stringify(armed)}`,
+      `PATH=${JSON.stringify(bin)}:$PATH timeout 10 /bin/sh -c "$GATEWAY_HANDBACK_SCRIPT" sh ${JSON.stringify(armed)} 0`,
     ].join("\n");
     const r = bash(script);
     return { calls: fs.existsSync(calls) ? fs.readFileSync(calls, "utf-8") : "", out: r.out };
@@ -412,9 +424,24 @@ d("the gateway's fallback start: only a gateway nobody has touched since the pau
     expect(started(fire({ state: "inactive", stamp: "999999999" }).calls)).toBe(false);
   });
 
-  it("does nothing while a root update step runs", () => {
+  it("never starts the gateway while a root update step runs", () => {
     const r = fire({ state: "inactive", stamp: "123456789", rootSteps: "clawbox-root-update@post_update.service loaded active running X\n" });
     expect(started(r.calls)).toBe(false);
+  });
+
+  it("waits out a root update step and starts the gateway once it is over, instead of giving up", () => {
+    // The deadline fell inside a long step (a continuation whose process died
+    // in post_update): it looks again until the step is gone.
+    const r = fire({ state: "inactive", stamp: "123456789", rootStepLooks: 3 });
+    expect(started(r.calls)).toBe(true);
+    expect(r.calls.split("\n").filter((l) => l.startsWith("list-units")).length).toBe(4);
+  });
+
+  it("does not start a gateway whose stamp moved while it waited (the step started and stopped it)", () => {
+    const r = fire({ state: "inactive", stamp: "123456789", rootStepLooks: 1, stampAfterWait: "987654321" });
+    expect(started(r.calls)).toBe(false);
+    // It did wait: one look found the step, the next found the moved stamp.
+    expect(r.calls.split("\n").filter((l) => l.startsWith("list-units")).length).toBe(1);
   });
 
   it("does nothing without the stamp it was armed with", () => {
@@ -513,15 +540,18 @@ d("record_rebuild_kept_build: the serving build's id, on the boot's own count", 
       fn("record_rebuild_kept_build"),
       "record_rebuild_kept_build",
     ].join("\n");
-    const r = bash(script, { CLAWBOX_REBUILD_KEPT_BUILD: note });
+    const bootId = path.join(tmp, "boot_id");
+    if (!fs.existsSync(bootId)) fs.writeFileSync(bootId, "d967658f-3b5f-4c6d-ac1e-390b669e2fd4\n");
+    const r = bash(script, { CLAWBOX_REBUILD_KEPT_BUILD: note, CLAWBOX_BOOT_ID_FILE: bootId });
     return { status: r.status };
   }
 
-  it("writes the serving build's BUILD_ID and the seconds since boot, readable by the web server", () => {
+  it("writes the serving build's BUILD_ID, this boot's id and the seconds since boot, readable by the web server", () => {
     serve("Fdx9fmcX3pnT8MkGe4OK3");
     expect(record().status).toBe(0);
-    const [id, up] = fs.readFileSync(note, "utf-8").trim().split(" ");
+    const [id, boot, up] = fs.readFileSync(note, "utf-8").trim().split(" ");
     expect(id).toBe("Fdx9fmcX3pnT8MkGe4OK3");
+    expect(boot).toBe("d967658f-3b5f-4c6d-ac1e-390b669e2fd4");
     const uptime = Number(fs.readFileSync("/proc/uptime", "utf-8").split(" ")[0]);
     expect(Number(up)).toBeGreaterThan(0);
     expect(Number(up)).toBeLessThanOrEqual(uptime + 1);
@@ -533,12 +563,13 @@ d("record_rebuild_kept_build: the serving build's id, on the boot's own count", 
   it("follows the nested layout's entry link to the build that serves", () => {
     serve("nested-build", true);
     expect(record().status).toBe(0);
-    expect(fs.readFileSync(note, "utf-8")).toMatch(/^nested-build \d/);
+    expect(fs.readFileSync(note, "utf-8")).toMatch(/^nested-build d967658f-3b5f-4c6d-ac1e-390b669e2fd4 \d/);
   });
 
   it.each([
     ["there is no standalone entry", () => fs.mkdirSync(project, { recursive: true })],
     ["the BUILD_ID is not one", () => serve("../../etc")],
+    ["the boot id cannot be read as one", () => { serve("good-build"); fs.writeFileSync(path.join(tmp, "boot_id"), "not a boot\n"); }],
   ])("writes nothing, and removes an older note, when %s", (_why, arrange) => {
     arrange();
     fs.mkdirSync(path.dirname(note), { recursive: true });
