@@ -1,7 +1,7 @@
 import { splitAssistantMedia } from "@/lib/chat-media";
 import { userTabKeyFor } from "@/lib/chat-scope";
 import { uuid, type ChatToolSummary } from "@/lib/chat-history-cache";
-import { isSlashCommand, type SlashCommand } from "@/lib/chat-slash-commands";
+import { isSlashCommand, typedResetCommand, type SlashCommand } from "@/lib/chat-slash-commands";
 import type { ConversationSize } from "@/lib/chat-local-fit";
 import { HERMES_AUTO_PROVIDER, hermesProviderLabel } from "@/lib/hermes-providers";
 import { confirmSessionStillValid } from "@/lib/session-expiry";
@@ -438,7 +438,49 @@ export class HermesAdapter implements HarnessAdapter {
     for (const cb of this.statusListeners) cb(status, detail);
   }
 
+  /**
+   * A typed `/new` or `/reset` is two turns when words follow it (TASK-2520).
+   *
+   * Hermes starts a session in its CLIENT — its own TUI opens the new one — so
+   * the command is not something `slash.exec` can run: handed to the slash
+   * worker like any other command it sat there until the worker gave up, and
+   * 45 seconds later the chat said "slash worker timed out" over a
+   * conversation that was exactly where it had been (v0.23.1, the owner and
+   * every other user alike). The chat route starts the fresh session itself
+   * now and answers `freshSession`, which `settledTurn` reads as "forget the
+   * session this conversation was on".
+   *
+   * The command goes out AS TYPED, so the box judges the whole message before
+   * anything is cleared — a member of staff's `/new <anything>` is refused
+   * there, and nothing of theirs is lost to a command they may not send. Only
+   * once the box has said the session is fresh do the words after the command
+   * go out, as the first message of the new conversation (as on the OpenClaw
+   * edition). A turn carrying a file is left alone, as the route leaves it.
+   */
   async sendTurn(req: TurnRequest, onEvent?: (event: TurnEvent) => void): Promise<TurnResult> {
+    // Read NOW, once, for both requests: the owner may be in another tab by
+    // the time the box has answered the first, and the words after the command
+    // belong to the conversation the command was typed in — not to whichever
+    // one is on screen by then.
+    const ctx = this.context();
+    const typed = req.attachments.length === 0 ? typedResetCommand(req.text) : null;
+    if (!typed?.tail) return (await this.postTurn(ctx, req, onEvent)).result;
+    const started = await this.postTurn(ctx, req);
+    // A box that did not start a fresh session answered the message some
+    // other way; that answer is the turn's.
+    if (!started.fresh) return started.result;
+    return (await this.postTurn(ctx, { ...req, text: typed.tail }, onEvent)).result;
+  }
+
+  /**
+   * One request to the chat route for the conversation `ctx` names: the
+   * settled turn, and whether the box said that conversation's session is fresh.
+   */
+  private async postTurn(
+    ctx: HermesTurnContext,
+    req: TurnRequest,
+    onEvent?: (event: TurnEvent) => void,
+  ): Promise<{ result: TurnResult; fresh: boolean }> {
     // Ask to be streamed to whenever the caller is listening. The route honours
     // the header when it can and answers with ordinary JSON when it cannot, so
     // asking is never a commitment — see `readStreamedTurn`.
@@ -451,7 +493,6 @@ export class HermesAdapter implements HarnessAdapter {
     // every text turn anyway, so the probe can only ever have downgraded a turn
     // that would stream to one that arrives whole.
     const streaming = typeof onEvent === "function";
-    const ctx = this.context();
     // Captured NOW: the owner may be in another tab by the time the reply
     // lands, and the session id it reports belongs to the conversation that
     // asked, not to the one on screen.
@@ -570,7 +611,7 @@ export class HermesAdapter implements HarnessAdapter {
           typeof data?.error === "string" && data.error ? data.error : "Hermes chat failed",
         );
       }
-      return this.settledTurn(key, resumed, data);
+      return { result: this.settledTurn(key, resumed, data), fresh: data.freshSession === true };
     } catch (err) {
       // A STOP IS NOT AN UPSTREAM FAILURE, whichever way the body ended.
       //
@@ -596,6 +637,12 @@ export class HermesAdapter implements HarnessAdapter {
    * conversation's next turn.
    */
   private settledTurn(key: string, resumed: string | undefined, data: Record<string, unknown>): TurnResult {
+    // The box started a fresh session for this conversation (a typed /new or
+    // /reset): the id it was on, and the model that session ran, go.
+    if (data.freshSession === true) {
+      this.sessions.delete(key);
+      this.sessionModels.delete(key);
+    }
     if (typeof data.sessionId === "string" && data.sessionId) {
       this.sessions.set(key, data.sessionId);
     }
