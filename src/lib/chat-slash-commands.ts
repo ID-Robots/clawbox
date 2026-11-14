@@ -267,6 +267,52 @@ export function isSlashCommandMessage(text: string): boolean {
   return /^\/[A-Za-z][\w-]*$/.test(first);
 }
 
+/** What the Hermes chat answers a typed `/new` or `/reset` with, once the fresh session is the conversation's. */
+export const FRESH_SESSION_NOTICE = "New session started.";
+
+/** A typed `/new` or `/reset`: the command, and the message that followed it ("" for the bare command). */
+export interface TypedResetCommand {
+  readonly action: "new" | "reset";
+  readonly tail: string;
+}
+
+const RESET_COMMAND_RE = /^\/(new|reset)(?:\s*:|(?=\s)|$)/i;
+const SOFT_RESET_RE = /^soft(?:\s|$)/i;
+
+/**
+ * Is this message a typed `/new` or `/reset` — "start a fresh conversation"?
+ *
+ * The one command this chat cannot simply hand to its harness as text
+ * (TASK-2520), because starting a session is not something either harness
+ * does for whoever asks:
+ *
+ *  - OpenClaw refuses it from a socket without `operator.admin`, which a
+ *    user's relayed socket never has — `scripts/gateway-user-relay.js` reads
+ *    the command with ITS copy of this function (a CommonJS entry point cannot
+ *    import TypeScript; `chat-slash-commands.test.ts` runs one table through
+ *    both) and runs the reset itself;
+ *  - Hermes leaves it to its CLIENT — its own TUI opens the new session — so
+ *    the `slash.exec` worker never answers it. `HermesAdapter.sendTurn` is
+ *    that client here, and the chat route answers the command itself
+ *    (`FRESH_SESSION_NOTICE`).
+ *
+ * Read as the OpenClaw core reads the start of a message: the bare word, the
+ * word and a message after white space (a new line included), or the
+ * `/new: message` colon form, in any letter case. `/reset soft` is NOT one:
+ * that is the core's in-place reset that keeps the transcript, and running a
+ * fresh session for it would throw away what the owner asked to keep.
+ */
+export function typedResetCommand(message: unknown): TypedResetCommand | null {
+  if (typeof message !== "string") return null;
+  const text = message.trim();
+  const match = RESET_COMMAND_RE.exec(text);
+  if (!match) return null;
+  const action = match[1].toLowerCase() === "reset" ? "reset" : "new";
+  const tail = text.slice(match[0].length).trim();
+  if (action === "reset" && SOFT_RESET_RE.test(tail)) return null;
+  return { action, tail };
+}
+
 /**
  * The command the owner is typing, or null when the popover has no business
  * being open.

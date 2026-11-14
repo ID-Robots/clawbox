@@ -138,6 +138,45 @@ describe("a slash command typed into the Hermes chat", () => {
     expect(recordedReplies()).toEqual(["Session · gemma"]);
   });
 
+  // TASK-2520: Hermes leaves "start a new session" to its client, so its slash
+  // worker never answers /new: 45 seconds, then "slash worker timed out", and
+  // nothing reset. The chat's adapter starts the fresh session and then sends
+  // the bare command with no session to resume; the route answers that itself.
+  it.each(["/new", "/reset", "/NEW"])("answers a typed %j that resumes no session itself, and never hands it to the slash worker", async (message) => {
+    const res = await POST(post({ message }, true));
+
+    expect(slashMock).not.toHaveBeenCalled();
+    expect(openTurnMock).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    // No session id: the next turn opens the fresh one.
+    expect(await res.json()).toEqual({ text: "New session started.", harness: "hermes" });
+    // The question and the answer are in the transcript, like any command's.
+    const recorded = appendMock.mock.calls.map(([record]) => record as { role: string; text: string });
+    expect(recorded.map((r) => [r.role, r.text])).toEqual([["user", message], ["assistant", "New session started."]]);
+  });
+
+  it("answers it under the caller's own transcript key", async () => {
+    await POST(post({ message: "/new", sessionKey: "desktop-0123456789ab" }));
+    expect(appendMock.mock.calls.map(([, key]) => key)).toEqual(["desktop-0123456789ab", "desktop-0123456789ab"]);
+  });
+
+  it.each([
+    ["/new", { sessionId: SESSION_ID }],
+    ["/reset", { sessionId: SESSION_ID }],
+    ["/new holiday plans", {}],
+    ["/reset soft", {}],
+    ["/newer", {}],
+  ])("leaves %j %j to Hermes: not a fresh session the chat already started", async (message, extra) => {
+    // A command that names a session to resume did not come from a chat that
+    // started a fresh one; words after it are Hermes' to read.
+    slashMock.mockResolvedValue(slashResult("as Hermes answered"));
+    const res = await POST(post({ message, ...extra }));
+    expect(slashMock).toHaveBeenCalledTimes(1);
+    expect(slashMock.mock.calls[0][0].command).toBe(message);
+    expect((await res.json()).text).toBe("as Hermes answered");
+  });
+
   it("carries the command's own text through, arguments included", async () => {
     slashMock.mockResolvedValue(slashResult("done"));
     await POST(post({ message: "/undo 2", sessionId: SESSION_ID }));

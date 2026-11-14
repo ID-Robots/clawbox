@@ -355,6 +355,118 @@ describe("HermesAdapter", () => {
     expect(adapter.threadedSessionId).toBe("");
   });
 
+  // ── A typed /new or /reset (TASK-2520) ───────────────────────────────────
+  //
+  // Hermes leaves "start a new session" to its client, so its slash worker
+  // never answers the command: down the route it took 45 seconds to say "slash
+  // worker timed out" and reset nothing, for the owner and every user alike.
+
+  /** An adapter whose every request is kept: method, path, and the turn's body. */
+  function recordingAdapter(context: HermesTurnContext = CONTEXT) {
+    const seen: Array<{ method: string; url: string; body?: Record<string, unknown> }> = [];
+    let turn = 0;
+    const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      seen.push({ method, url: String(url), ...(init?.body ? { body: JSON.parse(String(init.body)) as Record<string, unknown> } : {}) });
+      const payload = method === "POST" ? { text: `answer ${++turn}`, sessionId: `sess-${turn}` } : { ok: true };
+      return { ok: true, status: 200, json: async () => payload } as unknown as Response;
+    });
+    const adapter = new HermesAdapter(caps, () => context, fetchImpl as unknown as typeof fetch);
+    const turns = () => seen.filter((r) => r.method === "POST" && r.url === "/setup-api/hermes/chat");
+    return { adapter, seen, turns };
+  }
+
+  it.each([
+    ["/new", "/new"],
+    ["/reset", "/reset"],
+    ["  /NEW ", "/new"],
+    ["/new:", "/new"],
+  ])("starts a fresh session for a typed %j before the command reaches the box", async (command, sent) => {
+    const { adapter, seen, turns } = recordingAdapter();
+    await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" });
+    expect(adapter.threadedSessionId).toBe("sess-1");
+    seen.length = 0;
+
+    await adapter.sendTurn({ text: command, attachments: [], idempotencyKey: "b" });
+    // What the new-chat control does — the box stops anything still answering,
+    // the stored transcript goes, the session id is forgotten — and only then
+    // the command itself, as a turn that resumes nothing: the route answers
+    // that one itself instead of handing it to Hermes' slash worker.
+    expect(seen.map((r) => `${r.method} ${r.url}`)).toEqual([
+      "DELETE /setup-api/hermes/chat?sessionKey=desktop",
+      "DELETE /setup-api/chat/history?sessionKey=desktop",
+      "POST /setup-api/hermes/chat",
+    ]);
+    // The plain word, however it was spelt: that is the shape the route answers.
+    expect(turns()[0].body).toMatchObject({ message: sent, sessionKey: "desktop" });
+    expect(turns()[0].body?.sessionId).toBeUndefined();
+  });
+
+  it("does not resume the old session after a typed /new, whatever the box answered it with", async () => {
+    // The route's own answer to the command names no session.
+    const seen: Array<Record<string, unknown>> = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method !== "POST") return { ok: true, status: 200, json: async () => ({ ok: true }) } as unknown as Response;
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      seen.push(body);
+      const payload = body.message === "/new" ? { text: "New session started.", harness: "hermes" } : { text: "hi", sessionId: `sess-${seen.length}` };
+      return { ok: true, status: 200, json: async () => payload } as unknown as Response;
+    });
+    const adapter = new HermesAdapter(caps, () => CONTEXT, fetchImpl as unknown as typeof fetch);
+    await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" });
+    const result = await adapter.sendTurn({ text: "/new", attachments: [], idempotencyKey: "b" });
+    expect(result.text).toBe("New session started.");
+    expect(adapter.threadedSessionId).toBe("");
+    await adapter.sendTurn({ text: "fresh", attachments: [], idempotencyKey: "c" });
+    expect(seen.map((b) => [b.message, b.sessionId])).toEqual([["hello", undefined], ["/new", undefined], ["fresh", undefined]]);
+    expect(adapter.threadedSessionId).toBe("sess-3");
+  });
+
+  it("sends the words after a typed /new as the first message of the fresh session", async () => {
+    const { adapter, seen, turns } = recordingAdapter();
+    await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" });
+    seen.length = 0;
+
+    const result = await adapter.sendTurn({ text: "/new what is on my calendar?", attachments: [], idempotencyKey: "b" });
+    // The reset first, then the message without the command and without the old session.
+    expect(seen.map((r) => r.method)).toEqual(["DELETE", "DELETE", "POST"]);
+    expect(turns()[0].body).toMatchObject({ message: "what is on my calendar?", sessionKey: "desktop" });
+    expect(turns()[0].body?.sessionId).toBeUndefined();
+    expect(result.text).toBe("answer 2");
+    expect(adapter.threadedSessionId).toBe("sess-2");
+  });
+
+  it("resets the conversation the command was typed in, a user's own included", async () => {
+    const { adapter, seen, turns } = recordingAdapter({ ...CONTEXT, sessionKey: "desktop-user-alice" });
+    await adapter.sendTurn({ text: "/reset", attachments: [], idempotencyKey: "a" });
+    expect(seen.map((r) => `${r.method} ${r.url}`)).toEqual([
+      "DELETE /setup-api/hermes/chat?sessionKey=desktop-user-alice",
+      "DELETE /setup-api/chat/history?sessionKey=desktop-user-alice",
+      "POST /setup-api/hermes/chat",
+    ]);
+    expect(turns()[0].body).toMatchObject({ message: "/reset", sessionKey: "desktop-user-alice" });
+  });
+
+  it.each(["/reset soft", "/newer", "/model", "/status", "tell me about /new"])("leaves %j to the box", async (text) => {
+    const { adapter, seen, turns } = recordingAdapter();
+    await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" });
+    await adapter.sendTurn({ text, attachments: [], idempotencyKey: "b" });
+    expect(seen.some((r) => r.method === "DELETE")).toBe(false);
+    expect(turns()[1].body).toMatchObject({ message: text, sessionId: "sess-1" });
+  });
+
+  it("leaves a turn that carries a file alone, as the route does", async () => {
+    const { adapter, seen, turns } = recordingAdapter();
+    await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" });
+    await adapter.sendTurn({
+      text: "/new",
+      attachments: [{ id: "f1", name: "shot.png", path: "/tmp/clawbox-chat/shot.png", mimeType: "image/png" }] as never,
+      idempotencyKey: "b",
+    });
+    expect(seen.some((r) => r.method === "DELETE")).toBe(false);
+    expect(turns()[1].body).toMatchObject({ message: "/new", sessionId: "sess-1" });
+  });
+
   // ── Attachments ───────────────────────────────────────────────────────────
 
   it("hands the staged image paths to the route, which is what re-checks them", async () => {

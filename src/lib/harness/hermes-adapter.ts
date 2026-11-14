@@ -1,7 +1,7 @@
 import { splitAssistantMedia } from "@/lib/chat-media";
 import { userTabKeyFor } from "@/lib/chat-scope";
 import { uuid, type ChatToolSummary } from "@/lib/chat-history-cache";
-import { isSlashCommand, type SlashCommand } from "@/lib/chat-slash-commands";
+import { isSlashCommand, typedResetCommand, type SlashCommand } from "@/lib/chat-slash-commands";
 import type { ConversationSize } from "@/lib/chat-local-fit";
 import { HERMES_AUTO_PROVIDER, hermesProviderLabel } from "@/lib/hermes-providers";
 import { confirmSessionStillValid } from "@/lib/session-expiry";
@@ -439,6 +439,27 @@ export class HermesAdapter implements HarnessAdapter {
   }
 
   async sendTurn(req: TurnRequest, onEvent?: (event: TurnEvent) => void): Promise<TurnResult> {
+    // A typed /new or /reset (TASK-2520). Hermes starts a session in its
+    // CLIENT — its own TUI opens the new one — so the command is not something
+    // `slash.exec` can run: sent down the route like any other command it sat
+    // in the slash worker until that gave up, and 45 seconds later the chat
+    // said "slash worker timed out" over a conversation that was exactly where
+    // it had been (v0.23.1, the owner and every other user alike). This chat is
+    // the client here, and its fresh session is `resetSession` — what the
+    // strip's own new-chat control does, the stored transcript included.
+    //
+    // Then the turn goes on as a turn of the fresh session. Words after the
+    // command are its first message, as on the OpenClaw edition. The bare
+    // command is sent on as the plain word (`/new`, however it was spelt):
+    // with no session left to resume, the route answers it itself ("New
+    // session started.") and records both, so the exchange is in the
+    // transcript like any other command's. A turn carrying a file is left
+    // alone: the route does not read a command off one either.
+    const typed = req.attachments.length === 0 ? typedResetCommand(req.text) : null;
+    if (typed) {
+      await this.resetSession();
+      req = { ...req, text: typed.tail || `/${typed.action}` };
+    }
     // Ask to be streamed to whenever the caller is listening. The route honours
     // the header when it can and answers with ordinary JSON when it cannot, so
     // asking is never a commitment — see `readStreamedTurn`.

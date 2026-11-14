@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createRequire } from "module";
 import {
   applySlashCommand,
   commandsFromHermesCatalog,
@@ -7,7 +8,14 @@ import {
   isSlashCommandMessage,
   isSlashCommand,
   slashQueryAt,
+  typedResetCommand,
 } from "@/lib/chat-slash-commands";
+
+// The user relay's own copy of `typedResetCommand` (a CommonJS entry point
+// cannot import TypeScript): one table below runs through both.
+const relay = createRequire(import.meta.url)("../../../scripts/gateway-user-relay.js") as {
+  typedResetCommand(message: unknown): { action: "new" | "reset"; tail: string } | null;
+};
 
 /**
  * The command SOURCE, per edition.
@@ -423,5 +431,58 @@ describe("rows off the wire", () => {
     // a trailing space, so it is not a row this composer can use.
     expect(isSlashCommand({ id: "/x", usage: "/x", description: "d", source: "harness" })).toBe(false);
     expect(isSlashCommand(null)).toBe(false);
+  });
+});
+
+// TASK-2520: "start a fresh conversation" is the one command the chat cannot
+// hand to its harness as text. Read the same way by the Hermes adapter (this
+// module) and by the OpenClaw user relay (its CommonJS copy).
+describe("typedResetCommand", () => {
+  const CASES: Array<[unknown, { action: "new" | "reset"; tail: string } | null]> = [
+    ["/new", { action: "new", tail: "" }],
+    ["/reset", { action: "reset", tail: "" }],
+    ["  /NEW  ", { action: "new", tail: "" }],
+    ["/Reset\n", { action: "reset", tail: "" }],
+    ["/new hello", { action: "new", tail: "hello" }],
+    ["/new   hello  there ", { action: "new", tail: "hello  there" }],
+    ["/reset and now something else", { action: "reset", tail: "and now something else" }],
+    // The core's colon form.
+    ["/new:", { action: "new", tail: "" }],
+    ["/new: hello", { action: "new", tail: "hello" }],
+    ["/new :hello", { action: "new", tail: "hello" }],
+    // A message on the lines after the command.
+    ["/new\nfirst line\nsecond line", { action: "new", tail: "first line\nsecond line" }],
+    ["/reset\t now", { action: "reset", tail: "now" }],
+    // The in-place reset that keeps the transcript is not a fresh session…
+    ["/reset soft", null],
+    ["/reset soft and keep going", null],
+    ["/reset: soft", null],
+    ["/RESET Soft", null],
+    // …but only as the core's own word, and only after /reset.
+    ["/reset softly does it", { action: "reset", tail: "softly does it" }],
+    ["/new soft", { action: "new", tail: "soft" }],
+    // Not this command at all.
+    ["/newer", null],
+    ["/news today", null],
+    ["/resetting", null],
+    ["/new-chat", null],
+    ["/new/reset", null],
+    ["/model gpt-5", null],
+    ["tell me about /new", null],
+    ["new", null],
+    ["", null],
+    ["/", null],
+    [undefined, null],
+    [null, null],
+    [42, null],
+    [{ text: "/new" }, null],
+  ];
+
+  it.each(CASES)("reads %j", (message, expected) => {
+    expect(typedResetCommand(message)).toEqual(expected);
+  });
+
+  it.each(CASES)("is read the same way by the user relay's copy: %j", (message, expected) => {
+    expect(relay.typedResetCommand(message)).toEqual(expected);
   });
 });

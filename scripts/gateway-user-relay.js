@@ -158,7 +158,9 @@ const SOFT_RESET_RE = /^soft(?:\s|$)/i;
 /**
  * A chat message that is a typed `/new` or `/reset`: `{ action, tail }` — the
  * command, and the message that followed it ("" for the bare command) — or
- * null for anything else.
+ * null for anything else. The CommonJS copy of `typedResetCommand` in
+ * src/lib/chat-slash-commands.ts (which the Hermes chat reads the command
+ * with); src/tests/unit/chat-slash-commands.test.ts runs one table through both.
  *
  * `/reset soft` is "anything else": the gateway's `sessions.reset` is the hard
  * reset, so running it for a soft one would archive a transcript the user

@@ -51,7 +51,7 @@ import {
   type LiveTurnFrame,
   type LiveTurnListenerOptions,
 } from "@/lib/harness/hermes-live-turn";
-import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
+import { FRESH_SESSION_NOTICE, isSlashCommandMessage, typedResetCommand } from "@/lib/chat-slash-commands";
 import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
 import { hermesSessionFor, noteHermesSession, transcriptKeyFor } from "@/lib/chat-scope-server";
 import { chatKeyUser } from "@/lib/chat-scope";
@@ -1583,6 +1583,29 @@ export async function POST(request: Request) {
     // and a branch that ran the command and dropped the file would show the owner
     // their screenshot in the transcript over an answer that never saw it.
     if (imagePaths.length === 0 && documentPaths.length === 0 && isSlashCommandMessage(message)) {
+      // ── /new and /reset (TASK-2520) ─────────────────────────────────────
+      //
+      // The one command `slash.exec` cannot run: Hermes leaves "start a new
+      // session" to its client (its own TUI opens the session), so the slash
+      // worker sat on it until it gave up — 45 seconds, then "slash worker
+      // timed out", and the conversation exactly where it was, for the owner
+      // and every other user alike. The chat is the client here: its adapter
+      // has already started the fresh session before the command arrives
+      // (`HermesAdapter.sendTurn` — the running turn stopped, the transcript
+      // cleared, the session id forgotten), so the turn resumes nothing and
+      // all that is left is to say so. Answered and recorded like any other
+      // command's output, so a re-read of the transcript shows the same.
+      //
+      // Only that shape: a bare command that resumes no session. One that
+      // names a session to resume did not come from a chat that started a
+      // fresh one, and saying "new session" over it would be false — it goes
+      // to Hermes as before.
+      if (!rawSessionId && typedResetCommand(message)?.tail === "") {
+        await appendTranscript({ role: "assistant", text: FRESH_SESSION_NOTICE, timestamp: Date.now() }, sessionKey);
+        const answered = { text: FRESH_SESSION_NOTICE, harness: "hermes" } satisfies TurnPayload;
+        live.emit("done", answered);
+        return NextResponse.json(answered);
+      }
       const ran = await runHermesSlashCommand({
         command: message.trim(),
         ...(staff ? { profile: staff.profile } : {}),
