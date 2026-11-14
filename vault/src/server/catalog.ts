@@ -50,11 +50,12 @@ export function validateLoginName(name: unknown): string {
 }
 
 /**
- * A renamed save whose update failed and whose rename could not be undone:
- * the entry is under `at` (null when it was found under neither name), with
- * its previous content unless `contentUncertain` (the failed update could not
- * be undone either). Said in so many words, so the caller can retry where the
- * entry is instead of under a name that is gone.
+ * A save that renamed its entry and then failed, and could not end where it
+ * began: the entry is under `at`, or `at` is null when where it is could not
+ * be confirmed (under both names, neither, or a folder that cannot be read).
+ * Its content is the previous one unless `contentUncertain` (the failed update
+ * could not be undone either). Said in so many words, so the caller can retry
+ * where the entry is instead of under a name that is gone.
  */
 export class StrandedRenameError extends Error {
   constructor(
@@ -65,18 +66,40 @@ export class StrandedRenameError extends Error {
   ) {
     super(
       at
-        ? `the update failed and the entry could not be moved back: "${from}" is now "${at}"${contentUncertain ? ", and it may hold the refused update instead of its previous content" : ", unchanged"}`
-        : `the update failed and the entry could not be moved back: it is under neither "${from}" nor "${to}"; reload the list`,
+        ? `the save failed after the entry was renamed: "${from}" is now "${at}"${contentUncertain ? ", and it may hold the refused update instead of its previous content" : ", unchanged"}`
+        : `the save failed while the entry was being renamed, and where it is now could not be confirmed ("${from}" or "${to}"); reload the list`,
     );
     this.name = "StrandedRenameError";
   }
 }
 
+/** The one name the entry is under, or null when that is not certain. */
+async function locateEntry(store: PassStore, from: string, to: string): Promise<string | null> {
+  const [a, b] = await Promise.all([store.locate(from), store.locate(to)]);
+  if (a === "present" && b === "absent") return from;
+  if (b === "present" && a === "absent") return to;
+  return null;
+}
+
 /**
- * Undo the rename of a save whose update failed. `pass mv` can move the file
- * and fail afterwards (a .gpg-id signature check, its git commit), so a failed
- * move back is followed by a look at where the entry really is: back home is
- * a successful undo; anywhere else is a StrandedRenameError naming it.
+ * The rename of a save. `pass mv` can move the file and fail afterwards (a
+ * .gpg-id signature check, its commit), so a failed move is followed by a
+ * look: still at home is an ordinary failure; anywhere else is a
+ * StrandedRenameError saying where.
+ */
+export async function renameForSave(store: PassStore, from: string, to: string): Promise<void> {
+  try {
+    await store.move(from, to);
+  } catch (err) {
+    const at = await locateEntry(store, from, to);
+    if (at === from) throw err;
+    throw new StrandedRenameError(from, to, at, false);
+  }
+}
+
+/**
+ * Undo the rename of a save whose update failed, with the same look after a
+ * failed move back: back home is a successful undo.
  */
 export async function undoRename(store: PassStore, from: string, to: string, cause: unknown): Promise<void> {
   try {
@@ -85,10 +108,9 @@ export async function undoRename(store: PassStore, from: string, to: string, cau
   } catch {
     // Looked at below.
   }
-  const back = await store.exists(from).catch(() => false);
-  const there = await store.exists(to).catch(() => false);
-  if (back && !there) return;
-  throw new StrandedRenameError(from, to, there && !back ? to : null, cause instanceof PassError && cause.unrestored);
+  const at = await locateEntry(store, from, to);
+  if (at === from) return;
+  throw new StrandedRenameError(from, to, at, cause instanceof PassError && cause.unrestored);
 }
 
 export class Catalog {
@@ -191,7 +213,7 @@ export class Catalog {
         if (opts.mustBeNew) throw new ValidationError("a new entry cannot be renamed from another");
         const from = validateLoginName(opts.renameFrom);
         if (await this.store.exists(name)) throw new ValidationError("an entry with the new name already exists");
-        await this.store.move(from, name);
+        await renameForSave(this.store, from, name);
         movedFrom = from;
         this.cache.delete(from);
         source = name;

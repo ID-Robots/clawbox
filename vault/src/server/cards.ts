@@ -21,7 +21,7 @@ import {
   type ParsedCard,
 } from "../shared/card";
 import { validateName, ValidationError } from "../shared/entry";
-import { undoRename, type Catalog } from "./catalog";
+import { renameForSave, undoRename, type Catalog } from "./catalog";
 import { PassError, type PassStore } from "./pass";
 
 interface CacheItem {
@@ -197,7 +197,7 @@ export class CardCatalog {
         if (wanted !== source) {
           name = await this.freeName(wanted, source);
           if (name !== source) {
-            await this.store.move(source, name);
+            await renameForSave(this.store, source, name);
             movedFrom = source;
             this.cache.delete(source);
           }

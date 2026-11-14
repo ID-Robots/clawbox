@@ -201,6 +201,50 @@ describe("catalog on the temp store", () => {
     expect(err.message).toContain("may hold the refused update");
     await catalog.remove("shaky.example.com/ops2");
   });
+
+  test("a rename that fails after moving the file says where the entry is, for logins and cards", async () => {
+    // pass mv moved the file, then failed (a signature check, its commit).
+    const halfway = Object.create(pass) as PassStore;
+    halfway.move = async (from: string, to: string) => {
+      await pass.move(from, to);
+      throw new PassError("pass mv failed (exit 1)", "failed");
+    };
+    await catalog.save({ name: "halfway.example.com/ops", login: "ops", password: "Halfway-Secret-1" });
+    const err = await new Catalog(halfway).save({ name: "halfway.example.com/ops2", login: "ops2" }, { renameFrom: "halfway.example.com/ops" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(StrandedRenameError);
+    expect(err).toMatchObject({ at: "halfway.example.com/ops2", contentUncertain: false });
+    expect((await catalog.read("halfway.example.com/ops2")).login).toBe("ops");
+    await catalog.remove("halfway.example.com/ops2");
+
+    const cards = new CardCatalog(pass, catalog);
+    const saved = await cards.save({ number: "4242424242424242", exp: "12/34", label: "Halfway card" });
+    const cardErr = (await new CardCatalog(halfway, catalog).save({ label: "Moved halfway" }, { name: saved.name }).catch((e: unknown) => e)) as StrandedRenameError;
+    expect(cardErr).toBeInstanceOf(StrandedRenameError);
+    expect(cardErr.at).not.toBe(saved.name);
+    expect(await pass.exists(cardErr.at as string)).toBe(true);
+    await cards.remove(cardErr.at as string);
+  });
+
+  test("a location that cannot be read, or two copies, is never reported as a place", async () => {
+    for (const where of [{ from: "unknown", to: "unknown" }, { from: "present", to: "present" }, { from: "absent", to: "absent" }] as const) {
+      const blind = Object.create(pass) as PassStore;
+      blind.insert = async () => {
+        throw new PassError("pass insert failed (exit 2)", "failed");
+      };
+      let moves = 0;
+      blind.move = async (from: string, to: string) => {
+        if (moves++ > 0) throw new PassError("pass mv failed (exit 1)", "failed");
+        return pass.move(from, to);
+      };
+      blind.locate = async (name: string) => (name.endsWith("/ops") ? where.from : where.to);
+      await catalog.save({ name: "blind.example.com/ops", login: "ops", password: "Blind-Secret-1" });
+      const err = (await new Catalog(blind).save({ name: "blind.example.com/ops2" }, { renameFrom: "blind.example.com/ops" }).catch((e: unknown) => e)) as StrandedRenameError;
+      expect(err, JSON.stringify(where)).toBeInstanceOf(StrandedRenameError);
+      expect(err.at, JSON.stringify(where)).toBeNull();
+      expect(err.message).toContain("could not be confirmed");
+      await catalog.remove("blind.example.com/ops2");
+    }
+  });
 });
 
 describe("atomic saves", () => {
@@ -316,5 +360,23 @@ describe("a failed save that cannot be undone", () => {
       for (const f of allFiles(dir)) if (f.endsWith(".old")) rmSync(f, { force: true });
     }
     expect(passShow(store, "unrestored.example.com/ops")).toBe("before\n");
+  });
+});
+
+describe("where an entry is", () => {
+  test.skipIf(process.getuid?.() === 0)("present, absent, or unknown when its folder cannot be read", async () => {
+    await pass.insert("locate.example.com/ops", "x\n");
+    expect(await pass.locate("locate.example.com/ops")).toBe("present");
+    expect(await pass.locate("locate.example.com/none")).toBe("absent");
+    expect(await pass.locate("locate.example.com")).toBe("absent"); // a folder is no entry
+    const dir = join(store.storeDir, "locate.example.com");
+    chmodSync(dir, 0o000);
+    try {
+      expect(await pass.locate("locate.example.com/ops")).toBe("unknown");
+      expect(await pass.exists("locate.example.com/ops")).toBe(false);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+    await pass.remove("locate.example.com/ops");
   });
 });

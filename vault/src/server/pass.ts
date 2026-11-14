@@ -100,6 +100,20 @@ export class PassStore {
     }
   }
 
+  /**
+   * Whether the entry is there, is not, or cannot be told (a folder that
+   * cannot be read). exists() folds the last into "no"; a caller that must not
+   * guess asks this.
+   */
+  async locate(name: string): Promise<"present" | "absent" | "unknown"> {
+    try {
+      return (await stat(this.fileFor(name))).isFile() ? "present" : "absent";
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "unknown";
+    }
+  }
+
   private async isFolder(name: string): Promise<boolean> {
     try {
       return (await stat(join(this.opts.storeDir, validateName(name)))).isDirectory();
