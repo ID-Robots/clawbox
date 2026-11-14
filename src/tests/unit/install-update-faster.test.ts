@@ -338,9 +338,10 @@ d("hand_paused_gateway_to_update: one start of the gateway, by gateway_verify", 
     expect(args).toContain("--timer-property=RemainAfterElapse=no");
     expect(args).toContain("--collect");
     // The stamp the pause left travels to the timer as its $1, the recheck
-    // interval as its $2.
-    expect(args[args.length - 3]).toBe("123456789");
-    expect(args[args.length - 2]).toBe("60");
+    // interval as its $2, the updater's quiesce guard as its $3.
+    expect(args[args.length - 4]).toBe("123456789");
+    expect(args[args.length - 3]).toBe("60");
+    expect(args[args.length - 2]).toBe("/run/clawbox-gateway-maintenance");
     expect(args).toContain("/bin/sh");
   });
 
@@ -376,11 +377,26 @@ d("the gateway's fallback start: only a gateway nobody has touched since the pau
    * `rootStepLooks`: how many of the script's looks find a root update step
    * running (all of them when `rootSteps` is set and this is absent).
    */
-  function fire(box: { state: string; stamp: string; rootSteps?: string; rootStepLooks?: number; stampAfterWait?: string }, armed = "123456789"): { calls: string; out: string } {
+  /**
+   * `openclawLooks`: how many looks find an OpenClaw process running (pgrep);
+   * `guard`: the quiesce guard exists for the whole run.
+   */
+  function fire(box: { state: string; stamp: string; rootSteps?: string; rootStepLooks?: number; stampAfterWait?: string; openclawLooks?: number; guard?: boolean }, armed = "123456789"): { calls: string; out: string } {
     const bin = path.join(tmp, "bin");
     const calls = path.join(tmp, "systemctl.calls");
     const looks = path.join(tmp, "root-step.looks");
+    const pgrepLooks = path.join(tmp, "pgrep.looks");
+    const guard = path.join(tmp, "clawbox-gateway-maintenance");
     fs.mkdirSync(bin, { recursive: true });
+    if (box.guard) fs.mkdirSync(guard, { recursive: true });
+    // pgrep, never the host's: the machine running the suite may well have an
+    // OpenClaw of its own.
+    fs.writeFileSync(path.join(bin, "pgrep"), [
+      "#!/bin/sh",
+      `echo "$*" >> ${JSON.stringify(path.join(tmp, "pgrep.calls"))}`,
+      `n=$(cat ${JSON.stringify(pgrepLooks)} 2>/dev/null || echo 0); n=$((n + 1)); echo $n > ${JSON.stringify(pgrepLooks)}`,
+      `[ ${box.openclawLooks ?? 0} -ge "$n" ]`,
+    ].join("\n"), { mode: 0o755 });
     const busy = box.rootSteps ?? (box.rootStepLooks ? "clawbox-root-update@post_update.service loaded active running X\n" : "");
     fs.writeFileSync(path.join(bin, "systemctl"), [
       "#!/bin/sh",
@@ -398,7 +414,7 @@ d("the gateway's fallback start: only a gateway nobody has touched since the pau
     // that would loop for ever is ended by the timeout below.
     const script = [
       handbackSettings(),
-      `PATH=${JSON.stringify(bin)}:$PATH timeout 10 /bin/sh -c "$GATEWAY_HANDBACK_SCRIPT" sh ${JSON.stringify(armed)} 0`,
+      `PATH=${JSON.stringify(bin)}:$PATH timeout 10 /bin/sh -c "$GATEWAY_HANDBACK_SCRIPT" sh ${JSON.stringify(armed)} 0 ${JSON.stringify(guard)}`,
     ].join("\n");
     const r = bash(script);
     return { calls: fs.existsSync(calls) ? fs.readFileSync(calls, "utf-8") : "", out: r.out };
@@ -435,6 +451,22 @@ d("the gateway's fallback start: only a gateway nobody has touched since the pau
     const r = fire({ state: "inactive", stamp: "123456789", rootStepLooks: 3 });
     expect(started(r.calls)).toBe(true);
     expect(r.calls.split("\n").filter((l) => l.startsWith("list-units")).length).toBe(4);
+  });
+
+  it("waits while an OpenClaw process works beside the stopped gateway, then starts it", () => {
+    // A doctor --fix or an offline auth edit stops a gateway that is already
+    // stopped: no stamp moves, so the process itself is what the net sees.
+    const r = fire({ state: "inactive", stamp: "123456789", openclawLooks: 2 });
+    expect(started(r.calls)).toBe(true);
+    const pgrep = fs.readFileSync(path.join(tmp, "pgrep.calls"), "utf-8").trim().split("\n");
+    expect(pgrep).toHaveLength(3);
+    // The bracket keeps the pattern from matching the net's own command line.
+    expect(pgrep[0]).toBe("-f [o]penclaw");
+  });
+
+  it("never starts the gateway while the updater's quiesce guard is up", () => {
+    const r = fire({ state: "inactive", stamp: "123456789", guard: true });
+    expect(started(r.calls)).toBe(false);
   });
 
   it("does not start a gateway whose stamp moved while it waited (the step started and stopped it)", () => {

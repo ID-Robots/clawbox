@@ -4496,7 +4496,7 @@ describe("updater", () => {
       expectNoApplianceOnlyWork();
 
       // The continuation flag carries the serving build, like the appliance's.
-      expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", "rebuilt-build-id");
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({ update_needs_continuation: "rebuilt-build-id" }));
       expect(mockRebuildAsOwner).toHaveBeenCalledTimes(1);
       expect(mockRebuildAsOwner.mock.calls[0][0]).toBe(process.env.CLAWBOX_ROOT);
       const state = updater.getUpdateState();
@@ -4574,8 +4574,13 @@ describe("updater", () => {
       expect(restart?.error).toBe(
         "Rebuild failed: bun run build did not succeed: Error: Build failed because of webpack errors. The previous build was put back.",
       );
-      const flagWrites = mockSet.mock.calls.filter(([key]) => key === "update_needs_continuation").map(([, v]) => v);
-      expect(flagWrites).toEqual(["rebuilt-build-id", undefined]);
+      // Written with the rebuild step's dispatch moment, which this path has
+      // none of (TASK-2517): both keys travel in one write.
+      const flagWrites = mockSetMany.mock.calls
+        .map(([entries]) => entries as Record<string, unknown>)
+        .filter((entries) => "update_needs_continuation" in entries);
+      expect(flagWrites.map((e) => e.update_needs_continuation)).toEqual(["rebuilt-build-id", undefined]);
+      expect(flagWrites.every((e) => "update_rebuild_dispatched" in e && e.update_rebuild_dispatched === undefined)).toBe(true);
       expect(mockRestartUiProcess).not.toHaveBeenCalled();
       expectNoApplianceOnlyWork();
     });
