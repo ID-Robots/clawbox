@@ -30,7 +30,7 @@ import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
 import { readPlanGate } from "@/lib/paid-plan-gate-server";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
-import { redactCredentialShapes, redactQuotedCredentialValues } from "@/lib/incident-sanitize";
+import { sanitizeText } from "@/lib/incident-sanitize";
 import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { askOpenclawGateway, openclawGatewayRuns, startOpenclawGatewayAfterOffline, stopOpenclawGatewayForOffline } from "@/lib/openclaw-auth-ops";
 import { resolveMemoryEmbedder } from "@/lib/memory-embedder";
@@ -854,8 +854,9 @@ const EMBEDDER_OK_LAPSE_MS = 60 * 60_000;
  * The verdict that applies to this reading, asked for first when it is due and
  * may be asked; null when there is none.
  *
- * NEVER A WAKE. When memory search points at a loopback address (ClawBox's
- * proxy, whatever provider id names it) the probe goes through the proxy, which
+ * NEVER A WAKE. When memory search points at a loopback address, or at ClawBox's
+ * embed proxy under any host (whatever provider id names it), the probe goes
+ * through the proxy, which
  * starts clawbox-embed.service — the ~2 GB it stops after ten idle minutes, and
  * a start the box refuses when memory is short, which would come back as a false
  * "not ready". So it is asked only while llama-server already answers its health
@@ -869,7 +870,7 @@ async function embedderVerdictFor(agentId: string, legacy: Record<string, unknow
   if (!config) return null;
   const provider = config.provider || cleanString(legacy.requestedProvider);
   if (provider === "local" || provider === "ollama") return null;
-  const onBox = config.baseUrl === getEmbedProxyBaseUrl() || isLoopbackBaseUrl(config.baseUrl);
+  const onBox = isLoopbackBaseUrl(config.baseUrl) || isEmbedProxyUrl(config.baseUrl);
   const key = JSON.stringify([agentId, config.provider, config.baseUrl, cleanString(legacy.model)]);
   let held = embedderVerdict?.key === key ? embedderVerdict : null;
   const due = !held || held.generation !== statusGeneration || Date.now() >= held.nextAskAtMs;
@@ -882,6 +883,22 @@ async function embedderVerdictFor(agentId: string, legacy: Record<string, unknow
     held = embedderVerdict = { ...held, ok: null };
   }
   return held;
+}
+
+/**
+ * Does `baseUrl` reach ClawBox's embed proxy, under whatever host: the box's
+ * own name or LAN address reaches it as well as loopback does. The path is the
+ * one `getEmbedProxyBaseUrl()` builds (its `/v1` aside), so the two cannot drift.
+ */
+function isEmbedProxyUrl(baseUrl: string | null): boolean {
+  if (!baseUrl) return false;
+  try {
+    const proxyPath = new URL(getEmbedProxyBaseUrl()).pathname.replace(/\/v1\/?$/, "");
+    const path = new URL(baseUrl).pathname.replace(/\/+$/, "");
+    return Boolean(proxyPath) && (path === proxyPath || path.startsWith(`${proxyPath}/`));
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -908,7 +925,7 @@ async function askEmbedder(key: string, agentId: string, held: EmbedderVerdict |
     lastAskFailed: true,
   });
   const couldNotAsk = (why: string): EmbedderVerdict => {
-    noteEmbedderProbe(`the core's embedder readiness probe (doctor.memory.status) could not be asked: ${why}`);
+    noteEmbedderProbe(key, `the core's embedder readiness probe (doctor.memory.status) could not be asked: ${why}`);
     return kept();
   };
   let answer: Record<string, unknown>;
@@ -924,7 +941,7 @@ async function askEmbedder(key: string, agentId: string, held: EmbedderVerdict |
   const named = cleanString(answer.provider);
   const provider = named && embedding.cached !== true ? named : held?.provider ?? "";
   // No embedder at all (`none`) is the embedder-unavailable line's to say.
-  noteEmbedderProbe(embedding.ok || provider === "none"
+  noteEmbedderProbe(key, embedding.ok || provider === "none"
     ? ""
     : `the embedder did not pass the core's readiness probe (doctor.memory.status): ${redactCoreSentence(cleanString(embedding.error)) || "no reason given"}`);
   return (embedderVerdict = {
@@ -942,16 +959,19 @@ async function askEmbedder(key: string, agentId: string, held: EmbedderVerdict |
 }
 
 /**
- * The probe's outcome in the device log, once per change, like the lines
- * below: the card says only "not ready", and this is what tells a refused key
- * from an endpoint that is down from a probe this box can no longer ask. A
- * call that could not be made names its error's class and code only, never its
- * message; a not-ok carries the core's sentence through `redactCoreSentence`.
+ * The probe's outcome in the device log, once per change for each embedder
+ * setting (`key`, compared but never printed), like the lines below: the card
+ * says only "not ready", and this is what tells a refused key from an endpoint
+ * that is down from a probe this box can no longer ask. A call that could not
+ * be made names its error's class and code only, never its message; a not-ok
+ * carries the core's sentence through `redactCoreSentence`. An empty line (an
+ * ok) clears it, so the next failure is said again.
  */
 let loggedEmbedderProbe = "";
-function noteEmbedderProbe(line: string): void {
-  if (line === loggedEmbedderProbe) return;
-  loggedEmbedderProbe = line;
+function noteEmbedderProbe(key: string, line: string): void {
+  const said = line ? `${key}\n${line}` : "";
+  if (said === loggedEmbedderProbe) return;
+  loggedEmbedderProbe = said;
   if (line) console.warn(`[clawkeep-memory] ${line}`);
 }
 
@@ -1589,17 +1609,27 @@ function coreEmbedderFailure(raw: unknown, agentId: string): string {
   return redactCoreSentence(cleanString(custom.providerUnavailableReason) || cleanString(asRecord(custom.providerState).reason));
 }
 
-/** A sentence the core wrote about its embedder, with credentials, endpoints and paths taken out, for the device log. */
+/**
+ * A sentence the core wrote about its embedder, for the device log, at most
+ * 200 characters. Taken out first: every `scheme://` run (so an endpoint goes
+ * whole, user and password with it), paths under the usual roots, the value of
+ * `Basic <value>`, the `user:password@` before a host written without a scheme,
+ * and any run of 64 hex digits (the shape of the box's own local-AI bearer).
+ * Then `sanitizeText`: the credential shapes and named values it knows, e-mail
+ * addresses, IP addresses other than loopback (a bare `address:port` keeps only
+ * its port), home paths, query strings, and host names under the TLDs it lists
+ * (a host under another TLD stays).
+ */
 function redactCoreSentence(said: string): string {
   if (!said) return "";
-  const line = redactCredentialShapes(said, "[redacted]")
+  const cut = said
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[endpoint]")
     .replace(/(?:~|\/(?:home|root|tmp|var|srv|opt|usr|etc|mnt|media|data))\/\S*/g, "[path]")
-    .replace(/\s+/g, " ")
-    .slice(0, 200);
-  // A quoted value under a credential name comes out last, on what the cut kept;
-  // the second cut only takes off what a longer placeholder pushed past it.
-  return redactQuotedCredentialValues(line, "[redacted]").slice(0, 200);
+    .replace(/\bBasic\s+[A-Za-z0-9+/=._~-]{6,}/gi, "Basic [redacted]")
+    .replace(/[^\s:@/]+:[^\s@/]+@/g, "[redacted]@")
+    .replace(/\b[0-9a-f]{64}\b/gi, "[redacted]")
+    .replace(/\s+/g, " ");
+  return sanitizeText(cut, { maxChars: 200 });
 }
 
 /**

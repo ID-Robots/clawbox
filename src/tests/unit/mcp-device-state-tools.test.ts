@@ -14,6 +14,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { apiGet, apiTry } = vi.hoisted(() => ({ apiGet: vi.fn(), apiTry: vi.fn() }));
+// The install edition the memory tools read, set by the test that needs another one.
+const { installed } = vi.hoisted(() => ({ installed: { edition: "openclaw" as "openclaw" | "hermes" | "dual" } }));
+vi.mock("../../../mcp/lib/edition", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../mcp/lib/edition")>(),
+  installEdition: () => installed.edition,
+}));
 
 vi.mock("../../../mcp/lib/api", async () => ({
   apiGet: (...a: unknown[]) => apiGet(...a),
@@ -179,8 +185,7 @@ describe("memory_shard_status", () => {
   });
 
   it("does not point Hermes on a dual box at memory_shard_search, whose route answers only where there is no OpenClaw", async () => {
-    const saved = process.env.CLAWBOX_EDITION;
-    process.env.CLAWBOX_EDITION = "dual";
+    installed.edition = "dual";
     try {
       const dual = harness("hermes");
       expect(dual.get("memory_shard_status").description).not.toMatch(/memory_shard_search/);
@@ -193,8 +198,7 @@ describe("memory_shard_status", () => {
         expect(s.guidance).not.toMatch(/memory_shard_search/);
       }
     } finally {
-      if (saved === undefined) delete process.env.CLAWBOX_EDITION;
-      else process.env.CLAWBOX_EDITION = saved;
+      installed.edition = "openclaw";
     }
   });
 });

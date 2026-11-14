@@ -690,6 +690,38 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     for (const leak of ["example.invalid", "claw_PLACEHOLDER", "/var/lib"]) expect(lines[0]).not.toContain(leak);
   });
 
+  it.each([
+    ["a bare 64-hex token", `the proxy refused ${"5e".repeat(32)} (401)`, ["5e5e5e5e"]],
+    ["an Authorization: Basic value", "401 with Authorization: Basic dXNlcjpwYXNzd29yZDEyMw==", ["dXNlcjpwYXNzd29yZDEyMw"]],
+    ["a scheme-less user and password", "connect to owner:hunter2secret@192.0.2.44:8081 refused", ["hunter2secret", "owner:", "192.0.2.44"]],
+    ["a bare address and port", "connect ECONNREFUSED 198.51.100.7:8081", ["198.51.100.7"]],
+  ])("takes %s out of the not-ok line", async (_shape, sentence, leaks) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { gateway, reload } = await box();
+    gateway.probe = { agentId: "main", provider: "openai-compatible", embedding: { ok: false, error: sentence } };
+    await reload();
+    const lines = warn.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("readiness probe"));
+    expect(lines).toHaveLength(1);
+    for (const leak of leaks) expect(lines[0]).not.toContain(leak);
+  });
+
+  it("logs the not-ok again after a recovery, and for another embedder setting that fails the same way", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { gateway, reload, invalidated, configure } = await box();
+    const probeLines = () => warn.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("readiness probe"));
+    gateway.probe = FAILED;
+    await reload();
+    gateway.probe = OK;
+    await invalidated();
+    gateway.probe = FAILED;
+    await invalidated();
+    expect(probeLines()).toHaveLength(2);
+    // Another endpoint refusing the same way: the redacted sentence is the same, the embedder is not.
+    await configure({ baseUrl: "https://other.example.invalid/v1" });
+    await reload();
+    expect(probeLines()).toHaveLength(3);
+  });
+
   const NOT_CHECKED = { agentId: "main", provider: "openai-compatible", embedding: { ok: false, checked: false, error: "memory embedding readiness not checked" } };
 
   it.each([
@@ -907,6 +939,31 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     expect(probes()).toBe(0);
     expect(status.health).toBe("degraded");
     expect(status.errorCode).toBe("provider_degraded");
+  });
+
+  it("never wakes the embedder through the proxy under the box's own name or address", async () => {
+    const { probes, reload } = await box({ baseUrl: "http://192.0.2.20/setup-api/local-ai/embed/v1" });
+    embedder.installed = true;
+    embedder.healthy = false;
+    const status = await reload();
+    expect(probes()).toBe(0);
+    expect(status.errorCode).toBe("provider_degraded");
+  });
+
+  it("never wakes the embedder through a proxy root that is not loopback", async () => {
+    const saved = process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL;
+    process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL = "http://proxy.example.invalid/box";
+    try {
+      const { probes, reload } = await box({ baseUrl: "http://proxy.example.invalid/box/setup-api/local-ai/embed/v1" });
+      embedder.installed = true;
+      embedder.healthy = false;
+      const status = await reload();
+      expect(probes()).toBe(0);
+      expect(status.errorCode).toBe("provider_degraded");
+    } finally {
+      if (saved === undefined) delete process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL;
+      else process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL = saved;
+    }
   });
 
   it("keeps a not-ok verdict over an on-box embedder that is still asleep, however long ago it was asked", async () => {
