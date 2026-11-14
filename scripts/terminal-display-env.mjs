@@ -21,6 +21,11 @@
  *      was never started would make clients wait out a connection that cannot
  *      succeed, instead of failing the way they do today.
  *
+ * An authority belongs to one display, so the recorded XAUTHORITY travels only
+ * with the recorded display; an inherited display keeps only an inherited
+ * authority. And a relative WAYLAND_DISPLAY is a socket name, which is only
+ * findable through the XDG_RUNTIME_DIR it was inherited with.
+ *
  * Owner only — terminal-server.mjs adds this to the owner's shell, not to a
  * scoped ClawBox user's. The display is the owner's desktop: a shell that can
  * reach it can open windows on their screen and read its clipboard, which is not
@@ -90,7 +95,12 @@ export function readVncState(file) {
  *   env?: Record<string, string | undefined>,
  *   stateFile?: string,
  * }} [options]
- * @returns {{ DISPLAY?: string, WAYLAND_DISPLAY?: string, XAUTHORITY?: string }}
+ * @returns {{
+ *   DISPLAY?: string,
+ *   WAYLAND_DISPLAY?: string,
+ *   XAUTHORITY?: string,
+ *   XDG_RUNTIME_DIR?: string,
+ * }}
  */
 export function terminalDisplayEnv(options = {}) {
   const env = options.env ?? process.env;
@@ -98,22 +108,41 @@ export function terminalDisplayEnv(options = {}) {
   const stateFile = options.stateFile ?? (home ? vncStatePath(home) : "");
   const state = stateFile ? readVncState(stateFile) : {};
 
-  /** @type {{ DISPLAY?: string, WAYLAND_DISPLAY?: string, XAUTHORITY?: string }} */
+  /**
+   * @type {{
+   *   DISPLAY?: string,
+   *   WAYLAND_DISPLAY?: string,
+   *   XAUTHORITY?: string,
+   *   XDG_RUNTIME_DIR?: string,
+   * }}
+   */
   const display = {};
 
   const fromEnv = (env.DISPLAY ?? "").trim();
   const fromState = (state.CLAWBOX_VNC_DISPLAY ?? "").trim();
-  const chosen = fromEnv || fromState;
   // A DISPLAY from our own environment is taken as-is; the one from the state
   // file has to look like a display before it goes anywhere.
-  if (fromEnv ? true : DISPLAY_RE.test(fromState)) {
-    if (chosen) display.DISPLAY = chosen;
-  }
+  const useState = !fromEnv && DISPLAY_RE.test(fromState);
+  if (fromEnv) display.DISPLAY = fromEnv;
+  else if (useState) display.DISPLAY = fromState;
 
   const wayland = (env.WAYLAND_DISPLAY ?? "").trim();
-  if (wayland) display.WAYLAND_DISPLAY = wayland;
+  if (wayland) {
+    display.WAYLAND_DISPLAY = wayland;
+    // A relative WAYLAND_DISPLAY names a socket inside XDG_RUNTIME_DIR, so the
+    // child needs that directory to find it — defaulting to /run/user/<uid>
+    // is wrong whenever the owner's session runs elsewhere. An absolute one
+    // names the socket itself and needs nothing added.
+    const runtimeDir = (env.XDG_RUNTIME_DIR ?? "").trim();
+    if (!path.isAbsolute(wayland) && runtimeDir) display.XDG_RUNTIME_DIR = runtimeDir;
+  }
 
-  const authority = (env.XAUTHORITY ?? "").trim() || (state.CLAWBOX_VNC_XAUTHORITY ?? "").trim();
+  // The recorded authority is the cookie for the recorded display. Handing it
+  // to an inherited display would point the owner's session at another
+  // server's cookie, so it is used only when the recorded display is the one
+  // selected; otherwise XAUTHORITY stays unset unless our env has its own.
+  const authority =
+    (env.XAUTHORITY ?? "").trim() || (useState ? (state.CLAWBOX_VNC_XAUTHORITY ?? "").trim() : "");
   if (authority) display.XAUTHORITY = authority;
 
   return display;

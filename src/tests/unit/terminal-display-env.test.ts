@@ -12,7 +12,9 @@
  *   2. otherwise the display scripts/start-vnc.sh recorded, if it looks like
  *      one;
  *   3. otherwise nothing at all: no empty DISPLAY, no guessed ":99";
- *   4. nothing outside CLAWBOX_VNC_DISPLAY / CLAWBOX_VNC_XAUTHORITY is read.
+ *   4. nothing outside CLAWBOX_VNC_DISPLAY / CLAWBOX_VNC_XAUTHORITY is read;
+ *   5. the recorded authority is used only with the recorded display;
+ *   6. a relative WAYLAND_DISPLAY keeps the XDG_RUNTIME_DIR that finds it.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "fs";
@@ -129,16 +131,74 @@ describe("terminalDisplayEnv", () => {
     }
   });
 
-  it("passes XAUTHORITY through when either side has one", () => {
-    expect(
-      terminalDisplayEnv({
-        env: { HOME: "/nonexistent" },
-        stateFile: stateFile("CLAWBOX_VNC_XAUTHORITY=/home/clawbox/.Xauthority\n"),
-      }).XAUTHORITY,
-    ).toBe("/home/clawbox/.Xauthority");
+  it("passes an inherited XAUTHORITY through", () => {
     expect(
       terminalDisplayEnv({ env: { HOME: "/nonexistent", XAUTHORITY: "/tmp/xauth" } }).XAUTHORITY,
     ).toBe("/tmp/xauth");
+  });
+
+  it("takes the recorded authority with the recorded display", () => {
+    const env = terminalDisplayEnv({
+      env: { HOME: "/nonexistent" },
+      stateFile: stateFile(
+        "CLAWBOX_VNC_DISPLAY=:99\nCLAWBOX_VNC_XAUTHORITY=/home/clawbox/.Xauthority\n",
+      ),
+    });
+    expect(env).toEqual({ DISPLAY: ":99", XAUTHORITY: "/home/clawbox/.Xauthority" });
+  });
+
+  it("never gives the recorded authority to an inherited display", () => {
+    const env = terminalDisplayEnv({
+      env: { HOME: "/nonexistent", DISPLAY: ":0" },
+      stateFile: stateFile(
+        "CLAWBOX_VNC_DISPLAY=:99\nCLAWBOX_VNC_XAUTHORITY=/home/clawbox/.Xauthority\n",
+      ),
+    });
+    expect(env).toEqual({ DISPLAY: ":0" });
+    expect("XAUTHORITY" in env).toBe(false);
+  });
+
+  it("keeps an inherited authority on an inherited display", () => {
+    const env = terminalDisplayEnv({
+      env: { HOME: "/nonexistent", DISPLAY: ":0", XAUTHORITY: "/run/user/1000/xauth" },
+      stateFile: stateFile("CLAWBOX_VNC_XAUTHORITY=/home/clawbox/.Xauthority\n"),
+    });
+    expect(env).toEqual({ DISPLAY: ":0", XAUTHORITY: "/run/user/1000/xauth" });
+  });
+
+  it("carries XDG_RUNTIME_DIR when WAYLAND_DISPLAY is a relative socket name", () => {
+    const env = terminalDisplayEnv({
+      env: {
+        HOME: "/nonexistent",
+        WAYLAND_DISPLAY: "wayland-0",
+        XDG_RUNTIME_DIR: "/run/user/1000",
+      },
+      stateFile: path.join(tmp, "absent.env"),
+    });
+    expect(env).toEqual({
+      WAYLAND_DISPLAY: "wayland-0",
+      XDG_RUNTIME_DIR: "/run/user/1000",
+    });
+  });
+
+  it("adds no XDG_RUNTIME_DIR when WAYLAND_DISPLAY already names the socket", () => {
+    const env = terminalDisplayEnv({
+      env: {
+        HOME: "/nonexistent",
+        WAYLAND_DISPLAY: "/run/user/1000/wayland-0",
+        XDG_RUNTIME_DIR: "/run/user/1000",
+      },
+      stateFile: path.join(tmp, "absent.env"),
+    });
+    expect(env).toEqual({ WAYLAND_DISPLAY: "/run/user/1000/wayland-0" });
+  });
+
+  it("exports no XDG_RUNTIME_DIR of its own when the process has none", () => {
+    const env = terminalDisplayEnv({
+      env: { HOME: "/nonexistent", WAYLAND_DISPLAY: "wayland-0", XDG_RUNTIME_DIR: "  " },
+      stateFile: path.join(tmp, "absent.env"),
+    });
+    expect(env).toEqual({ WAYLAND_DISPLAY: "wayland-0" });
   });
 
   it("carries WAYLAND_DISPLAY through when the process has one", () => {
