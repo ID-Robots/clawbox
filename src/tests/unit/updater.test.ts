@@ -5676,6 +5676,58 @@ describe("updater", () => {
       expect(state.error).toContain("without producing a new build");
     });
 
+    // TASK-2517: an update whose target is the build already serving keeps that
+    // build (install.sh's build_is_current_for_checkout) and notes so on /run
+    // ("<BUILD_ID> <seconds since boot>"); the unchanged BUILD_ID is then not
+    // evidence of a rebuild that never happened.
+    function keptBuildBox(opts: { note: string; dispatched: unknown }): void {
+      mockGet.mockImplementation(async (key: string) => {
+        if (key === "update_needs_continuation") return "build-aaa";
+        if (key === "update_rebuild_dispatched_uptime") return opts.dispatched;
+        return undefined;
+      });
+      mockReadFile.mockImplementation(async (file) => {
+        const f = String(file);
+        if (f.endsWith("BUILD_ID")) return "build-aaa\n";
+        if (f.endsWith("rebuild-kept-build")) return opts.note;
+        throw new Error("ENOENT");
+      });
+    }
+
+    it("resumes when this run's rebuild step kept the serving build on purpose (TASK-2517)", async () => {
+      updater.resetUpdateState();
+      keptBuildBox({ note: "build-aaa 1042.17\n", dispatched: 1000.5 });
+      const log = vi.spyOn(console, "log");
+
+      expect(await updater.checkContinuation()).toBe(true);
+
+      expect(log.mock.calls.some(([m]) => String(m).includes("The rebuild step kept build build-aaa"))).toBe(true);
+      // Both halves of the record go with the flag.
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({
+        update_needs_continuation: undefined,
+        update_rebuild_dispatched_uptime: undefined,
+      }));
+      log.mockRestore();
+      // Let the continuation it started finish here, as the case above does.
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+    });
+
+    it.each([
+      ["a note written before this run dispatched the step", "build-aaa 999.9\n", 1000.5],
+      ["a note naming another build", "build-bbb 1042.17\n", 1000.5],
+      ["no dispatch time recorded", "build-aaa 1042.17\n", undefined],
+      ["a dispatch time that is not a number", "build-aaa 1042.17\n", "1000"],
+      ["a note that is not one", "kept\n", 1000.5],
+    ])("still reports no new build with %s (TASK-2517)", async (_why, note, dispatched) => {
+      updater.resetUpdateState();
+      keptBuildBox({ note, dispatched });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toContain("without producing a new build");
+    });
+
     it("moves the checkout back to the served build when the rebuild failed (TASK-1423)", async () => {
       // The killed `next build`: do_rebuild restored the previous build, the
       // box came back on it, but step 1 had left the checkout on the NEW

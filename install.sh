@@ -3169,14 +3169,13 @@ GATEWAY_HANDBACK_UNIT="clawbox-gateway-handback"
 GATEWAY_HANDBACK_S="${CLAWBOX_GATEWAY_HANDBACK_S:-900}"
 case "$GATEWAY_HANDBACK_S" in ''|*[!0-9]*) GATEWAY_HANDBACK_S=900 ;; esac
 # What the timer runs, as root, with the stamp the pause left as $1. Inline in
-# this root-owned file (the mirror's copy), never a script of the tree's.
+# this root-owned file (the mirror's copy), never a script of the tree's. ONE
+# line: systemd writes a transient unit's command into a unit file under
+# /run/systemd/transient, and a newline in it splits the ExecStart= there
+# ("Missing '=', ignoring line"), as the first board run of this showed. No
+# `${` and no `%` either: systemd expands both in a command line.
 # shellcheck disable=SC2016  # expanded by the timer's own shell
-GATEWAY_HANDBACK_SCRIPT='state=$(systemctl show clawbox-gateway.service -p ActiveState --value 2>/dev/null)
-case "$state" in inactive|failed) ;; *) exit 0 ;; esac
-[ -n "$1" ] && [ "$(systemctl show clawbox-gateway.service -p InactiveEnterTimestampMonotonic --value 2>/dev/null)" = "$1" ] || exit 0
-if systemctl list-units --no-legend --plain --state=active,activating,deactivating "clawbox-root-update@*" 2>/dev/null | grep -q .; then exit 0; fi
-echo "clawbox-gateway.service was paused for an update build and nothing has started it since: starting it"
-exec systemctl start --no-block clawbox-gateway.service'
+GATEWAY_HANDBACK_SCRIPT='state=$(systemctl show clawbox-gateway.service -p ActiveState --value 2>/dev/null); case "$state" in inactive|failed) ;; *) exit 0 ;; esac; [ -n "$1" ] && [ "$(systemctl show clawbox-gateway.service -p InactiveEnterTimestampMonotonic --value 2>/dev/null)" = "$1" ] || exit 0; if systemctl list-units --no-legend --plain --state=active,activating,deactivating "clawbox-root-update@*" 2>/dev/null | grep -q .; then exit 0; fi; echo "clawbox-gateway.service was paused for an update build and nothing has started it since: starting it"; exec systemctl start --no-block clawbox-gateway.service'
 
 disarm_gateway_handback() {
   systemctl stop "$GATEWAY_HANDBACK_UNIT.timer" 2>/dev/null || true
@@ -3856,6 +3855,44 @@ build_stamp_refusal() {
     if (!want || s.node !== want) why.push(`was built on Node ${s.node || "(unrecorded)"}, and this build would run on ${want || "(no answer)"}`);
     process.stdout.write(why.join("; "));
   ' "$1" "${2:-}" 2>/dev/null
+}
+
+# The note that tells the update's second half the rebuild step KEPT the build
+# it found (TASK-2517). The web server that resumes the update after the
+# restart demands a changed BUILD_ID as its evidence that the rebuild happened
+# (src/lib/updater.ts) — a power cycle can erase a unit's failure, never the
+# build on disk — and a build kept on purpose does not change it. So the step
+# says so: "<BUILD_ID of the serving build> <seconds since boot>", which the
+# updater accepts only for the build that is serving and only when written after
+# it dispatched this run (rebuildKeptBuild). A plain data file root writes and
+# runs nothing from, in root's /run/clawbox, like record_gateway_left_running's:
+# it outlives the web server's restart and is gone after a boot — as the
+# evidence it stands in for would be. Written through a fresh mktemp file
+# renamed over the place, readable by all. Non-zero, leaving no note, when it
+# cannot be: the caller then rebuilds as it always did.
+REBUILD_KEPT_NOTE="${CLAWBOX_REBUILD_KEPT_BUILD:-/run/clawbox/rebuild-kept-build}"
+forget_rebuild_kept_build() {
+  rm -f "$REBUILD_KEPT_NOTE" 2>/dev/null || true
+  return 0
+}
+record_rebuild_kept_build() {
+  local entry id up tmp=""
+  forget_rebuild_kept_build
+  # The BUILD_ID of the tree the server runs from, read as the updater reads it
+  # (readBuildId): beside the real standalone entry, through its link if any.
+  entry="$(readlink -f "$PROJECT_DIR/.next/standalone/server.js" 2>/dev/null)" || entry=""
+  [ -n "$entry" ] || return 1
+  id="$(head -n 1 "$(dirname "$entry")/.next/BUILD_ID" 2>/dev/null | tr -d '[:space:]')" || id=""
+  case "$id" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  up="$(awk '{print $1}' /proc/uptime 2>/dev/null)" || up=""
+  case "$up" in ''|*[!0-9.]*) return 1 ;; esac
+  if mkdir -p "$(dirname "$REBUILD_KEPT_NOTE")" 2>/dev/null \
+    && tmp="$(mktemp "$(dirname "$REBUILD_KEPT_NOTE")/.rebuild-kept-build.XXXXXX" 2>/dev/null)" \
+    && printf '%s %s\n' "$id" "$up" > "$tmp" && chmod 0644 "$tmp" && mv -fT "$tmp" "$REBUILD_KEPT_NOTE" 2>/dev/null; then
+    return 0
+  fi
+  [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+  return 1
 }
 
 # Is the build on disk already the build of this checkout? Prints why or why
@@ -15644,8 +15681,22 @@ step_rebuild_reboot() {
   # On the restart arm outside test mode a gateway paused for the build is left
   # to that second half (`--gateway-to-update`), which stops it again first
   # thing and then starts it; test mode keeps the plain rebuild.
-  local current_why=""
+  #
+  # The note that tells the second half so (record_rebuild_kept_build) is
+  # cleared first, whatever this run decides: it may only ever describe this
+  # run. A build that is current but cannot be noted is rebuilt as before —
+  # without the note the second half would read the unchanged build as a
+  # rebuild that never happened.
+  local current_why="" build_kept=0
+  forget_rebuild_kept_build
   if current_why="$(build_is_current_for_checkout)"; then
+    if record_rebuild_kept_build; then
+      build_kept=1
+    else
+      current_why="the build on disk is this checkout's, but the note that tells the update's second half so could not be written"
+    fi
+  fi
+  if [ "$build_kept" = 1 ]; then
     echo "No rebuild needed: $current_why"
   else
     echo "Rebuilding: $current_why"

@@ -240,6 +240,10 @@ d("step_rebuild_reboot removes the grant only after a verified rebuild", () => {
       // The checkout guard (TASK-1427) has its own test file.
       "arm_rebuild_checkout_guard() { :; }",
       "disarm_rebuild_checkout_guard() { :; }",
+      // So does the rebuild skip (TASK-2517): here the build is never current.
+      "forget_rebuild_kept_build() { :; }",
+      "record_rebuild_kept_build() { :; }",
+      "build_is_current_for_checkout() { echo 'not current'; return 1; }",
       fn("step_rebuild_reboot"),
       "step_rebuild_reboot",
     ].join("\n");

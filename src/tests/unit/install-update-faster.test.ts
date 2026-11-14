@@ -399,11 +399,14 @@ d("the gateway's fallback start: only a gateway nobody has touched since the pau
     expect(started(fire({ state: "inactive", stamp: "" }, "").calls)).toBe(false);
   });
 
-  it("carries no ${…} and no %: systemd would expand both in a transient unit's command line", () => {
+  it("is one line with no ${…} and no %: systemd writes a transient unit's command into a unit file, and expands both", () => {
     const settings = handbackSettings();
-    const body = settings.slice(settings.indexOf("GATEWAY_HANDBACK_SCRIPT='"));
-    expect(body).not.toMatch(/\$\{/);
-    expect(body).not.toContain("%");
+    const line = settings.split("\n").find((l) => l.startsWith("GATEWAY_HANDBACK_SCRIPT='")) ?? "";
+    // The whole value closes on its own line: a newline inside it split the
+    // transient unit's ExecStart= on the first board run.
+    expect(line).toMatch(/^GATEWAY_HANDBACK_SCRIPT='.*'$/);
+    expect(line).not.toMatch(/\$\{/);
+    expect(line).not.toContain("%");
   });
 });
 
@@ -454,5 +457,70 @@ d("git_with_retry: a stalled transfer ends and is retried", () => {
     const r = run({}, 1, "error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 60 seconds");
     expect(r.status).toBe(0);
     expect(r.attempts).toBe(2);
+  });
+});
+
+// ── 4. The note that tells the update's second half the build was kept ─────
+
+d("record_rebuild_kept_build: the serving build's id, on the boot's own count", () => {
+  let project: string;
+  let note: string;
+
+  beforeEach(() => {
+    project = path.join(tmp, "clawbox");
+    note = path.join(tmp, "run", "clawbox", "rebuild-kept-build");
+  });
+
+  function serve(buildId: string, nested = false): void {
+    const tree = nested ? path.join(project, ".next", "standalone", "apps", "box") : path.join(project, ".next", "standalone");
+    fs.mkdirSync(path.join(tree, ".next"), { recursive: true });
+    fs.writeFileSync(path.join(tree, "server.js"), "// entry\n");
+    fs.writeFileSync(path.join(tree, ".next", "BUILD_ID"), buildId);
+    if (nested) fs.symlinkSync(path.join(tree, "server.js"), path.join(project, ".next", "standalone", "server.js"));
+  }
+
+  function record(): { status: number | null } {
+    const start = INSTALL_SH.indexOf('\nREBUILD_KEPT_NOTE="');
+    const end = INSTALL_SH.indexOf("\n", start + 1);
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR=${JSON.stringify(project)}`,
+      INSTALL_SH.slice(start + 1, end),
+      fn("forget_rebuild_kept_build"),
+      fn("record_rebuild_kept_build"),
+      "record_rebuild_kept_build",
+    ].join("\n");
+    const r = bash(script, { CLAWBOX_REBUILD_KEPT_BUILD: note });
+    return { status: r.status };
+  }
+
+  it("writes the serving build's BUILD_ID and the seconds since boot, readable by the web server", () => {
+    serve("Fdx9fmcX3pnT8MkGe4OK3");
+    expect(record().status).toBe(0);
+    const [id, up] = fs.readFileSync(note, "utf-8").trim().split(" ");
+    expect(id).toBe("Fdx9fmcX3pnT8MkGe4OK3");
+    const uptime = Number(fs.readFileSync("/proc/uptime", "utf-8").split(" ")[0]);
+    expect(Number(up)).toBeGreaterThan(0);
+    expect(Number(up)).toBeLessThanOrEqual(uptime + 1);
+    expect(fs.statSync(note).mode & 0o777).toBe(0o644);
+    // Nothing of the temp file it renamed into place is left beside it.
+    expect(fs.readdirSync(path.dirname(note))).toEqual(["rebuild-kept-build"]);
+  });
+
+  it("follows the nested layout's entry link to the build that serves", () => {
+    serve("nested-build", true);
+    expect(record().status).toBe(0);
+    expect(fs.readFileSync(note, "utf-8")).toMatch(/^nested-build \d/);
+  });
+
+  it.each([
+    ["there is no standalone entry", () => fs.mkdirSync(project, { recursive: true })],
+    ["the BUILD_ID is not one", () => serve("../../etc")],
+  ])("writes nothing, and removes an older note, when %s", (_why, arrange) => {
+    arrange();
+    fs.mkdirSync(path.dirname(note), { recursive: true });
+    fs.writeFileSync(note, "older 1.0\n");
+    expect(record().status).toBe(1);
+    expect(fs.existsSync(note)).toBe(false);
   });
 });
