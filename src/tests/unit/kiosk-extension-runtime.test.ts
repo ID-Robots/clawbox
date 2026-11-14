@@ -464,3 +464,331 @@ describe("desktop.js", () => {
     }
   });
 });
+
+describe("workspaces.js", () => {
+  // The linked-box switcher's page side (TASK-2519): the keys on every page,
+  // the indicator, and on the kiosk's own desktop the list it hands the worker.
+  type Listener = (e: unknown) => void;
+
+  function load(href: string, opts: { pending?: unknown; list?: unknown; listStatus?: number } = {}) {
+    const url = new URL(href);
+    const keydown: Listener[] = [];
+    const winEvents: Record<string, Listener[]> = {};
+    const win = {
+      top: null as unknown,
+      addEventListener: (type: string, fn: Listener, capture?: boolean) => {
+        if (type === "keydown") {
+          expect(capture).toBe(true);
+          keydown.push(fn);
+        } else (winEvents[type] ??= []).push(fn);
+      },
+    };
+    win.top = win;
+    const onMessage: Array<(msg: unknown, sender: unknown, respond: (r: unknown) => void) => unknown> = [];
+    const sendMessage = vi.fn(async (msg: { type: string }) => (msg.type === "pendingIndicator" ? opts.pending ?? null : { ok: true }));
+    const chrome = { runtime: { sendMessage, onMessage: { addListener: (fn: (typeof onMessage)[number]) => onMessage.push(fn) } } };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(opts.list ?? { self: { name: "laptop" }, boxes: [] }), { status: opts.listStatus ?? 200 }));
+    const scope: Record<string, unknown> = {};
+    new Function("chrome", "window", "location", "fetch", "globalThis", source("workspaces.js"))(
+      chrome, win, { origin: url.origin, pathname: url.pathname }, fetchMock, scope,
+    );
+    const key = (code: string, extra: Record<string, unknown> = {}) => {
+      const ev = {
+        code, ctrlKey: true, shiftKey: true, altKey: false, metaKey: false, isTrusted: true, repeat: false,
+        preventDefault: vi.fn(), stopImmediatePropagation: vi.fn(), ...extra,
+      };
+      for (const fn of keydown) fn(ev);
+      return ev;
+    };
+    const message = (msg: unknown) => {
+      let answer: unknown;
+      let async = false;
+      for (const fn of onMessage) if (fn(msg, {}, (r) => { answer = r; }) === true) async = true;
+      return { answer: () => answer, async };
+    };
+    return { key, message, sendMessage, fetchMock, winEvents, scope };
+  }
+
+  const sent = (m: ReturnType<typeof load>) => m.sendMessage.mock.calls.map((c) => c[0] as { type: string });
+
+  afterEach(() => {
+    document.documentElement.removeAttribute("data-clawbox-box-switcher");
+    document.getElementById("clawbox-kiosk-workspaces")?.remove();
+  });
+
+  it("marks the page, so the desktop's own handler stands down", () => {
+    load("https://main.example.com/");
+    expect(document.documentElement.getAttribute("data-clawbox-box-switcher")).toBe("kiosk");
+  });
+
+  it("Ctrl+Shift+<digit> asks the worker for that box, ahead of the page, by code whatever the layout", () => {
+    const w = load("https://main.example.com/");
+    for (const [code, slot] of [["Digit1", 1], ["Digit2", 2], ["Digit9", 9]] as const) {
+      const ev = w.key(code, { key: slot === 2 ? "ě" : "!" });
+      expect(ev.preventDefault).toHaveBeenCalled();
+      expect(ev.stopImmediatePropagation).toHaveBeenCalled();
+      expect(sent(w)).toContainEqual({ type: "switchBox", slot });
+    }
+  });
+
+  it("leaves every other key, a key the page made up and a held key's repeats alone", () => {
+    const w = load("https://main.example.com/");
+    const before = sent(w).length;
+    for (const [code, extra] of [
+      ["Digit0", {}], ["Numpad2", {}], ["KeyS", {}], ["Digit2", { shiftKey: false }], ["Digit2", { ctrlKey: false }],
+      ["Digit2", { altKey: true }], ["Digit2", { metaKey: true }], ["Digit2", { isComposing: true }],
+    ] as const) {
+      const ev = w.key(code, extra);
+      expect(ev.preventDefault, `${code} ${JSON.stringify(extra)}`).not.toHaveBeenCalled();
+    }
+    // A page's own dispatchEvent is not the owner's key press.
+    const forged = w.key("Digit2", { isTrusted: false });
+    expect(forged.preventDefault).not.toHaveBeenCalled();
+    const held = w.key("Digit2", { repeat: true });
+    expect(held.preventDefault).toHaveBeenCalled();
+    expect(sent(w).slice(before).filter((m) => m.type === "switchBox")).toEqual([]);
+  });
+
+  it("draws the indicator the worker sends, the name as text, and takes it down", async () => {
+    vi.useFakeTimers();
+    try {
+      const w = load("https://laptop.example.com/");
+      const reply = w.message({ type: "boxIndicator", slot: 2, kind: "stay", name: "<img src=x onerror=alert(1)>", names: ["main", "x", "NAS"] });
+      expect(reply.answer()).toEqual({ ok: true });
+      const host = document.getElementById("clawbox-kiosk-workspaces")!;
+      const root = host.shadowRoot!;
+      expect(root.querySelectorAll(".dot")).toHaveLength(3);
+      expect(root.querySelector(".dot.lit")?.textContent).toBe("2");
+      expect(root.querySelector(".text")?.textContent).toBe("2 · <img src=x onerror=alert(1)>");
+      expect(root.querySelector("img")).toBeNull();
+      w.message({ type: "boxIndicator", slot: 5, kind: "empty", name: null, names: ["main"] });
+      expect(root.querySelectorAll(".dot")).toHaveLength(5);
+      expect(root.querySelectorAll(".dot.empty")).toHaveLength(3);
+      expect(root.querySelector(".text")?.textContent).toContain("Nothing on Ctrl+Shift+5 yet");
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(document.getElementById("clawbox-kiosk-workspaces")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows the indicator a switch left for a tab it had to open", async () => {
+    load("https://laptop.example.com/", { pending: { type: "boxIndicator", slot: 2, kind: "stay", name: "Laptop", names: ["main", "Laptop"] } });
+    await flushMicrotasks();
+    const root = document.getElementById("clawbox-kiosk-workspaces")?.shadowRoot;
+    expect(root?.querySelector(".text")?.textContent).toBe("2 · Laptop");
+  });
+
+  it("on the kiosk's own desktop, reads the list and hands it to the worker — again when Settings saves it", async () => {
+    const list = { self: { name: "laptop" }, boxes: [{ name: "Main", url: "https://main.example.com/" }], labels: { empty: "Leer auf Ctrl+Shift+{n}." } };
+    const w = load("http://localhost:3005/", { list });
+    await flushMicrotasks();
+    expect(w.fetchMock).toHaveBeenCalledWith("/setup-api/linked-boxes", expect.objectContaining({ credentials: "same-origin" }));
+    expect(sent(w)).toContainEqual({ type: "boxes", selfName: "laptop", boxes: list.boxes, emptyText: "Leer auf Ctrl+Shift+{n}." });
+    for (const fn of w.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    expect(w.fetchMock).toHaveBeenCalledTimes(2);
+    // …and answers the worker's own ask.
+    const ask = w.message({ type: "readBoxes" });
+    expect(ask.async).toBe(true);
+    await flushMicrotasks();
+    expect(ask.answer()).toEqual({ selfName: "laptop", boxes: list.boxes, emptyText: "Leer auf Ctrl+Shift+{n}." });
+  });
+
+  it("never reads the list anywhere else, and hands the worker nothing when the box refuses", async () => {
+    for (const href of ["https://main.example.com/", "http://localhost:3005/app/settings", "http://localhost:8090/"]) {
+      const w = load(href);
+      await flushMicrotasks();
+      expect(w.fetchMock, href).not.toHaveBeenCalled();
+      expect(w.message({ type: "readBoxes" }).async, href).toBe(false);
+    }
+    const refused = load("http://127.0.0.1:3005/", { listStatus: 403 });
+    await flushMicrotasks();
+    expect(sent(refused).filter((m) => m.type === "boxes")).toEqual([]);
+  });
+});
+
+describe("background.js: switching linked ClawBoxes", () => {
+  type Tab = { id: number; url: string; active?: boolean; pendingUrl?: string };
+
+  function loadWorker(start: Tab[], opts: { listening?: number[]; stored?: unknown; desktopList?: unknown } = {}) {
+    let tabs = start.map((t) => ({ ...t }));
+    let nextId = 100;
+    const listening = new Set(opts.listening ?? start.map((t) => t.id));
+    const local: Record<string, unknown> = opts.stored ? { linkedBoxes: opts.stored } : {};
+    const session: Record<string, unknown> = {};
+    const area = (data: Record<string, unknown>) => ({
+      get: vi.fn(async (key: string) => (key in data ? { [key]: JSON.parse(JSON.stringify(data[key])) } : {})),
+      set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(data, JSON.parse(JSON.stringify(items))); }),
+    });
+    let onMessage: ((msg: unknown, sender: unknown, respond: (r: unknown) => void) => unknown) | null = null;
+    const event = () => ({ addListener: () => {} });
+    const delivered: [number, unknown][] = [];
+    const sendMessage = vi.fn(async (id: number, msg: { type: string }) => {
+      if (!listening.has(id)) throw new Error("Could not establish connection. Receiving end does not exist.");
+      if (msg.type === "readBoxes") return opts.desktopList ?? null;
+      if (msg.type === "boxIndicator") delivered.push([id, msg]);
+      return { ok: true };
+    });
+    const chrome = {
+      runtime: {
+        getURL: (p: string) => `chrome-extension://kiosk/${p}`,
+        onMessage: { addListener: (fn: typeof onMessage) => { onMessage = fn; } },
+        onStartup: event(),
+        onInstalled: event(),
+      },
+      storage: { local: area(local), session: area(session) },
+      tabs: {
+        query: vi.fn(async () => tabs.map((t) => ({ ...t }))),
+        sendMessage,
+        update: vi.fn(async (id: number, props: { active?: boolean }) => {
+          tabs = tabs.map((t) => ({ ...t, active: props.active ? t.id === id : t.active }));
+          return tabs.find((t) => t.id === id);
+        }),
+        create: vi.fn(async (props: { url: string }) => {
+          const tab = { id: nextId++, url: "", pendingUrl: props.url, active: true };
+          tabs = [...tabs.map((t) => ({ ...t, active: false })), tab];
+          return { ...tab };
+        }),
+        remove: vi.fn(async () => undefined),
+        onCreated: event(),
+        onRemoved: event(),
+        onUpdated: event(),
+        onActivated: event(),
+      },
+    };
+    new Function("chrome", source("background.js"))(chrome);
+    const call = (msg: unknown, tabId = 1) => {
+      const sender = { tab: tabs.find((t) => t.id === tabId) ?? { id: tabId, url: "chrome-extension://kiosk/newtab.html" } };
+      return new Promise((resolve) => {
+        expect(onMessage!(msg, sender, resolve)).toBe(true);
+      });
+    };
+    return {
+      call,
+      chrome,
+      local,
+      tabs: () => tabs,
+      active: () => tabs.find((t) => t.active)?.id,
+      listen: (id: number) => listening.add(id),
+      indicators: () => delivered,
+    };
+  }
+
+  const DESK = { id: 1, url: "http://localhost:3005/", active: true };
+  const list = {
+    selfName: "laptop",
+    boxes: [{ name: "Main", url: "https://main.example.com/" }, { name: "NAS", url: "http://nas.example.net:3005/" }],
+  };
+
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("opens a box in a tab of its own on first use, then only activates that tab", async () => {
+    const w = loadWorker([DESK], { stored: list });
+    await w.call({ type: "switchBox", slot: 2 });
+    expect(w.chrome.tabs.create).toHaveBeenCalledWith({ url: "https://main.example.com/", active: true });
+    const opened = w.active()!;
+    expect(opened).not.toBe(1);
+
+    // Back home with 1, then 2 again: the same tab, nothing reloaded.
+    await w.call({ type: "switchBox", slot: 1 }, opened);
+    expect(w.active()).toBe(1);
+    await w.call({ type: "switchBox", slot: 2 }, 1);
+    expect(w.active()).toBe(opened);
+    expect(w.chrome.tabs.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses a tab already on the box, the box's desktop before its other pages", async () => {
+    const w = loadWorker([DESK, { id: 2, url: "https://main.example.com/app/files" }, { id: 3, url: "https://main.example.com/" }], { stored: list });
+    await w.call({ type: "switchBox", slot: 2 });
+    expect(w.active()).toBe(3);
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+  });
+
+  it("does not take a tab that has wandered off to another site for the box", async () => {
+    const w = loadWorker([DESK], { stored: list });
+    await w.call({ type: "switchBox", slot: 2 });
+    const opened = w.active()!;
+    // The owner navigated that tab elsewhere.
+    for (const t of w.tabs()) if (t.id === opened) { t.url = "https://news.example.org/"; delete t.pendingUrl; }
+    await w.call({ type: "switchBox", slot: 2 }, 1);
+    expect(w.chrome.tabs.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("tells the tab it showed which box it is; a tab still loading gets it when it asks", async () => {
+    const w = loadWorker([DESK], { stored: list, listening: [1] });
+    await w.call({ type: "switchBox", slot: 3 });
+    const opened = w.active()!;
+    // Nobody listening there yet: kept for it.
+    expect(w.indicators()).toEqual([]);
+    const pending = await w.call({ type: "pendingIndicator" }, opened);
+    expect(pending).toMatchObject({ type: "boxIndicator", slot: 3, kind: "stay", name: "NAS", names: ["laptop", "Main", "NAS"] });
+    // Once.
+    expect(await w.call({ type: "pendingIndicator" }, opened)).toBeNull();
+
+    await w.call({ type: "switchBox", slot: 1 }, opened);
+    expect(w.indicators().at(-1)).toEqual([1, expect.objectContaining({ slot: 1, kind: "stay", name: "laptop" })]);
+  });
+
+  it("an empty slot says so on the tab the key was pressed on, and opens nothing", async () => {
+    const w = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { stored: list });
+    await w.call({ type: "switchBox", slot: 6 }, 2);
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(w.chrome.tabs.update).not.toHaveBeenCalled();
+    expect(w.indicators()).toEqual([[2, expect.objectContaining({ slot: 6, kind: "empty" })]]);
+    expect(await w.call({ type: "switchBox", slot: 10 }, 2)).toEqual({ ok: false, error: "no such slot" });
+  });
+
+  it("with no copy of the list yet, asks the desktop for it and keeps it", async () => {
+    const w = loadWorker([DESK], { desktopList: list });
+    await w.call({ type: "switchBox", slot: 2 });
+    expect(w.chrome.tabs.create).toHaveBeenCalledWith({ url: "https://main.example.com/", active: true });
+    expect(w.local.linkedBoxes).toEqual({ ...list, emptyText: "" });
+  });
+
+  it("says an empty slot in the box's own words when the desktop gave them", async () => {
+    const w = loadWorker([DESK], { stored: { ...list, emptyText: "Rien sur Ctrl+Shift+{n}." } });
+    await w.call({ type: "switchBox", slot: 7 }, 1);
+    expect(w.indicators()).toEqual([[1, expect.objectContaining({ slot: 7, kind: "empty", text: "Rien sur Ctrl+Shift+7." })]]);
+  });
+
+  it("never takes the kiosk's own desktop for a box of the list", async () => {
+    const w = loadWorker([DESK]);
+    await w.call({ type: "boxes", selfName: "laptop", boxes: [{ name: "Me", url: "http://localhost:3005/" }, list.boxes[0]] }, 1);
+    expect((w.local.linkedBoxes as { boxes: unknown[] }).boxes).toEqual([list.boxes[0]]);
+  });
+
+  it("keeps the session maps whole under quick presses", async () => {
+    const w = loadWorker([DESK], { stored: list, listening: [1] });
+    await Promise.all([w.call({ type: "switchBox", slot: 2 }), w.call({ type: "switchBox", slot: 3 })]);
+    const opened = w.tabs().filter((t) => t.id !== 1).map((t) => t.id);
+    expect(opened).toHaveLength(2);
+    // Both tabs' indicators were kept, neither lost to the other's write.
+    for (const id of opened) expect(await w.call({ type: "pendingIndicator" }, id)).toMatchObject({ type: "boxIndicator" });
+  });
+
+  it("takes the list from the kiosk's own desktop only, rebuilt from its rules", async () => {
+    const w = loadWorker([DESK, { id: 2, url: "https://evil.example/" }]);
+    expect(await w.call({ type: "boxes", selfName: "x", boxes: [{ name: "Evil", url: "https://evil.example/" }] }, 2))
+      .toEqual({ ok: false, error: "not from the desktop" });
+    expect(w.local.linkedBoxes).toBeUndefined();
+    await w.call({
+      type: "boxes",
+      selfName: "laptop",
+      boxes: [
+        { name: "Main", url: "https://main.example.com/login" },
+        { name: "Script", url: "javascript:alert(1)" },
+        { name: "Creds", url: "https://user:pw@nas.example.net/" },
+        { name: "Again", url: "https://main.example.com/" },
+        { name: "", url: "https://blank.example/" },
+        ...Array.from({ length: 10 }, (_, i) => ({ name: `B${i}`, url: `https://b${i}.example/` })),
+      ],
+    }, 1);
+    const kept = w.local.linkedBoxes as { selfName: string; boxes: { name: string; url: string }[] };
+    expect(kept.selfName).toBe("laptop");
+    expect(kept.boxes[0]).toEqual({ name: "Main", url: "https://main.example.com/" });
+    expect(kept.boxes).toHaveLength(8);
+    expect(kept.boxes.map((b) => b.name)).not.toEqual(expect.arrayContaining(["Script", "Creds", "Again", ""]));
+  });
+});

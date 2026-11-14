@@ -37,6 +37,10 @@ import nodePath from "node:path";
  *    against a recorded hash of each release's files: Chrome caches unpacked
  *    extension code across restarts and re-reads it only when the version
  *    changes;
+ *  - Ctrl+Shift+1 … 9 (workspaces.js, on every page and the start page)
+ *    switches between the linked ClawBoxes through the worker, with the
+ *    desktop's own names for the mark it leaves on the page, the event
+ *    Settings fires and the route the list comes from (src/lib/box-switcher.ts);
  *  - what keeps the extension cheap on a busy page: offset.js judges a box
  *    again only for a change that can move one, the bar redraws its strip
  *    only when the tabs changed and not at all while hidden, and the worker
@@ -61,7 +65,7 @@ function stringConst(source: string, name: string): string {
   return m[1];
 }
 
-const JS_FILES = ["background.js", "bar.js", "offset.js", "content.js", "desktop.js", "newtab.js"];
+const JS_FILES = ["background.js", "bar.js", "offset.js", "content.js", "desktop.js", "newtab.js", "workspaces.js"];
 const BAR_H = 40;
 
 const versionNumber = (v: string) => {
@@ -82,6 +86,8 @@ const RELEASES: readonly { version: string; files: string }[] = [
   { version: "1.5.2", files: "3e6c440c9f6bc37e4abc2d7d674657cd6c84aa2eafebec7cdb1ee0064773995c" },
   // The desktop bar's flat fill instead of a backdrop blur.
   { version: "1.5.3", files: "c05f89216307470adbaf94161ceebf6f4d267c3a55182c0a8a1b23fa0ad7b257" },
+  // Ctrl+Shift+1 … 9: the linked-box switcher (workspaces.js, `storage`).
+  { version: "1.6.0", files: "87e7fa523b9069c7de0a1c1f7faf21701516741aaf7de1db1d3b159ea4332b33" },
 ];
 
 /**
@@ -117,16 +123,17 @@ describe("kiosk extension", () => {
     }
   });
 
-  it("asks for tabs (and DevTools' two), http(s) only; web pages and the desktop each get their own script", () => {
+  it("asks for tabs (and DevTools' two, and storage), http(s) only; web pages and the desktop each get their own script", () => {
     const m = JSON.parse(read("manifest.json"));
     expect(m.manifest_version).toBe(3);
     // `debugger` for getTargets() alone and the loopback host for the kiosk's
-    // CDP port: what DevTools on a tab needs, and nothing wider.
-    expect(m.permissions).toEqual(["tabs", "debugger"]);
+    // CDP port: what DevTools on a tab needs, and nothing wider. `storage`
+    // for the linked-box switcher's copy of the list and its tab per box.
+    expect(m.permissions).toEqual(["tabs", "debugger", "storage"]);
     expect(m.host_permissions).toEqual(["http://127.0.0.1/*"]);
     expect(m.background).toEqual({ service_worker: "background.js" });
-    expect(m.content_scripts).toHaveLength(2);
-    const [web, desk] = m.content_scripts;
+    expect(m.content_scripts).toHaveLength(3);
+    const [web, desk, keys] = m.content_scripts;
     expect(web.matches).toEqual(["http://*/*", "https://*/*"]);
     expect(web.exclude_matches).toEqual(expect.arrayContaining(["http://localhost:3005/*", "http://127.0.0.1:3005/*"]));
     expect(web.all_frames).toBe(false);
@@ -142,6 +149,15 @@ describe("kiosk extension", () => {
     expect(desk.css).toEqual(["content.css"]);
     expect(read("content.css")).toMatch(/^html\.clawbox-kiosk-bar-shown \{/m);
     expect(desk.all_frames).toBe(false);
+    // The linked-box switcher's keys: every http(s) page, the desktop's hosts
+    // included, at document_start — its mark is on the page before the
+    // desktop's own handler could act, and its listener is the first.
+    expect(keys.matches).toEqual(["http://*/*", "https://*/*"]);
+    expect(keys.exclude_matches).toBeUndefined();
+    expect(keys.js).toEqual(["workspaces.js"]);
+    expect(keys.run_at).toBe("document_start");
+    expect(keys.all_frames).toBe(false);
+    expect(keys.css).toBeUndefined();
   });
 
   it("desktop.js: the desktop bar on the desktop, nothing on the shell, the web bar everywhere else", () => {
@@ -477,8 +493,9 @@ describe("kiosk extension", () => {
 
   it("the start page loads the bar, searches through the bar's rule, and links the four sites", () => {
     const html = read("newtab.html");
-    // Scripts in load order: the bar's definition, then the page's own.
-    expect(html).toMatch(/<script src="bar\.js"><\/script>\s*<script src="newtab\.js"><\/script>/);
+    // Scripts in load order: the bar's definition, then the page's own, then
+    // the linked-box switcher's keys (they work on the start page too).
+    expect(html).toMatch(/<script src="bar\.js"><\/script>\s*<script src="newtab\.js"><\/script>\s*<script src="workspaces\.js"><\/script>/);
     for (const ref of [...html.matchAll(/(?:src|href)="([^":]+)"/g)].map((m) => m[1])) {
       expect(exists(ref), ref).toBe(true);
     }
@@ -569,5 +586,38 @@ describe("kiosk extension", () => {
     const idFor = (p: string) =>
       [...crypto.createHash("sha256").update(p).digest("hex").slice(0, 32)].map((c) => "abcdefghijklmnop"[parseInt(c, 16)]).join("");
     expect(idFor("/home/clawbox/clawbox/kiosk/extension")).toBe("nehkanofolimmnmadochopjangeomkhk");
+  });
+
+  it("switches linked ClawBoxes on Ctrl+Shift+1 … 9 with the desktop's own names for the mark, the event and the route", () => {
+    const ws = read("workspaces.js");
+    const bg = read("background.js");
+    const lib = fs.readFileSync(nodePath.resolve(__dirname, "../../lib/box-switcher.ts"), "utf-8");
+    const exported = (name: string) => {
+      const m = new RegExp(`export const ${name} = "([^"]*)";`).exec(lib);
+      if (!m) throw new Error(`${name} not found in box-switcher.ts`);
+      return m[1];
+    };
+    // The mark the desktop's handler stands down on, the event Settings fires
+    // and the route the list comes from: one name each, on both sides.
+    expect(stringConst(ws, "SWITCHER_ATTR")).toBe(exported("KIOSK_SWITCHER_ATTR"));
+    expect(stringConst(ws, "LINKED_BOXES_EVENT")).toBe(exported("LINKED_BOXES_CHANGED_EVENT"));
+    expect(stringConst(ws, "LINKED_BOXES_PATH")).toBe(exported("LINKED_BOXES_URL"));
+    // The kiosk's own desktop, by the worker's list of its origins.
+    const origins = (src: string) => [...(/const DESKTOP_ORIGINS = \[([\s\S]*?)\];/.exec(src)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+    expect(origins(ws)).toEqual(origins(bg));
+    expect(origins(ws).length).toBeGreaterThan(0);
+    // By code (any layout), only a key the owner pressed, ahead of the page.
+    expect(ws).toContain('const m = /^Digit([1-9])$/.exec(e.code || "");');
+    expect(ws).toContain("if (slot === null || !e.isTrusted) return;");
+    expect(ws).toMatch(/window\.addEventListener\("keydown", \(e\) => \{[\s\S]*?\}, true\);/);
+    // The worker activates a tab per box, never navigates one, and takes the
+    // list only from the kiosk's own desktop.
+    expect(bg).toContain('case "switchBox":');
+    expect(bg).toContain("if (tab) await chrome.tabs.update(tab.id, { active: true });");
+    expect(bg).toContain("else tab = await chrome.tabs.create({ url: box.url, active: true });");
+    expect(bg).toMatch(/case "boxes":\s*\/\/[^\n]*\n\s*if \(!sender\.tab \|\| !isDesktop\(sender\.tab\.url\)/);
+    // A name drawn as text, never markup.
+    expect(ws).toContain("text.textContent = indicatorText(ind);");
+    expect(ws).not.toMatch(/innerHTML/);
   });
 });

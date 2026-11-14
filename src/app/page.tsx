@@ -81,6 +81,8 @@ import { useSessionExpiryGuard } from "@/hooks/useSessionExpiryGuard";
 import { samePairingRequests, sameSelection, type PairingRequestCard } from "@/lib/desktop-shell-equality";
 import { mergeDesktopApps, knownSetChanged } from "@/lib/desktop-app-merge";
 import { PublicLinkBadge, PublicLinkDialog, PublicLinkMenuItems, usePublicAppLinks } from "@/components/PublicAppLink";
+import BoxSwitcherIndicator from "@/components/BoxSwitcherIndicator";
+import { useBoxSwitcher } from "@/lib/use-box-switcher";
 import {
   layoutIcons,
   layoutsEqual,
@@ -750,6 +752,11 @@ function ChromeDesktopInner() {
   // polled only on the kiosk itself: every other box — every Jetson — sends
   // nothing.
   const kiosk = useKioskTabs(boxApis && onKiosk);
+  // Linked ClawBoxes (TASK-2519): Ctrl+Shift+1 … 9 shows box 1 … 9, this box
+  // first, like workspaces (src/lib/box-switcher.ts). The owner's alone — the
+  // list is — and only once it is known who is signed in. In the kiosk Chrome
+  // the extension takes the keys instead and keeps each box in its own tab.
+  const boxSwitcher = useBoxSwitcher(boxApis && settledSessionUser?.isOwner !== false);
   // The ClawBox Desktop session's own screen: the Google Chrome icon
   // (src/lib/desktop-chrome-client.ts) — `missing` when the box has no Chrome
   // to start, and a click then says how to install it. Hidden elsewhere.
@@ -3539,6 +3546,7 @@ function ChromeDesktopInner() {
       {boxApis && <ScreenshotOverlay />}
       {deskScreens && <MonitorIdentifyOverlay screens={deskScreens} />}
       {boxApis && <PowerApprovalPrompt />}
+      <BoxSwitcherIndicator indicator={boxSwitcher.indicator} top={kioskBarInset + mainIns.top} onDone={boxSwitcher.dismiss} />
       {/* "What's new in 4.3": a dialog over the desktop and the chat, with the
           notice column held back while it is up. */}
       {whatsNew.visible && whatsNew.state && (
