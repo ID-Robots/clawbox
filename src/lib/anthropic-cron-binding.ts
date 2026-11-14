@@ -43,7 +43,9 @@
  * than `main` (the pool writes only `main`'s store), and a job whose model
  * names a profile that is not the pool's — the owner chose that account —
  * unless the box itself put it there while every pool account was limited and
- * the owner's own sign-in led.
+ * the owner's own sign-in led. Such a job whose run is lost to its account
+ * (its binding replaced, or never recorded) is reported in the log, once a
+ * lost run, with what it needs: the owner's own `model@profile` update.
  *
  * WHAT IS KNOWN. `cron.list` hides each job's binding (`toPublicCronJob`), so
  * the box keeps its own record of what it adopted, per job: the profile, that
@@ -77,12 +79,17 @@ export const BINDING_RETRY_WINDOW_MS = 2 * 60 * 60_000;
  * long (an agent core resolves otherwise, a job core will not take). One
  * refusal is asked again on the next pass: right after a stop and start the
  * scheduler may still be loading, and the job is bound to an account that may
- * have just left the gateway.
+ * have just left the gateway. The back-off is for the account and lifetime it
+ * was refused on: once the lead moves or is renewed, the job's own binding is
+ * the one that was replaced, and it is asked again in that same pass.
  */
 export const REFUSED_BACKOFF_MS = 10 * 60_000;
 
-/** Per job: when core last refused its update, and how many times in a row. */
-export type CronRefusals = Map<string, { at: number; count: number }>;
+/** Per job: when core last refused its update, how many times in a row, and for which target (targetKey). */
+export type CronRefusals = Map<string, { at: number; count: number; target?: string }>;
+
+/** Per job: the last run lost to its account that the box has already reported (its `lastRunAtMs`). */
+export type CronLostRunReports = Map<string, number>;
 
 /** `cron.list` answers at most this many jobs a page. */
 const LIST_PAGE = 200;
@@ -97,6 +104,8 @@ export interface CronBindingTarget {
 /** What `cron.list` says of one job, as far as the binding goes. */
 export interface CronJobDefinition {
   id: string;
+  /** The job's name, for what the box reports about it. */
+  name?: string | null;
   agentId: string | null;
   sessionTarget: string | null;
   kind: string | null;
@@ -182,6 +191,7 @@ export function parseCronDefinitions(payload: unknown): CronJobDefinition[] {
     const state = (job.state && typeof job.state === "object" ? job.state : job) as Record<string, unknown>;
     jobs.push({
       id,
+      name: str(job.name),
       agentId: str(job.agentId),
       sessionTarget: str(job.sessionTarget),
       kind: str(payloadOf.kind),
@@ -234,6 +244,8 @@ export interface CronPlanInput {
 export interface CronBindingRun {
   /** Refusals per job, kept by the caller across passes (the gateway's process store). */
   refused?: CronRefusals;
+  /** Lost runs already reported, kept by the caller across passes (the gateway's process store). */
+  reported?: CronLostRunReports;
   /** The profiles the gateway holds now: a job recorded on one that left is never held back by a refusal. */
   heldProfiles?: ReadonlySet<string>;
 }
@@ -356,10 +368,42 @@ async function listAll(call: CronBindingDeps["call"]): Promise<{ jobs: CronJobDe
 
 /** Refusals when the caller keeps none (per module copy: the gateway passes its process store's). */
 const ownRefusals: CronRefusals = new Map();
+/** Reported lost runs when the caller keeps none (likewise). */
+const ownReports: CronLostRunReports = new Map();
 
-/** Test seam: forget which jobs core refused. */
+/** Test seam: forget which jobs core refused, and which lost runs were reported. */
 export function _resetCronBindingForTests(): void {
   ownRefusals.clear();
+  ownReports.clear();
+}
+
+/** What a refusal was for: the account and lifetime the job was being given, or a give-back. */
+function targetKey(target: CronBindingTarget | null): string {
+  return target ? JSON.stringify([target.profileId, target.authorization]) : "release";
+}
+
+/**
+ * A run lost to its recorded account on a job the box does not bind — the
+ * account the owner chose for it, another agent, another provider: said once
+ * a lost run, with what it needs (TASK-2533, the owner's box 2026-11-14:
+ * jobs whose runs core refused before any model call were seen only by
+ * reading core's run receipts). Moving such a job onto an account is the
+ * owner's consent to give, not the box's: core asks for that explicit
+ * selection again after a replacement.
+ */
+function reportLostRuns(listed: { jobs: readonly CronJobDefinition[]; complete: boolean }, records: CronBindingRecords, planned: ReadonlySet<string>, skip: ReadonlySet<string>, reported: CronLostRunReports): void {
+  const { jobs } = listed;
+  // A job that is gone has nothing more to report.
+  if (listed.complete) for (const id of [...reported.keys()]) if (!jobs.some((j) => j.id === id)) reported.delete(id);
+  for (const job of jobs) {
+    // The box's own jobs are its to bind (a failure from before their adoption is history).
+    if (records[job.id] || planned.has(job.id) || skip.has(job.id) || job.kind !== "agentTurn" || job.sessionTarget === "main") continue;
+    if (job.lastStatus !== "error" || !job.lastError || !BINDING_FAILURE_RE.test(job.lastError) || job.lastRunAtMs === null) continue;
+    if ((reported.get(job.id) ?? Number.NEGATIVE_INFINITY) >= job.lastRunAtMs) continue;
+    reported.set(job.id, job.lastRunAtMs);
+    const what = job.agentId !== null && job.agentId !== "main" ? `it runs as agent ${job.agentId}` : job.model ? `its model is ${job.model}` : "it runs on its agent's default model";
+    console.error(`[anthropic-cron-binding] automation ${job.id}${job.name ? ` (${job.name})` : ""} lost its run at ${new Date(job.lastRunAtMs).toISOString()} to its inference account ("${job.lastError.slice(0, 200)}"), and it is not one the box binds (${what}): select its account again with a model@profile update`);
+  }
 }
 
 /**
@@ -373,6 +417,7 @@ export async function bindCronsToTarget(
 ): Promise<CronBindingResult> {
   const refusedAt = input.refused ?? ownRefusals;
   const now = input.now ?? Date.now();
+  const refusedFor = targetKey(input.target);
   const result: CronBindingResult = { bound: 0, released: 0, owed: 0, rerun: 0, unread: false };
   let listed: { jobs: CronJobDefinition[]; complete: boolean };
   try {
@@ -413,11 +458,15 @@ export async function bindCronsToTarget(
   }
   const skip = new Set([...refusedAt].filter(([id, r]) => {
     if (r.count < 2 || now - r.at >= REFUSED_BACKOFF_MS) return false;
+    // Refused for another account or lifetime than the one leading now: the
+    // move or the renewal since is news, and the job is asked at once.
+    if (r.target !== undefined && r.target !== refusedFor) return false;
     const on = records[id]?.profileId;
     return !(on && input.heldProfiles && !input.heldProfiles.has(on));
   }).map(([id]) => id));
-  const { refused: _refused, heldProfiles: _held, ...planInput } = input;
+  const { refused: _refused, heldProfiles: _held, reported, ...planInput } = input;
   const plans = planCronBindings({ ...planInput, jobs, records, skip, now });
+  reportLostRuns(listed, records, new Set(plans.map((plan) => plan.job.id)), skip, reported ?? ownReports);
   for (const plan of plans) {
     const { job } = plan;
     if (plan.release && plan.steps.length === 0) {
@@ -478,7 +527,8 @@ export async function bindCronsToTarget(
         revision = revisionOf(reply);
         landed += 1;
       } catch (err) {
-        refusedAt.set(job.id, { at: now, count: (refusedAt.get(job.id)?.count ?? 0) + 1 });
+        const prior = refusedAt.get(job.id);
+        refusedAt.set(job.id, { at: now, count: (prior && prior.target === refusedFor ? prior.count : 0) + 1, target: refusedFor });
         console.error(`[anthropic-cron-binding] core did not take automation ${job.id}'s account (${step === null ? "clearing the model" : step}):`, err instanceof Error ? err.message : err);
         break;
       }

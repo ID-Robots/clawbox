@@ -49,8 +49,12 @@
  *    account until you select another or remove its saved profile"). So it is
  *    taken out with core's own logout (no restart) — once an account that
  *    answers is in with its current token, else it stays (syncLocked) — and
- *    by that rule the session takes the order's lead on its next turn. It goes back in when it can
- *    answer: at once when it is the only one that can, else with the next
+ *    by that rule the session takes the order's lead on its next turn. When a
+ *    renewal's window is about to stop the gateway, it goes out BEFORE the
+ *    stop: a paste resets the CLI binding of every session on the profile it
+ *    renews, and the fresh pick takes the session's own earlier pick while
+ *    the store still holds that profile (the owner's box, 2026-11-14 20:05).
+ *    It goes back in when it can answer: at once when it is the only one that can, else with the next
  *    window the pool opens anyway (a renewal) — never a gateway stop of its
  *    own while another answers. With none that can answer, the owner's own
  *    subscription sign-in leads (THE OWNER'S OWN SIGN-IN, below), and the
@@ -137,7 +141,7 @@ import { fetchAnthropicUsage, type AnthropicUsageReading } from "@/lib/anthropic
 import { readGatewayProviderAuth, type GatewayProviderAuthRead, type ProfileFailureState, type ProviderAuthProfile } from "@/lib/openclaw-auth-store";
 import { registerSwapConsumer, reportAnthropicFailure, type FailureOutcome, type SwapContext } from "@/lib/anthropic-swap";
 import { verifyAnthropicKey } from "@/lib/coding-anthropic";
-import { bindCronsToTarget, splitModelRef, type CronBindingRecords, type CronBindingResult, type CronBindingTarget, type CronRefusals } from "@/lib/anthropic-cron-binding";
+import { bindCronsToTarget, splitModelRef, type CronBindingRecords, type CronBindingResult, type CronBindingTarget, type CronLostRunReports, type CronRefusals } from "@/lib/anthropic-cron-binding";
 
 const PROVIDER = "anthropic";
 const POOL_PROFILE_PREFIX = "anthropic:clawbox-";
@@ -392,6 +396,8 @@ interface GatewayRuntime {
   usageFailedAt: Map<string, number>;
   /** Per automation, core's refusals of its re-binding (src/lib/anthropic-cron-binding.ts). */
   cronRefusals: CronRefusals;
+  /** Per automation the box does not bind, the last run lost to its account that was already reported. */
+  cronReported: CronLostRunReports;
   /**
    * The watcher's minute passes in a row that left the gateway still owing
    * (gatewayOwesLocked), and when the last one ran: a write core keeps
@@ -434,6 +440,7 @@ function runtime(): GatewayRuntime {
     usageAnsweredAt: new Map(),
     usageFailedAt: new Map(),
     cronRefusals: new Map(),
+    cronReported: new Map(),
     owedPasses: 0,
     owedPassAt: 0,
     owedKey: null,
@@ -762,6 +769,35 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
       toPaste.push({ id, account: account.id, token });
     }
   }
+  // A window is about to stop the gateway: a LIMITED account goes out before
+  // the stop, through the gateway that is still up — by the test the logout
+  // after the window makes, read before it: an account that answers is in
+  // with the token the pass holds for it, or else the owner's own sign-in
+  // answers. Each paste gives the profile it renews a new credential, so a
+  // Claude CLI session bound to that profile starts again on its next turn
+  // (`reuse=invalidated:auth-epoch`). That fresh pick puts the session's own
+  // earlier automatic pick first while the store still holds that profile
+  // (`prependAuthProfilePin`, OpenClaw 2026.11.3). Logged out only after the
+  // window, a limited account was there for every turn in between. On the
+  // owner's box (2026-11-14 20:05) a chat's first turn after a renewal ran
+  // on a spent account.
+  const outBefore = new Set<string>();
+  if (toPaste.length > 0 && d.offline) {
+    const okHeld = pool.accounts.filter((a) => a.kind === "oauth" && effectiveStatus(a, now) === "ok" && ours.some((p) => p.profileId === poolProfileId(a.id)));
+    const answersBefore = okHeld.some((a) => {
+      const id = poolProfileId(a.id);
+      const held = ours.find((p) => p.profileId === id);
+      const token = tokens.get(id);
+      return !!held && !held.fenced && !!token && held.fingerprint === token.fingerprint && (held.expires === null || held.expires > now);
+    });
+    if (answersBefore || (okHeld.length === 0 && signInUsable)) {
+      for (const profile of ours) {
+        const account = pool.accounts.find((a) => poolProfileId(a.id) === profile.profileId);
+        if (!account || account.kind !== "oauth" || effectiveStatus(account, now) !== "limited") continue;
+        if (await attempt(`taking ${profile.profileId} out before the gateway stops`, () => d.logout(profile.profileId, agent))) outBefore.add(profile.profileId);
+      }
+    }
+  }
   if (toPaste.length > 0) {
     const ends = toPaste.flatMap((p) => (p.token.expires === null ? [] : [p.token.expires]));
     // Without a window to share (`d.offline` absent) or an end among the
@@ -886,8 +922,11 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
   const signInNow = mid.kind === "present"
     && !pool.accounts.some((a) => a.kind === "oauth" && effectiveStatus(a, now) === "ok" && mid.profiles.some((p) => p.profileId === poolProfileId(a.id)))
     && otherProfiles(mid).some((p) => isOwnSubscription(p, now));
-  const takenOut = new Set<string>();
+  // Those already out before the window are out for their limit too (one
+  // core still holds is asked again here, and owed if it stays).
+  const takenOut = new Set<string>(outBefore);
   const unwanted = ours.filter((p) => {
+    if (outBefore.has(p.profileId)) return mid.kind === "present" && mid.profiles.some((q) => q.profileId === p.profileId);
     const account = pool.accounts.find((a) => poolProfileId(a.id) === p.profileId);
     if (account && account.kind === "oauth" && effectiveStatus(account, now) === "limited") {
       const out = answersNow || signInNow;
@@ -1174,43 +1213,54 @@ export type UseForChatResult =
 export async function putChatOnPool(setModel: () => Promise<{ ok: true } | { ok: false; error: string; status: number }>): Promise<UseForChatResult> {
   if (deps().absent()) return { ok: false, code: "no_gateway", error: "This ClawBox's chat does not run on OpenClaw.", status: 409 };
   return runtime().lock(async () => {
-    const pool = await readPoolState();
-    const now = Date.now();
-    if (!pool.accounts.some((a) => a.kind === "oauth" && effectiveStatus(a, now) !== "expired" && effectiveStatus(a, now) !== "revoked")) {
-      return { ok: false, code: "no_claude_account", error: "No Anthropic subscription account on this box can answer: the chat can only use one signed in here.", status: 409 } as const;
-    }
-    const synced = await syncLocked({ force: true });
-    if (synced.code === "agent_unsupported") {
-      return { ok: false, code: "agent_unsupported", error: "This box's assistant runs as an agent other than main, which the accounts cannot be given to from here.", status: 409 } as const;
-    }
-    if (synced.status !== "ok" && synced.code !== "not_transferable") {
-      return { ok: false, code: "gateway_write_failed", error: "The Anthropic accounts could not be given to the chat. See the box's log.", status: 502 } as const;
-    }
-    // A throw is a refusal too: the accounts are already in, and the same
-    // re-read below must decide whether they stay.
-    const set = await setModel().catch((err: unknown) => ({ ok: false as const, error: err instanceof Error ? err.message : String(err), status: 500 }));
-    if (!set.ok) {
-      // A refusal is not proof the chat stayed where it was: the model route
-      // can fail after `agents.defaults.model.primary` landed. openclaw.json
-      // decides. On Claude, the accounts are what the chat now runs on, so the
-      // move is done — taken out, they could leave it with no credential at all.
-      const chat = await deps().chat();
-      if (chat?.onAnthropic) {
-        console.error(`[anthropic-gateway] the chat's model landed on Claude though the model route answered ${set.status}; the accounts stay`);
-        return { ok: true, outcome: synced, warning: `The chat now runs on these accounts, but setting its model reported: ${set.error}` } as const;
-      }
-      // Unknown is not "off": nothing is taken out, and the keeper settles it.
-      if (chat === null) {
-        return { ok: false, code: "model_unknown", error: `Whether the chat moved could not be read, so the accounts stay in until it can be. Setting its model reported: ${set.error}`, status: set.status } as const;
-      }
-      // The chat did not move: take the accounts out again rather than leave
-      // the card saying the chat runs on them, with nothing to press.
-      await syncLocked();
-      return { ok: false, code: "model_not_set", error: set.error, status: set.status } as const;
-    }
-    console.error("[anthropic-gateway] the owner put the chat on the box's Claude accounts");
-    return { ok: true, outcome: synced } as const;
+    const result = await putChatOnPoolLocked(setModel);
+    // Its passes can paste (a renewal that was due goes in with the accounts),
+    // and the chat's model has moved: the automations follow in the same step,
+    // as after every other pass — not a watcher minute later, when a paste's
+    // new lifetime has already refused their next run (TASK-2533).
+    if (!(result.ok === false && result.code === "no_claude_account")) await bindCronsLocked();
+    return result;
   });
+}
+
+/** putChatOnPool's work, under the gateway lock. */
+async function putChatOnPoolLocked(setModel: () => Promise<{ ok: true } | { ok: false; error: string; status: number }>): Promise<UseForChatResult> {
+  const pool = await readPoolState();
+  const now = Date.now();
+  if (!pool.accounts.some((a) => a.kind === "oauth" && effectiveStatus(a, now) !== "expired" && effectiveStatus(a, now) !== "revoked")) {
+    return { ok: false, code: "no_claude_account", error: "No Anthropic subscription account on this box can answer: the chat can only use one signed in here.", status: 409 } as const;
+  }
+  const synced = await syncLocked({ force: true });
+  if (synced.code === "agent_unsupported") {
+    return { ok: false, code: "agent_unsupported", error: "This box's assistant runs as an agent other than main, which the accounts cannot be given to from here.", status: 409 } as const;
+  }
+  if (synced.status !== "ok" && synced.code !== "not_transferable") {
+    return { ok: false, code: "gateway_write_failed", error: "The Anthropic accounts could not be given to the chat. See the box's log.", status: 502 } as const;
+  }
+  // A throw is a refusal too: the accounts are already in, and the same
+  // re-read below must decide whether they stay.
+  const set = await setModel().catch((err: unknown) => ({ ok: false as const, error: err instanceof Error ? err.message : String(err), status: 500 }));
+  if (!set.ok) {
+    // A refusal is not proof the chat stayed where it was: the model route
+    // can fail after `agents.defaults.model.primary` landed. openclaw.json
+    // decides. On Claude, the accounts are what the chat now runs on, so the
+    // move is done — taken out, they could leave it with no credential at all.
+    const chat = await deps().chat();
+    if (chat?.onAnthropic) {
+      console.error(`[anthropic-gateway] the chat's model landed on Claude though the model route answered ${set.status}; the accounts stay`);
+      return { ok: true, outcome: synced, warning: `The chat now runs on these accounts, but setting its model reported: ${set.error}` } as const;
+    }
+    // Unknown is not "off": nothing is taken out, and the keeper settles it.
+    if (chat === null) {
+      return { ok: false, code: "model_unknown", error: `Whether the chat moved could not be read, so the accounts stay in until it can be. Setting its model reported: ${set.error}`, status: set.status } as const;
+    }
+    // The chat did not move: take the accounts out again rather than leave
+    // the card saying the chat runs on them, with nothing to press.
+    await syncLocked();
+    return { ok: false, code: "model_not_set", error: set.error, status: set.status } as const;
+  }
+  console.error("[anthropic-gateway] the owner put the chat on the box's Claude accounts");
+  return { ok: true, outcome: synced } as const;
 }
 
 // ── what core saw ───────────────────────────────────────────────────────────
@@ -1500,6 +1550,7 @@ async function bindCronsLocked(): Promise<CronBindingResult | null> {
         accountFor,
         defaultIsMain: chat.defaultIsMain !== false,
         refused: runtime().cronRefusals,
+        reported: runtime().cronReported,
         heldProfiles: new Set(store.profiles.map((p) => p.profileId)),
       },
     );
@@ -1853,6 +1904,7 @@ export function _setGatewayDepsForTests(overrides: Partial<GatewayDeps> | null):
   state.usageAnsweredAt.clear();
   state.usageFailedAt.clear();
   state.cronRefusals.clear();
+  state.cronReported.clear();
   state.owedPasses = 0;
   state.owedPassAt = 0;
   state.owedKey = null;

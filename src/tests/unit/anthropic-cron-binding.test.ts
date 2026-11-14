@@ -33,14 +33,14 @@ const plan = (jobs: CronJobDefinition[], records: CronBindingRecords = {}, targe
 describe("reading cron.list", () => {
   it("reads the fields the binding needs, flat or under state, and skips what has no id", () => {
     const jobs = parseCronDefinitions({ jobs: [
-      { id: "a", agentId: "main", sessionTarget: "isolated", enabled: false, configRevision: "x", payload: { kind: "agentTurn", model: "anthropic/claude-sonnet-5-5" }, state: { lastStatus: "error", lastError: "boom", lastRunAtMs: 5 } },
+      { id: "a", name: "Morning digest", agentId: "main", sessionTarget: "isolated", enabled: false, configRevision: "x", payload: { kind: "agentTurn", model: "anthropic/claude-sonnet-5-5" }, state: { lastStatus: "error", lastError: "boom", lastRunAtMs: 5 } },
       { jobId: "b", payload: { kind: "systemEvent" }, lastRunStatus: "ok", lastRunAt: 7 },
       { payload: {} },
       null,
     ] });
     expect(jobs).toEqual([
-      { id: "a", agentId: "main", sessionTarget: "isolated", kind: "agentTurn", model: "anthropic/claude-sonnet-5-5", enabled: false, revision: "x", lastStatus: "error", lastError: "boom", lastRunAtMs: 5 },
-      { id: "b", agentId: null, sessionTarget: null, kind: "systemEvent", model: null, enabled: true, revision: null, lastStatus: "ok", lastError: null, lastRunAtMs: 7 },
+      { id: "a", name: "Morning digest", agentId: "main", sessionTarget: "isolated", kind: "agentTurn", model: "anthropic/claude-sonnet-5-5", enabled: false, revision: "x", lastStatus: "error", lastError: "boom", lastRunAtMs: 5 },
+      { id: "b", name: null, agentId: null, sessionTarget: null, kind: "systemEvent", model: null, enabled: true, revision: null, lastStatus: "ok", lastError: null, lastRunAtMs: 7 },
     ]);
   });
 
