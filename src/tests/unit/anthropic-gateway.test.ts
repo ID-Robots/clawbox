@@ -119,6 +119,10 @@ function fakeCore() {
     otherProfiles: new Map<string, { provider: string; type: string; secret: string }>(),
     /** Runs as the gateway answers again after an offline window: a turn or a run in its first moments. */
     afterWindow: null as (() => void) | null,
+    /** The next this many gateway requests find no answer: the gateway was just started again and its socket is not up yet. */
+    unansweredCalls: 0,
+    /** How often the box waited for the gateway to answer again. */
+    readyWaits: 0,
     /** Claude CLI chat sessions (chatTurn): the session's automatic pick, and the profile and credential its CLI session is bound to. */
     sessions: new Map<string, ChatSession>(),
   };
@@ -202,7 +206,16 @@ function fakeCore() {
       core.configOrder = null;
     },
     usage: async (access) => core.usage.get(access) ?? null,
+    ready: async () => {
+      core.readyWaits += 1;
+      core.unansweredCalls = 0;
+      return true;
+    },
     call: async (method, params) => {
+      if (core.unansweredCalls > 0) {
+        core.unansweredCalls -= 1;
+        throw new Error("the gateway is not answering yet");
+      }
       core.calls.push({ method, params });
       core.beforeCall?.(method, params);
       if (method === "cron.list") return { jobs: [...core.cronJobs, ...[...core.crons.values()].map(publicCron)] };
@@ -2681,6 +2694,25 @@ describe("TASK-2533 renewal follow-up (the owner's box, 2026-11-14 20:05)", () =
       expect(ran).not.toMatch(/replaced|no recorded/);
       expect(await statusOf(ran)).toBe("ok");
     }
+  });
+
+  it("R1d — the renewal's own pass waits for the gateway it started again before it binds: a first request that finds no answer does not leave the jobs on the replaced lifetime (seen on a lab board)", async () => {
+    const core = fakeCore();
+    const ids = await ownersBox(core);
+    addCron(core, { id: "standup", name: "Daily standup auto-report" });
+    addCron(core, { id: "winback", payload: { kind: "agentTurn", message: "m", model: `${SONNET}@${p(ids[1])}` }, binding: { profileId: p(ids[1]), lifetime: lifetime(core, p(ids[1])), source: "user" } });
+    await gw.bindGatewayCrons();
+    for (const id of ["standup", "winback"]) expect(runCron(core, id)).toBe(p(ids[0]));
+
+    // The gateway is back, but its socket is not: the pass's first requests after the restart find no answer.
+    core.afterWindow = () => {
+      core.unansweredCalls = 3;
+    };
+    await renewalDue(ids, "first");
+    await gw.keepGatewayMirror();
+
+    expect(core.readyWaits).toBeGreaterThan(0);
+    for (const id of ["standup", "winback"]) expect(runCron(core, id)).toBe(p(ids[0]));
   });
 
   it("R1b — a renewal made by the owner's \"use these accounts for the chat\" re-binds the jobs before it answers", async () => {

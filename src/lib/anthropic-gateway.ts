@@ -119,8 +119,8 @@
 
 import { logoutOpenclawAuthProfiles, setOpenclawAuthOrder, withOpenclawGatewayStopped } from "@/lib/openclaw-auth-ops";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
-import { gatewayIsAbsent, openclawIsAbsent, readConfigStrict, runOpenclawConfigSet, runOpenclawConfigUnset, spawnOpenclawCli } from "@/lib/openclaw-config";
-import { gatewayWsCall } from "@/lib/openclaw-gateway-ws";
+import { gatewayIsAbsent, gatewayReadyWaitMs, openclawIsAbsent, readConfigStrict, runOpenclawConfigSet, runOpenclawConfigUnset, spawnOpenclawCli } from "@/lib/openclaw-config";
+import { gatewayWsCall, waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
 import { processStore } from "@/lib/process-store";
 import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
 import {
@@ -189,12 +189,21 @@ export interface GatewayDeps {
   /** Anthropic's usage windows for one account. Null: could not be asked. */
   usage: (access: string) => Promise<AnthropicUsageReading | null>;
   call: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  /**
+   * Wait for a gateway that was just started again to answer requests: false
+   * when it did not in time. Absent: nothing is waited for.
+   */
+  ready?: () => Promise<boolean>;
   /** What the box adopted for each automation (src/lib/anthropic-cron-binding.ts), kept in the config store. */
   cronBindings?: { read: () => Promise<CronBindingRecords>; write: (records: CronBindingRecords) => Promise<void> };
 }
 
 /** A Jetson CLI cold start is 5-14 s; a busy one is given room. */
 const CLI_TIMEOUT_MS = 60_000;
+/** After the gateway answers its startup probe, the box's own socket to it is given this long to come back. */
+const POST_START_SETTLE_MS = 3_000;
+/** How many times the binding after a window waits for the gateway and asks again. */
+const POST_WINDOW_BIND_ATTEMPTS = 3;
 
 /** openclaw.json, as far as this module reads it. */
 export interface ChatConfig {
@@ -348,6 +357,13 @@ const defaultDeps: GatewayDeps = {
   // The in-process socket only: a gateway that is not there is skipped this
   // time rather than paid for with a CLI start-up every minute.
   call: (method, params) => gatewayWsCall(method, params, { timeoutMs: 10_000 }),
+  // Its HTTP side first, then a moment for the box's own socket to it to come
+  // back up (a Jetson takes most of a minute to start the gateway).
+  ready: async () => {
+    const up = await waitForGatewayRpcReady(gatewayReadyWaitMs() * 3);
+    if (up) await new Promise((resolve) => setTimeout(resolve, POST_START_SETTLE_MS));
+    return up;
+  },
   cronBindings: {
     read: async () => {
       const raw = await configGet(CRON_BINDINGS_KEY);
@@ -422,6 +438,8 @@ interface GatewayRuntime {
    * at once, as it always did.
    */
   limitedOut: Set<string>;
+  /** A pass's offline window started the gateway again: the binding that follows waits for it to answer (bindCronsLocked). */
+  windowRan: boolean;
 }
 
 function runtime(): GatewayRuntime {
@@ -447,6 +465,7 @@ function runtime(): GatewayRuntime {
     owedKey: null,
     pasteRefusals: new Map(),
     limitedOut: new Set(),
+    windowRan: false,
   }));
 }
 
@@ -910,6 +929,7 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
       if (outInWindow.size > 0) console.error(`[anthropic-gateway] took ${outInWindow.size} limited account(s) out with the gateway stopped, before it starts again: ${[...outInWindow].join(", ")}`);
     };
     try {
+      if (d.offline) runtime().windowRan = true;
       await (d.offline ? d.offline(pasteAll) : pasteAll());
     } catch (err) {
       // Stored credentials do not prove the gateway is answering again: the
@@ -1517,6 +1537,27 @@ export function keepGatewayMirror(): Promise<KeeperResult> {
  * there was nothing to bind to.
  */
 async function bindCronsLocked(): Promise<CronBindingResult | null> {
+  // Right after a pass's offline window the gateway was started again, and
+  // its requests can find no answer yet: the automations of the profiles that
+  // window pasted then stayed on the lifetime the paste replaced until the
+  // watcher's next look, and a run in between was refused "account was
+  // replaced" (seen on a lab board). The binding in the same step as the
+  // paste waits for the gateway to answer and asks again.
+  const state = runtime();
+  const afterWindow = state.windowRan;
+  state.windowRan = false;
+  let result = await bindCronsOnce();
+  const d = deps();
+  for (let attempt = 1; afterWindow && d.ready && !d.absent() && (result === null || result.unread) && attempt <= POST_WINDOW_BIND_ATTEMPTS; attempt += 1) {
+    if (!(await d.ready())) break;
+    result = await bindCronsOnce();
+  }
+  if (afterWindow && result?.unread) console.error("[anthropic-gateway] the automations could not be read after the gateway started again; the watcher's next look binds them");
+  return result;
+}
+
+/** One look at the automations (bindCronsLocked). */
+async function bindCronsOnce(): Promise<CronBindingResult | null> {
   try {
     const d = deps();
     if (d.absent() || !d.cronBindings) return null;
@@ -1935,4 +1976,5 @@ export function _setGatewayDepsForTests(overrides: Partial<GatewayDeps> | null):
   state.owedKey = null;
   state.pasteRefusals.clear();
   state.limitedOut.clear();
+  state.windowRan = false;
 }
