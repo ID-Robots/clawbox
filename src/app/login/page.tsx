@@ -9,6 +9,7 @@ import {
   useFollowSessionSwitch,
   type SessionSwitchDestination,
 } from "@/lib/session-switch";
+import { takeCarriedFromLocation } from "@/lib/use-box-switcher";
 
 /**
  * Who may sign in here (GET /login-api/users, TASK-1256). `multiUser: false`
@@ -72,6 +73,13 @@ function LoginForm() {
   // The picked (or typed) user. Empty means the owner, which is also what a
   // single-user box sends by sending no name at all.
   const [username, setUsername] = useState("");
+
+  // A Ctrl+Shift+<n> switch from another ClawBox lands here first when this
+  // box is not signed in yet: keep the numbering it carried (the address's
+  // fragment) for the desktop the sign-in leads to (src/lib/use-box-switcher.ts).
+  useEffect(() => {
+    takeCarriedFromLocation();
+  }, []);
 
   useEffect(() => {
     let live = true;
