@@ -90,7 +90,7 @@ d("build_is_current_for_checkout: a rebuild only when one could change something
   let project: string;
   let head: string;
 
-  interface Stamp { commit?: string; dirty?: unknown; untracked?: unknown; node?: string; buildId?: string }
+  interface Stamp { commit?: string; dirty?: unknown; contentDirty?: unknown; untracked?: unknown; node?: string; buildId?: string }
 
   function writeStamp(dir: string, over: Stamp = {}): void {
     const stamp = { commit: head, dirty: false, untracked: 0, node: process.version, buildId: "build-1", ...over };
@@ -161,6 +161,20 @@ d("build_is_current_for_checkout: a rebuild only when one could change something
   it("rebuilds when the stamp's build id is not the build beside it", () => {
     fs.writeFileSync(path.join(project, ".next", "standalone", ".next", "BUILD_ID"), "build-2");
     expect(ask().status).toBe(1);
+  });
+
+  it("keeps a build whose only difference at build time was an executable bit (contentDirty=false)", () => {
+    // The rebuild step chmods scripts/*.sh before it builds; on a checkout with
+    // core.fileMode=true the stamp's `dirty` is then true on every update build.
+    writeBuild({ dirty: true, contentDirty: false });
+    expect(ask().status).toBe(0);
+  });
+
+  it("rebuilds a build whose tracked contents differed (contentDirty=true)", () => {
+    writeBuild({ dirty: true, contentDirty: true });
+    const r = ask();
+    expect(r.status).toBe(1);
+    expect(r.reason).toContain("was built from a tree with changed files (contentDirty=true)");
   });
 
   it.each([

@@ -3859,7 +3859,13 @@ build_stamp_refusal() {
     let s;
     try { s = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.stdout.write("cannot be read"); process.exit(0); }
     const why = [];
-    if (s.dirty !== false) why.push(`was built from a tree with changes (dirty=${s.dirty})`);
+    // contentDirty (write-build-info.mjs) leaves out the executable bits the
+    // rebuild step itself sets; a stamp from before it has only `dirty`.
+    if (typeof s.contentDirty === "boolean") {
+      if (s.contentDirty) why.push("was built from a tree with changed files (contentDirty=true)");
+    } else if (s.dirty !== false) {
+      why.push(`was built from a tree with changes (dirty=${s.dirty})`);
+    }
     if (s.untracked !== 0) why.push(`was built with ${s.untracked} untracked file(s) in the tree`);
     const want = process.argv[2] || "";
     if (!want || s.node !== want) why.push(`was built on Node ${s.node || "(unrecorded)"}, and this build would run on ${want || "(no answer)"}`);
