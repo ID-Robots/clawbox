@@ -233,7 +233,8 @@ export async function POST(req: Request) {
       const kept = (server: string) => Object.hasOwn(servers, server)
         && Object.hasOwn(store.servers, server)
         && (store.servers[server].harness ?? "openclaw") === servers[server].harness;
-      const credentials: StaffMcpStore["credentials"] = {};
+      // No prototype: a username is a key here, `__proto__` included.
+      const credentials: StaffMcpStore["credentials"] = Object.create(null);
       for (const [user, byServer] of Object.entries(store.credentials)) {
         const mine = Object.fromEntries(Object.entries(byServer).filter(([server]) => kept(server)));
         if (Object.keys(mine).length > 0) credentials[user] = mine;
@@ -276,10 +277,10 @@ export async function POST(req: Request) {
       // may have withdrawn it or re-made it on the other runtime, and a
       // credential must never land on a grant it was not set for.
       if (!Object.hasOwn(store.servers, server) || (store.servers[server].harness ?? "openclaw") !== runtime) throw new GrantGoneError();
-      const mine = { ...(store.credentials[username] ?? {}) };
+      const mine = { ...(Object.hasOwn(store.credentials, username) ? store.credentials[username] : {}) };
       if (credential) mine[server] = credential;
       else delete mine[server];
-      const credentials = { ...store.credentials };
+      const credentials: StaffMcpStore["credentials"] = Object.assign(Object.create(null), store.credentials);
       if (Object.keys(mine).length > 0) credentials[username] = mine;
       else delete credentials[username];
       return { ...store, credentials };

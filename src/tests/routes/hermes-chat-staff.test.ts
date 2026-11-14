@@ -25,6 +25,8 @@ const stateHomes = vi.hoisted(() => [] as Array<string | null | undefined>);
 /** The organisation switch as `readOrgMode` reads it, and the member's own profile folder. */
 const org = vi.hoisted(() => ({ on: false, folder: "/h/.hermes/profiles/clawbox-staff-maria/workspace" }));
 const recordReplyMock = vi.hoisted(() => vi.fn());
+/** Real paths recorded as the member's (src/lib/chat-media-owners.ts). */
+const owned = vi.hoisted(() => new Set<string>());
 
 vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-dashboard-turn")>()),
@@ -61,6 +63,11 @@ vi.mock("@/lib/org-mode-server", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/org-mode-server")>()),
   orgMemberStrictOf: memberMock,
   readOrgMode: vi.fn(async () => org.on),
+}));
+vi.mock("@/lib/chat-media-owners", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/chat-media-owners")>()),
+  recordMediaOwner: vi.fn(),
+  isMediaOwnedBy: vi.fn((username: string, real: string) => username === "maria" && owned.has(real)),
 }));
 vi.mock("@/lib/chat-reply-media", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/chat-reply-media")>()),
@@ -116,6 +123,7 @@ beforeEach(() => {
   stateHomes.length = 0;
   org.on = false;
   recordReplyMock.mockReset();
+  owned.clear();
   recordReplyMock.mockReturnValue({ recorded: [], refused: [] });
   guardLoadedMock.mockReset();
   guardLoadedMock.mockResolvedValue(true);
@@ -218,15 +226,28 @@ describe("a member of staff's reply naming files of their own (TASK-2516)", () =
       const chart = path.join(own, "chart.png");
       const stale = path.join(own, "old.png");
       const doc = path.join(own, "report.docx");
-      for (const file of [chart, stale, doc]) fs.writeFileSync(file, "x");
+      const oldDoc = path.join(own, "old.docx");
+      const elsewhere = path.join(own, "..", `${path.basename(own)}-elsewhere.docx`);
+      for (const file of [chart, stale, doc, oldDoc, elsewhere]) fs.writeFileSync(file, "x");
       org.on = true;
       org.folder = own;
       // The recorder's verdict: the chart and the document are this turn's, the old picture is not.
-      recordReplyMock.mockReturnValue({ recorded: [chart, doc], refused: [{ path: stale, reason: "not_this_turn" }] });
+      // An earlier turn's document is theirs already; a file outside their folders never is.
+      recordReplyMock.mockImplementation(() => {
+        owned.add(chart);
+        owned.add(doc);
+        return { recorded: [chart, doc], refused: [{ path: stale, reason: "not_this_turn" }, { path: oldDoc, reason: "not_this_turn" }] };
+      });
+      owned.add(oldDoc);
+      owned.add(path.resolve(elsewhere));
       openTurnMock.mockResolvedValue({
         ...fakeTurn(),
         async run() {
-          return { text: `Here they are.\nMEDIA:${chart}\nMEDIA:${stale}\nMEDIA:${doc}`, reasoning: "", status: "complete" };
+          return {
+            text: `Here they are.\nMEDIA:${chart}\nMEDIA:${stale}\nMEDIA:${doc}\nMEDIA:${oldDoc}\nMEDIA:${elsewhere}\nMEDIA:notes/plan.docx\nMEDIA:https://example.com/brief.pdf\n\`\`\`\nMEDIA:${elsewhere}\n\`\`\``,
+            reasoning: "",
+            status: "complete",
+          };
         },
       });
       const res = await POST(post({ message: "Draw the chart and write the report." }));
@@ -236,10 +257,17 @@ describe("a member of staff's reply naming files of their own (TASK-2516)", () =
       const { text } = await res.json();
       expect(text).toContain(`MEDIA:${chart}`);
       expect(text).toContain(`MEDIA:${doc}`);
-      expect(text).not.toContain(stale); // not recorded: no card that would be a 404
+      expect(text).toContain(`MEDIA:${oldDoc}`); // theirs from before: still served
+      expect(text).toContain("MEDIA:https://example.com/brief.pdf"); // not a file of this box
+      // No card that would be a 404: a picture not recorded, a file outside
+      // their folders (named in fenced code it stays text), a relative path.
+      expect(text).not.toContain(stale);
+      expect(text).not.toContain("MEDIA:notes/plan.docx");
+      expect(text.split(`MEDIA:${elsewhere}`)).toHaveLength(2);
+      expect(text).toContain(`\`\`\`\nMEDIA:${elsewhere}\n\`\`\``);
       const stored = appendMock.mock.calls.map((call) => call[0]).find((r) => r.role === "assistant");
       expect(stored.media).toEqual([mediaUrl(chart)]);
-      expect(stored.files).toEqual([mediaUrl(doc)]);
+      expect(stored.files).toEqual([mediaUrl(doc), mediaUrl(oldDoc), mediaUrl("https://example.com/brief.pdf")]);
     } finally {
       fs.rmSync(own, { recursive: true, force: true });
     }

@@ -306,6 +306,21 @@ describe("the grants", () => {
     }
   });
 
+  it("keeps a credential of a member whose username is `__proto__` across a grant save", async () => {
+    const saved = h.users;
+    h.users = ["ivan", "__proto__"];
+    try {
+      expect((await post({ servers: { docs: {} } })).status).toBe(200);
+      expect((await post({ username: "__proto__", server: "docs", credential: "proto-secret-token-01" })).status).toBe(200);
+      expect((await post({ servers: { docs: { writeTools: true } } })).status).toBe(200);
+      const stored = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      expect(Object.hasOwn(stored.credentials, "__proto__")).toBe(true);
+      expect(stored.credentials.__proto__).toEqual({ docs: "proto-secret-token-01" });
+    } finally {
+      h.users = saved;
+    }
+  });
+
   it("never drops a grant the other runtime saved while this runtime's save waited (overlapping saves)", async () => {
     const hermesHome = fs.mkdtempSync(path.join(os.tmpdir(), "staff-mcp-hermes-"));
     const savedHome = process.env.HERMES_HOME;

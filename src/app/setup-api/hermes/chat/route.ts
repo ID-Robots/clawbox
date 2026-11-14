@@ -64,7 +64,7 @@ import { personSession } from "@/lib/owner-session";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
 import { chatMediaRoot, resolveInMediaRoot } from "@/lib/harness/media-root";
 import { hermesDocumentPrompt } from "@/lib/harness/hermes-document-prompt";
-import { boundedFiles, mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
+import { boundedFiles, mediaUrl, splitAssistantMedia, splitMediaDirectives } from "@/lib/chat-media";
 import { splitEmailRefs } from "@/lib/chat-email-refs";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
 import {
@@ -408,6 +408,44 @@ function wantsStream(request: Request): boolean {
  * arrive on separate channels), but only the database has the TOOL STEPS, which
  * no amount of reading the reply can recover.
  */
+/**
+ * A member's caption with every `MEDIA:` line dropped that names a local file
+ * the chat media route would not serve them (src/app/setup-api/chat/media/route.ts):
+ * one that does not resolve inside `roots` or is not recorded as theirs. Such
+ * a line would only become a card that answers 404. A remote URL is left as
+ * it is; fenced code is never touched.
+ */
+async function memberServableCaption(caption: string, username: string, roots: ReadonlyArray<string | null>): Promise<string> {
+  if (!/media:/i.test(caption)) return caption;
+  const realRoots = (await Promise.all(
+    roots.map((root) => (root ? fsp.realpath(/* turbopackIgnore: true */ root).catch(() => null) : null)),
+  )).filter((root): root is string => root !== null);
+  const served = async (payload: string): Promise<boolean> => {
+    const local = payload.toLowerCase().startsWith("file://") ? payload.slice("file://".length) : payload;
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(local)) return true; // a remote URL: not a file of this box
+    if (!path.isAbsolute(local)) return false; // a member is served no relative path
+    const real = await fsp.realpath(/* turbopackIgnore: true */ local).catch(() => null);
+    if (!real) return false;
+    return realRoots.some((root) => {
+      const rel = path.relative(root, real);
+      return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel) && isMediaOwnedBy(username, real, root);
+    });
+  };
+  const kept: string[] = [];
+  let inFence = false;
+  let dropped = false;
+  for (const line of caption.split("\n")) {
+    if (/^(?:```|~~~)/.test(line.trim())) inFence = !inFence;
+    const payload = inFence ? undefined : splitMediaDirectives(line).media[0];
+    if (payload !== undefined && !(await served(payload))) {
+      dropped = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  return dropped ? kept.join("\n").replace(/\n{3,}/g, "\n\n").trim() : caption;
+}
+
 async function settleTurn(
   threaded: string,
   /** The transcript the answer is recorded under — ours, not the agent's. */
@@ -531,7 +569,9 @@ async function settleTurn(
   // A picture of theirs that the reclaiming above took out of the caption
   // (an image a tool wrote into their own folder), said again once recorded.
   const claimedImages: string[] = [];
+  let shownCaption = caption;
   if (memberTurn && chatUser) {
+    const ownFolder = staffHermesProfilePaths(chatUser)?.folder ?? null;
     // Their own profile folder only: a file in the shared media tree is made
     // theirs by the relay that ran their tool call, never by a reply naming
     // it (scripts/chat-reply-media.js). Synchronous and never throws. Read
@@ -540,7 +580,7 @@ async function settleTurn(
     const { recorded, refused } = recordMemberReplyMedia({
       username: chatUser,
       text: spoken,
-      ownFolder: staffHermesProfilePaths(chatUser)?.folder ?? null,
+      ownFolder,
       since: turnStartedAt,
     });
     if (recorded.length > 0 || refused.length > 0) {
@@ -554,9 +594,13 @@ async function settleTurn(
       const real = path.isAbsolute(source) ? await fsp.realpath(/* turbopackIgnore: true */ source).catch(() => null) : null;
       if (real && mine.has(real) && !claimedImages.includes(real) && !drawn.includes(real)) claimedImages.push(real);
     }
+    // The same rule for every other file the caption still names (a document,
+    // a picture in the shared tree): a card stays only for a file the member
+    // is served — recorded as theirs, in the chat media tree or their folder.
+    shownCaption = await memberServableCaption(caption, chatUser, [await chatMediaRoot().catch(() => null), ownFolder]);
   }
   const answer = [
-    caption,
+    shownCaption,
     ...claimedImages.map((file) => `MEDIA:${file}`),
     ...drawn.map((file) => `MEDIA:${file}`),
     ...(spokenClip ? [`MEDIA:${spokenClip}`] : []),
