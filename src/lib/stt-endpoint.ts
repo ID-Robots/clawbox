@@ -108,12 +108,23 @@ export function readSttEndpointKey(baseUrl: string): string | null {
   }
 }
 
-/** Written 0600 and atomically (temp + rename), so a crash never leaves half a key; bound to `baseUrl`. */
+/**
+ * Written 0600 and atomically (temp + rename), so a crash never leaves half a
+ * key; bound to `baseUrl`. Both values come from an owner's request, so they
+ * are validated HERE, at the write, by the same rules the route applies — one
+ * line of at most `apiKeyMax` with no whitespace or control character, and a
+ * base URL already in its normalised, on-the-LAN form — and only the validated
+ * values are serialised. Anything else throws and nothing is written.
+ */
 export function writeSttEndpointKey(key: string, baseUrl: string): void {
+  const safeKey = parseApiKey(key);
+  if (!safeKey) throw new Error("invalid speech server key");
+  const safeBaseUrl = normalizeSttEndpointUrl(baseUrl);
+  if (!safeBaseUrl || safeBaseUrl !== baseUrl) throw new Error("invalid speech server address");
   const target = keyPath();
   fs.mkdirSync(path.dirname(target), { recursive: true });
   const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ v: 1, for: baseUrl, key }), { mode: 0o600 });
+  fs.writeFileSync(tmp, JSON.stringify({ v: 1, for: safeBaseUrl, key: safeKey }), { mode: 0o600 });
   fs.chmodSync(tmp, 0o600);
   fs.renameSync(tmp, target);
 }
@@ -183,6 +194,13 @@ function parseModel(raw: unknown): string | null {
   return model;
 }
 
+/** A key as the owner may give it: trimmed, one line, no whitespace, at most `apiKeyMax`. Empty or invalid → null. */
+function parseApiKey(raw: string): string | null {
+  const key = raw.trim();
+  if (!key || key.length > STT_ENDPOINT_LIMITS.apiKeyMax || /[\u0000-\u001f\u007f\s]/.test(key)) return null;
+  return key;
+}
+
 /**
  * Is this address one a speech engine on the owner's own network may have?
  * Loopback, RFC 1918, CGNAT, IPv6 unique-local — and never link-local, a
@@ -248,11 +266,10 @@ export function validateSttEndpointInput(body: Record<string, unknown> | null): 
   let apiKey: string | null = null;
   if (keyRaw !== undefined && keyRaw !== null) {
     if (typeof keyRaw !== "string") return { ok: false, code: "invalid_api_key", error: "The API key must be text." };
-    const key = keyRaw.trim();
-    if (key.length > STT_ENDPOINT_LIMITS.apiKeyMax || /[\u0000-\u001f\u007f\s]/.test(key)) {
-      return { ok: false, code: "invalid_api_key", error: "The API key must be one line with no spaces." };
+    if (keyRaw.trim()) {
+      apiKey = parseApiKey(keyRaw);
+      if (!apiKey) return { ok: false, code: "invalid_api_key", error: "The API key must be one line with no spaces." };
     }
-    apiKey = key || null;
   }
   return { ok: true, value: { baseUrl, model }, apiKey, clearApiKey: body?.clearApiKey === true };
 }

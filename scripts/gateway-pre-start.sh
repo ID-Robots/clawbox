@@ -4006,6 +4006,12 @@ def _clawbox_cloud_ai_locked():
 
 
 _clawbox_ai_locked = _clawbox_cloud_ai_locked()
+# Set by EVERY change this start makes because the lock is on — a cloud
+# transcription row or endpoint taken back, a locked seed, the audio switch
+# turned off, ClawBox's own cloud voice withdrawn, cloud voices held aside. The
+# config on disk still lets that cloud leg run, so the gateway config write
+# below must not start the gateway on it if the write fails.
+_clawbox_lock_applied = False
 # The auth profile the cloud row names as its OWN bearer, and it is now
 # load-bearing rather than belt-and-braces. This row's provider is `openai` —
 # the only bundled media-understanding provider that speaks the proxy's
@@ -4491,6 +4497,9 @@ if _clawai_openai_route_is_ours:
         if _audio_seed:
             _audio_write_seed(_audio_seed)
             changed = True
+            if _clawbox_ai_locked:
+                # On disk there is no list, so the core auto-detects one.
+                _clawbox_lock_applied = True
     elif _audio_models is None or (
         # The endpoint only ever travels WITH the cloud row. A list Settings
         # wrote without one — the box's own engine alone, because no ClawBox
@@ -4542,10 +4551,14 @@ if _clawai_openai_route_is_ours:
                 _audio_models[:] = _audio_kept
                 print("  Withdrew the ClawBox AI transcription row: %s" % _audio_cloud_refused)
                 changed = True
+                if _clawbox_ai_locked:
+                    _clawbox_lock_applied = True
         if _audio_has_base_url and _same_endpoint(_audio_base_url, _clawai_proxy_base_url):
             del _audio["baseUrl"]
             print("  Removed the ClawBox AI transcription endpoint along with its row")
             changed = True
+            if _clawbox_ai_locked:
+                _clawbox_lock_applied = True
     elif not _audio_route_taken and isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
         _audio_repaired = False
         for _row in _audio_models:
@@ -4587,7 +4600,7 @@ def _clawbox_audio_lock_off_marker():
 def _clawbox_audio_lock_switch():
     import os
 
-    global changed
+    global changed, _clawbox_lock_applied
     _marker = _clawbox_audio_lock_off_marker()
     _tools = cfg.get("tools") if isinstance(cfg.get("tools"), dict) else {}
     _media = _tools.get("media") if isinstance(_tools.get("media"), dict) else {}
@@ -4620,6 +4633,7 @@ def _clawbox_audio_lock_switch():
             _tools["media"] = _media
             cfg["tools"] = _tools
             changed = True
+            _clawbox_lock_applied = True
             print("  Channel transcription off: local-only AI is on and this box has no engine of its own")
     elif _marker and os.path.exists(_marker):
         if _audio.get("enabled") is False:
@@ -4968,6 +4982,10 @@ elif _clawai_openai_route_is_ours and (_clawai_speech_withdrawable or _clawai_sp
             )
         ):
             del _tts_providers["openai"]
+            if _clawai_speech_locked:
+                # Withdrawn for the lock: the config on disk still speaks
+                # through it, and the pass below may find nothing more to move.
+                _clawbox_lock_applied = True
             print(
                 "  Removed the ClawBox AI cloud voice: %s"
                 % (
@@ -5005,9 +5023,11 @@ CLAWBOX_TTS_LOCAL_PROVIDER_ID = "tts-local-cli"
 CLAWBOX_TTS_HELD_PREFIX = "clawbox-held--"
 # The held file, removed only once the config it was restored into is written.
 _clawbox_tts_held_to_remove = None
-# Set when this start held cloud voices aside under the lock: the config on
-# disk still lets them speak, so it must not be started on if the write fails.
-_clawbox_tts_lock_applied = False
+# Holding cloud voices aside sets `_clawbox_lock_applied` (defined beside the
+# lock reader, and already set when the arm above withdrew our own voice): the
+# config on disk still lets them speak, so it must not be started on if the
+# write fails. Never reset here, or a withdrawal with nothing left to hold
+# would start on the cloud config.
 
 
 def _clawbox_tts_is_local(_id):
@@ -5108,8 +5128,8 @@ def _clawbox_tts_lock_pass():
                     _target["providers"].setdefault(CLAWBOX_TTS_HELD_PREFIX + "provider", {"provider": _target.get("provider"), "selected": _key})
                 _target["provider"] = _key
         changed = True
-        global _clawbox_tts_lock_applied
-        _clawbox_tts_lock_applied = True
+        global _clawbox_lock_applied
+        _clawbox_lock_applied = True
         if _in_file:
             print("  Local-only AI is on: the gateway speaks with this box's own voice only (cloud voices held aside)")
         else:
@@ -5587,17 +5607,18 @@ if changed:
                 os.unlink(tmp_path)
             except Exception:
                 pass
-        if globals().get("_clawbox_tts_lock_applied"):
+        if globals().get("_clawbox_lock_applied"):
             # The one exception to "carry on" above: under the local-only AI
-            # lock (TASK-2501) the config on disk still lets cloud voices
-            # speak, so starting on it would break the lock. Failing closed
+            # lock (TASK-2501) this start took a cloud leg out (a voice, a
+            # transcription row, audio auto-detection) and the config on disk
+            # still has it, so starting on it would break the lock. Failing closed
             # costs the gateway its start: systemd retries until its start
             # limit, and past it the gateway stays down until a start can
             # write the config (a restart once there is room, or the next
             # boot). Under the lock that is the chosen trade: no chat rather
             # than a cloud voice.
             print(
-                "  ERROR: local-only AI is on and the gateway config that holds the cloud voices aside could not be written (%s: %s); the gateway is not started on the old config"
+                "  ERROR: local-only AI is on and the gateway config that keeps its cloud legs out could not be written (%s: %s); the gateway is not started on the old config"
                 % (type(exc).__name__, exc),
                 file=sys.stderr,
             )
