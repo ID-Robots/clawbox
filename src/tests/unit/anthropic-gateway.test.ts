@@ -100,6 +100,10 @@ function fakeCore() {
     configWrites: [] as string[][],
     /** `cron.update` calls core refuses, by step value (`null` is a clear). */
     refuseCronUpdate: new Set<string | null>(),
+    /** `cron.update` calls core applies and whose answer is then lost. */
+    loseReplyOf: new Set<string | null>(),
+    /** Runs before each gateway request: the owner acting meanwhile. */
+    beforeCall: null as ((method: string, params: Record<string, unknown>) => void) | null,
   };
   offlineWindows = 0;
   gw._setGatewayDepsForTests({
@@ -169,6 +173,7 @@ function fakeCore() {
     usage: async (access) => core.usage.get(access) ?? null,
     call: async (method, params) => {
       core.calls.push({ method, params });
+      core.beforeCall?.(method, params);
       if (method === "cron.list") return { jobs: [...core.cronJobs, ...[...core.crons.values()].map(publicCron)] };
       if (method === "cron.update") return cronUpdate(core, params);
       return { ok: true };
@@ -204,6 +209,9 @@ function cronUpdate(core: ReturnType<typeof fakeCore>, params: Record<string, un
   if (!job) throw new Error(`unknown cron job id: ${String(params.id)}`);
   const model = ((params.patch as { payload?: { model?: string | null } }).payload ?? {}).model;
   if (core.refuseCronUpdate.has(model ?? null)) throw new Error("cron.update: the scheduler is busy");
+  if (params.expectedConfigRevision !== undefined && params.expectedConfigRevision !== `rev-${job.revision}`) {
+    throw new Error("cron job definition no longer matches the loaded version; review the latest version before retrying");
+  }
   if (typeof model === "string") {
     const at = model.lastIndexOf("@");
     if (at > 0) {
@@ -217,6 +225,7 @@ function cronUpdate(core: ReturnType<typeof fakeCore>, params: Record<string, un
     delete job.payload.model;
   }
   job.revision += 1;
+  if (core.loseReplyOf.has(model ?? null)) throw new Error("gateway request timed out");
   return { ok: true, job: publicCron(job) };
 }
 
@@ -259,6 +268,7 @@ beforeEach(async () => {
   pool._resetAnthropicAccountsForTests();
   swap._resetAnthropicSwapForTests();
   announceAnthropicLimit.mockClear();
+  (await import("@/lib/anthropic-cron-binding"))._resetCronBindingForTests();
 });
 
 afterEach(() => {
@@ -1530,10 +1540,101 @@ describe("automations follow the pool across a swap and a renewal (TASK-2533, Op
     await gw.keepGatewayMirror();
     expect((core.crons.get("inbox") as FakeCron).payload.model).toBe(`anthropic/claude-opus-5-5@${p(work.id)}`);
     core.refuseCronUpdate.clear();
+    // A refused job is asked again after its back-off, not every minute.
+    await gw.bindGatewayCrons();
+    expect((core.crons.get("inbox") as FakeCron).payload.model).toBe(`anthropic/claude-opus-5-5@${p(work.id)}`);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 11 * 60_000);
     await gw.bindGatewayCrons();
     const job = core.crons.get("inbox") as FakeCron;
     expect(job.payload.model).toBeUndefined();
     expect(job.binding?.profileId).toBe(p(work.id));
+  });
+
+  it("gives the jobs it adopted back when the pool leaves the gateway — their own model again, no pin on a model-less one — and touches no other", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    addCron(core, { id: "inherits" });
+    addCron(core, { id: "own-model", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-sonnet-5-5" } });
+    await gw.keepGatewayMirror();
+    expect((core.crons.get("own-model") as FakeCron).payload.model).toMatch(/@anthropic:clawbox-/);
+    // Made after the pool left: never the box's.
+    core.chatOnClaude = false;
+    await gw.syncGatewayNow();
+    expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
+    addCron(core, { id: "later", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-haiku-5-5" } });
+    await gw.bindGatewayCrons();
+    expect((core.crons.get("own-model") as FakeCron).payload.model).toBe("anthropic/claude-sonnet-5-5");
+    expect((core.crons.get("inherits") as FakeCron).payload.model).toBeUndefined();
+    expect((core.crons.get("later") as FakeCron).revision).toBe(1);
+    // Nothing left of the box's: the next look asks core nothing.
+    const asked = core.calls.length;
+    await gw.bindGatewayCrons();
+    expect(core.calls.length).toBe(asked);
+  });
+
+  it("moves the jobs it adopted onto the owner's own sign-in when the pool's accounts all leave while the chat stays on Claude", async () => {
+    const core = fakeCore();
+    const { work, personal } = await twoClaudeAccounts();
+    addCron(core, { id: "own-model", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-sonnet-5-5" } });
+    await gw.keepGatewayMirror();
+    await pool.removeAccount(work.id);
+    await pool.removeAccount(personal.id);
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+    expect(runCron(core, "own-model")).toBe("anthropic:default");
+  });
+
+  it("never writes over an owner's edit made while it was planning: core refuses the stale revision, and the job is planned again from what it is", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    const job = addCron(core, { id: "own-model", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-sonnet-5-5" } });
+    // The owner moves the job to another provider between the box's list and its update.
+    core.beforeCall = (method) => {
+      if (method !== "cron.update") return;
+      core.beforeCall = null;
+      job.payload.model = "openai/gpt-5.5";
+      job.revision += 1;
+    };
+    await gw.keepGatewayMirror();
+    expect(job.payload.model).toBe("openai/gpt-5.5");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 11 * 60_000);
+    await gw.bindGatewayCrons();
+    expect(job.payload.model).toBe("openai/gpt-5.5");
+  });
+
+  it("runs a lost run again once in its window, however often it fails again", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    addCron(core, { id: "inbox" });
+    runCron(core, "inbox");
+    await gw.keepGatewayMirror();
+    // Its forced run fails on its account again (here: the binding vanished).
+    (core.crons.get("inbox") as FakeCron).binding = null;
+    runCron(core, "inbox", Date.now() + 1);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 60_000);
+    await gw.bindGatewayCrons();
+    expect(core.calls.filter((c) => c.method === "cron.run").length).toBe(1);
+    expect(runCron(core, "inbox")).toMatch(/^anthropic:clawbox-/);
+  });
+
+  it("knows a model-less job as its own when core took the pin but its answer was lost — the next pass clears it instead of keeping it pinned", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    const job = addCron(core, { id: "inbox" });
+    // Core applies the pin, and its answer never arrives (a timeout on a busy box).
+    core.loseReplyOf.add(`anthropic/claude-opus-5-5@${p(work.id)}`);
+    await gw.keepGatewayMirror();
+    expect(job.payload.model).toBe(`anthropic/claude-opus-5-5@${p(work.id)}`);
+    core.loseReplyOf.clear();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 11 * 60_000);
+    await gw.bindGatewayCrons();
+    expect(job.payload.model).toBeUndefined();
+    expect(job.binding?.profileId).toBe(p(work.id));
+    expect(runCron(core, "inbox")).toBe(p(work.id));
   });
 
   it("adopts a job the chat made since, bound to whatever its session ran on, on the watcher's next look", async () => {

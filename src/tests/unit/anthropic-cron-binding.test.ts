@@ -97,7 +97,8 @@ describe("planning the adoptions", () => {
     const failed = { lastStatus: "error", lastError: "Automation inference account was replaced. Explicitly select an authorized account again." };
     const records: CronBindingRecords = { j: { profileId: POOL_A, authorization: "life-1", inherits: true, model: null, revision: "r1", at: NOW - 60_000 } };
     expect(plan([job({ id: "j", ...failed, lastRunAtMs: NOW - 1000 })], records)[0]).toMatchObject({ retry: true });
-    expect(plan([job({ id: "j", ...failed, lastRunAtMs: NOW - 1000 })], { j: { ...records.j, retriedRunAt: NOW - 1000 } })[0]).toMatchObject({ retry: false });
+    // Run again lately and failed again: adopted again, not forced again inside the window.
+    expect(plan([job({ id: "j", ...failed, lastRunAtMs: NOW - 1000 })], { j: { ...records.j, retriedAt: NOW - 30_000 } })[0]).toMatchObject({ retry: false });
     expect(plan([job({ id: "j", ...failed, lastRunAtMs: NOW - 120_000 })], records)).toEqual([]);
     const old = NOW - BINDING_RETRY_WINDOW_MS - 1;
     expect(plan([job({ id: "j", ...failed, lastRunAtMs: old })], {})[0]).toMatchObject({ retry: false });

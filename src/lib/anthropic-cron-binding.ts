@@ -53,16 +53,32 @@
  * job was edited since, when the box has no record of it (a job made in the
  * chat binds to whatever that session ran on), and — whatever the record says
  * — when its last run failed on its account. Such a failed run is run once
- * more right after, when it is recent: the scheduled run it lost.
+ * more right after, when it is recent: the scheduled run it lost — once in
+ * BINDING_RETRY_WINDOW_MS, however often it fails again.
+ *
+ * WHEN THE POOL LEAVES. With none of the pool's accounts in the gateway any
+ * more, only the jobs the box adopted are touched: onto the Anthropic profile
+ * still leading (the owner's own sign-in), or — with none, the chat off
+ * Claude — given back the model they had before the box touched them.
+ *
+ * NEVER OVER AN EDIT. Each update carries the job's config revision
+ * (`expectedConfigRevision`), so an owner's edit made while the box was
+ * planning wins; the job is planned again from what it now is.
  */
 
 /** A job's last run failed on its recorded inference account, not on the model. */
 const BINDING_FAILURE_RE = /no recorded inference account|inference account was replaced|selected automation account is unavailable|requires an available stored inference account/i;
 
-/** A run lost to its account longer ago than this is not run again: its moment has passed. */
+/** A run lost to its account is run again once in this long, and only when it is this recent: its moment has passed. */
 export const BINDING_RETRY_WINDOW_MS = 2 * 60 * 60_000;
 
-/** The profile automations should be bound to: the one core's stored order leads with. */
+/** A job whose update core refused is not asked again for this long (a busy scheduler, an agent core resolves otherwise). */
+export const REFUSED_BACKOFF_MS = 10 * 60_000;
+
+/** `cron.list` answers at most this many jobs a page. */
+const LIST_PAGE = 200;
+
+/** The profile automations should be bound to: the one core's order leads with. */
 export interface CronBindingTarget {
   profileId: string;
   /** Its authorization lifetime (or, before core enrolled one, its credential's fingerprint). */
@@ -92,10 +108,12 @@ export interface CronBindingRecord {
   inherits: boolean;
   /** `payload.model` as the box left it — null once a model-less job's clear landed. */
   model: string | null;
+  /** `payload.model` before the box first touched the job: what it is given back when the pool leaves. */
+  original?: string | null;
   revision: string | null;
   at: number;
-  /** The failed run (its `lastRunAtMs`) the box already ran again. */
-  retriedRunAt?: number;
+  /** When the box last ran a lost run of this job again. */
+  retriedAt?: number;
 }
 
 export type CronBindingRecords = Record<string, CronBindingRecord>;
@@ -105,8 +123,12 @@ export interface CronBindingPlan {
   /** The `payload.model` values to set, in order; null clears it. */
   steps: (string | null)[];
   inherits: boolean;
+  /** `payload.model` before the box first touched the job. */
+  original: string | null;
   /** Run the job once more after it is adopted: its last run was lost to its account. */
   retry: boolean;
+  /** The pool left: the job is given back, and its record dropped. */
+  release?: boolean;
 }
 
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
@@ -153,34 +175,61 @@ export function isAnthropicModel(base: string): boolean {
   return lower.startsWith("anthropic/") || (!lower.includes("/") && lower.startsWith("claude"));
 }
 
+export interface CronPlanInput {
+  jobs: readonly CronJobDefinition[];
+  /** Null: the pool left and no Anthropic profile leads — the jobs the box adopted are given back. */
+  target: CronBindingTarget | null;
+  records: CronBindingRecords;
+  /** The `main` agent's default model without any `@profile` (what a model-less job runs on), or null. */
+  defaultModel: string | null;
+  isPoolProfile: (profileId: string) => boolean;
+  /** Only jobs the box already adopted (the pool's accounts are out of the gateway). */
+  onlyAdopted?: boolean;
+  /** A job with no `agentId` runs on `main` (core's default agent is `main`). */
+  defaultIsMain?: boolean;
+  /** Jobs not to ask about this time (their update was refused lately). */
+  skip?: ReadonlySet<string>;
+  now: number;
+}
+
 /**
  * Which jobs to adopt onto `target`, and how. Pure: the box's records and
  * `cron.list` in, the updates out.
- *
- * `defaultModel`: the `main` agent's default model without any `@profile` — what
- * a model-less job runs on — or null when it could not be read.
  */
-export function planCronBindings(input: {
-  jobs: readonly CronJobDefinition[];
-  target: CronBindingTarget;
-  records: CronBindingRecords;
-  defaultModel: string | null;
-  isPoolProfile: (profileId: string) => boolean;
-  now: number;
-}): CronBindingPlan[] {
+export function planCronBindings(input: CronPlanInput): CronBindingPlan[] {
   const { target, records, defaultModel, isPoolProfile, now } = input;
   const plans: CronBindingPlan[] = [];
   for (const job of input.jobs) {
+    if (input.skip?.has(job.id)) continue;
     if (job.kind !== "agentTurn" || job.sessionTarget === "main") continue;
-    if (job.agentId !== null && job.agentId !== "main") continue;
+    if (job.agentId !== null ? job.agentId !== "main" : input.defaultIsMain === false) continue;
     const record: CronBindingRecord | undefined = records[job.id];
     // The model is the one the box left: what it adopted is still its to move.
     const ours = !!record && record.model === job.model;
-    const inherits = job.model === null || (ours && record.inherits);
+    if (input.onlyAdopted && !ours) continue;
+    const original = ours ? (record.original ?? (record.inherits ? null : record.model)) : job.model;
+    const { base: defaultBase } = defaultModel ? splitModelRef(defaultModel) : { base: "" };
+    // A model-less job, or one the box left pinned to the default because
+    // its clear did not land — or whose record a crash lost after the pin.
+    const pinnedDefault = !ours && job.model !== null && defaultModel !== null
+      && (() => { const ref = splitModelRef(job.model as string); return ref.base === defaultBase && ref.profileId !== null && isPoolProfile(ref.profileId); })()
+      && record?.inherits === true;
+    const inherits = job.model === null || (ours && record.inherits) || pinnedDefault;
+    if (target === null) {
+      if (!ours) continue;
+      // Given back: no model left on a model-less job, the model it had on any other.
+      const back = record.inherits ? null : (record.original ?? null);
+      if (job.model === back) {
+        plans.push({ job, steps: [], inherits: record.inherits, original: back, retry: false, release: true });
+      } else {
+        plans.push({ job, steps: [back], inherits: record.inherits, original: back, retry: false, release: true });
+      }
+      continue;
+    }
     let adopt: string;
     if (inherits) {
-      if (defaultModel === null || !isAnthropicModel(defaultModel)) continue;
-      adopt = `${defaultModel}@${target.profileId}`;
+      if (defaultModel === null || !isAnthropicModel(defaultBase)) continue;
+      adopt = `${defaultBase}@${target.profileId}`;
     } else {
       const { base, profileId } = splitModelRef(job.model as string);
       if (!isAnthropicModel(base)) continue;
@@ -190,17 +239,19 @@ export function planCronBindings(input: {
     }
     const lastRun = job.lastRunAtMs ?? 0;
     const failed = job.lastStatus === "error" && !!job.lastError && BINDING_FAILURE_RE.test(job.lastError) && lastRun > (record?.at ?? 0);
-    const current = !!record && ours
+    const current = !!record && (ours || pinnedDefault)
       && record.profileId === target.profileId
       && record.authorization === target.authorization
-      && (record.revision === null || job.revision === null || record.revision === job.revision);
-    const retry = failed && job.enabled && record?.retriedRunAt !== job.lastRunAtMs && now - lastRun <= BINDING_RETRY_WINDOW_MS;
+      && (record.revision === null || job.revision === null || record.revision === job.revision || pinnedDefault);
+    const retry = failed && job.enabled && now - lastRun <= BINDING_RETRY_WINDOW_MS
+      && (record?.retriedAt === undefined || now - record.retriedAt > BINDING_RETRY_WINDOW_MS);
+    const originalOf = inherits ? null : original;
     if (current && !failed) {
       // Bound, but a model-less job's clear is still owed.
-      if (inherits && job.model !== null) plans.push({ job, steps: [null], inherits, retry: false });
+      if (inherits && job.model !== null) plans.push({ job, steps: [null], inherits, original: originalOf, retry: false });
       continue;
     }
-    plans.push({ job, steps: inherits ? [adopt, null] : [adopt], inherits, retry });
+    plans.push({ job, steps: inherits ? [adopt, null] : [adopt], inherits, original: originalOf, retry });
   }
   return plans;
 }
@@ -214,7 +265,9 @@ export interface CronBindingDeps {
 export interface CronBindingResult {
   /** Jobs adopted onto the target (their binding update landed). */
   bound: number;
-  /** Jobs whose update core refused or that could not be asked: tried again on the next pass. */
+  /** Jobs given back when the pool left. */
+  released: number;
+  /** Jobs whose update core refused or that could not be asked: tried again on a later pass. */
   owed: number;
   /** Lost runs started again. */
   rerun: number;
@@ -229,22 +282,47 @@ function revisionOf(reply: Record<string, unknown> | null): string | null {
   return str(job.configRevision);
 }
 
+/** Every page of `cron.list`, disabled jobs too; `complete` is false when a page said there was more and it could not be read. */
+async function listAll(call: CronBindingDeps["call"]): Promise<{ jobs: CronJobDefinition[]; complete: boolean }> {
+  const jobs: CronJobDefinition[] = [];
+  let offset = 0;
+  for (let page = 0; page < 50; page += 1) {
+    const reply = await call("cron.list", { includeDisabled: true, includeDeliveryPreviews: false, limit: LIST_PAGE, offset });
+    const got = parseCronDefinitions(reply);
+    jobs.push(...got);
+    const next = num(reply?.nextOffset);
+    if (reply?.hasMore !== true || next === null || next <= offset || got.length === 0) return { jobs, complete: reply?.hasMore !== true };
+    offset = next;
+  }
+  return { jobs, complete: false };
+}
+
+/** Jobs whose update core refused, and when (per process: a restart asks again). */
+const refusedAt = new Map<string, number>();
+
+/** Test seam: forget which jobs core refused. */
+export function _resetCronBindingForTests(): void {
+  refusedAt.clear();
+}
+
 /**
- * Adopt every job that needs it onto `target`. Never throws: what could not
- * be done is counted as owed and planned again on the next pass.
+ * Adopt every job that needs it onto `target` (or, with none, give back the
+ * ones the box adopted). Never throws: what could not be done is counted as
+ * owed and planned again on a later pass.
  */
 export async function bindCronsToTarget(
   deps: CronBindingDeps,
-  input: { target: CronBindingTarget; defaultModel: string | null; isPoolProfile: (profileId: string) => boolean; now?: number },
+  input: Omit<CronPlanInput, "jobs" | "records" | "now" | "skip"> & { now?: number },
 ): Promise<CronBindingResult> {
   const now = input.now ?? Date.now();
-  const result: CronBindingResult = { bound: 0, owed: 0, rerun: 0, unread: false };
-  let jobs: CronJobDefinition[];
+  const result: CronBindingResult = { bound: 0, released: 0, owed: 0, rerun: 0, unread: false };
+  let listed: { jobs: CronJobDefinition[]; complete: boolean };
   try {
-    jobs = parseCronDefinitions(await deps.call("cron.list", { includeDisabled: true }));
+    listed = await listAll(deps.call);
   } catch {
     return { ...result, unread: true };
   }
+  const { jobs } = listed;
   let records: CronBindingRecords;
   try {
     records = { ...(await deps.readRecords()) };
@@ -252,50 +330,103 @@ export async function bindCronsToTarget(
     records = {};
   }
   let dirty = false;
-  // Records of jobs that are gone.
-  for (const id of Object.keys(records)) {
-    if (!jobs.some((j) => j.id === id)) {
-      delete records[id];
-      dirty = true;
+  const save = async () => {
+    try {
+      await deps.writeRecords(records);
+      dirty = false;
+    } catch (err) {
+      console.error("[anthropic-cron-binding] could not record which accounts the automations were given:", err instanceof Error ? err.message : err);
+    }
+  };
+  // Records of jobs that are gone — only when the whole list was read.
+  if (listed.complete) {
+    for (const id of Object.keys(records)) {
+      if (!jobs.some((j) => j.id === id)) {
+        delete records[id];
+        dirty = true;
+      }
     }
   }
-  const plans = planCronBindings({ jobs, target: input.target, records, defaultModel: input.defaultModel, isPoolProfile: input.isPoolProfile, now });
+  const skip = new Set([...refusedAt].filter(([, at]) => now - at < REFUSED_BACKOFF_MS).map(([id]) => id));
+  const plans = planCronBindings({ ...input, jobs, records, skip, now });
   for (const plan of plans) {
     const { job } = plan;
+    if (plan.release && plan.steps.length === 0) {
+      delete records[job.id];
+      dirty = true;
+      result.released += 1;
+      continue;
+    }
+    const before = records[job.id];
+    const adopting = plan.steps[0] !== null && !plan.release;
+    if (adopting && input.target) {
+      // Written BEFORE the first update: one core takes but whose answer is
+      // lost (a timeout, a restart) is still known as the box's own next time
+      // — a model-less job pinned to its default is cleared, not kept pinned.
+      records[job.id] = {
+        profileId: input.target.profileId,
+        authorization: input.target.authorization,
+        inherits: plan.inherits,
+        model: plan.steps[0],
+        original: plan.original,
+        revision: null,
+        at: now,
+        ...(before?.retriedAt !== undefined ? { retriedAt: before.retriedAt } : {}),
+      };
+      await save();
+    }
     let model: string | null = job.model;
-    let revision: string | null = null;
+    let revision: string | null = job.revision;
     let landed = 0;
     for (const step of plan.steps) {
       try {
-        const reply = await deps.call("cron.update", { id: job.id, patch: { payload: { kind: "agentTurn", model: step } } });
+        const reply = await deps.call("cron.update", {
+          id: job.id,
+          ...(revision ? { expectedConfigRevision: revision } : {}),
+          patch: { payload: { kind: "agentTurn", model: step } },
+        });
         model = step;
         revision = revisionOf(reply);
         landed += 1;
       } catch (err) {
-        console.error(`[anthropic-cron-binding] core did not take automation ${job.id}'s account (${step === null ? "clearing the model it inherits" : step}):`, err instanceof Error ? err.message : err);
+        refusedAt.set(job.id, now);
+        console.error(`[anthropic-cron-binding] core did not take automation ${job.id}'s account (${step === null ? "clearing the model" : step}):`, err instanceof Error ? err.message : err);
         break;
       }
     }
-    // The adoption is the first step of a binding plan; a clear-only plan was already bound.
-    const adopted = plan.steps[0] !== null ? landed > 0 : true;
-    if (landed < plan.steps.length) result.owed += 1;
-    if (!adopted) continue;
-    if (plan.steps[0] !== null) result.bound += 1;
-    const before = records[job.id];
+    if (landed === plan.steps.length) refusedAt.delete(job.id);
+    else result.owed += 1;
+    if (plan.release) {
+      if (landed === plan.steps.length) {
+        delete records[job.id];
+        dirty = true;
+        result.released += 1;
+      }
+      continue;
+    }
+    // Nothing core took — or nothing it said it took. An adoption's
+    // provisional record stays: had the first step landed unseen, the job's
+    // model now matches it and the next pass finishes from there; had it not,
+    // the job does not match and is planned whole again. A clear's record is
+    // left as it was.
+    if (landed === 0) continue;
+    if (adopting) result.bound += 1;
+    const base = records[job.id] ?? before;
     records[job.id] = {
-      profileId: plan.steps[0] !== null ? input.target.profileId : (before?.profileId ?? input.target.profileId),
-      authorization: plan.steps[0] !== null ? input.target.authorization : (before?.authorization ?? input.target.authorization),
+      profileId: adopting && input.target ? input.target.profileId : (base?.profileId ?? input.target?.profileId ?? ""),
+      authorization: adopting && input.target ? input.target.authorization : (base?.authorization ?? input.target?.authorization ?? null),
       inherits: plan.inherits,
       model,
+      original: plan.original,
       revision,
-      at: plan.steps[0] !== null ? now : (before?.at ?? now),
-      ...(before?.retriedRunAt !== undefined ? { retriedRunAt: before.retriedRunAt } : {}),
+      at: adopting ? now : (base?.at ?? now),
+      ...(base?.retriedAt !== undefined ? { retriedAt: base.retriedAt } : {}),
     };
     dirty = true;
-    if (plan.retry && job.lastRunAtMs !== null) {
-      // Once per lost run, whether or not core starts it: a run that cannot be
-      // started now is not worth a second try at a later, wrong moment.
-      records[job.id].retriedRunAt = job.lastRunAtMs;
+    if (plan.retry && adopting) {
+      // Once in a window, whether or not core starts it: a run that keeps
+      // failing is not forced again every minute.
+      records[job.id].retriedAt = now;
       try {
         await deps.call("cron.run", { id: job.id, mode: "force" });
         result.rerun += 1;
@@ -304,15 +435,10 @@ export async function bindCronsToTarget(
       }
     }
   }
-  if (dirty) {
-    try {
-      await deps.writeRecords(records);
-    } catch (err) {
-      console.error("[anthropic-cron-binding] could not record which accounts the automations were given:", err instanceof Error ? err.message : err);
-    }
-  }
-  if (result.bound > 0 || result.owed > 0) {
-    console.error(`[anthropic-cron-binding] ${result.bound} automation(s) on ${input.target.profileId}${result.owed > 0 ? `, ${result.owed} still owed` : ""}${result.rerun > 0 ? `, ${result.rerun} lost run(s) started again` : ""}`);
+  if (dirty) await save();
+  if (result.bound > 0 || result.owed > 0 || result.released > 0) {
+    const on = input.target ? `on ${input.target.profileId}` : "given back";
+    console.error(`[anthropic-cron-binding] ${result.bound + result.released} automation(s) ${on}${result.owed > 0 ? `, ${result.owed} still owed` : ""}${result.rerun > 0 ? `, ${result.rerun} lost run(s) started again` : ""}`);
   }
   return result;
 }

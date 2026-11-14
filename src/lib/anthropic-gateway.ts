@@ -123,7 +123,7 @@ import { fetchAnthropicUsage, type AnthropicUsageReading } from "@/lib/anthropic
 import { readGatewayProviderAuth, type GatewayProviderAuthRead, type ProfileFailureState, type ProviderAuthProfile } from "@/lib/openclaw-auth-store";
 import { registerSwapConsumer, reportAnthropicFailure, type FailureOutcome, type SwapContext } from "@/lib/anthropic-swap";
 import { verifyAnthropicKey } from "@/lib/coding-anthropic";
-import { bindCronsToTarget, splitModelRef, type CronBindingRecords, type CronBindingResult } from "@/lib/anthropic-cron-binding";
+import { bindCronsToTarget, splitModelRef, type CronBindingRecords, type CronBindingResult, type CronBindingTarget } from "@/lib/anthropic-cron-binding";
 
 const PROVIDER = "anthropic";
 const POOL_PROFILE_PREFIX = "anthropic:clawbox-";
@@ -191,6 +191,29 @@ export interface ChatConfig {
    * automation with no model of its own runs on — or null when none is set.
    */
   model?: string | null;
+  /** A job with no agent of its own runs on `main`; false when openclaw.json names another default agent. */
+  defaultIsMain?: boolean;
+}
+
+/**
+ * Does a job with no `agentId` run on `main`? Core takes the configured
+ * system agent, else a roster entry marked default, else the sole agent; with
+ * several and none named, `main` when it is the first, as core lists them.
+ */
+function defaultIsMainOf(config: Record<string, unknown>): boolean {
+  const agents = config.agents && typeof config.agents === "object" ? (config.agents as Record<string, unknown>) : {};
+  const defaults = agents.defaults && typeof agents.defaults === "object" ? (agents.defaults as Record<string, unknown>) : {};
+  const system = defaults.systemAgent && typeof defaults.systemAgent === "object" ? (defaults.systemAgent as { agentId?: unknown }).agentId : undefined;
+  if (typeof system === "string" && system.trim()) return system.trim().toLowerCase() === "main";
+  const entries = agents.entries && typeof agents.entries === "object" && !Array.isArray(agents.entries) ? (agents.entries as Record<string, unknown>) : null;
+  const roster: { id: string; isDefault: boolean }[] = entries
+    ? Object.entries(entries).map(([id, e]) => ({ id, isDefault: !!e && typeof e === "object" && (e as { default?: unknown }).default === true }))
+    : Array.isArray(agents.list)
+      ? agents.list.flatMap((e) => (e && typeof e === "object" && typeof (e as { id?: unknown }).id === "string" ? [{ id: (e as { id: string }).id, isDefault: (e as { default?: unknown }).default === true }] : []))
+      : [];
+  if (roster.length === 0) return true;
+  const chosen = roster.find((r) => r.isDefault) ?? roster[0];
+  return chosen.id.toLowerCase() === "main";
 }
 
 /** The `main` agent's default model as openclaw.json sets it: its own entry's, else the defaults'. */
@@ -256,6 +279,7 @@ const defaultDeps: GatewayDeps = {
           : null,
         agent: agentArgsOf(config.agents),
         model: mainModelOf(config as Record<string, unknown>),
+        defaultIsMain: defaultIsMainOf(config as Record<string, unknown>),
       };
     } catch {
       return null;
@@ -695,8 +719,24 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     marker.config = true;
     await writeOrderMarker(marker);
   }
-  // Out: accounts that left the pool or can no longer answer (needs the owner).
-  const unwanted = ours.filter((p) => !wanted.some((a) => poolProfileId(a.id) === p.profileId));
+  // Out: accounts that left the pool or can no longer answer (needs the
+  // owner) — and the limited ones, but only while an account that answers is
+  // in the gateway NOW, with its current token: a renewal that was refused in
+  // the window above left that one's old token refused by Anthropic.
+  const mid = d.read();
+  const answersNow = mid.kind === "present" && wanted.some((a) => {
+    if (effectiveStatus(a, now) !== "ok") return false;
+    const held = mid.profiles.find((p) => p.profileId === poolProfileId(a.id));
+    const token = tokens.get(poolProfileId(a.id));
+    return !!held && !held.fenced && !!token && held.fingerprint === token.fingerprint && (held.expires === null || held.expires > Date.now());
+  });
+  const unwanted = ours.filter((p) => {
+    const account = pool.accounts.find((a) => poolProfileId(a.id) === p.profileId);
+    if (wanted.includes(account as AnthropicAccount)) return false;
+    // Limited (kept out of `wanted` by answersHeld): out only with one that answers in.
+    if (account && account.kind === "oauth" && effectiveStatus(account, now) === "limited") return answersNow;
+    return true;
+  });
   for (const profile of unwanted) await attempt(`taking ${profile.profileId} out`, () => d.logout(profile.profileId, agent));
 
   // Read back. A profile still holding an older token stays in the order —
@@ -743,10 +783,14 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   // stored order (hot-reloaded: no restart), every path picks the same
   // account. Only while the reader says what is there (`configOrderIds`).
   if (chat.configOrderIds !== undefined && d.setConfigOrder) {
-    const wantConfig = orderLanded && final.order ? [...final.order] : order;
-    const current = (await d.chat())?.configOrderIds;
-    const same = Array.isArray(current) && current.length === wantConfig.length && current.every((id, i) => id === wantConfig[i]);
-    if (wantConfig.length > 0 && current !== undefined && !same) {
+    // The stored order as it landed — or, with none stored (core refuses to
+    // store one over a config order: "controlled by auth configuration"),
+    // the config order IS the order. A stored order that did not land is
+    // owed, and the config waits for it, so the two never disagree.
+    const wantConfig = orderLanded && final.order ? [...final.order] : final.order === null ? order : null;
+    const current = wantConfig ? (await d.chat())?.configOrderIds : undefined;
+    const same = Array.isArray(current) && !!wantConfig && current.length === wantConfig.length && current.every((id, i) => id === wantConfig[i]);
+    if (wantConfig && wantConfig.length > 0 && current !== undefined && !same) {
       const setConfig = d.setConfigOrder;
       if (await attempt("openclaw.json's account order", () => setConfig(wantConfig))) {
         // One the pool created is the pool's to take out again (takeOut).
@@ -1128,25 +1172,39 @@ async function bindCronsLocked(): Promise<CronBindingResult | null> {
     const d = deps();
     if (d.absent() || !d.cronBindings) return null;
     const store = d.read();
-    if (store.kind !== "present" || !store.profiles.some((p) => isPoolProfile(p.profileId))) return null;
-    const usable = (id: string) => store.profiles.find((p) => p.profileId === id && !p.fenced && p.fingerprint !== null);
-    const leadId = (store.order ?? []).find((id) => usable(id));
-    const lead = leadId ? usable(leadId) : undefined;
-    if (!lead) return null;
+    if (store.kind !== "present") return null;
     const chat = await d.chat();
-    if (!chat || !chat.onAnthropic || chat.agent === null) return null;
+    if (!chat || chat.agent === null) return null;
+    const poolIn = store.profiles.some((p) => isPoolProfile(p.profileId));
+    const usable = (id: string) => store.profiles.find((p) => p.profileId === id && !p.fenced && p.fingerprint !== null);
+    // The order a turn resolves: the stored one, else openclaw.json's, else the store's own.
+    const order = store.order ?? chat.configOrderIds ?? store.profiles.map((p) => p.profileId);
+    const leadId = chat.onAnthropic ? order.find((id) => usable(id)) : undefined;
+    const lead = leadId ? usable(leadId) : undefined;
+    // With the pool in, every Anthropic job is the box's to bind. With it out,
+    // only the ones the box adopted: onto what leads now, or given back.
+    if (poolIn && !lead) return null;
+    if (!poolIn && Object.keys(await d.cronBindings.read().catch(() => ({}))).length === 0) return null;
+    const target: CronBindingTarget | null = lead ? { profileId: lead.profileId, authorization: lead.authorization ?? lead.fingerprint } : null;
     return await bindCronsToTarget(
       { call: d.call, readRecords: d.cronBindings.read, writeRecords: d.cronBindings.write },
       {
-        target: { profileId: lead.profileId, authorization: lead.authorization ?? lead.fingerprint },
+        target,
         defaultModel: chat.model ?? null,
         isPoolProfile,
+        onlyAdopted: !poolIn,
+        defaultIsMain: chat.defaultIsMain !== false,
       },
     );
   } catch (err) {
     console.error("[anthropic-gateway] could not give the automations the account the gateway leads with:", err instanceof Error ? err.message : err);
     return null;
   }
+}
+
+/** The watcher's look at the automations: a job made since, or an adoption a restarting gateway refused. */
+export function bindGatewayCrons(): Promise<CronBindingResult | null> {
+  return runtime().lock(() => bindCronsLocked());
 }
 
 /**
@@ -1174,10 +1232,6 @@ export async function lookAtLeadUsage(now: number = Date.now()): Promise<void> {
   }
 }
 
-/** The watcher's look at the automations: a job made since, or an adoption a restarting gateway refused. */
-export function bindGatewayCrons(): Promise<CronBindingResult | null> {
-  return runtime().lock(() => bindCronsLocked());
-}
 
 // ── the failures ────────────────────────────────────────────────────────────
 
