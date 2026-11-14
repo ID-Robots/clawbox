@@ -31,7 +31,7 @@
 import { spawnOpenclawCli, restartGateway, gatewayIsAbsent, gatewayReadyWaitMs } from "@/lib/openclaw-config";
 import { gatewayWsCall, GatewayWsUnavailableError, waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
 import { readGatewayProviderAuth } from "@/lib/openclaw-auth-store";
-import { readUnitState, runUnitJob } from "@/lib/gateway-unit-job";
+import { readUnitState, runUnitJob, unitIsStopped, UNIT_JOB_SETTLE_BUDGET_MS } from "@/lib/gateway-unit-job";
 import { DATA_DIR } from "@/lib/config-store";
 import fs from "fs";
 import path from "@/lib/runtime-path";
@@ -47,12 +47,21 @@ const OFFLINE_HOLD_PATH = path.join(DATA_DIR, ".openclaw-offline-hold.json");
 /** One CLI start-up on a Jetson is 10-12 s; the gateway's own write is quicker. */
 const AUTH_TIMEOUT_MS = 60_000;
 
+/**
+ * How long a stop whose client gave up is waited for (a key save, a memory
+ * pass): with the client's own 15 s, a minute. A tunnel gives up near 100 s,
+ * and "still stopping" is then the honest answer. The account pool's window
+ * is the exception (`waitOutStop`).
+ */
+const STOP_SETTLE_MS = 45_000;
+
 export interface AuthOpsDeps {
   gatewayAuthRpc: (method: string, params: Record<string, unknown>, timeoutMs: number) => Promise<unknown>;
   offlineAuthCli: (args: string[], options: { stdinData?: string; timeoutMs: number }) => Promise<string>;
   /** The provider's profile ids in the gateway's store, or null when it cannot be read. */
   storeProfiles: (provider: string) => string[] | null;
-  stopGateway: () => Promise<void>;
+  /** `waitOut`: wait for a slow stop as long as the unit may take (`withOpenclawGatewayStopped`'s `waitOutStop`). */
+  stopGateway: (waitOut?: boolean) => Promise<void>;
   startGateway: () => Promise<void>;
   /**
    * Is a gateway up or coming up, i.e. does one own (or is about to own) the
@@ -78,13 +87,21 @@ const defaultDeps: AuthOpsDeps = {
     if (read.kind !== "present") return null;
     return read.profiles.map((p) => p.profileId);
   },
-  stopGateway: async () => {
+  stopGateway: async (waitOut = false) => {
     const stop = await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
       unit: "clawbox-gateway.service",
       timeoutMs: 15_000,
-      settleBudgetMs: 45_000,
+      // The unit may take TimeoutStopSec=330 to stop (OpenClaw drains what it
+      // is answering, and is killed at the end of it): UNIT_JOB_SETTLE_BUDGET_MS
+      // covers that.
+      settleBudgetMs: waitOut ? UNIT_JOB_SETTLE_BUDGET_MS : STOP_SETTLE_MS,
     });
     if (stop.kind === "in-flight") throw new Error("the gateway is still stopping");
+    // A start or restart asked for while the stop was pending takes its place
+    // (gateway-unit-job.ts, `unitJobWasCanceled`): no job is left and the unit
+    // is UP. Offline work must not run beside it — the CLI is refused, and the
+    // account pool renews tokens on the strength of the gateway being down.
+    if (stop.kind === "settled" && !unitIsStopped(stop.state)) throw new Error("the gateway did not stay stopped");
   },
   startGateway: async () => {
     try {
@@ -343,8 +360,19 @@ export async function restoreOpenclawGatewayAfterCrash(): Promise<boolean> {
  * Run `work` (CLI commands that 2026.11.3 accepts only offline) with the
  * gateway stopped through its service owner, and start the gateway again
  * whatever `work` did. A box with no gateway answering runs `work` as it is.
+ *
+ * `waitOutStop`: a stop that is still running after a minute is waited for as
+ * long as the unit may take, instead of given up on. Giving up starts the
+ * gateway again with `work` not run — the assistant went down for nothing,
+ * and the caller has to stop it once more to try again. For work that cannot
+ * be left undone: the account pool's token pastes (a token is renewed by
+ * then, and Anthropic refuses the gateway's copy of it). The pool asks for it
+ * on every pass, the owner's own "use these accounts for the chat" request
+ * and the swap consumer (which stops waiting at four minutes while the pass
+ * goes on) included: giving up answered them no sooner — the start that
+ * follows waits behind the same stop — and left nothing pasted.
  */
-export async function withOpenclawGatewayStopped<T>(work: () => Promise<T>): Promise<T> {
+export async function withOpenclawGatewayStopped<T>(work: () => Promise<T>, options: { waitOutStop?: boolean } = {}): Promise<T> {
   if (gatewayIsAbsent()) return work();
   // The stop is inside the `try`: a stop that throws (a job still running when
   // its client gave up) may still stop the unit afterwards, and the gateway
@@ -353,7 +381,7 @@ export async function withOpenclawGatewayStopped<T>(work: () => Promise<T>): Pro
   // says so, rather than leaving the assistant stopped.
   let failure: { error: unknown } | null = null;
   try {
-    await deps.stopGateway();
+    await deps.stopGateway(options.waitOutStop === true);
     return await work();
   } catch (err) {
     failure = { error: err };

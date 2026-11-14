@@ -30,6 +30,8 @@ const h = vi.hoisted(() => ({
   cli: [] as string[][],
   restarts: 0,
   storeFile: "",
+  /** What each offline window (the gateway stopped around the token pastes) was asked for. */
+  windows: [] as unknown[],
 }));
 
 vi.mock("@/lib/coding-agent-notify", () => ({ announceAnthropicLimit: vi.fn(async () => undefined) }));
@@ -54,7 +56,10 @@ vi.mock("@/lib/openclaw-auth-ops", async () => {
   const { spawnOpenclawCli } = await import("@/lib/openclaw-config");
   const agent = (id?: string) => (id ? ["--agent", id] : []);
   return {
-    withOpenclawGatewayStopped: async <T,>(work: () => Promise<T>) => work(),
+    withOpenclawGatewayStopped: async <T,>(work: () => Promise<T>, options?: unknown) => {
+      h.windows.push(options);
+      return work();
+    },
     logoutOpenclawAuthProfiles: async (_provider: string, ids: string[], agentId?: string) => {
       for (const id of ids) await spawnOpenclawCli(["models", "auth", "logout", id, "--yes", ...agent(agentId)], { timeoutMs: 60_000 });
       return ids;
@@ -220,6 +225,7 @@ beforeEach(async () => {
   h.config = { agents: { defaults: { model: { primary: "anthropic/claude-opus-5-5" } } }, auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } } };
   h.cli = [];
   h.restarts = 0;
+  h.windows = [];
   usage = () => ({ five_hour: { utilization: 12, resets_at: null }, seven_day: { utilization: 20, resets_at: null } });
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
     if (String(url).endsWith("/api/oauth/usage")) {
@@ -277,6 +283,10 @@ describe("the chat on the box's Claude accounts (TASK-1260, 2026-10-14)", () => 
     expect(storedOrder()).toEqual([`anthropic:clawbox-${work.id}`, `anthropic:clawbox-${personal.id}`, "anthropic:default"]);
     // No restart: core reads its store, and the CLI tells the running gateway.
     expect(h.restarts).toBe(0);
+    // Both pastes in one window, and its stop waited out: the tokens the
+    // gateway holds are refused once the pool has renewed them, so a stop
+    // given up on after a minute would restart the assistant for nothing.
+    expect(h.windows).toEqual([{ waitOutStop: true }]);
     // The token travelled on stdin, never on a command line.
     expect(h.cli.flat().join(" ")).not.toContain("sk-ant-oat01");
     expect((await pool.describePool()).gateway).toMatchObject({ following: true, accountId: work.id, label: "Work Max" });
