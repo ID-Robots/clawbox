@@ -220,15 +220,16 @@ describe("a member of staff's turn", () => {
 });
 
 describe("a member of staff's reply naming files of their own (TASK-2516)", () => {
-  it("is recorded as written; a picture keeps its card only once recorded, and a document's card is in the transcript too", async () => {
+  it("is recorded as written; a picture keeps its card only when it is theirs, and a document's card is in the transcript too", async () => {
     const own = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "staff-own-"));
     try {
       const chart = path.join(own, "chart.png");
       const stale = path.join(own, "old.png");
       const doc = path.join(own, "report.docx");
       const oldDoc = path.join(own, "old.docx");
+      const oldChart = path.join(own, "last-week.png");
       const elsewhere = path.join(own, "..", `${path.basename(own)}-elsewhere.docx`);
-      for (const file of [chart, stale, doc, oldDoc, elsewhere]) fs.writeFileSync(file, "x");
+      for (const file of [chart, stale, doc, oldDoc, oldChart, elsewhere]) fs.writeFileSync(file, "x");
       org.on = true;
       org.folder = own;
       // The recorder's verdict: the chart and the document are this turn's, the old picture is not.
@@ -236,15 +237,16 @@ describe("a member of staff's reply naming files of their own (TASK-2516)", () =
       recordReplyMock.mockImplementation(() => {
         owned.add(chart);
         owned.add(doc);
-        return { recorded: [chart, doc], refused: [{ path: stale, reason: "not_this_turn" }, { path: oldDoc, reason: "not_this_turn" }] };
+        return { recorded: [chart, doc], refused: [{ path: stale, reason: "not_this_turn" }, { path: oldDoc, reason: "not_this_turn" }, { path: oldChart, reason: "not_this_turn" }] };
       });
       owned.add(oldDoc);
+      owned.add(oldChart); // a picture of theirs from an earlier turn
       owned.add(path.resolve(elsewhere));
       openTurnMock.mockResolvedValue({
         ...fakeTurn(),
         async run() {
           return {
-            text: `Here they are.\nMEDIA:${chart}\nMEDIA:${stale}\nMEDIA:${doc}\nMEDIA:${oldDoc}\nMEDIA:${elsewhere}\nMEDIA:notes/plan.docx\nMEDIA:https://example.com/brief.pdf\n\`\`\`\nMEDIA:${elsewhere}\n\`\`\``,
+            text: `Here they are.\nMEDIA:${chart}\nMEDIA:${stale}\nMEDIA:${doc}\nMEDIA:${oldDoc}\nMEDIA:${oldChart}\nMEDIA:${elsewhere}\nMEDIA:notes/plan.docx\nMEDIA:https://example.com/brief.pdf\n\`\`\`\nMEDIA:${elsewhere}\n\`\`\``,
             reasoning: "",
             status: "complete",
           };
@@ -258,6 +260,7 @@ describe("a member of staff's reply naming files of their own (TASK-2516)", () =
       expect(text).toContain(`MEDIA:${chart}`);
       expect(text).toContain(`MEDIA:${doc}`);
       expect(text).toContain(`MEDIA:${oldDoc}`); // theirs from before: still served
+      expect(text).toContain(`MEDIA:${oldChart}`); // …a picture too, though reclaiming took its line
       expect(text).toContain("MEDIA:https://example.com/brief.pdf"); // not a file of this box
       // No card that would be a 404: a picture not recorded, a file outside
       // their folders (named in fenced code it stays text), a relative path.
@@ -266,7 +269,7 @@ describe("a member of staff's reply naming files of their own (TASK-2516)", () =
       expect(text.split(`MEDIA:${elsewhere}`)).toHaveLength(2);
       expect(text).toContain(`\`\`\`\nMEDIA:${elsewhere}\n\`\`\``);
       const stored = appendMock.mock.calls.map((call) => call[0]).find((r) => r.role === "assistant");
-      expect(stored.media).toEqual([mediaUrl(chart)]);
+      expect(stored.media).toEqual([mediaUrl(chart), mediaUrl(oldChart)]);
       expect(stored.files).toEqual([mediaUrl(doc), mediaUrl(oldDoc), mediaUrl("https://example.com/brief.pdf")]);
     } finally {
       fs.rmSync(own, { recursive: true, force: true });

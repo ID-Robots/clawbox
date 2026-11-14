@@ -377,6 +377,52 @@ interface TurnPayload {
 /** A page's turn id: its own uuid, and nothing that could be a path or a flag. */
 const TURN_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
+/**
+ * Is a `MEDIA:` payload something the chat media route
+ * (src/app/setup-api/chat/media/route.ts) serves `username`? A local file only
+ * when it resolves inside one of `roots` and is recorded as theirs; a remote
+ * URL is not a file of this box and is always let through; a relative path
+ * never is.
+ */
+async function servedToMember(username: string, roots: ReadonlyArray<string | null>): Promise<(payload: string) => Promise<boolean>> {
+  const realRoots = (await Promise.all(
+    roots.map((root) => (root ? fsp.realpath(/* turbopackIgnore: true */ root).catch(() => null) : null)),
+  )).filter((root): root is string => root !== null);
+  return async (payload) => {
+    const local = payload.toLowerCase().startsWith("file://") ? payload.slice("file://".length) : payload;
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(local)) return true;
+    if (!path.isAbsolute(local)) return false;
+    const real = await fsp.realpath(/* turbopackIgnore: true */ local).catch(() => null);
+    if (!real) return false;
+    return realRoots.some((root) => {
+      const rel = path.relative(root, real);
+      return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel) && isMediaOwnedBy(username, real, root);
+    });
+  };
+}
+
+/**
+ * A member's caption with every `MEDIA:` line dropped that `served` refuses:
+ * such a line would only become a card that answers 404. Fenced code is never
+ * touched.
+ */
+async function memberServableCaption(caption: string, served: (payload: string) => Promise<boolean>): Promise<string> {
+  if (!/media:/i.test(caption)) return caption;
+  const kept: string[] = [];
+  let inFence = false;
+  let dropped = false;
+  for (const line of caption.split("\n")) {
+    if (/^(?:```|~~~)/.test(line.trim())) inFence = !inFence;
+    const payload = inFence ? undefined : splitMediaDirectives(line).media[0];
+    if (payload !== undefined && !(await served(payload))) {
+      dropped = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  return dropped ? kept.join("\n").replace(/\n{3,}/g, "\n\n").trim() : caption;
+}
+
 /** Did the caller ask to be streamed to, rather than handed a finished turn? */
 function wantsStream(request: Request): boolean {
   return (request.headers.get("accept") || "").includes("text/event-stream");
@@ -408,44 +454,6 @@ function wantsStream(request: Request): boolean {
  * arrive on separate channels), but only the database has the TOOL STEPS, which
  * no amount of reading the reply can recover.
  */
-/**
- * A member's caption with every `MEDIA:` line dropped that names a local file
- * the chat media route would not serve them (src/app/setup-api/chat/media/route.ts):
- * one that does not resolve inside `roots` or is not recorded as theirs. Such
- * a line would only become a card that answers 404. A remote URL is left as
- * it is; fenced code is never touched.
- */
-async function memberServableCaption(caption: string, username: string, roots: ReadonlyArray<string | null>): Promise<string> {
-  if (!/media:/i.test(caption)) return caption;
-  const realRoots = (await Promise.all(
-    roots.map((root) => (root ? fsp.realpath(/* turbopackIgnore: true */ root).catch(() => null) : null)),
-  )).filter((root): root is string => root !== null);
-  const served = async (payload: string): Promise<boolean> => {
-    const local = payload.toLowerCase().startsWith("file://") ? payload.slice("file://".length) : payload;
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(local)) return true; // a remote URL: not a file of this box
-    if (!path.isAbsolute(local)) return false; // a member is served no relative path
-    const real = await fsp.realpath(/* turbopackIgnore: true */ local).catch(() => null);
-    if (!real) return false;
-    return realRoots.some((root) => {
-      const rel = path.relative(root, real);
-      return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel) && isMediaOwnedBy(username, real, root);
-    });
-  };
-  const kept: string[] = [];
-  let inFence = false;
-  let dropped = false;
-  for (const line of caption.split("\n")) {
-    if (/^(?:```|~~~)/.test(line.trim())) inFence = !inFence;
-    const payload = inFence ? undefined : splitMediaDirectives(line).media[0];
-    if (payload !== undefined && !(await served(payload))) {
-      dropped = true;
-      continue;
-    }
-    kept.push(line);
-  }
-  return dropped ? kept.join("\n").replace(/\n{3,}/g, "\n\n").trim() : caption;
-}
-
 async function settleTurn(
   threaded: string,
   /** The transcript the answer is recorded under — ours, not the agent's. */
@@ -586,18 +594,18 @@ async function settleTurn(
     if (recorded.length > 0 || refused.length > 0) {
       console.log(`[hermes chat] a member's reply named files: ${recorded.length} recorded as theirs, ${refused.length} not (${[...new Set(refused.map((r) => r.reason))].join(", ") || "-"})`);
     }
-    // A card only for what was recorded: one not recorded would be a 404
-    // (src/app/setup-api/chat/media/route.ts serves a member only their own).
-    const mine = new Set(recorded);
+    // A card only for a file the member is served — recorded as theirs now or
+    // on an earlier turn, in the chat media tree or their own folder. One they
+    // are not would be a 404 (src/app/setup-api/chat/media/route.ts).
+    const served = await servedToMember(chatUser, [await chatMediaRoot().catch(() => null), ownFolder]);
     for (const source of mentioned) {
-      // The recorder answers real paths (walked link-free below the folder's own real path).
+      // Said by its real path, the one its ownership is recorded under.
       const real = path.isAbsolute(source) ? await fsp.realpath(/* turbopackIgnore: true */ source).catch(() => null) : null;
-      if (real && mine.has(real) && !claimedImages.includes(real) && !drawn.includes(real)) claimedImages.push(real);
+      if (real && !claimedImages.includes(real) && !drawn.includes(real) && (await served(real))) claimedImages.push(real);
     }
     // The same rule for every other file the caption still names (a document,
-    // a picture in the shared tree): a card stays only for a file the member
-    // is served — recorded as theirs, in the chat media tree or their folder.
-    shownCaption = await memberServableCaption(caption, chatUser, [await chatMediaRoot().catch(() => null), ownFolder]);
+    // a picture in the shared tree).
+    shownCaption = await memberServableCaption(caption, served);
   }
   const answer = [
     shownCaption,
