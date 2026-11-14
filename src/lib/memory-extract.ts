@@ -294,7 +294,7 @@ export async function extractDocuments(source: string, signal?: AbortSignal): Pr
   for await (const file of walkFiles(path.resolve(source), budget)) {
     // A conversion is a spawned pdftotext or libreoffice with a 60 s budget of
     // its own, and a folder can hold 500 of them — so a caller that has given
-    // up (the index run's two-hour deadline, a web server going down) must be
+    // up (a stopped index run, a web server going down) must be
     // able to stop this between files rather than up to 500 timeouts later.
     signal?.throwIfAborted();
     if (seen >= MAX_FILES) {

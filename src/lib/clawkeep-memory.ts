@@ -45,6 +45,7 @@ import {
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 import { memoryStatusTimeoutMs } from "@/lib/memory-status-timeout";
 import { processStore } from "@/lib/process-store";
+import { processStartKey } from "@/lib/process-identity";
 import { memoryReindexAdvice, type MemoryReindexAdvice } from "@/lib/memory-reindex-advice";
 import { isOpenclawMaintenanceRefusal, withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
 import { FALLBACK_AGENT_ID, openclawDefaultAgentId } from "@/lib/openclaw-default-agent";
@@ -151,9 +152,20 @@ interface PersistedMemoryRunState {
   progress: MemoryIndexProgress | null;
   /** Internal only. Never returned by publicMemoryRunState(). */
   childPid: number;
+  /**
+   * WHICH process `childPid` names (`processStartKey`): the boot it belongs to
+   * and when it started. Internal only, like the pid.
+   *
+   * A pass may run for as long as it needs, so nothing but this tells a run
+   * that is going from a record left by a power cut whose pid another process
+   * has since been given. Empty on a record with no child yet, and on one
+   * written before the field existed — whose pass did not outlive the web
+   * server that started it, so it reads as lost, which is what it is.
+   */
+  childStartKey: string;
 }
 
-export type MemoryRunState = Omit<PersistedMemoryRunState, "childPid">;
+export type MemoryRunState = Omit<PersistedMemoryRunState, "childPid" | "childStartKey">;
 
 export interface ClawKeepMemoryStatus {
   available: boolean;
@@ -279,7 +291,13 @@ const RUN_LOCK_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index.lock");
 // boot every few polls.
 const STATUS_CACHE_MS = 120_000;
 const STATUS_TIMEOUT_MS = memoryStatusTimeoutMs(process.env.CLAWKEEP_MEMORY_STATUS_TIMEOUT_MS);
-const INDEX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+// NO LIMIT ON HOW LONG A PASS MAY RUN. There was one — two hours — and a full
+// re-embed that needs longer could never finish under it: on a box with 18,114
+// files and the 4B on-box model the pass was cut at the two-hour mark, and the
+// rebuild it had not finished was never published (OpenClaw publishes only a
+// complete one) — so the index stayed the one that needed rebuilding, however
+// many times the pass was started. A pass ends when it is done, when it
+// fails, or when the owner stops it.
 const LOCK_START_GRACE_MS = 30_000;
 
 /** The pause before the one retry of the gateway start after an OpenClaw index pass. */
@@ -302,6 +320,7 @@ const EMPTY_RUN_STATE: PersistedMemoryRunState = {
   errorCode: "",
   progress: null,
   childPid: 0,
+  childStartKey: "",
 };
 
 let writeSeq = 0;
@@ -444,6 +463,7 @@ function sanitiseRunState(value: unknown): PersistedMemoryRunState {
     // would have a screen drawing one over a finished pass.
     progress: status === "running" ? sanitiseProgress(raw.progress) : null,
     childPid: Number.isSafeInteger(raw.childPid) && Number(raw.childPid) > 0 ? Number(raw.childPid) : 0,
+    childStartKey: typeof raw.childStartKey === "string" ? raw.childStartKey.slice(0, 128) : "",
   };
 }
 
@@ -497,15 +517,25 @@ function publicMemoryRunState(state: PersistedMemoryRunState): MemoryRunState {
   return { status, mode, trigger, startedAtMs, finishedAtMs, durationMs, error, errorCode, progress };
 }
 
-function processIsAlive(pid: number): boolean {
-  if (!pid) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+/**
+ * Whether the process a run record names is still THAT process.
+ *
+ * The pid and the start key together, never the pid alone. A pass has no time
+ * limit, so a record's age says nothing about it any more — and the age was
+ * what used to free a record whose pid had been reused: a box that loses power
+ * mid-index comes back with "running" on disk beside a low pid, which some
+ * other process holds a few seconds into the next boot. Read by the pid alone
+ * that run would be going for ever, with the lock held and every later pass
+ * refused. A record with a pid and no key is from a build before the key, and
+ * reads as lost for the reason `childStartKey` gives.
+ */
+function recordedChildIsAlive(run: RunChild): boolean {
+  if (!run.childPid || !run.childStartKey) return false;
+  return processStartKey(run.childPid) === run.childStartKey;
 }
+
+/** The two fields of a run record that say which process is doing the work. */
+type RunChild = Pick<PersistedMemoryRunState, "childPid" | "childStartKey">;
 
 /**
  * Pids of the passes THIS process started and has not finished settling.
@@ -564,8 +594,8 @@ export function memoryPassSettled(): Promise<void> {
   return (passSettling().current ?? Promise.resolve()).catch(() => { /* settled either way */ });
 }
 
-function runIsAlive(pid: number): boolean {
-  return processIsAlive(pid) || (pid > 0 && settlingPasses().has(pid));
+function runIsAlive(run: RunChild): boolean {
+  return recordedChildIsAlive(run) || (run.childPid > 0 && settlingPasses().has(run.childPid));
 }
 
 const INTERRUPTED_MESSAGE = "Indexing was interrupted. Run it again.";
@@ -586,6 +616,7 @@ async function markInterrupted(state: PersistedMemoryRunState): Promise<Persiste
     errorCode: "interrupted",
     progress: null,
     childPid: 0,
+    childStartKey: "",
   };
   await writeRunState(failed);
   await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
@@ -597,7 +628,7 @@ export async function readMemoryRunState(): Promise<MemoryRunState> {
   if (state.status === "running") {
     const age = Date.now() - state.startedAtMs;
     const stillStarting = state.childPid === 0 && age >= 0 && age < LOCK_START_GRACE_MS;
-    if (!stillStarting && (!runIsAlive(state.childPid) || age > INDEX_TIMEOUT_MS)) {
+    if (!stillStarting && !runIsAlive(state)) {
       state = await markInterrupted(state);
     }
   }
@@ -1841,7 +1872,7 @@ async function acquireRunLock(): Promise<boolean> {
   const state = await readPersistedRunState();
   const age = Date.now() - state.startedAtMs;
   const stillStarting = state.status === "running" && state.childPid === 0 && age >= 0 && age < LOCK_START_GRACE_MS;
-  if (state.status === "running" && (stillStarting || (runIsAlive(state.childPid) && age <= INDEX_TIMEOUT_MS))) {
+  if (state.status === "running" && (stillStarting || runIsAlive(state))) {
     return false;
   }
   if (state.status === "running") await markInterrupted(state);
@@ -1937,8 +1968,8 @@ function fixedFailure(
   code: number | null,
   signal: NodeJS.Signals | null,
 ): { error: string; errorCode: MemoryRunErrorCode } {
-  // 124 is `timeout`'s own verdict, which is the same fact arriving as an exit
-  // code rather than as this module's budget.
+  // 124 is `timeout`'s own verdict. Nothing here runs a pass under one — a
+  // pass has no time limit — so this words a limit somebody else put on it.
   if (code === 124) return TIMED_OUT_FAILURE;
   // Killed from outside — the OOM killer, an operator, a service restart. The
   // embedding model had nothing to do with it, so do not send the owner to
@@ -1980,14 +2011,14 @@ type PassOutcome =
  * One indexing pass, however it is performed.
  *
  * The whole point of the interface is that everything AROUND a pass — the
- * decline, the lock, the run-state file, the liveness reconcile, the two-hour
- * budget, the cache invalidation and the reload behind it — is written once and
+ * decline, the lock, the run-state file, the liveness reconcile, the cache
+ * invalidation and the reload behind it — is written once and
  * is the same on both editions. Only the work in the middle differs.
  */
 interface IndexPass {
   /**
-   * Recorded as `childPid`, which `acquireRunLock` checks with
-   * `processIsAlive`. The OpenClaw arm records the indexer's own pid. The local
+   * Recorded as `childPid` (with its `childStartKey`), which `acquireRunLock`
+   * checks with `runIsAlive`. The OpenClaw arm records the indexer's own pid. The local
    * arm records THIS process, which is the same fact for a pass that runs
    * inside it: while the web server is up the run is going, and a run lost to a
    * restart reads dead and is reconciled as interrupted — exactly as before.
@@ -2042,7 +2073,7 @@ function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgress
   //
   // `--no-fork` is load-bearing, not tidiness. util-linux `flock` defaults to
   // forking the command and waiting on it, so the process under supervision
-  // would be the WRAPPER: killing it on the timeout or on a failed state write
+  // would be the WRAPPER: killing it on a stop or on a failed state write
   // would leave `openclaw memory index` running unsupervised while the lock it
   // was holding is released with the wrapper — the exact opposite of what both
   // of those paths are trying to achieve. With `--no-fork` flock execs into
@@ -2299,6 +2330,7 @@ export async function startMemoryIndex(
     errorCode: "",
     progress: null,
     childPid: 0,
+    childStartKey: "",
   };
   try {
     await writeRunState(state);
@@ -2308,7 +2340,7 @@ export async function startMemoryIndex(
   }
 
   // The one line that differs by edition. Everything above and below it — the
-  // decline, the lock, the state file, the reconcile, the budget, the cache —
+  // decline, the lock, the state file, the reconcile, the cache —
   // is the same work whoever does the indexing.
   // How far the pass has got, on its way to the card's bar.
   //
@@ -2345,8 +2377,8 @@ export async function startMemoryIndex(
   const localArm = openclawIsAbsent();
   // OpenClaw 2026.11.3: `memory index` needs exclusive offline ownership of the
   // state, so the pass runs with the gateway stopped through its service owner
-  // and starts it again however the pass ends (done, failed, stopped, timed
-  // out, abandoned).
+  // and starts it again however the pass ends (done, failed, stopped,
+  // abandoned).
   // Ends the run claim's heartbeat (the OpenClaw arm below); a no-op otherwise.
   let releaseClaim: () => Promise<void> = async () => {};
   if (!localArm) {
@@ -2436,7 +2468,11 @@ export async function startMemoryIndex(
     pass = { ...pass, ended };
   }
   if (pass.pid) settlingPasses().add(pass.pid);
-  state = { ...state, childPid: pass.pid };
+  // The key is read here, while the child is certainly this one: it was
+  // spawned a moment ago and its end has not been collected. A child already
+  // gone answers "", and that record is kept alive by `settlingPasses` alone
+  // until `finish` has written how it ended.
+  state = { ...state, childPid: pass.pid, childStartKey: processStartKey(pass.pid) };
   try {
     await writeRunState(state);
   } catch (err) {
@@ -2456,34 +2492,28 @@ export async function startMemoryIndex(
   // until the pass ends, and dropping the reading at spawn time made the
   // panel's very next read block on the cold probe for the whole run.
 
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    pass.abandon();
-  }, INDEX_TIMEOUT_MS);
+  // No timer is armed here: nothing ends a pass but the pass itself and
+  // `stopMemoryIndex` (see the note above LOCK_START_GRACE_MS).
   const finish = async (outcome: PassOutcome) => {
     // Before anything else: a report that lands after this point would put a
     // running run's bar back over the settled record.
     settled = true;
-    clearTimeout(timer);
     if (supervisedPass().current === supervised) supervisedPass().current = null;
     const finishedAtMs = Date.now();
-    const ok = !timedOut && outcome.kind === "exit" && outcome.code === 0;
-    // The timeout first, because it is the one verdict that does not depend on
-    // which arm ran: whatever the pass said on its way out, the budget is what
-    // ended it. After that each arm is worded by its own mapper.
+    const ok = outcome.kind === "exit" && outcome.code === 0;
+    // A stop the owner asked for first: whatever the pass said on its way
+    // out, the stop is what ended it. After that each arm is worded by its
+    // own mapper.
     const mapped = ok
       ? null
-      : timedOut
-        ? TIMED_OUT_FAILURE
-        : supervised.stopRequested
-          ? (mode === "full" ? STOPPED_FULL_FAILURE[localArm ? "local" : "openclaw"] : STOPPED_FAILURE)
-          : outcome.kind === "threw"
-            ? localFailure(outcome.error)
-            : fixedFailure(outcome.code, outcome.signal);
+      : supervised.stopRequested
+        ? (mode === "full" ? STOPPED_FULL_FAILURE[localArm ? "local" : "openclaw"] : STOPPED_FAILURE)
+        : outcome.kind === "threw"
+          ? localFailure(outcome.error)
+          : fixedFailure(outcome.code, outcome.signal);
     // The catch-all, and ONLY the catch-all, gives way to the cause the plan
     // already found. Every other verdict above is a fact about how this pass
-    // ended — a timeout, a signal, a missing binary — and stays what it is:
+    // ended — a stop, a signal, a missing binary — and stays what it is:
     // a box whose config the core ignored can still be killed by the OOM
     // killer, and "re-run setup" would be the wrong thing to say about that.
     const failure = mapped && fellBack && mapped.errorCode === "index_failed"
@@ -2510,6 +2540,7 @@ export async function startMemoryIndex(
       // counts are the card's own figures by then.
       progress: null,
       childPid: 0,
+      childStartKey: "",
     };
     // See `publishProgress`: no report may still be on its way to the file.
     await progressWritten;
