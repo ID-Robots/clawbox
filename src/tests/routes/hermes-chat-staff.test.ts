@@ -13,6 +13,7 @@ const openTurnMock = vi.hoisted(() => vi.fn());
 const spawnMock = vi.hoisted(() => vi.fn());
 const appendMock = vi.hoisted(() => vi.fn());
 const slashMock = vi.hoisted(() => vi.fn());
+const clearMock = vi.hoisted(() => vi.fn());
 const memberMock = vi.hoisted(() => vi.fn());
 const profileMock = vi.hoisted(() => vi.fn());
 /** Whose state.db each turn's reads were scoped to (undefined: the box's own). */
@@ -27,7 +28,7 @@ vi.mock("@/lib/hermes-slash-exec", async (importOriginal) => ({
   runHermesSlashCommand: slashMock,
 }));
 vi.mock("child_process", () => ({ spawn: spawnMock }));
-vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock }));
+vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock, clearTranscript: clearMock }));
 vi.mock("@/lib/harness/hermes-turn-record", () => ({
   withHermesStateHome: (home: string | null | undefined, fn: () => unknown) => {
     stateHomes.push(home);
@@ -90,6 +91,8 @@ beforeEach(() => {
   spawnMock.mockReset();
   appendMock.mockReset();
   slashMock.mockReset();
+  clearMock.mockReset();
+  clearMock.mockResolvedValue(undefined);
   memberMock.mockReset();
   profileMock.mockReset();
   memberMock.mockResolvedValue({ username: "maria" });
@@ -102,18 +105,36 @@ beforeEach(() => {
 });
 
 describe("a member of staff's command", () => {
-  it.each(["/model gpt-5", "/config set tools.profile full", "/restart", "/cron list", "/skills install x", "/new gpt-5", "! ls"])(
+  it.each(["/model gpt-5", "/config set tools.profile full", "/restart", "/cron list", "/skills install x", "/new gpt-5", "/new hello there", "/reset", "/reset hello", "! ls"])(
     "%j is refused before it is recorded or run",
     async (message) => {
       const res = await POST(post({ message }));
       expect(res.status).toBe(403);
       expect((await res.json()).code).toBe("staff_command_refused");
+      // …and before anything of theirs is cleared (TASK-2520: /new and /reset
+      // start a fresh session, but only the command they may send).
+      expect(clearMock).not.toHaveBeenCalled();
       expect(appendMock).not.toHaveBeenCalled();
       expect(openTurnMock).not.toHaveBeenCalled();
       expect(slashMock).not.toHaveBeenCalled();
       expect(spawnMock).not.toHaveBeenCalled();
     },
   );
+
+  it("/new starts a fresh session of their own conversation", async () => {
+    const res = await POST(post({ message: "/new", sessionId: "20261111_100000_abcdef" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ text: "New session started.", harness: "hermes", freshSession: true });
+    expect(clearMock.mock.calls).toEqual([["desktop-user-maria"]]);
+    expect(slashMock).not.toHaveBeenCalled();
+  });
+
+  it("/new is refused like any turn of theirs while their profile is not ready, and clears nothing", async () => {
+    profileMock.mockResolvedValue(null);
+    const res = await POST(post({ message: "/new" }));
+    expect(res.status).toBe(503);
+    expect(clearMock).not.toHaveBeenCalled();
+  });
 
   it("/reasoning runs on their own profile", async () => {
     const res = await POST(post({ message: "/reasoning high" }));

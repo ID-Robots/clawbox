@@ -24,7 +24,11 @@ vi.mock("@/lib/openclaw-config", () => ({
   gatewayReadyWaitMs: () => 1000,
 }));
 vi.mock("@/lib/openclaw-auth-store", () => ({ readGatewayProviderAuth: vi.fn() }));
-vi.mock("@/lib/gateway-unit-job", () => ({ runUnitJob: vi.fn(), readUnitState: vi.fn() }));
+vi.mock("@/lib/gateway-unit-job", () => ({
+  runUnitJob: vi.fn(),
+  readUnitState: vi.fn(),
+  unitIsStopped: (state: { activeState: string }) => state.activeState === "inactive" || state.activeState === "failed",
+}));
 
 import {
   _setAuthOpsDepsForTests,

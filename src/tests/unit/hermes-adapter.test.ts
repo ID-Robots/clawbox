@@ -355,6 +355,150 @@ describe("HermesAdapter", () => {
     expect(adapter.threadedSessionId).toBe("");
   });
 
+  // ── A typed /new or /reset (TASK-2520) ───────────────────────────────────
+  //
+  // Hermes leaves "start a new session" to its client, so its slash worker
+  // never answers the command: down the route it took 45 seconds to say "slash
+  // worker timed out" and reset nothing, for the owner and every user alike.
+  // The route starts the fresh session now and says so (`freshSession`).
+
+  /**
+   * An adapter over a box that answers a typed /new or /reset the way the
+   * route does, and every other turn with a session id of its own. `refuse`
+   * names messages the box answers 403 (a member of staff's).
+   */
+  function freshBox(opts: { context?: HermesTurnContext; refuse?: (message: string) => boolean; legacy?: boolean } = {}) {
+    const turns: Array<Record<string, unknown>> = [];
+    const other: string[] = [];
+    let n = 0;
+    const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (init?.method !== "POST") {
+        other.push(`${init?.method ?? "GET"} ${String(url)}`);
+        return { ok: true, status: 200, json: async () => ({ ok: true }) } as unknown as Response;
+      }
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      turns.push(body);
+      // The route reads the message trimmed.
+      const message = String(body.message).trim();
+      if (opts.refuse?.(message)) {
+        return { ok: false, status: 403, json: async () => ({ error: "not available on this organisation's ClawBox", code: "staff_command_refused" }) } as unknown as Response;
+      }
+      const command = !opts.legacy && /^\/(new|reset)(\s|$)/i.test(message) && !/^\/reset\s+soft(\s|$)/i.test(message);
+      const payload = command
+        ? { text: "New session started.", harness: "hermes", freshSession: true }
+        : { text: `answer ${++n}`, harness: "hermes", sessionId: `sess-${n}` };
+      return { ok: true, status: 200, json: async () => payload } as unknown as Response;
+    });
+    const adapter = new HermesAdapter(caps, () => opts.context ?? CONTEXT, fetchImpl as unknown as typeof fetch);
+    return { adapter, turns, other };
+  }
+
+  it.each(["/new", "/reset", "  /NEW "])("forgets the conversation's session once the box has started a fresh one for a typed %j", async (command) => {
+    const { adapter, turns, other } = freshBox();
+    await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" });
+    expect(adapter.threadedSessionId).toBe("sess-1");
+
+    const result = await adapter.sendTurn({ text: command, attachments: [], idempotencyKey: "b" });
+    // The command goes to the box as typed — the box judges it and does the
+    // reset — in one request, like any other turn of the conversation.
+    expect(turns[1]).toMatchObject({ message: command, sessionKey: "desktop", sessionId: "sess-1" });
+    expect(other).toEqual([]);
+    expect(result.text).toBe("New session started.");
+    expect(adapter.threadedSessionId).toBe("");
+    expect(adapter.conversationModel("desktop")).toBeNull();
+
+    await adapter.sendTurn({ text: "fresh", attachments: [], idempotencyKey: "c" });
+    expect(turns[2]).toMatchObject({ message: "fresh" });
+    expect(turns[2].sessionId).toBeUndefined();
+    expect(adapter.threadedSessionId).toBe("sess-2");
+  });
+
+  it("sends the words after a typed /new as the first message of the fresh session, once the box has started it", async () => {
+    const { adapter, turns } = freshBox();
+    await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" });
+
+    const result = await adapter.sendTurn({ text: "/new what is on my calendar?", attachments: [], idempotencyKey: "b" });
+    // The whole message first, as typed; then the message without the command
+    // and without the old session.
+    expect(turns.slice(1).map((t) => [t.message, t.sessionId])).toEqual([
+      ["/new what is on my calendar?", "sess-1"],
+      ["what is on my calendar?", undefined],
+    ]);
+    expect(result.text).toBe("answer 2");
+    expect(adapter.threadedSessionId).toBe("sess-2");
+  });
+
+  it("sends the words after the command to the conversation the command was typed in, wherever the owner is by then", async () => {
+    // The owner types "/new hello" in one conversation and is in another tab
+    // before the box has answered the command.
+    let onScreen = "desktop";
+    const turns: Array<Record<string, unknown>> = [];
+    const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      turns.push(body);
+      if (String(body.message).startsWith("/new")) {
+        onScreen = "desktop-0123456789ab";
+        return { ok: true, status: 200, json: async () => ({ text: "New session started.", harness: "hermes", freshSession: true }) } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => ({ text: "hi", harness: "hermes", sessionId: "sess-9" }) } as unknown as Response;
+    });
+    const adapter = new HermesAdapter(caps, () => ({ ...CONTEXT, sessionKey: onScreen }), fetchImpl as unknown as typeof fetch);
+    await adapter.sendTurn({ text: "/new hello", attachments: [], idempotencyKey: "a" });
+    expect(turns.map((t) => [t.message, t.sessionKey])).toEqual([["/new hello", "desktop"], ["hello", "desktop"]]);
+    // The session the answer named is the first conversation's, not the tab's.
+    expect(adapter.threadedSessionId).toBe("");
+    onScreen = "desktop";
+    expect(adapter.threadedSessionId).toBe("sess-9");
+  });
+
+  it("clears nothing and sends nothing more when the box refuses the command", async () => {
+    // A member of staff's "/new <anything>" and "/reset": the box judges the
+    // message as typed, before anything of theirs is cleared.
+    const { adapter, turns, other } = freshBox({ refuse: (m) => m.startsWith("/reset") || /^\/new\s+\S/.test(m) });
+    await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" });
+    for (const text of ["/reset", "/new hello"]) {
+      await expect(adapter.sendTurn({ text, attachments: [], idempotencyKey: "b" })).rejects.toBeInstanceOf(HarnessError);
+    }
+    expect(turns.map((t) => t.message)).toEqual(["hello", "/reset", "/new hello"]);
+    expect(other).toEqual([]);
+    // The conversation is where it was.
+    expect(adapter.threadedSessionId).toBe("sess-1");
+  });
+
+  it("takes the box's answer as the turn's when the box started no fresh session", async () => {
+    const { adapter, turns } = freshBox({ legacy: true });
+    const result = await adapter.sendTurn({ text: "/new hello", attachments: [], idempotencyKey: "a" });
+    expect(turns.map((t) => t.message)).toEqual(["/new hello"]);
+    expect(result.text).toBe("answer 1");
+  });
+
+  it("resets the conversation the command was typed in, a user's own included", async () => {
+    const { adapter, turns } = freshBox({ context: { ...CONTEXT, sessionKey: "desktop-user-alice" } });
+    await adapter.sendTurn({ text: "/reset", attachments: [], idempotencyKey: "a" });
+    expect(turns[0]).toMatchObject({ message: "/reset", sessionKey: "desktop-user-alice" });
+  });
+
+  it.each(["/reset soft", "/newer", "/model", "/status", "tell me about /new"])("keeps the session for %j", async (text) => {
+    const { adapter, turns } = freshBox();
+    await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" });
+    await adapter.sendTurn({ text, attachments: [], idempotencyKey: "b" });
+    expect(turns).toHaveLength(2);
+    expect(turns[1]).toMatchObject({ message: text, sessionId: "sess-1" });
+    expect(adapter.threadedSessionId).toBe("sess-2");
+  });
+
+  it("sends a turn that carries a file once, as typed", async () => {
+    const { adapter, turns } = freshBox({ legacy: true });
+    await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" });
+    await adapter.sendTurn({
+      text: "/new look at this",
+      attachments: [{ id: "f1", name: "shot.png", path: "/tmp/clawbox-chat/shot.png", mimeType: "image/png" }] as never,
+      idempotencyKey: "b",
+    });
+    expect(turns).toHaveLength(2);
+    expect(turns[1]).toMatchObject({ message: "/new look at this", sessionId: "sess-1" });
+  });
+
   // ── Attachments ───────────────────────────────────────────────────────────
 
   it("hands the staged image paths to the route, which is what re-checks them", async () => {

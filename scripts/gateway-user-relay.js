@@ -32,13 +32,24 @@
 //     the user was shown) pass as they are; everything else is refused with
 //     the gateway's own error frame shape, so the chat reports it like any
 //     other refusal.
-//   * `sessions.reset` (the chat's /new and /reset) is the one exception to
+//   * `sessions.reset` (the chat's "new chat" button) is the one exception to
 //     "never admin": OpenClaw requires `operator.admin` from any caller that
 //     declares scopes before it resets a session, so the user's socket can
 //     never do it. Once the key has passed the same ownership check, the relay
 //     runs that one reset on a short-lived socket of its own that declares
 //     admin, sends nothing else on it, and closes it. The browser's socket
 //     keeps its scopes; the user can reset only their own sessions.
+//   * A TYPED `/new` or `/reset` is that same reset. The chat sends it as the
+//     text of a `chat.send`, and the core answers a caller without
+//     `operator.admin` "You are not authorized to reset this session" — so a
+//     user could never start a fresh conversation by typing the command the
+//     catalogue offers them. The relay reads the command off the message
+//     (`typedResetCommand`), runs the reset as above — the key and the reason
+//     only — and then finishes the turn the way the core would: a bare command
+//     is answered with the core's own notice ("New session started."), and
+//     text after the command (`/new hello`) goes out as an ordinary
+//     `chat.send` on the USER's socket, into the fresh session. Nothing the
+//     user typed reaches the admin socket.
 //   * Every event the gateway broadcasts is dropped unless it names one of the
 //     user's sessions, so the owner's turns never stream into a user's window.
 //
@@ -134,6 +145,69 @@ function refusalFrame(id, message) {
 }
 
 /**
+ * The core's `/new` and `/reset`, as its command parser reads the start of a
+ * message (`normalizeCommandBody`, then `/^\/(new|reset)(?:\s|$)/i` in
+ * commands-reset.ts of the pinned core): the bare word, the word and a
+ * message after white space (a new line included), or its `/new: message`
+ * colon form.
+ */
+const RESET_COMMAND_RE = /^\/(new|reset)(?:\s*:|(?=\s)|$)/i;
+/** `/reset soft …`: the core's in-place reset that keeps the transcript. */
+const SOFT_RESET_RE = /^soft(?:\s|$)/i;
+
+/**
+ * A chat message that is a typed `/new` or `/reset`: `{ action, tail }` — the
+ * command, and the message that followed it ("" for the bare command) — or
+ * null for anything else. The CommonJS copy of `typedResetCommand` in
+ * src/lib/chat-slash-commands.ts (which the Hermes chat reads the command
+ * with); src/tests/unit/chat-slash-commands.test.ts runs one table through both.
+ *
+ * `/reset soft` is "anything else": the gateway's `sessions.reset` is the hard
+ * reset, so running it for a soft one would archive a transcript the user
+ * asked to keep. It travels as it is and the core answers it.
+ */
+function typedResetCommand(message) {
+  if (typeof message !== "string") return null;
+  const text = message.trim();
+  const match = RESET_COMMAND_RE.exec(text);
+  if (!match) return null;
+  const action = match[1].toLowerCase();
+  const tail = text.slice(match[0].length).trim();
+  if (action === "reset" && SOFT_RESET_RE.test(tail)) return null;
+  return { action, tail };
+}
+
+/**
+ * What the chat is told once a bare typed `/new` or `/reset` has reset the
+ * session: the frames the core itself answers that command with — the
+ * `chat.send` acknowledged under its run, then that run's final, the core's
+ * own status notice. So the chat shows what the owner's chat shows.
+ */
+function resetNoticeFrames(id, { runId, sessionKey, action }) {
+  const text = action === "reset" ? "✅ Session reset." : "✅ New session started.";
+  return [
+    { type: "res", id, ok: true, payload: { runId, status: "started" } },
+    {
+      type: "event",
+      event: "chat",
+      payload: {
+        runId,
+        sessionKey,
+        seq: 1,
+        state: "final",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text, openclawStatusNotice: true }],
+          timestamp: Date.now(),
+          stopReason: "stop",
+          idempotencyKey: runId,
+        },
+      },
+    },
+  ];
+}
+
+/**
  * The per-connection state: who the socket belongs to, what is in flight.
  * `gatewayMainKey` arrives with the hello; until then the user's main is
  * derived from `main`, which the hello then corrects.
@@ -214,6 +288,11 @@ function isRecord(value) {
  * `{ toGateway }` to pass it on, `{ toClient }` to answer it here, `{ reset }`
  * to run a reset of the user's own session on the relay's admin socket, or
  * `{}` to drop it.
+ *
+ * A `reset` that came from a typed command carries `chat`, what follows the
+ * reset once it has succeeded: `{ send }`, the message after the command as an
+ * ordinary `chat.send` for the user's own socket, or `{ notice }`, the bare
+ * command's answer (`resetNoticeFrames`).
  */
 function filterClientFrame(state, frame) {
   if (!isRecord(frame) || frame.type !== "req" || typeof frame.id !== "string" || typeof frame.method !== "string") {
@@ -244,6 +323,24 @@ function filterClientFrame(state, frame) {
       const resetParams = { key: params.key };
       if (typeof params.reason === "string") resetParams.reason = params.reason.slice(0, 32);
       return { reset: { id, params: resetParams } };
+    }
+    if (method === "chat.send") {
+      // A typed /new or /reset — for a member of staff already judged above,
+      // so only their bare /new arrives here. The same reset, of the same
+      // key that just passed the ownership check; the admin socket is given
+      // the key and the command's name and nothing else of the message.
+      const typed = typedResetCommand(params.message);
+      if (typed) {
+        const resetParams = { key: params.sessionKey, reason: typed.action };
+        if (typed.tail) {
+          // The message after the command: what `forwarded` would have sent,
+          // without the command, for the user's own socket once the reset is done.
+          const send = { type: "req", id, method, params: { ...forwarded.params, message: typed.tail } };
+          return { reset: { id, params: resetParams, chat: { send } } };
+        }
+        const runId = typeof params.idempotencyKey === "string" && params.idempotencyKey ? params.idempotencyKey.slice(0, 128) : crypto.randomUUID();
+        return { reset: { id, params: resetParams, chat: { notice: { runId, sessionKey: params.sessionKey, action: typed.action } } } };
+      }
     }
     if (method === "progressCard.put") {
       // The chat's only write to the card is the trash: a clear of the user's
@@ -573,9 +670,24 @@ function relayUserChat({ clientWs, username, connectUpstream, token, identity, s
         return;
       }
       resetInFlight = true;
-      runAdminReset({ ...out.reset, connectUpstream, token, identity })
+      const { id, params, chat } = out.reset;
+      runAdminReset({ id, params, connectUpstream, token, identity })
         .then((res) => {
-          if (!closed) sendClient(res);
+          if (closed) return;
+          // A `sessions.reset` is answered with the gateway's own answer. So is
+          // a typed command whose reset failed: the chat reports the send as
+          // failed, and nothing of the message goes out to a session that was
+          // not reset.
+          if (!chat || !res.ok) {
+            sendClient(res);
+            return;
+          }
+          if (chat.send) {
+            state.pending.set(id, "chat.send");
+            sendGateway(chat.send);
+            return;
+          }
+          for (const frame of resetNoticeFrames(id, chat.notice)) sendClient(frame);
         })
         .finally(() => {
           resetInFlight = false;
@@ -662,6 +774,8 @@ module.exports = {
   KEYED_METHODS,
   KEYLESS_METHODS,
   createRelayState,
+  typedResetCommand,
+  resetNoticeFrames,
   filterClientFrame,
   filterGatewayFrame,
   userHello,
