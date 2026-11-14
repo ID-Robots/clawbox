@@ -546,10 +546,11 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     const { provider = "openai-compatible", baseUrl = CLOUD, config = true } = options;
     const home = path.join(tmpDir, "openclaw-state");
     await fs.mkdir(home, { recursive: true });
-    const configure = async (embedderAt: { provider?: string; baseUrl?: string | null }) => {
+    const configure = async (embedderAt: { provider?: string; baseUrl?: string | null; agents?: unknown }) => {
       const named = { provider, baseUrl, ...embedderAt };
       await fs.writeFile(path.join(home, "openclaw.json"), JSON.stringify({
         memory: { search: { provider: named.provider, ...(named.baseUrl ? { remote: { baseUrl: named.baseUrl } } : {}) } },
+        ...(named.agents ? { agents: named.agents } : {}),
       }));
     };
     if (config) await configure({});
@@ -565,12 +566,15 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     const gateway = {
       status: gatewayStatus(),
       probe: OK as Record<string, unknown> | Error,
+      // Runs while the probe is in flight, before it answers.
+      duringProbe: null as (() => void) | null,
       calls: [] as Array<{ method: string; params: Record<string, unknown>; timeoutMs?: number }>,
     };
     vi.mocked(ws.gatewayWsCall).mockImplementation(async (method, params, callOptions) => {
       gateway.calls.push({ method, params, timeoutMs: callOptions?.timeoutMs });
       if (method === "memory.status") return gateway.status;
       if (method === "doctor.memory.status") {
+        gateway.duringProbe?.();
         if (gateway.probe instanceof Error) throw gateway.probe;
         return gateway.probe;
       }
@@ -587,7 +591,7 @@ describe("the status from the running gateway, and the embedder's own probe", ()
       mod.invalidateMemoryStatusCache();
       return await reload();
     };
-    return { gateway, probes, reload, invalidated, configure };
+    return { gateway, probes, reload, invalidated, configure, invalidate: () => mod.invalidateMemoryStatusCache() };
   }
 
   it("reads a complete index as healthy, with every chunk a vector, once the embedder's own probe answers ok", async () => {
@@ -640,6 +644,50 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     expect(status.available).toBe(true);
     expect(status.health).toBe("healthy");
     expect(status.vectors).toBe(123);
+  });
+
+  it("reads a ready memory.status that still says pending as it stands, and asks no probe", async () => {
+    // A KNOWN OPEN POINT, pinned as it is, not as it should be: the only
+    // `ready` answer seen on any pin (an earlier one) carried provider mode
+    // `pending`. No probe is asked over a `ready` answer, and `parseMemoryStatus`
+    // calls `healthy` only a mode of `active`, so this reads "unknown".
+    const { gateway, probes, reload } = await box();
+    gateway.status = gatewayStatus(() => {}, { status: "ready", message: null });
+    const { health, errorCode, semanticAvailable, vectors } = await reload();
+    expect(probes()).toBe(0);
+    expect({ health, errorCode, semanticAvailable, vectors }).toEqual({ health: "unknown", errorCode: "", semanticAvailable: true, vectors: 123 });
+  });
+
+  it("says once in the device log why the probe could not be asked: the error's class and code, nothing it carried", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { gateway, reload, invalidated } = await box();
+    const { GatewayRpcError } = await import("@/lib/openclaw-gateway-ws");
+    gateway.probe = new GatewayRpcError("refused at https://user:secret@api.example.invalid/v1 with token abc123", "INVALID_REQUEST");
+    await reload();
+    await invalidated();
+    const lines = warn.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("readiness probe"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("could not be asked");
+    expect(lines[0]).toContain("GatewayRpcError INVALID_REQUEST");
+    for (const leak of ["secret", "example.invalid", "abc123", "https://"]) expect(lines[0]).not.toContain(leak);
+  });
+
+  it("says once in the device log why the core found the embedder not ok, with addresses, keys and paths taken out", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { gateway, reload, invalidated } = await box();
+    gateway.probe = {
+      agentId: "main", provider: "openai-compatible",
+      embedding: {
+        ok: false,
+        error: "Error: embeddings request to https://api.example.invalid/v1/embeddings failed (401) for key claw_PLACEHOLDER0000000000 at /var/lib/openclaw/openclaw.json",
+      },
+    };
+    expect((await reload()).errorCode).toBe("provider_degraded");
+    await invalidated();
+    const lines = warn.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("readiness probe"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("401");
+    for (const leak of ["example.invalid", "claw_PLACEHOLDER", "/var/lib"]) expect(lines[0]).not.toContain(leak);
   });
 
   const NOT_CHECKED = { agentId: "main", provider: "openai-compatible", embedding: { ok: false, checked: false, error: "memory embedding readiness not checked" } };
@@ -738,7 +786,55 @@ describe("the status from the running gateway, and the embedder's own probe", ()
       expect(status.errorCode).toBe("embedder_unavailable");
       expect(status.health).toBe("degraded");
       expect(status.vectors).toBe(0);
+      // Never searchable with no embedder, whatever the probe's `ok`.
+      expect(status.semanticAvailable).toBe(false);
     }
+  });
+
+  it("promotes nothing when neither the probe nor memory.status names a provider", async () => {
+    const { gateway, reload } = await box();
+    gateway.status = gatewayStatus((legacy) => { legacy.provider = ""; });
+    gateway.probe = { agentId: "main", embedding: { ok: true } };
+    const status = await reload();
+    expect(status.semanticAvailable).toBe(false);
+    expect(status.vectors).toBe(0);
+    expect(status.health).not.toBe("healthy");
+  });
+
+  it("promotes nothing over a vector index the core reports as switched off", async () => {
+    const { gateway, reload } = await box();
+    gateway.status = gatewayStatus((legacy) => { legacy.vector.enabled = false; });
+    const status = await reload();
+    expect(status.semanticAvailable).toBe(false);
+    expect(status.vectors).toBe(0);
+    expect(status.health).not.toBe("healthy");
+  });
+
+  it("asks again for another model in memory.status, and for another agent", async () => {
+    const { gateway, probes, reload, configure } = await box();
+    await reload();
+    expect(probes()).toBe(1);
+    gateway.status = gatewayStatus((legacy) => { legacy.model = "text-embedding-3-large"; });
+    await reload();
+    expect(probes()).toBe(2);
+    await configure({ agents: { ownership: "explicit", defaults: { systemAgent: { agentId: "travel" } }, entries: { travel: {} } } });
+    const status = await reload();
+    expect(probes()).toBe(3);
+    expect(gateway.calls.filter((call) => call.method === "doctor.memory.status").at(-1)?.params).toEqual({ agentId: "travel", deep: true });
+    expect(status.agentId).toBe("travel");
+  });
+
+  it("asks the probe again on the one retry that an invalidation during the read causes", async () => {
+    const { gateway, probes, reload, invalidate } = await box();
+    // A pass finishes while the first probe is in flight.
+    let first = true;
+    gateway.duringProbe = () => {
+      if (first) invalidate();
+      first = false;
+    };
+    const status = await reload();
+    expect(probes()).toBe(2);
+    expect(status.health).toBe("healthy");
   });
 
   it("asks the probe once for a window of reloads, and again at once after an invalidation", async () => {
@@ -794,6 +890,23 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     status = await invalidated();
     expect(probes()).toBe(1);
     expect(status.health).toBe("degraded");
+  });
+
+  it("never wakes the embedder behind the loopback proxy whatever provider id the file names, or none", async () => {
+    // No provider in openclaw.json: the core asks for its default, `openai`,
+    // and the proxy URL is still the base URL.
+    const { gateway, probes, reload } = await box({ provider: "", baseUrl: PROXY });
+    gateway.status = gatewayStatus((legacy) => {
+      legacy.provider = "openai";
+      legacy.requestedProvider = "openai";
+      legacy.custom.providerState.requestedProvider = "openai";
+    });
+    embedder.installed = true;
+    embedder.healthy = false;
+    const status = await reload();
+    expect(probes()).toBe(0);
+    expect(status.health).toBe("degraded");
+    expect(status.errorCode).toBe("provider_degraded");
   });
 
   it("keeps a not-ok verdict over an on-box embedder that is still asleep, however long ago it was asked", async () => {

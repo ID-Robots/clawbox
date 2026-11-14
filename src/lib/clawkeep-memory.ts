@@ -825,7 +825,9 @@ async function memoryStatusFromGateway(agentId: string): Promise<unknown | null>
  *
  * Asked again on the next reload after an invalidation (a pass's finish, a
  * provider, source or cloud-embedder change: `statusGeneration` moved), else no
- * sooner than 30 minutes after an ok and 10 minutes after anything else.
+ * sooner than 30 minutes after an ok and 10 minutes after anything else — but
+ * an ok answered from the core's own cache before any uncached answer named
+ * the provider is asked again at once, on the next reload.
  */
 interface EmbedderVerdict {
   key: string;
@@ -852,22 +854,22 @@ const EMBEDDER_OK_LAPSE_MS = 60 * 60_000;
  * The verdict that applies to this reading, asked for first when it is due and
  * may be asked; null when there is none.
  *
- * NEVER A WAKE. On ClawBox's own embedder (openai-compatible at the loopback
- * proxy) the probe goes through the proxy, which starts clawbox-embed.service —
- * the ~2 GB it stops after ten idle minutes, and a start the box refuses when
- * memory is short, which would come back as a false "not ready". So it is asked
- * only while llama-server already answers its health URL, which wakes nothing.
- * OpenClaw's `local` embedder (a llama.cpp server OpenClaw manages) would be
- * started by a probe, and `ollama` is a server that check cannot see: neither
- * is asked at all.
+ * NEVER A WAKE. When memory search points at a loopback address (ClawBox's
+ * proxy, whatever provider id names it) the probe goes through the proxy, which
+ * starts clawbox-embed.service — the ~2 GB it stops after ten idle minutes, and
+ * a start the box refuses when memory is short, which would come back as a false
+ * "not ready". So it is asked only while llama-server already answers its health
+ * URL, which wakes nothing. A probe then keeps the awake embedder awake for one
+ * more idle window; it never starts a sleeping one. OpenClaw's `local` embedder
+ * (a llama.cpp server OpenClaw manages) would be started by a probe, and
+ * `ollama` is a server that check cannot see: neither is asked at all.
  */
 async function embedderVerdictFor(agentId: string, legacy: Record<string, unknown>): Promise<EmbedderVerdict | null> {
   const config = await readEmbeddingConfig();
   if (!config) return null;
   const provider = config.provider || cleanString(legacy.requestedProvider);
   if (provider === "local" || provider === "ollama") return null;
-  const onBox = provider === "openai-compatible"
-    && (config.baseUrl === getEmbedProxyBaseUrl() || isLoopbackBaseUrl(config.baseUrl));
+  const onBox = config.baseUrl === getEmbedProxyBaseUrl() || isLoopbackBaseUrl(config.baseUrl);
   const key = JSON.stringify([agentId, config.provider, config.baseUrl, cleanString(legacy.model)]);
   let held = embedderVerdict?.key === key ? embedderVerdict : null;
   const due = !held || held.generation !== statusGeneration || Date.now() >= held.nextAskAtMs;
@@ -905,18 +907,26 @@ async function askEmbedder(key: string, agentId: string, held: EmbedderVerdict |
     generation,
     lastAskFailed: true,
   });
+  const couldNotAsk = (why: string): EmbedderVerdict => {
+    noteEmbedderProbe(`the core's embedder readiness probe (doctor.memory.status) could not be asked: ${why}`);
+    return kept();
+  };
   let answer: Record<string, unknown>;
   try {
     const online = await askOpenclawGateway("doctor.memory.status", { agentId, deep: true }, STATUS_TIMEOUT_MS);
-    if (!online.answered) return kept();
+    if (!online.answered) return couldNotAsk("no gateway is running");
     answer = asRecord(online.result);
-  } catch {
-    return kept();
+  } catch (err) {
+    return couldNotAsk(errorClass(err));
   }
   const embedding = asRecord(answer.embedding);
-  if (typeof embedding.ok !== "boolean" || embedding.checked === false) return kept();
+  if (typeof embedding.ok !== "boolean" || embedding.checked === false) return couldNotAsk("the core answered without checking");
   const named = cleanString(answer.provider);
   const provider = named && embedding.cached !== true ? named : held?.provider ?? "";
+  // No embedder at all (`none`) is the embedder-unavailable line's to say.
+  noteEmbedderProbe(embedding.ok || provider === "none"
+    ? ""
+    : `the embedder did not pass the core's readiness probe (doctor.memory.status): ${redactCoreSentence(cleanString(embedding.error)) || "no reason given"}`);
   return (embedderVerdict = {
     key,
     ok: embedding.ok,
@@ -929,6 +939,28 @@ async function askEmbedder(key: string, agentId: string, held: EmbedderVerdict |
     generation,
     lastAskFailed: false,
   });
+}
+
+/**
+ * The probe's outcome in the device log, once per change, like the lines
+ * below: the card says only "not ready", and this is what tells a refused key
+ * from an endpoint that is down from a probe this box can no longer ask. A
+ * call that could not be made names its error's class and code only, never its
+ * message; a not-ok carries the core's sentence through `redactCoreSentence`.
+ */
+let loggedEmbedderProbe = "";
+function noteEmbedderProbe(line: string): void {
+  if (line === loggedEmbedderProbe) return;
+  loggedEmbedderProbe = line;
+  if (line) console.warn(`[clawkeep-memory] ${line}`);
+}
+
+/** An error's class, and its code when it has one: never its message. */
+function errorClass(err: unknown): string {
+  const safe = (value: string) => value.replace(/[^\w.-]/g, "").slice(0, 64);
+  const name = safe(err instanceof Error ? err.name : typeof err) || "unknown";
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" || typeof code === "number" ? `${name} ${safe(String(code))}` : name;
 }
 
 /** One `openclaw memory status --agent <agentId> --deep --json` probe, parsed; rejects on a failure or a timeout. */
@@ -1554,7 +1586,11 @@ function noteEmbedderUnavailable(status: ClawKeepMemoryStatus, raw: unknown): vo
 /** The core's own sentence for why no embedder started, made safe for the device log. */
 function coreEmbedderFailure(raw: unknown, agentId: string): string {
   const custom = asRecord(asRecord(agentStatusRow(raw, agentId).status).custom);
-  const said = cleanString(custom.providerUnavailableReason) || cleanString(asRecord(custom.providerState).reason);
+  return redactCoreSentence(cleanString(custom.providerUnavailableReason) || cleanString(asRecord(custom.providerState).reason));
+}
+
+/** A sentence the core wrote about its embedder, with credentials, endpoints and paths taken out, for the device log. */
+function redactCoreSentence(said: string): string {
   if (!said) return "";
   const line = redactCredentialShapes(said, "[redacted]")
     .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[endpoint]")
@@ -1677,8 +1713,11 @@ function reloadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
  * an index a pass has changed since (`cachedStatusUnsettled`) and no pass is
  * going now, the answer is the probe's, not the cache's. That read is the
  * card's flip out of "running", and the probe it waits on is the one the
- * finish already started — ~8 s, up to 90 s on a cold box, and on the gateway
- * arm the embedder's own probe can add as long again — so the card
+ * finish already started — ~8 s, up to 90 s on a cold box. On the gateway arm
+ * it is two calls, memory.status and the embedder's own probe, each bounded by
+ * STATUS_TIMEOUT_MS; a socket closed mid-call is asked again after the wait for
+ * a starting gateway, so one call can take about twice its bound plus that
+ * wait — so the card
  * says "Indexing…" for the length of the probe rather than drawing the
  * mid-rebuild identity for 30 s. `peekMemoryStatus` never waits, and
  * `resolveIndexMode` reads through `lastMemoryStatus` for the same reason.
