@@ -4,7 +4,7 @@
 // `record` drops anything else. Cards are recorded by label and last 4 only;
 // as a last guard every field is run through the card-number/CVV redactor.
 import { scrubCardData } from "../shared/card";
-import { closeSync, existsSync, fchmodSync, fstatSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fchmodSync, fstatSync, ftruncateSync, openSync, readFileSync, readSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import type { AuditRecord } from "../shared/types";
 
@@ -26,21 +26,38 @@ export class AuditLog {
     if (entry.detail) rec.detail = clean(entry.detail, 200);
     let fd = -1;
     try {
-      // The size is read from the open descriptor, so the file that is rotated
-      // or appended to is the one that was measured.
-      fd = openSync(this.file, "a", 0o600);
-      if (fstatSync(fd).size > MAX_BYTES) {
-        closeSync(fd);
-        fd = -1;
-        renameSync(this.file, `${this.file}.1`);
-        fd = openSync(this.file, "a", 0o600);
-      }
+      // Measured, rotated and appended to through one descriptor, so the file
+      // that is rotated is the one that was measured.
+      fd = openSync(this.file, "a+", 0o600);
       fchmodSync(fd, 0o600);
+      const size = fstatSync(fd).size;
+      if (size > MAX_BYTES) {
+        this.rotate(fd, size);
+        ftruncateSync(fd, 0);
+      }
       writeSync(fd, `${JSON.stringify(rec)}\n`);
     } catch (err) {
       console.error(`audit log write failed: ${(err as Error).message}`);
     } finally {
       if (fd >= 0) closeSync(fd);
+    }
+  }
+
+  /** Copies the open log into `<file>.1` (replacing it), mode 600. */
+  private rotate(fd: number, size: number): void {
+    const old = Buffer.alloc(size);
+    let got = 0;
+    while (got < size) {
+      const n = readSync(fd, old, got, size - got, got);
+      if (n === 0) break;
+      got += n;
+    }
+    const out = openSync(`${this.file}.1`, "w", 0o600);
+    try {
+      fchmodSync(out, 0o600);
+      writeSync(out, old, 0, got);
+    } finally {
+      closeSync(out);
     }
   }
 
