@@ -3185,13 +3185,23 @@ disarm_gateway_handback() {
 
 # Returns non-zero when the net could not be armed, so the caller starts the
 # gateway itself.
+#
+# The deadline is ON THE BOOT's clock (`--on-boot`, now + GATEWAY_HANDBACK_S),
+# never `--on-active`: systemd re-reads a transient timer at every
+# daemon-reload and counts an OnActiveSec= again from the reload, so on a board
+# each update step's daemon-reload pushed the deadline another 15 min out and
+# the timer never fired; an OnBootSec= deadline is the same after a reload, and
+# needs no wall clock. RemainAfterElapse=no unloads it once it has fired.
 arm_gateway_handback() {
-  local stamp
+  local stamp up
   stamp="$(systemctl show clawbox-gateway.service -p InactiveEnterTimestampMonotonic --value 2>/dev/null || true)"
   case "$stamp" in ''|0|*[!0-9]*) return 1 ;; esac
+  up="$(awk '{print int($1)}' /proc/uptime 2>/dev/null)" || up=""
+  case "$up" in ''|*[!0-9]*) return 1 ;; esac
   disarm_gateway_handback
   systemd-run --quiet --collect --unit="$GATEWAY_HANDBACK_UNIT" \
-    --on-active="${GATEWAY_HANDBACK_S}s" --timer-property=AccuracySec=10s \
+    --on-boot="$((up + GATEWAY_HANDBACK_S))s" --timer-property=AccuracySec=10s \
+    --timer-property=RemainAfterElapse=no \
     /bin/sh -c "$GATEWAY_HANDBACK_SCRIPT" sh "$stamp" >/dev/null 2>&1
 }
 

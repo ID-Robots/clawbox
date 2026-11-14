@@ -327,7 +327,15 @@ d("hand_paused_gateway_to_update: one start of the gateway, by gateway_verify", 
     expect(r.out).toContain("15 min");
     const args = r.runs.split("\n");
     expect(args).toContain("--unit=clawbox-gateway-handback");
-    expect(args).toContain("--on-active=900s");
+    // On the boot's clock, 900 s from now: a daemon-reload re-counts an
+    // --on-active deadline from the reload (measured on systemd 249), and an
+    // elapsed timer is unloaded instead of lingering.
+    const onBoot = args.find((a) => a.startsWith("--on-boot="));
+    const uptime = Number(fs.readFileSync("/proc/uptime", "utf-8").split(" ")[0]);
+    expect(Number(onBoot?.slice("--on-boot=".length, -1))).toBeGreaterThanOrEqual(Math.floor(uptime) + 899);
+    expect(Number(onBoot?.slice("--on-boot=".length, -1))).toBeLessThanOrEqual(Math.floor(uptime) + 905);
+    expect(args.some((a) => a.startsWith("--on-active"))).toBe(false);
+    expect(args).toContain("--timer-property=RemainAfterElapse=no");
     expect(args).toContain("--collect");
     // The stamp the pause left travels to the timer as its $1.
     expect(args[args.length - 2]).toBe("123456789");
