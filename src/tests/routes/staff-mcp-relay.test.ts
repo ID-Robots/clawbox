@@ -83,24 +83,33 @@ beforeAll(async () => {
         return;
       }
       if (req.method !== "POST") { res.writeHead(405).end(); return; }
-      const msg = JSON.parse(body);
-      let result: unknown = {};
-      if (msg.method === "tools/list") result = { tools: TOOLS };
-      if (msg.method === "tools/call") result = { content: [{ type: "text", text: `caller=${req.headers.authorization ?? req.headers["x-api-key"]}` }] };
-      if (msg.method === "tools/call" && msg.params?.name === "create_word_document") {
-        // Writes a fresh document and names it — and names an OLD file of the owner's too.
-        const fresh = path.join(ROOT, ".openclaw", "media", "word-docs", `${msg.params.arguments?.title ?? "doc"}.docx`);
-        fs.mkdirSync(path.dirname(fresh), { recursive: true });
-        fs.writeFileSync(fresh, "PK");
-        result = { content: [{ type: "text", text: `Saved.\nMEDIA:${fresh}\nAlso see ${path.join(ROOT, ".openclaw", "media", "word-docs", "owners-old.docx")}` }] };
-      }
-      const reply = JSON.stringify({ jsonrpc: "2.0", id: msg.id, result });
+      const parsed = JSON.parse(body);
+      const answer = (msg: { id?: unknown; method?: string; params?: { name?: string; arguments?: Record<string, unknown> } }) => {
+        let result: unknown = {};
+        if (msg.method === "tools/list") result = { tools: TOOLS };
+        if (msg.method === "tools/call") {
+          // `pad` makes the answer that many characters longer (a large tool result).
+          const pad = typeof msg.params?.arguments?.pad === "number" ? "x".repeat(msg.params.arguments.pad) : "";
+          result = { content: [{ type: "text", text: `caller=${req.headers.authorization ?? req.headers["x-api-key"]}${pad}` }] };
+        }
+        if (msg.method === "tools/call" && msg.params?.name === "create_word_document") {
+          // Writes a fresh document and names it — and names an OLD file of the owner's too.
+          const fresh = path.join(ROOT, ".openclaw", "media", "word-docs", `${msg.params.arguments?.title ?? "doc"}.docx`);
+          fs.mkdirSync(path.dirname(fresh), { recursive: true });
+          fs.writeFileSync(fresh, "PK");
+          result = { content: [{ type: "text", text: `Saved.\nMEDIA:${fresh}\nAlso see ${path.join(ROOT, ".openclaw", "media", "word-docs", "owners-old.docx")}` }] };
+        }
+        return { jsonrpc: "2.0", id: msg.id, result };
+      };
+      const reply = JSON.stringify(Array.isArray(parsed) ? parsed.map(answer) : answer(parsed));
       if (sse) {
         res.writeHead(200, { "Content-Type": "text/event-stream", "Mcp-Session-Id": "s-1" });
         res.end(`event: message\ndata: ${reply}\n\n`);
       } else {
         res.writeHead(200, { "Content-Type": "application/json", "Mcp-Session-Id": "s-1" });
-        res.end(reply);
+        // In pieces, as a large answer arrives.
+        for (let i = 0; i < reply.length; i += 1024 * 1024) res.write(reply.slice(i, i + 1024 * 1024));
+        res.end();
       }
     });
   });
@@ -220,6 +229,34 @@ describe("a tool on the box that takes no credential (TASK-2516)", () => {
     expect(owners[path.join(docs, "olga-sse.docx")]).toBe("olga");
     expect(owners[path.join(docs, "olga-json.docx")]).toBe("olga");
     expect(owners[path.join(docs, "owners-old.docx")]).toBeUndefined();
+  });
+
+  it("records a tool call's file from a batch that also lists the tools (the buffered answer)", async () => {
+    await grant({ needsCredential: false, writeTools: true });
+    await (await call("worddoc", TOKENS.olga, listTools)).json(); // the tool is known
+    for (const as of [false, true]) {
+      sse = as;
+      const title = `olga-batch-${as ? "sse" : "json"}`;
+      const res = await call("worddoc", TOKENS.olga, [listTools, { ...createDoc, params: { name: "create_word_document", arguments: { title } } }]);
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(text).toContain(`${title}.docx`);
+      expect(text).not.toContain("send_mail"); // the list in it still filtered
+    }
+    const owners = JSON.parse(fs.readFileSync(path.join(ROOT, "data", "chat-media-owners.json"), "utf-8")) as Record<string, string>;
+    const docs = path.join(fs.realpathSync(ROOT), ".openclaw", "media", "word-docs");
+    expect(owners[path.join(docs, "olga-batch-json.docx")]).toBe("olga");
+    expect(owners[path.join(docs, "olga-batch-sse.docx")]).toBe("olga");
+  });
+
+  it("passes a JSON tool result larger than the scan limit through whole, never repeating a part", async () => {
+    await grant({ needsCredential: false });
+    const pad = 9 * 1024 * 1024;
+    const res = await call("worddoc", TOKENS.olga, { ...whoami, params: { name: "whoami", arguments: { pad } } });
+    expect(res.status).toBe(200);
+    const body = JSON.parse(await res.text());
+    expect(body.id).toBe(7);
+    expect(body.result.content[0].text).toHaveLength("caller=undefined".length + pad);
   });
 
   it("is not served to staff at all while it is not granted", async () => {

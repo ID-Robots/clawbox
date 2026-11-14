@@ -18,7 +18,20 @@ const h = vi.hoisted(() => ({
   harness: "openclaw" as "openclaw" | "hermes",
   users: ["ivan", "maria"],
   sync: vi.fn(async () => true),
+  // Called as a save, its checks done, asks for the store's lock.
+  atStore: null as null | (() => void),
 }));
+
+vi.mock("@/lib/staff-mcp", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/staff-mcp")>();
+  return {
+    ...real,
+    updateStaffMcpStore: ((...args: Parameters<typeof real.updateStaffMcpStore>) => {
+      h.atStore?.();
+      return real.updateStaffMcpStore(...args);
+    }) as typeof real.updateStaffMcpStore,
+  };
+});
 
 vi.mock("@/lib/owner-session", () => ({ personSession: h.who }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: h.sameOrigin }));
@@ -68,6 +81,7 @@ beforeEach(() => {
   h.who.mockResolvedValue({ username: "owner", isOwner: true });
   h.sameOrigin.mockReturnValue(true);
   h.harness = "openclaw";
+  h.atStore = null;
   fs.rmSync(storePath, { force: true });
 });
 
@@ -271,10 +285,12 @@ describe("the grants", () => {
       h.harness = "hermes";
       const grantSave = post({ servers: { docs: {} } });
       await atLock;
-      // Meanwhile, back on OpenClaw, a credential save reads the OLD OpenClaw grant and queues.
+      // Meanwhile, back on OpenClaw, a credential save reads the OLD OpenClaw grant,
+      // passes its first checks and queues for the lock; only then is the grant save let go.
       h.harness = "openclaw";
+      const queued = new Promise<void>((r) => { h.atStore = r; });
       const credentialSave = post({ username: "ivan", server: "docs", credential: "ivan-secret-token-0009" });
-      await new Promise((r) => setTimeout(r, 50));
+      await queued;
       release();
       expect((await grantSave).status).toBe(200);
       const res = await credentialSave;
@@ -283,6 +299,44 @@ describe("the grants", () => {
       const stored = JSON.parse(fs.readFileSync(storePath, "utf-8"));
       expect(stored.servers.docs).toMatchObject({ harness: "hermes" });
       expect(stored.credentials).toEqual({});
+    } finally {
+      if (savedHome === undefined) delete process.env.HERMES_HOME;
+      else process.env.HERMES_HOME = savedHome;
+      fs.rmSync(hermesHome, { recursive: true, force: true });
+    }
+  });
+
+  it("never drops a grant the other runtime saved while this runtime's save waited (overlapping saves)", async () => {
+    const hermesHome = fs.mkdtempSync(path.join(os.tmpdir(), "staff-mcp-hermes-"));
+    const savedHome = process.env.HERMES_HOME;
+    process.env.HERMES_HOME = hermesHome;
+    fs.writeFileSync(path.join(hermesHome, "config.yaml"), "mcp_servers:\n  wiki:\n    url: https://wiki.example.com/mcp\n");
+    try {
+      expect((await post({ servers: { docs: {} } })).status).toBe(200); // the OpenClaw grant
+      const { listUsers } = await import("@/lib/clawbox-users");
+      const users = [{ username: "ivan", createdAt: "x", sv: "1" }, { username: "maria", createdAt: "x", sv: "1" }];
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      let reached!: () => void;
+      const atLock = new Promise<void>((r) => { reached = r; });
+      vi.mocked(listUsers)
+        .mockResolvedValueOnce(users as never) // the Hermes save, before the lock
+        .mockImplementationOnce(async () => { reached(); await gate; return users as never; }); // …and under it, held
+      // On Hermes, the owner grants `wiki`; the save holds the store's lock.
+      h.harness = "hermes";
+      const hermesSave = post({ servers: { wiki: {} } });
+      await atLock;
+      // Meanwhile on OpenClaw, a save of `docs` reads the store WITHOUT `wiki` and queues.
+      h.harness = "openclaw";
+      const queued = new Promise<void>((r) => { h.atStore = r; });
+      const openclawSave = post({ servers: { docs: { writeTools: true } } });
+      await queued;
+      release();
+      expect((await hermesSave).status).toBe(200);
+      expect((await openclawSave).status).toBe(200);
+      const stored = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      expect(stored.servers.wiki).toMatchObject({ harness: "hermes" });
+      expect(stored.servers.docs).toMatchObject({ harness: "openclaw", writeTools: true });
     } finally {
       if (savedHome === undefined) delete process.env.HERMES_HOME;
       else process.env.HERMES_HOME = savedHome;

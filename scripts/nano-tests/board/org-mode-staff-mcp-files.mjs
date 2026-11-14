@@ -422,7 +422,8 @@ async function main() {
     await api("POST", "/setup-api/settings/staff-mcp", OWNER_COOKIE, { servers: {} }).catch(() => undefined);
     removeServer();
     for (const file of written) fs.rmSync(file, { force: true });
-    fs.rmSync(OUTSIDE_DIR, { recursive: true, force: true });
+    // Only this run's files went above; the folder goes only when that left it empty.
+    try { fs.rmdirSync(OUTSIDE_DIR); } catch { /* other files remain, or it was never made */ }
     if (RUNTIME === "openclaw") {
       const left = Object.keys(openclawConfig().mcp?.servers || {}).filter((n) => n.startsWith("cbstaff-") || n === SERVER);
       check(left.length === 0, "the grant withdrawn, no relay entry and no test server is left", left.join(","));

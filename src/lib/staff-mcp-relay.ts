@@ -371,6 +371,12 @@ async function relayPost(req: Request, admission: Extract<Admission, { ok: true 
   const body = await readBounded(upstream.body, MAX_LIST_RESPONSE_BYTES);
   if (body === null) return refuse(502, "upstream_too_large", "The MCP server's tool list is too large to check.");
   const type = (upstream.headers.get("content-type") ?? "").toLowerCase();
+  // A batch that lists AND calls: the calls' files are recorded here too,
+  // before the gateway gets the answer.
+  if (recordOutputs) {
+    const strings = messagesOf(body, type).flatMap((m) => (isObject(m) && callIds.has(JSON.stringify(m.id)) && m.result !== undefined ? stringsIn(m.result) : []));
+    if (strings.length > 0) recordOutputs(strings);
+  }
   const filtered = type.includes("text/event-stream")
     ? filterSseBody(body, listIds, admission.filter, cache)
     : filterJsonBody(body, listIds, admission.filter, cache);
@@ -446,9 +452,17 @@ function recordingToolResults(body: ReadableStream<Uint8Array>, sse: boolean, ca
     transform(chunk, controller) {
       seen += chunk.byteLength;
       if (seen > MAX_TOOL_RESULT_SCAN_BYTES) {
-        if (pending) controller.enqueue(encoder.encode(pending));
+        // Past the scan limit everything passes unread. A JSON answer's earlier
+        // chunks went on as they came; an SSE one's unread tail goes on now,
+        // through the same decoder so a character split across chunks survives.
+        if (!sse) {
+          pending = "";
+          controller.enqueue(chunk);
+          return;
+        }
+        const text = pending + decoder.decode(chunk, { stream: true });
         pending = "";
-        controller.enqueue(chunk);
+        if (text) controller.enqueue(encoder.encode(text));
         return;
       }
       const text = decoder.decode(chunk, { stream: true });
@@ -468,7 +482,11 @@ function recordingToolResults(body: ReadableStream<Uint8Array>, sse: boolean, ca
       }
     },
     flush(controller) {
-      if (seen > MAX_TOOL_RESULT_SCAN_BYTES) return;
+      if (seen > MAX_TOOL_RESULT_SCAN_BYTES) {
+        const rest = sse ? decoder.decode() : "";
+        if (rest) controller.enqueue(encoder.encode(rest));
+        return;
+      }
       pending += decoder.decode();
       if (!sse) {
         const strings = callResultStrings(pending, callIds);

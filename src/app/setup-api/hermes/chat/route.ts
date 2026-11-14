@@ -64,7 +64,7 @@ import { personSession } from "@/lib/owner-session";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
 import { chatMediaRoot, resolveInMediaRoot } from "@/lib/harness/media-root";
 import { hermesDocumentPrompt } from "@/lib/harness/hermes-document-prompt";
-import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
+import { boundedFiles, mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { splitEmailRefs } from "@/lib/chat-email-refs";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
 import {
@@ -528,22 +528,36 @@ async function settleTurn(
   // tool wrote — named on a `MEDIA:` line of the reply is theirs too
   // (TASK-2516): only a fresh regular file in the media tree or their own
   // profile folder, never through a link, never one already someone else's.
+  // A picture of theirs that the reclaiming above took out of the caption
+  // (an image a tool wrote into their own folder), said again once recorded.
+  const claimedImages: string[] = [];
   if (memberTurn && chatUser) {
     // Their own profile folder only: a file in the shared media tree is made
     // theirs by the relay that ran their tool call, never by a reply naming
-    // it (scripts/chat-reply-media.js). Synchronous and never throws.
+    // it (scripts/chat-reply-media.js). Synchronous and never throws. Read
+    // from the reply AS WRITTEN: the caption has lost its image lines to the
+    // reclaiming above, and a member's image is never adopted.
     const { recorded, refused } = recordMemberReplyMedia({
       username: chatUser,
-      text: caption,
+      text: spoken,
       ownFolder: staffHermesProfilePaths(chatUser)?.folder ?? null,
       since: turnStartedAt,
     });
     if (recorded.length > 0 || refused.length > 0) {
       console.log(`[hermes chat] a member's reply named files: ${recorded.length} recorded as theirs, ${refused.length} not (${[...new Set(refused.map((r) => r.reason))].join(", ") || "-"})`);
     }
+    // A card only for what was recorded: one not recorded would be a 404
+    // (src/app/setup-api/chat/media/route.ts serves a member only their own).
+    const mine = new Set(recorded);
+    for (const source of mentioned) {
+      // The recorder answers real paths (walked link-free below the folder's own real path).
+      const real = path.isAbsolute(source) ? await fsp.realpath(/* turbopackIgnore: true */ source).catch(() => null) : null;
+      if (real && mine.has(real) && !claimedImages.includes(real) && !drawn.includes(real)) claimedImages.push(real);
+    }
   }
   const answer = [
     caption,
+    ...claimedImages.map((file) => `MEDIA:${file}`),
     ...drawn.map((file) => `MEDIA:${file}`),
     ...(spokenClip ? [`MEDIA:${spokenClip}`] : []),
   ]
@@ -572,6 +586,8 @@ async function settleTurn(
     timestamp: Date.now(),
     ...(reply.images.length ? { media: reply.images } : {}),
     ...(reply.audio.length ? { audio: reply.audio } : {}),
+    // A document the reply named (a tool's .docx): its download card survives a refresh.
+    ...(reply.files.length ? { files: boundedFiles(reply.files) } : {}),
     // Persisted beside the answer, never inside it: replay has to be able to
     // collapse the monologue the same way the live turn did.
     ...(settledReasoning ? { reasoning: settledReasoning } : {}),

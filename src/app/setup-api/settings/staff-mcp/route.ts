@@ -208,12 +208,15 @@ export async function POST(req: Request) {
       // The grant is for the runtime it is made on, whatever the body says.
       next[name] = serverSetting(header, { ...fields, harness });
     }
-    // The other runtime's grants (a dual box switched) stay as they are.
-    for (const [name, setting] of Object.entries(current.servers)) {
-      if ((setting.harness ?? "openclaw") !== harness && !Object.hasOwn(next, name)) next[name] = setting;
-    }
     const named = [...new Set(Object.values(next).flatMap((setting) => setting.members ?? []))];
     change = async (store) => {
+      // The other runtime's grants (a dual box switched) stay as they are —
+      // read from the store UNDER its lock, so a save made there while this
+      // one waited is never undone by this runtime's list.
+      const servers: StaffMcpStore["servers"] = { ...next };
+      for (const [name, setting] of Object.entries(store.servers)) {
+        if ((setting.harness ?? "openclaw") !== harness && !Object.hasOwn(servers, name)) servers[name] = setting;
+      }
       // Checked again UNDER the store's lock, which removal's and creation's
       // clean-ups take too: a grant naming a member is never written for an
       // account removed (or replaced by a new one of the same name) meanwhile.
@@ -227,15 +230,15 @@ export async function POST(req: Request) {
       // A withdrawn grant takes its credentials with it, and so does a grant
       // that moved to the other runtime: a credential set for one server is
       // never sent to another that happens to share its name.
-      const kept = (server: string) => Object.hasOwn(next, server)
+      const kept = (server: string) => Object.hasOwn(servers, server)
         && Object.hasOwn(store.servers, server)
-        && (store.servers[server].harness ?? "openclaw") === next[server].harness;
+        && (store.servers[server].harness ?? "openclaw") === servers[server].harness;
       const credentials: StaffMcpStore["credentials"] = {};
       for (const [user, byServer] of Object.entries(store.credentials)) {
         const mine = Object.fromEntries(Object.entries(byServer).filter(([server]) => kept(server)));
         if (Object.keys(mine).length > 0) credentials[user] = mine;
       }
-      return { ...store, servers: next, credentials };
+      return { ...store, servers, credentials };
     };
   } else if (body.username !== undefined || body.server !== undefined) {
     const { username, server } = body;

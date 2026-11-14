@@ -205,6 +205,18 @@ describe("HermesAdapter", () => {
     expect(result.media?.length).toBe(1);
     // The whole reply landed, so nothing else is coming.
     expect(result.acknowledgedOnly).toBeFalsy();
+    expect(result.files).toBeUndefined();
+  });
+
+  it("hands a document the reply named on as its download card (TASK-2516)", async () => {
+    const { adapter } = makeAdapter(
+      ok({ text: "Your report.\nMEDIA:/home/clawbox/clawbox/data/chat-media/word-docs/report.docx" }),
+    );
+    const result = await adapter.sendTurn({ text: "write it", attachments: [], idempotencyKey: "a" });
+    expect(result.text).toBe("Your report.");
+    expect(result.media).toEqual([]);
+    expect(result.files).toHaveLength(1);
+    expect(result.files?.[0]).toContain("report.docx");
   });
 
   it("turns a Stop into an aborted error, not a red banner", async () => {

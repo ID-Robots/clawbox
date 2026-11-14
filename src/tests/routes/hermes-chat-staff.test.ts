@@ -1,4 +1,8 @@
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mediaUrl } from "@/lib/chat-media";
 
 /**
  * A member of staff's Hermes turn on an organisation box (TASK-2444,
@@ -18,6 +22,9 @@ const memberMock = vi.hoisted(() => vi.fn());
 const profileMock = vi.hoisted(() => vi.fn());
 /** Whose state.db each turn's reads were scoped to (undefined: the box's own). */
 const stateHomes = vi.hoisted(() => [] as Array<string | null | undefined>);
+/** The organisation switch as `readOrgMode` reads it, and the member's own profile folder. */
+const org = vi.hoisted(() => ({ on: false, folder: "/h/.hermes/profiles/clawbox-staff-maria/workspace" }));
+const recordReplyMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-dashboard-turn")>()),
@@ -53,9 +60,18 @@ vi.mock("@/lib/hermes-model-options", () => ({
 vi.mock("@/lib/org-mode-server", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/org-mode-server")>()),
   orgMemberStrictOf: memberMock,
+  readOrgMode: vi.fn(async () => org.on),
+}));
+vi.mock("@/lib/chat-reply-media", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/chat-reply-media")>()),
+  recordMemberReplyMedia: recordReplyMock,
 }));
 const guardLoadedMock = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/hermes-staff-profile", () => ({ ensureStaffHermesProfile: profileMock, staffGuardLoaded: guardLoadedMock }));
+vi.mock("@/lib/hermes-staff-profile", () => ({
+  ensureStaffHermesProfile: profileMock,
+  staffGuardLoaded: guardLoadedMock,
+  staffHermesProfilePaths: vi.fn(() => ({ folder: org.folder })),
+}));
 vi.mock("@/lib/chat-scope-server", () => ({
   transcriptKeyFor: vi.fn(async () => ({ ok: true, key: "desktop-user-maria", principal: { username: "maria", isOwner: false } })),
   hermesSessionFor: vi.fn((_who: unknown, id: string) => id),
@@ -98,6 +114,9 @@ beforeEach(() => {
   memberMock.mockResolvedValue({ username: "maria" });
   profileMock.mockResolvedValue(STAFF);
   stateHomes.length = 0;
+  org.on = false;
+  recordReplyMock.mockReset();
+  recordReplyMock.mockReturnValue({ recorded: [], refused: [] });
   guardLoadedMock.mockReset();
   guardLoadedMock.mockResolvedValue(true);
   openTurnMock.mockResolvedValue(fakeTurn());
@@ -189,6 +208,41 @@ describe("a member of staff's turn", () => {
     expect((await res.json()).code).toBe("staff_profile_unavailable");
     expect(openTurnMock).not.toHaveBeenCalled();
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("a member of staff's reply naming files of their own (TASK-2516)", () => {
+  it("is recorded as written; a picture keeps its card only once recorded, and a document's card is in the transcript too", async () => {
+    const own = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "staff-own-"));
+    try {
+      const chart = path.join(own, "chart.png");
+      const stale = path.join(own, "old.png");
+      const doc = path.join(own, "report.docx");
+      for (const file of [chart, stale, doc]) fs.writeFileSync(file, "x");
+      org.on = true;
+      org.folder = own;
+      // The recorder's verdict: the chart and the document are this turn's, the old picture is not.
+      recordReplyMock.mockReturnValue({ recorded: [chart, doc], refused: [{ path: stale, reason: "not_this_turn" }] });
+      openTurnMock.mockResolvedValue({
+        ...fakeTurn(),
+        async run() {
+          return { text: `Here they are.\nMEDIA:${chart}\nMEDIA:${stale}\nMEDIA:${doc}`, reasoning: "", status: "complete" };
+        },
+      });
+      const res = await POST(post({ message: "Draw the chart and write the report." }));
+      expect(res.status).toBe(200);
+      // Judged on the reply AS WRITTEN — its picture lines too, which the caption loses.
+      expect(recordReplyMock).toHaveBeenCalledWith(expect.objectContaining({ username: "maria", ownFolder: own, text: expect.stringContaining(`MEDIA:${chart}`) }));
+      const { text } = await res.json();
+      expect(text).toContain(`MEDIA:${chart}`);
+      expect(text).toContain(`MEDIA:${doc}`);
+      expect(text).not.toContain(stale); // not recorded: no card that would be a 404
+      const stored = appendMock.mock.calls.map((call) => call[0]).find((r) => r.role === "assistant");
+      expect(stored.media).toEqual([mediaUrl(chart)]);
+      expect(stored.files).toEqual([mediaUrl(doc)]);
+    } finally {
+      fs.rmSync(own, { recursive: true, force: true });
+    }
   });
 });
 
