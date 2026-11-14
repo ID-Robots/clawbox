@@ -291,6 +291,46 @@ describe("Settings → Linked ClawBoxes", () => {
     expect(within(screen.getByTestId("linked-boxes-row-4")).getByText("Mac")).toBeInTheDocument();
   });
 
+  it("offers no Try again while a save is on its way, and draws the save's list after it", async () => {
+    server.boxes = [{ name: "Laptop", url: "https://laptop.example.com/" }];
+    const viaServer = globalThis.fetch;
+    let step = 0;
+    let finishPut: () => void = () => {};
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      const isGet = url === LINKED_BOXES_URL && (!init || !init.method || init.method === "GET");
+      const isPut = url === LINKED_BOXES_URL && init?.method === "PUT";
+      if (isPut && step === 1) {
+        step = 2;
+        server.boxes = (JSON.parse(String(init!.body)) as { boxes: Box[] }).boxes;
+        return new Response("not json", { status: 200 });
+      }
+      if (isGet && step === 2) {
+        step = 3;
+        return new Response("{}", { status: 500 });
+      }
+      if (isPut && step === 3) {
+        // The next save waits for the box.
+        step = 4;
+        const boxes = (JSON.parse(String(init!.body)) as { boxes: Box[] }).boxes;
+        await new Promise<void>((r) => { finishPut = r; });
+        server.boxes = boxes;
+        return new Response(JSON.stringify({ self: { name: "mainbox" }, boxes, max: 8 }), { status: 200 });
+      }
+      return (viaServer as (u: string, i?: RequestInit) => Promise<Response>)(url, init);
+    }) as unknown as typeof fetch;
+    render(<LinkedBoxesPanel />);
+    await screen.findByTestId("linked-boxes-row-2");
+    step = 1;
+    await addBox("NAS", "http://nas.example.net");
+    await screen.findByTestId("linked-boxes-retry");
+    await addBox("Mac", "https://mac.example.com");
+    await waitFor(() => expect(step).toBe(4));
+    expect(screen.getByTestId("linked-boxes-retry")).toBeDisabled();
+    finishPut();
+    await waitFor(() => expect(within(screen.getByTestId("linked-boxes-row-4")).getByText("Mac")).toBeInTheDocument());
+    expect(screen.getByTestId("linked-boxes-retry")).not.toBeDisabled();
+  });
+
   it("takes no typing while a save is on its way", async () => {
     let finish: (r: Response) => void = () => {};
     const ok = globalThis.fetch;
