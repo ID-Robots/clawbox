@@ -163,6 +163,8 @@ export interface GatewayDeps {
   chat: () => Promise<ChatConfig | null>;
   /** What core's store holds for Anthropic: the profiles, the stored order, the failures. */
   read: () => GatewayProviderAuthRead;
+  /** The same for any provider: the account a job the box gives back is bound to (bindCronsLocked). */
+  readProvider?: (provider: string) => GatewayProviderAuthRead;
   /** Core's writer: one `token` profile, the access token on stdin. `agent`: the `--agent` arguments (ChatConfig). */
   paste: (profileId: string, token: { access: string; expires: number | null }, agent: readonly string[]) => Promise<void>;
   /**
@@ -303,6 +305,7 @@ const defaultDeps: GatewayDeps = {
     }
   },
   read: () => readGatewayProviderAuth(PROVIDER),
+  readProvider: (provider) => readGatewayProviderAuth(provider),
   paste: async (profileId, token, agent) => {
     const args = ["paste-token", "--provider", PROVIDER, "--profile-id", profileId];
     // Core stores the end itself, so it stops offering the profile at the
@@ -325,7 +328,16 @@ const defaultDeps: GatewayDeps = {
     await logoutOpenclawAuthProfiles(PROVIDER, [profileId], agentIdOf(agent));
   },
   order: (profileIds, agent) => setOpenclawAuthOrder(PROVIDER, profileIds.length > 0 ? [...profileIds] : null, agentIdOf(agent)),
-  unsetConfigOrder: () => runOpenclawConfigUnset(`auth.order.${PROVIDER}`),
+  unsetConfigOrder: async () => {
+    try {
+      await runOpenclawConfigUnset(`auth.order.${PROVIDER}`);
+    } catch (err) {
+      // Already gone — core's logouts took its last entries with them (seen on
+      // a lab board): what was asked for is done.
+      if (/Config path not found/i.test(err instanceof Error ? err.message : String(err))) return;
+      throw err;
+    }
+  },
   setConfigOrder: (profileIds) => runOpenclawConfigSet([`auth.order.${PROVIDER}`, JSON.stringify([...profileIds]), "--strict-json"]),
   usage: (access) => fetchAnthropicUsage(access),
   // The in-process socket only: a gateway that is not there is skipped this
@@ -1463,6 +1475,20 @@ async function bindCronsLocked(): Promise<CronBindingResult | null> {
     if (poolIn && !lead) return null;
     if (!poolIn && Object.keys(await d.cronBindings.read().catch(() => ({}))).length === 0) return null;
     const target: CronBindingTarget | null = lead ? { profileId: lead.profileId, authorization: lead.authorization ?? lead.fingerprint } : null;
+    // Given back (the pool left): the account a job's model runs on now — the
+    // first profile core holds for that provider that is not the pool's (for
+    // Anthropic, the owner's own sign-in). The pool's profile it was bound to
+    // is gone, and core changes a job's account only on a `model@profile`.
+    const accountFor = (model: string): string | null => {
+      const slash = model.indexOf("/");
+      if (slash <= 0) return null;
+      const provider = model.slice(0, slash);
+      const read = provider === PROVIDER ? store : d.readProvider?.(provider);
+      if (!read || read.kind !== "present") return null;
+      const fit = (id: string) => !isPoolProfile(id) && read.profiles.some((p) => p.profileId === id && !p.fenced && p.fingerprint !== null
+        && !(p.type === "token" && p.expires !== null && p.expires <= now));
+      return (read.order ?? []).find(fit) ?? read.profiles.map((p) => p.profileId).find(fit) ?? null;
+    };
     return await bindCronsToTarget(
       { call: d.call, readRecords: d.cronBindings.read, writeRecords: d.cronBindings.write },
       {
@@ -1470,6 +1496,7 @@ async function bindCronsLocked(): Promise<CronBindingResult | null> {
         defaultModel: chat.model ?? null,
         isPoolProfile,
         onlyAdopted: !poolIn,
+        accountFor,
         defaultIsMain: chat.defaultIsMain !== false,
         refused: runtime().cronRefusals,
         heldProfiles: new Set(store.profiles.map((p) => p.profileId)),

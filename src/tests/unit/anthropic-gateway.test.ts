@@ -113,6 +113,8 @@ function fakeCore() {
     loseReplyOf: new Set<string | null>(),
     /** Runs before each gateway request: the owner acting meanwhile. */
     beforeCall: null as ((method: string, params: Record<string, unknown>) => void) | null,
+    /** Other providers' profiles core holds (`deepseek:default`, …): what a job given back can be bound to. */
+    otherProfiles: new Map<string, { provider: string; type: string; secret: string }>(),
   };
   offlineWindows = 0;
   gw._setGatewayDepsForTests({
@@ -129,6 +131,13 @@ function fakeCore() {
       core.configWrites.push([...ids]);
       core.configOrder = [...ids];
     },
+    readProvider: (provider) => ({
+      kind: "present",
+      profiles: [...core.otherProfiles].filter(([, p]) => p.provider === provider)
+        .map(([profileId, p]) => ({ profileId, type: p.type, fingerprint: fp(p.secret), refreshFingerprint: null, expires: null, fenced: false, fence: null, authorization: core.lifetimes.get(profileId) ?? null })),
+      order: null,
+      failures: {},
+    }),
     read: () => core.readable
       ? {
         kind: "present",
@@ -229,7 +238,7 @@ function cronUpdate(core: ReturnType<typeof fakeCore>, params: Record<string, un
     const at = model.lastIndexOf("@");
     if (at > 0) {
       const profileId = model.slice(at + 1);
-      if (!core.profiles.has(profileId)) throw new Error("The selected automation account is unavailable.");
+      if (!core.profiles.has(profileId) && !core.otherProfiles.has(profileId)) throw new Error("The selected automation account is unavailable.");
       if (!core.lifetimes.has(profileId)) core.lifetimes.set(profileId, crypto.randomUUID());
       job.binding = { profileId, lifetime: core.lifetimes.get(profileId) as string };
     }
@@ -2232,6 +2241,28 @@ describe("TASK-2533 second review pass", () => {
     expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
     // Nothing owed: the keeper's next pass is not a failure, and earns no back-off.
     expect(await gw.keepGatewayMirror()).not.toBe("failed");
+  });
+
+  it("gives an adopted job back onto the account its model runs on now — the owner's sign-in for its own Claude model, the new default's account for a model-less one — not the pool's profile that left (seen on a lab board)", async () => {
+    const core = fakeCore();
+    core.otherProfiles.set("deepseek:default", { provider: "deepseek", type: "api_key", secret: "sk-deepseek-key" });
+    await twoClaudeAccounts();
+    addCron(core, { id: "inherits" });
+    addCron(core, { id: "own-model", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-sonnet-5-5" } });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "inherits")).toMatch(/^anthropic:clawbox-/);
+
+    // The owner moves the chat to another provider: the pool leaves the gateway.
+    core.chatOnClaude = false;
+    core.chatModel = "deepseek/deepseek-v4-flash";
+    await gw.syncGatewayNow();
+
+    const inherits = core.crons.get("inherits") as FakeCron;
+    const own = core.crons.get("own-model") as FakeCron;
+    expect(inherits.payload.model).toBeUndefined();
+    expect(own.payload.model).toBe("anthropic/claude-sonnet-5-5");
+    expect(runCron(core, "inherits")).toBe("deepseek:default");
+    expect(runCron(core, "own-model")).toBe("anthropic:default");
   });
 
   it("the minute's back-off holds back only what it already tried: an account limited since is out at once", async () => {

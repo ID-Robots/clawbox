@@ -211,6 +211,11 @@ export interface CronPlanInput {
   defaultIsMain?: boolean;
   /** Jobs not to ask about this time (their update was refused lately). */
   skip?: ReadonlySet<string>;
+  /**
+   * Given back (`target` null): the profile a job's model (`provider/model`)
+   * runs on now that the pool's is gone, or null when core holds none.
+   */
+  accountFor?: (model: string) => string | null;
   now: number;
 }
 
@@ -246,13 +251,21 @@ export function planCronBindings(input: CronPlanInput): CronBindingPlan[] {
     const inherits = job.model === null || (ours && record.inherits) || pinnedDefault;
     if (target === null) {
       if (!ours) continue;
-      // Given back: no model left on a model-less job, the model it had on any other.
-      const back = record.inherits ? null : (record.original ?? null);
-      if (job.model === back) {
-        plans.push({ job, steps: [], inherits: record.inherits, original: back, retry: false, release: true });
-      } else {
-        plans.push({ job, steps: [back], inherits: record.inherits, original: back, retry: false, release: true });
-      }
+      // Given back: no model left on a model-less job, the model it had on any
+      // other (never a pin on one of the pool's profiles, which are gone).
+      const kept = record.inherits ? null : (record.original ?? null);
+      const keptRef = kept ? splitModelRef(kept) : null;
+      const back = keptRef && keptRef.profileId !== null && isPoolProfile(keptRef.profileId) ? keptRef.base : kept;
+      // ...and the account its model runs on now: the pool's profile its
+      // binding names went with the pool, and a plain model change keeps the
+      // binding ("changing … the job's plain model selection does not switch
+      // the job's account"), so it would stop on "unavailable". A
+      // `model@profile` first moves it (core's way), then its own model back.
+      const runsOn = back ?? (record.inherits ? defaultModel : null);
+      const base = runsOn ? splitModelRef(runsOn).base : null;
+      const account = base && input.accountFor ? input.accountFor(base) : null;
+      const steps: (string | null)[] = account ? [`${base}@${account}`, back] : job.model === back ? [] : [back];
+      plans.push({ job, steps, inherits: record.inherits, original: back, retry: false, release: true });
       continue;
     }
     let adopt: string;
@@ -447,6 +460,11 @@ export async function bindCronsToTarget(
     if (landed === plan.steps.length) refusedAt.delete(job.id);
     else result.owed += 1;
     if (plan.release) {
+      if (landed > 0 && landed < plan.steps.length && records[job.id]) {
+        // Part of it landed: still the box's (its model is the one left), and planned again.
+        records[job.id] = { ...records[job.id], model, revision };
+        dirty = true;
+      }
       if (landed === plan.steps.length) {
         delete records[job.id];
         dirty = true;
