@@ -520,6 +520,11 @@ async function submitEdit(ev: Event): Promise<void> {
       void loadEntries();
     } else if ((err as ApiError).renameUnconfirmed) {
       if (editSession === session) unconfirmedEditSession = session;
+      // The detail shown (and its Edit button) is the entry as it was: gone,
+      // so the entry can only be edited again once picked from the new list.
+      selected = null;
+      entryRequest++;
+      resetDetail();
       void loadEntries();
     }
   }
@@ -785,6 +790,9 @@ async function submitCard(ev: Event): Promise<void> {
       void loadCards();
     } else if ((err as ApiError).renameUnconfirmed) {
       if (cardEditSession === session) unconfirmedCardSession = session;
+      selectedCard = null;
+      cardRequest++;
+      resetCardDetail();
       void loadCards();
     }
   }

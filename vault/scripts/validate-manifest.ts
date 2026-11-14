@@ -11,7 +11,25 @@ const dir = resolve(process.argv[2] ?? join(import.meta.dir, "../extension-build
 const errors: string[] = [];
 const fail = (msg: string) => errors.push(msg);
 
-let manifest: Record<string, any>;
+/** The parts of manifest.json this check reads; anything else is ignored. */
+interface Manifest {
+  manifest_version?: number;
+  name?: string;
+  short_name?: string;
+  version?: string;
+  description?: string;
+  permissions?: string[];
+  host_permissions?: string[];
+  content_scripts?: { matches?: string[]; js?: string[] }[];
+  content_security_policy?: { extension_pages?: string };
+  background?: { service_worker?: string; scripts?: unknown; page?: unknown };
+  action?: { default_popup?: string; default_icon?: Record<string, string> };
+  icons?: Record<string, string>;
+  externally_connectable?: unknown;
+  web_accessible_resources?: unknown[];
+}
+
+let manifest: Manifest;
 try {
   manifest = JSON.parse(readFileSync(join(dir, "manifest.json"), "utf8"));
 } catch (err) {
@@ -61,7 +79,7 @@ for (const page of ["popup.html", "offscreen.html", "confirm.html"]) {
 // Permissions: only what the extension uses.
 const ALLOWED = new Set(["storage", "scripting", "alarms", "offscreen", "clipboardWrite", "tabs"]);
 for (const p of manifest.permissions ?? []) if (!ALLOWED.has(p)) fail(`unexpected permission: ${p}`);
-for (const h of [...(manifest.host_permissions ?? []), ...(manifest.content_scripts ?? []).flatMap((c: any) => c.matches)]) {
+for (const h of [...(manifest.host_permissions ?? []), ...(manifest.content_scripts ?? []).flatMap((c) => c.matches ?? [])]) {
   if (h === "<all_urls>" || /^\*:\/\//.test(h) || /^http:\/\/\*/.test(h)) fail(`host pattern too broad: ${h}`);
   if (!/^(https:\/\/\*\/\*|http:\/\/(localhost|127\.0\.0\.1)\/\*)$/.test(h)) fail(`unexpected host pattern: ${h}`);
 }

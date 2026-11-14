@@ -55,6 +55,8 @@ beforeAll(async () => {
   win = dom.window as unknown as Window & typeof globalThis;
   doc = win.document;
   const g = globalThis as Record<string, unknown>;
+  // What these were before anything below touches them.
+  for (const key of ["window", "document", "navigator", "fetch"]) saved.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
   for (const key of Object.getOwnPropertyNames(win)) {
     if (!(key in globalThis)) {
       try {
@@ -65,7 +67,6 @@ beforeAll(async () => {
       }
     }
   }
-  for (const key of ["window", "document", "navigator", "fetch"]) saved.set(key, Object.getOwnPropertyDescriptor(globalThis, key));
   Object.assign(g, { window: win, document: doc, navigator: win.navigator });
   const dialog = (win as unknown as { HTMLDialogElement: { prototype: { showModal?: () => void; close?: () => void; open: boolean } } }).HTMLDialogElement.prototype;
   dialog.showModal ??= function (this: { open: boolean }) {
@@ -99,7 +100,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   const g = globalThis as Record<string, unknown>;
-  for (const key of added) delete g[key];
+  for (const key of added) if (!saved.has(key)) delete g[key];
   for (const [key, desc] of saved) {
     if (desc) Object.defineProperty(globalThis, key, desc);
     else delete g[key];
@@ -117,6 +118,10 @@ describe("a renamed save that failed", () => {
     await save("b.example.com/ops");
     expect(posts()).toHaveLength(1);
     expect($("edit-error").textContent).toContain("could not be confirmed");
+    // The detail it was opened from (with its Edit button) is gone: the entry
+    // is edited again only once picked from the reloaded list.
+    expect(Array.from($("detail").querySelectorAll("button")).some((b) => b.textContent === "Edit")).toBe(false);
+    expect(doc.querySelector(".entry-item.selected")).toBeNull();
     // Opened again from the list (which reloaded it), the entry can be saved.
     saveAnswer = null;
     await openEditor();

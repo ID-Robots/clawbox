@@ -153,7 +153,9 @@ describe("metadata only", () => {
   test("the card cache holds no number and no CVV", async () => {
     const cache = (v.cards as unknown as { cache: Map<string, unknown> }).cache;
     expect(cache.size).toBeGreaterThan(0);
-    const snapshot = JSON.stringify([...cache.entries()]);
+    // Every field but the file time, a 13-digit number in which a 3-digit CVV
+    // can turn up by chance.
+    const snapshot = JSON.stringify([...cache.entries()].map(([name, item]) => [name, { ...(item as object), mtimeMs: 0 }]));
     for (const s of [NUMBER, AMEX, CVV, AMEX_CVV]) expect(snapshot.includes(s)).toBe(false);
   });
 
