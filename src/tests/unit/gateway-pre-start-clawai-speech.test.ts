@@ -1150,29 +1150,32 @@ describe.skipIf(!hasPython3)("the cloud voice under the local-only AI lock", () 
     expect(JSON.parse(readFileSync(cfgPath, "utf-8"))).toEqual({ messages: {}, written: true });
   });
 
-  it("fails closed when the lock withdrew only ClawBox's own voice and the config write fails", () => {
-    // The case the hold pass alone missed: the stamped `openai` voice is
-    // withdrawn by the arm before `_clawbox_tts_lock_pass`, the box's own voice
-    // is already selected and nothing else is cloud, so the pass finds no move.
-    // The real cloud-voice block runs, then the real write block against a
-    // directory that cannot take the temp file.
+  /**
+   * A whole gateway start, as far as speech goes: the real cloud-voice block
+   * (managed-voice arm, withdrawal and hold pass), then the real gateway config
+   * write, over a config in a directory that cannot take the temp file — the
+   * config write FAILS. `blockHeld` makes the held-providers file unwritable
+   * too, so a hold has to fall back to holding in place: both writes fail.
+   */
+  function startWithFailingWrite(cfg: Config, opts: { lock: boolean; routeIsOurs?: boolean; blockHeld?: boolean }) {
     const writeBlock = slice("if changed:\n    # Atomic write", "    # It changes nothing in the config, so it needs no write to land first.");
-    const local = { command: "/home/clawbox/clawbox/scripts/openclaw/clawbox-tts.sh", outputFormat: "wav" };
-    const armed = migrate({ messages: { tts: { provider: "tts-local-cli", providers: { "tts-local-cli": local } } } });
-    expect(speech(armed.cfg)).toMatchObject({ baseUrl: PROXY, ...MANAGED });
     const ro = path.join(dir, "ro");
-    mkdirSync(ro);
+    mkdirSync(ro, { recursive: true });
     const cfgPath = path.join(ro, "openclaw.json");
-    writeFileSync(cfgPath, JSON.stringify(armed.cfg));
+    chmodSync(ro, 0o700);
+    writeFileSync(cfgPath, JSON.stringify(cfg));
     const store = path.join(dir, "device-store.json");
-    const run = (lock: boolean) => {
-      writeFileSync(store, JSON.stringify({ clawai_tier: MAX_DEVICE_TIER, ai_cloud_lock: lock }));
-      return spawnSync("python3", ["-c", [
+    writeFileSync(store, JSON.stringify({ clawai_tier: MAX_DEVICE_TIER, ai_cloud_lock: opts.lock }));
+    const heldFile = path.join(dir, ".tts-local-only-held.json");
+    if (opts.blockHeld) mkdirSync(heldFile + ".tmp", { recursive: true });
+    chmodSync(ro, 0o500);
+    try {
+      const run = spawnSync("python3", ["-c", [
         "import json, os, sys, tempfile",
         `cfg_path = ${JSON.stringify(cfgPath)}`,
         "cfg = json.load(open(cfg_path))",
         "changed = False",
-        "_clawai_openai_route_is_ours = True",
+        `_clawai_openai_route_is_ours = ${opts.routeIsOurs === false ? "False" : "True"}`,
         `_clawai_proxy_base_url = ${JSON.stringify(PROXY)}`,
         `_clawai_token = ${JSON.stringify(TOKEN)}`,
         `deepseek_provider = {"baseUrl": ${JSON.stringify(PROXY)}}`,
@@ -1183,31 +1186,73 @@ describe.skipIf(!hasPython3)("the cloud voice under the local-only AI lock", () 
         "def _record_memory_rebuild(_x): pass",
         "def _record_keyword_only_rebuild(): pass",
         "_memory_index_changes = None",
-        "print('HELD-NOTHING' if not os.path.exists(os.path.join(os.path.dirname(os.environ['CLAWBOX_DEVICE_STORE']), '.tts-local-only-held.json')) else 'HELD')",
         writeBlock,
         "print('STARTS')",
       ].join("\n")], { encoding: "utf-8", env: { ...process.env, CLAWBOX_DEVICE_STORE: store } });
-    };
-    chmodSync(ro, 0o500);
-    try {
-      const locked = run(true);
-      expect(locked.stdout).toMatch(/Removed the ClawBox AI cloud voice: local-only AI is on/);
-      // The hold pass had nothing to move: no held file, no in-place hold.
-      expect(locked.stdout).toContain("HELD-NOTHING");
-      expect(locked.stdout).not.toMatch(/held aside|held in place/);
-      expect(locked.status).toBe(1);
-      expect(locked.stdout).not.toContain("STARTS");
-      expect(locked.stderr).toMatch(/not started on the old config/);
-      // The config on disk is the cloud one, untouched.
-      expect(speech(JSON.parse(readFileSync(cfgPath, "utf-8")) as Config)).toMatchObject({ baseUrl: PROXY, ...MANAGED });
-
-      // Unlocked, nothing is withdrawn and the start carries on as before.
-      const unlocked = run(false);
-      expect(unlocked.status).toBe(0);
-      expect(unlocked.stdout).toContain("STARTS");
+      return { ...run, onDisk: JSON.parse(readFileSync(cfgPath, "utf-8")) as Config, heldFileWritten: existsSync(heldFile) };
     } finally {
       chmodSync(ro, 0o700);
     }
+  }
+
+  it("fails closed when the lock withdrew only ClawBox's own voice and the config write fails", () => {
+    // The case the hold pass alone missed: the stamped `openai` voice is
+    // withdrawn by the arm before `_clawbox_tts_lock_pass`, the box's own voice
+    // is already selected and nothing else is cloud, so the pass finds no move.
+    const local = { command: "/home/clawbox/clawbox/scripts/openclaw/clawbox-tts.sh", outputFormat: "wav" };
+    const armed = migrate({ messages: { tts: { provider: "tts-local-cli", providers: { "tts-local-cli": local } } } });
+    expect(speech(armed.cfg)).toMatchObject({ baseUrl: PROXY, ...MANAGED });
+
+    const locked = startWithFailingWrite(armed.cfg, { lock: true });
+    expect(locked.stdout).toMatch(/Removed the ClawBox AI cloud voice: local-only AI is on/);
+    // The hold pass had nothing to move: no held file, no in-place hold.
+    expect(locked.heldFileWritten).toBe(false);
+    expect(locked.stdout).not.toMatch(/held aside|held in place/);
+    expect(locked.status).toBe(1);
+    expect(locked.stdout).not.toContain("STARTS");
+    expect(locked.stderr).toMatch(/not started on the old config/);
+    // The config on disk is the cloud one, untouched.
+    expect(speech(locked.onDisk)).toMatchObject({ baseUrl: PROXY, ...MANAGED });
+
+    // Unlocked, nothing is withdrawn and the start carries on as before.
+    const unlocked = startWithFailingWrite(armed.cfg, { lock: false });
+    expect(unlocked.status).toBe(0);
+    expect(unlocked.stdout).toContain("STARTS");
+  });
+
+  it("fails closed when BOTH the held-providers file and the config cannot be written", () => {
+    // The combined failure in one start: the lock withdraws ClawBox's own voice,
+    // the owner's own cloud voices cannot go to the held file (its temp path is
+    // taken) so they are held in place, and then the config that carries that
+    // in-place hold cannot be written either.
+    const own = {
+      messages: {
+        tts: {
+          provider: "elevenlabs",
+          providers: {
+            "tts-local-cli": { command: "/x" },
+            elevenlabs: { apiKey: "el-own" },
+            microsoft: { enabled: true },
+            openai: { baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED },
+          },
+        },
+      },
+    };
+    const locked = startWithFailingWrite(own, { lock: true, blockHeld: true });
+    expect(locked.stdout).toMatch(/Removed the ClawBox AI cloud voice: local-only AI is on/);
+    expect(locked.stdout).toMatch(/held speech providers file could not be written; the cloud voices are held in place/);
+    expect(locked.heldFileWritten).toBe(false);
+    expect(locked.status).toBe(1);
+    expect(locked.stdout).not.toContain("STARTS");
+    expect(locked.stderr).toMatch(/not started on the old config/);
+    // Nothing reached the disk: the old config, every cloud voice in it, as it was.
+    expect(locked.onDisk).toEqual(own);
+
+    // The same two failures with the lock off: no hold, no withdrawal, and the
+    // start carries on over the config already on disk, as it always has.
+    const unlocked = startWithFailingWrite(own, { lock: false, blockHeld: true });
+    expect(unlocked.status).toBe(0);
+    expect(unlocked.stdout).toContain("STARTS");
   });
 
   it("marks the start as needing its write when the lock withdrew ClawBox's own voice, with nothing left to hold", () => {
