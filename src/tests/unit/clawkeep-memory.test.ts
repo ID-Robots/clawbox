@@ -750,6 +750,16 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     ["a hex run longer than 64", `refused ${"5e".repeat(32)}a`, `${"5e".repeat(32)}a`],
     ["a loopback address and port", "connect ECONNREFUSED 127.0.0.1:8081", "127.0.0.1:8081"],
     ["the word after an ordinary Basic, which is taken", "HTTP Basic authentication required", "HTTP Basic [redacted] required"],
+    ["a password holding a quote", 'connect owner:pa"ss@192.0.2.46 refused', 'owner:pa"ss@'],
+    ["a password holding a comma", "connect owner:pa,ss@192.0.2.46 refused", "owner:pa,ss@"],
+    ["a password holding a brace", "connect owner:pa}ss@192.0.2.46 refused", "owner:pa}ss@"],
+    ["the port of an address that is not loopback", "connect ECONNREFUSED 198.51.100.7:8081", "[redacted]:8081"],
+    ["a host without a scheme under a TLD the sanitizer does not list", "refused by embed.vendor.invalid", "embed.vendor.invalid"],
+    ["a user and password whose @ ends the text", "invalid proxy owner:placeholderpw@", "owner:placeholderpw@"],
+    ["a user and password whose @ is followed by a space", "invalid proxy owner:placeholderpw@ host", "owner:placeholderpw@ host"],
+    ["a user and password whose @ is followed by a hyphen", "invalid proxy owner:placeholderpw@-host", "owner:placeholderpw@-host"],
+    ["a user and password whose @ is followed by a percent sign", "invalid proxy owner:placeholderpw@%68ost", "owner:placeholderpw@%68ost"],
+    ["an empty user", "connect :placeholderpw@192.0.2.47 refused", ":placeholderpw@"],
   ])("leaves what its doc says it leaves: %s", async (_case, sentence, kept) => {
     expect(await loggedReason(sentence)).toContain(kept);
   });
@@ -764,6 +774,11 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     expect(cut).not.toBe("");
     expect(cut.length).toBeLessThanOrEqual(200);
     expect(cut).not.toContain("claw_");
+    // The cut itself, shown by content: past 1,000 characters a word is gone even
+    // though the URL before it shrinks to a placeholder that leaves room for it.
+    const past = await loggedReason(`https://x/${"a".repeat(995)} MARKER`);
+    expect(past).toContain("[endpoint]");
+    expect(past).not.toContain("MARKER");
   });
 
   it("logs the not-ok again after a recovery, and for another embedder setting that fails the same way", async () => {

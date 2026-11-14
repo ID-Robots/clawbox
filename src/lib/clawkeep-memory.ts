@@ -1617,22 +1617,29 @@ function coreEmbedderFailure(raw: unknown, agentId: string): string {
  * nothing past 1,000 characters can reach the 200 that are kept.
  *
  * Taken out, in order: every `scheme://` run (an endpoint goes whole, user and
- * password with it); paths under the usual roots; the word after `Basic` (6 or
- * more characters, also after an ordinary "Basic"); `user:password@` written
- * without a scheme, when neither half holds whitespace, `/`, `@`, a quote, a
- * comma or a brace and the `@` is followed by a letter, a digit, `_` or `[`
- * (whatever comes after the host: a doubt is redacted) — which also takes the
- * `name:tag@` of a model digest such as `qwen3-embedding:0.6b@sha256:…`; a run
- * of exactly 64 hex digits standing alone. Then `sanitizeText`: the credential
- * shapes and named values it knows, e-mail addresses, IP addresses other than
- * loopback, home paths, query strings, and host names under the TLDs it lists.
+ * password with it); paths under the usual roots; the word after `Basic`, in
+ * any case (6 or more characters, also after an ordinary "Basic");
+ * `user:password@` written without a scheme, when neither half holds
+ * whitespace, `/`, `@`, a quote, a comma or a brace and the `@` is followed by
+ * a letter, a digit, `_` or `[` (whatever comes after the host: a doubt is
+ * redacted) — which also takes the `name:tag@` of a model digest such as
+ * `qwen3-embedding:0.6b@sha256:…`; a run of exactly 64 hex digits standing
+ * alone. Then `sanitizeText`: the credential shapes and named values it knows,
+ * e-mail addresses, IP addresses other than loopback, home paths, query
+ * strings, and host names under the TLDs it lists.
  *
- * What stays: a password holding whitespace, `/`, a quote, a comma or a brace
- * (the pair is not matched; the host after it may still go, as above); of a
- * password holding `@`, the part after its first `@` (unless a later rule takes
- * it with the host); a 64-hex run glued to a word character, or longer than 64;
- * a loopback `address:port`; the port of any other bare `address:port`; a host
- * written without a scheme under a TLD `sanitizeText` does not list.
+ * What stays includes, and is not limited to: any credential whose shape or
+ * name `sanitizeText` does not know; a password holding whitespace, `/`, a
+ * quote, a comma or a brace (the pair is not matched; the host after it may
+ * still go, as above); of a password holding `@`, the part after its first `@`
+ * (unless a later rule takes it with the host); a `user:password@` whose `@`
+ * ends the text or is followed by a space, `-` or `%`; an empty user
+ * (`:password@host`); a credential the 1,000-character cut goes through, whose
+ * broken shape no rule matches, so its head can be printed when earlier text
+ * shrank (a long URL becoming `[endpoint]`); a 64-hex run glued to a word
+ * character, or longer than 64; a loopback `address:port`; the port of any
+ * other bare `address:port`; a host written without a scheme under a TLD
+ * `sanitizeText` does not list.
  */
 function redactCoreSentence(said: string): string {
   const head = said.slice(0, 1_000);
