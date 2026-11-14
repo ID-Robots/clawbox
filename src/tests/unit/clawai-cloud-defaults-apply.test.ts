@@ -12,6 +12,15 @@ const store = new Map<string, unknown>();
 vi.mock("@/lib/config-store", () => ({
   get: async (key: string) => store.get(key),
   set: async (key: string, value: unknown) => { store.set(key, value); },
+  // The local-only AI lock (`cloudAiLockOn`) reads the store failing closed:
+  // a reader that is not there reads as LOCKED, so the mock answers it.
+  getKnown: async (key: string) => ({ value: store.get(key), known: true }),
+  setMany: async (entries: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(entries)) {
+      if (value === undefined) store.delete(key);
+      else store.set(key, value);
+    }
+  },
 }));
 
 const entitlement = vi.fn(async () => "pro" as string | null);
@@ -124,6 +133,18 @@ describe("applyClawaiCloudDefaults", () => {
     expect(switchToCloud).toHaveBeenCalledWith("https://clawbox.test/api/ai/embeddings", "claw_test");
     // Moving the index invalidates its fingerprint, so the rebuild goes with it.
     expect(startIndex).toHaveBeenCalledWith("full", "manual", { embedderChanged: true });
+  });
+
+  it("never moves transcription to the cloud under the local-only AI lock (TASK-2501), so no boot loops on it", async () => {
+    store.set("ai_cloud_lock", true);
+    try {
+      const applied = await applyClawaiCloudDefaults();
+      expect(applied.moved).not.toContain("stt");
+      expect(syncChannel).not.toHaveBeenCalled();
+      expect(store.get("stt_primary")).toBeUndefined();
+    } finally {
+      store.delete("ai_cloud_lock");
+    }
   });
 
   it("touches nothing on a box with no subscription", async () => {

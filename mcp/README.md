@@ -1410,7 +1410,9 @@ draws (installed, running / idle / on-demand / not-installed /
 not-on-this-edition, disk and memory, the device's own one-line detail, which is
 never a path or a command). Alongside it, which voice and which transcription
 engine the box uses now (`GET /setup-api/tts` `choice`/`activeEngine`, `GET
-/setup-api/stt` `primary`/`chain`). `engine: "whisper"` adds the downloaded
+/setup-api/stt` `primary`/`chain`; `primary: "endpoint"` is the owner's own
+OpenAI-compatible speech server on the box or the LAN, and `localOnly` says the
+local-only AI lock keeps every recording off the cloud, TASK-2501). `engine: "whisper"` adds the downloaded
 sizes and free disk (`GET /setup-api/whisper`), `engine: "embeddings"` the
 embedding service's unit state (`GET /setup-api/embed/status`). Each leg past
 the inventory is independent, so one that does not answer costs only its line.

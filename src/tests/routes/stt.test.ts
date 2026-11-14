@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * /setup-api/stt — which engine hears this box first.
@@ -22,6 +22,7 @@ const ownerSessionMock = vi.fn();
 const localInstalledMock = vi.fn();
 const tokenMock = vi.fn();
 const store = vi.hoisted(() => new Map<string, unknown>());
+const configRoot = vi.hoisted(() => ({ dir: "" }));
 
 vi.mock("@/lib/openclaw-config", () => ({
   readConfig: (...a: unknown[]) => readConfigMock(...a),
@@ -54,6 +55,17 @@ vi.mock("@/lib/harness/credentials", () => ({
 vi.mock("@/lib/config-store", () => ({
   get: async (key: string) => store.get(key),
   set: async (key: string, value: unknown) => { store.set(key, value); },
+  // The local-only AI lock (`cloudAiLockOn`) reads the store failing closed:
+  // a reader that is not there reads as LOCKED, so the mock answers it.
+  getKnown: async (key: string) => ({ value: store.get(key), known: true }),
+  // Where the owner's speech server keeps its key file (TASK-2501 PR-D).
+  resolveConfigRoot: () => configRoot.dir,
+  setMany: async (entries: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(entries)) {
+      if (value === undefined) store.delete(key);
+      else store.set(key, value);
+    }
+  },
 }));
 // The gateway's credential store, which decides whether the cloud row is
 // written at all (stt-channel.ts). Mocked so no test reads a real one.
@@ -133,9 +145,11 @@ describe("GET /setup-api/stt", () => {
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(await res.json()).toEqual({
       primary: "cloud",
+      localOnly: false,
       engines: {
         cloud: { configured: true, label: "ClawBox cloud" },
         local: { installed: true, label: "On this box", detail: INSTALLED.detail },
+        endpoint: { configured: false, label: "Your speech server" },
       },
       chain: ["cloud", "local"],
       channels: { supportedOnEdition: true, chain: ["cloud", "local"], cloudUnavailable: null },
@@ -598,5 +612,165 @@ describe("POST /setup-api/stt — the write", () => {
     // Both halves are saved; only the switch-over of channel voice notes waits.
     expect(body.primary).toBe("local");
     expect(store.get("stt_primary")).toBe("local");
+  });
+});
+
+// TASK-2501 PR-D: the owner's own speech server, and the local-only AI lock.
+describe("the owner's own speech server and the local-only AI lock", () => {
+  // Real servers on loopback: the probe dials them on Node's own http client
+  // (stt-endpoint.ts `lanFetch`), so `fetch` must never be asked.
+  let ENDPOINT = "";
+  let OTHER = "";
+  let probes: string[];
+  let servers: import("http").Server[];
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  async function serve(): Promise<string> {
+    const http = await import("http");
+    const server = http.createServer((req, res) => {
+      probes.push(`${req.headers.host}${req.url}`);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ data: [] }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    servers.push(server);
+    return `http://127.0.0.1:${(server.address() as import("net").AddressInfo).port}/v1`;
+  }
+
+  beforeEach(async () => {
+    const fs = await import("fs");
+    const os = await import("os");
+    const path = await import("path");
+    configRoot.dir = fs.mkdtempSync(path.join(os.tmpdir(), "stt-endpoint-route-"));
+    probes = [];
+    servers = [];
+    ENDPOINT = await serve();
+    OTHER = await serve();
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+    (await import("fs")).rmSync(configRoot.dir, { recursive: true, force: true });
+  });
+
+  async function endpointRoute() {
+    return await import("@/app/setup-api/stt/endpoint/route");
+  }
+  function endpointPost(body: unknown) {
+    return new Request("http://box/setup-api/stt/endpoint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  }
+  const keyFile = () => `${configRoot.dir}/data/.stt-endpoint-key`;
+
+  it("reports the lock: no cloud in the chain, the cloud marked locked, the credential never read", async () => {
+    store.set("ai_cloud_lock", true);
+    store.set("stt_primary", "cloud");
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body.localOnly).toBe(true);
+    expect(body.primary).toBe("local");
+    expect(body.chain).toEqual(["local"]);
+    expect(body.engines.cloud).toEqual({ configured: false, label: "ClawBox cloud", locked: true });
+    expect(body.channels.chain).toEqual(["local"]);
+    expect(tokenMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses the cloud as the engine under the lock, and writes nothing", async () => {
+    store.set("ai_cloud_lock", true);
+    const { POST } = await route();
+    const res = await POST(post({ primary: "cloud" }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("cloud_ai_locked");
+    expect(batchMock).not.toHaveBeenCalled();
+    expect(store.get("stt_primary")).toBeUndefined();
+  });
+
+  it("refuses the server as the engine before one is saved", async () => {
+    const { POST } = await route();
+    const res = await POST(post({ primary: "endpoint" }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("not_configured");
+  });
+
+  it("saves a server after testing it, makes it the engine, pins the owner's choice and writes channels", async () => {
+    const { POST } = await endpointRoute();
+    const res = await POST(endpointPost({ baseUrl: `${ENDPOINT}/`, model: "asr", apiKey: "lan-key" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: true, configured: true, baseUrl: ENDPOINT, model: "asr", apiKeySet: true });
+    expect(JSON.stringify(body)).not.toContain("lan-key");
+    expect(probes).toEqual([`${new URL(ENDPOINT).host}/v1/models`]);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(store.get("stt_endpoint")).toEqual({ baseUrl: ENDPOINT, model: "asr" });
+    expect(store.get("stt_primary")).toBe("endpoint");
+    expect(store.get("stt_choice_source")).toBe("owner");
+    const fs = await import("fs");
+    expect(JSON.parse(fs.readFileSync(keyFile(), "utf-8"))).toEqual({ v: 1, for: ENDPOINT, key: "lan-key" });
+    const models = JSON.parse(batchMock.mock.calls.at(-1)![0].find((op: string[]) => op[0] === "tools.media.models")[1]);
+    expect(models[0].args[0]).toMatch(/scripts\/stt-endpoint-client\.py$/);
+    expect(restartMock).toHaveBeenCalled();
+  });
+
+  it("only tests when asked to, and writes nothing", async () => {
+    const { POST } = await endpointRoute();
+    const res = await POST(endpointPost({ baseUrl: ENDPOINT, test: true }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+    expect(store.get("stt_endpoint")).toBeUndefined();
+    expect(batchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses an address on the internet, and a server that does not answer, before saving anything", async () => {
+    const { POST } = await endpointRoute();
+    const refused = await POST(endpointPost({ baseUrl: "http://8.8.8.8/v1" }));
+    expect(refused.status).toBe(400);
+    expect((await refused.json()).code).toBe("address_refused");
+    const dead = ENDPOINT;
+    await new Promise<void>((resolve) => servers.shift()!.close(() => resolve()));
+    const down = await POST(endpointPost({ baseUrl: dead }));
+    expect(down.status).toBe(502);
+    expect((await down.json()).code).toBe("unreachable");
+    expect(probes).toEqual([]);
+    expect(store.get("stt_endpoint")).toBeUndefined();
+  });
+
+  it("keeps a saved key for the same server only", async () => {
+    const { POST } = await endpointRoute();
+    await POST(endpointPost({ baseUrl: ENDPOINT, apiKey: "k1" }));
+    await POST(endpointPost({ baseUrl: `${ENDPOINT}`, model: "other" }));
+    const fs = await import("fs");
+    expect(JSON.parse(fs.readFileSync(keyFile(), "utf-8"))).toEqual({ v: 1, for: ENDPOINT, key: "k1" });
+    await POST(endpointPost({ baseUrl: OTHER }));
+    expect(fs.existsSync(keyFile())).toBe(false);
+  });
+
+  it("is the owner's: the agent's bearer cannot save or remove a server", async () => {
+    ownerSessionMock.mockResolvedValue(false);
+    const { POST, DELETE } = await endpointRoute();
+    expect((await POST(endpointPost({ baseUrl: ENDPOINT }))).status).toBe(403);
+    expect((await DELETE(new Request("http://box/setup-api/stt/endpoint", { method: "DELETE" }))).status).toBe(403);
+    expect(probes).toEqual([]);
+  });
+
+  it("removing the chosen server goes back to the box's engine under the lock, to the default without it", async () => {
+    const { POST, DELETE } = await endpointRoute();
+    await POST(endpointPost({ baseUrl: ENDPOINT, apiKey: "k1" }));
+    store.set("ai_cloud_lock", true);
+    const res = await DELETE(new Request("http://box/setup-api/stt/endpoint", { method: "DELETE" }));
+    expect(res.status).toBe(200);
+    expect(store.get("stt_endpoint")).toBeUndefined();
+    expect(store.get("stt_primary")).toBe("local");
+    const fs = await import("fs");
+    expect(fs.existsSync(keyFile())).toBe(false);
+
+    store.delete("ai_cloud_lock");
+    await POST(endpointPost({ baseUrl: ENDPOINT }));
+    await DELETE(new Request("http://box/setup-api/stt/endpoint", { method: "DELETE" }));
+    expect(store.get("stt_primary")).toBe("cloud");
   });
 });

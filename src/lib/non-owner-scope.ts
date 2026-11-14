@@ -146,6 +146,7 @@ const BOX_AI_SETTINGS_API: ReadonlySet<string> = new Set([
   "/setup-api/tts",
   "/setup-api/tts/install",
   "/setup-api/stt",
+  "/setup-api/stt/endpoint",
 ]);
 
 /** Trees where every write is one of the box's AI settings: model and provider config, sign-ins, account pools. */

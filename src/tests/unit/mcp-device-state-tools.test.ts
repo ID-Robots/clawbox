@@ -209,6 +209,23 @@ describe("local_ai_status", () => {
     expect(s.guidance).toMatch(/Settings → Local AI/);
   });
 
+  it("names the owner's own speech server and the local-only AI lock (TASK-2501)", async () => {
+    apiGet.mockResolvedValue(INVENTORY);
+    apiTry.mockImplementation(async (path: string) => {
+      if (path === "/setup-api/stt") return { primary: "endpoint", chain: ["endpoint"], localOnly: true };
+      return null;
+    });
+    const out = await harness("openclaw").call("local_ai_status", { engine: "whisper" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const s = JSON.parse(out.text) as { transcription: Record<string, unknown> };
+    expect(s.transcription).toMatchObject({
+      first_choice: "the owner's own speech server on the local network",
+      tried_in_order: ["endpoint"],
+      local_only: expect.stringMatching(/never go to the cloud/),
+    });
+  });
+
   it("says the embeddings row is not read yet instead of leaving it out silently", async () => {
     // The inventory omits the row until the device has asked the memory index
     // once; an empty answer read as "no embedding model" would be false.

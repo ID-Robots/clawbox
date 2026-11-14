@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -99,7 +99,7 @@ function migrate(
   routeIsOurs = true,
   v2 = false,
   opts: MigrateOptions = {},
-): { cfg: Config; changed: boolean; log: string } {
+): { cfg: Config; changed: boolean; log: string; lockApplied: boolean } {
   const profile = opts.clawaiProfile === undefined ? CLAWAI_PROFILE : opts.clawaiProfile;
   const auth = (cfg.auth ?? {}) as { profiles?: Record<string, unknown> };
   const injected = profile !== null && auth.profiles?.[TRANSCRIBE_AUTH_PROFILE] === undefined;
@@ -116,13 +116,13 @@ function migrate(
     `_clawai_proxy_base_url = ${JSON.stringify(PROXY)}`,
     ...(v2 ? ["CLAWBOX_OPENCLAW_V2 = True"] : []),
     POLICY,
-    "print(json.dumps({'cfg': cfg, 'changed': changed}))",
+    "print(json.dumps({'cfg': cfg, 'changed': changed, 'lockApplied': globals().get('_clawbox_lock_applied', False)}))",
   ].join("\n");
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: opts.whisperHome?.home ?? dir };
   if (opts.whisperHome) env.PYTHONPATH = opts.whisperHome.pythonPath;
   else delete env.PYTHONPATH;
   const lines = execFileSync("python3", ["-c", program, file], { encoding: "utf-8", env }).trim().split("\n");
-  const out = JSON.parse(lines[lines.length - 1]) as { cfg: Config; changed: boolean };
+  const out = JSON.parse(lines[lines.length - 1]) as { cfg: Config; changed: boolean; lockApplied: boolean };
   if (injected) {
     const outAuth = out.cfg.auth as { profiles?: Record<string, unknown> };
     const profiles = outAuth.profiles ?? {};
@@ -768,5 +768,133 @@ describe.skipIf(!hasPython3)("a box whose ClawBox AI profile is not recorded as 
       const shellKeeps = JSON.stringify(media(cfg)?.models) === JSON.stringify([V2_CLOUD]);
       expect({ record, shellKeeps }).toEqual({ record, shellKeeps: tsKeeps });
     }
+  });
+});
+
+// TASK-2501 PR-D: the local-only AI lock, and the owner's own speech server.
+describe.skipIf(!hasPython3)("gateway-pre-start.sh speech-to-text under the local-only AI lock", () => {
+  /** Run with a device store, the way the shell exports it. */
+  function withStore(store: unknown, fn: () => void): void {
+    const file = path.join(dir, "device-store.json");
+    writeFileSync(file, typeof store === "string" ? store : JSON.stringify(store));
+    const saved = process.env.CLAWBOX_DEVICE_STORE;
+    process.env.CLAWBOX_DEVICE_STORE = file;
+    try {
+      fn();
+    } finally {
+      if (saved === undefined) delete process.env.CLAWBOX_DEVICE_STORE;
+      else process.env.CLAWBOX_DEVICE_STORE = saved;
+    }
+  }
+  const ENDPOINT_STORE = { stt_primary: "endpoint", stt_endpoint: { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" } }; // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
+
+  it("seeds no cloud row and no endpoint on a locked box", () => {
+    withStore({ ai_cloud_lock: true }, () => {
+      const { cfg } = migrate({});
+      expect(audio(cfg)?.baseUrl).toBeUndefined();
+      expect(JSON.stringify(cfg)).not.toContain(PROXY);
+    });
+  });
+
+  it("takes back the cloud row and our endpoint, and keeps the box's own engine", () => {
+    withStore({ ai_cloud_lock: "pinned" }, () => {
+      const { cfg, changed, log } = migrate({ tools: { media: { audio: { baseUrl: PROXY, models: [LOCAL_CLI, CLOUD] } } } });
+      expect(changed).toBe(true);
+      expect(audio(cfg)).toEqual({ models: [LOCAL_CLI] });
+      expect(log).toMatch(/local-only AI is on/);
+    });
+  });
+
+  it("reads a store it cannot parse as locked", () => {
+    withStore("{ torn", () => {
+      const { cfg } = migrate({ tools: { media: { audio: { baseUrl: PROXY, models: [CLOUD] } } } });
+      // No row left, so the core's auto-detection is switched off too.
+      expect(audio(cfg)).toEqual({ models: [], enabled: false });
+    });
+  });
+
+  it("switches audio auto-detection off on a locked box with no engine, and back on once the lock is lifted", () => {
+    const marker = path.join(dir, ".channel-audio-lock-off");
+    withStore({ ai_cloud_lock: true }, () => {
+      // An unlinked box (the claw_ gate closed): the switch is still kept.
+      const { cfg, changed } = migrate({}, false);
+      expect(changed).toBe(true);
+      expect(audio(cfg)).toEqual({ enabled: false });
+      expect(existsSync(marker)).toBe(true);
+    });
+    withStore({ ai_cloud_lock: false }, () => {
+      const { cfg } = migrate({ tools: { media: { audio: { enabled: false } } } }, false);
+      expect(audio(cfg)).toEqual({});
+      expect(existsSync(marker)).toBe(false);
+    });
+  });
+
+  it("never turns on a switch the owner turned off, and leaves an owner's own route alone", () => {
+    withStore({ ai_cloud_lock: false }, () => {
+      const { cfg, changed } = migrate({ tools: { media: { audio: { enabled: false } } } }, false);
+      expect(changed).toBe(false);
+      expect(audio(cfg)).toEqual({ enabled: false });
+    });
+    withStore({ ai_cloud_lock: true }, () => {
+      const own = { tools: { media: { audio: { baseUrl: "http://192.168.7.9:9000/v1" } } } }; // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
+      expect(audio(migrate(own, false).cfg)).toEqual({ baseUrl: "http://192.168.7.9:9000/v1" }); // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
+    });
+  });
+
+  it("marks every change it makes for the lock, so a failed config write cannot start on the cloud config", () => {
+    // The gateway config write exits instead of carrying on when this is set.
+    withStore({ ai_cloud_lock: true }, () => {
+      // The cloud row and our endpoint taken back.
+      expect(migrate({ tools: { media: { audio: { baseUrl: PROXY, models: [LOCAL_CLI, CLOUD] } } } }).lockApplied).toBe(true);
+      // Auto-detection switched off on a box with no engine.
+      expect(migrate({}, false).lockApplied).toBe(true);
+      // Already as the lock wants it: nothing to write, nothing to guard.
+      const settled = migrate({}, false).cfg;
+      expect(migrate(settled, false).lockApplied).toBe(false);
+    });
+    withStore({ ai_cloud_lock: false }, () => {
+      // Unlocked, the same withdrawal-free start is never marked.
+      expect(migrate({}).lockApplied).toBe(false);
+    });
+  });
+
+  it("marks a locked seed: on disk there is no list, and the core would auto-detect one", () => {
+    withStore({ ...ENDPOINT_STORE, ai_cloud_lock: true }, () => {
+      const { cfg, lockApplied } = migrate({});
+      expect(audio(cfg)?.models).toHaveLength(1);
+      expect(lockApplied).toBe(true);
+    });
+    withStore(ENDPOINT_STORE, () => {
+      expect(migrate({}).lockApplied).toBe(false);
+    });
+  });
+
+  it("leaves a box that is not locked exactly as before", () => {
+    withStore({ ai_cloud_lock: false }, () => {
+      expect(audio(migrate({}).cfg)).toEqual({ baseUrl: PROXY, models: OURS });
+    });
+  });
+
+  it("seeds the owner's own speech server first when it is the chosen engine, and alone under the lock", () => {
+    withStore(ENDPOINT_STORE, () => {
+      const models = audio(migrate({}).cfg)?.models as Record<string, unknown>[];
+      expect(models[0]).toMatchObject({ type: "cli", command: "/usr/bin/python3", timeoutSeconds: 120 });
+      expect((models[0].args as string[])[0]).toMatch(/scripts\/stt-endpoint-client\.py$/);
+      expect(models[1]).toEqual(CLOUD);
+    });
+    withStore({ ...ENDPOINT_STORE, ai_cloud_lock: true }, () => {
+      const models = audio(migrate({}).cfg)?.models as Record<string, unknown>[];
+      expect(models).toHaveLength(1);
+      expect((models[0].args as string[])[0]).toMatch(/stt-endpoint-client\.py$/);
+    });
+  });
+
+  it("calls a list holding the server's row ours, so it is repaired rather than skipped", () => {
+    const endpointRow = { type: "cli", command: "/usr/bin/python3", args: ["/home/clawbox/clawbox/scripts/stt-endpoint-client.py", "{{MediaPath}}"], timeoutSeconds: 120 };
+    withStore({ ai_cloud_lock: true }, () => {
+      const { cfg, log } = migrate({ tools: { media: { audio: { baseUrl: PROXY, models: [endpointRow, CLOUD] } } } });
+      expect(log).not.toMatch(/already names its own transcription route/);
+      expect(audio(cfg)).toEqual({ models: [endpointRow] });
+    });
   });
 });

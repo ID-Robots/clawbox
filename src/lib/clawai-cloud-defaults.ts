@@ -191,7 +191,9 @@ async function readStatusAndVoice(): Promise<{ status: CloudDefaultsStatus; voic
   const facts = await readCloudDefaultsFacts();
   const defaults = resolveClawaiCloudDefaults(facts);
   const [stt, voice, embeddings, owners] = await Promise.all([
-    getSttPrimary(),
+    // The owner's own speech server (TASK-2501 PR-D) is on the owner's
+    // network: for the cloud defaults it is a local source like the box's own.
+    getSttPrimary().then((engine): CapabilitySource => (engine === "cloud" ? "cloud" : "local")),
     readVoiceSnapshot(),
     currentEmbeddingSource(defaults.embeddings.source),
     readOwnerChoices(),
@@ -395,6 +397,12 @@ async function promote(capability: CloudCapability, voice: VoiceSnapshot): Promi
  * as the engine that hears a box holding no credential for it.
  */
 async function promoteStt(): Promise<boolean> {
+  // Under the local-only AI lock (TASK-2501) there is no cloud to move
+  // transcription onto: a `cloud` written here would read back as the box's
+  // own engine and be "moved" again at every boot. The lock's own PR makes the
+  // whole applier stand down; this keeps the one write that would loop.
+  const { cloudAiLockOn } = await import("@/lib/feature-engine");
+  if (await cloudAiLockOn()) return false;
   const order = sttEngineOrder("cloud");
   let wrote = false;
   if (!openclawIsAbsent()) {
