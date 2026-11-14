@@ -146,6 +146,7 @@
         selfName: body && body.self && typeof body.self.name === "string" ? body.self.name : "",
         boxes: body && Array.isArray(body.boxes) ? body.boxes : [],
         emptyText: body && body.labels && typeof body.labels.empty === "string" ? body.labels.empty : "",
+        validUntil: body && Number.isFinite(body.sessionExpiresAt) ? body.sessionExpiresAt : 0,
       };
     } catch {
       return null;
@@ -156,7 +157,7 @@
     const list = await readBoxes();
     if (!list) return;
     if (list.revoked) send({ type: "boxesRevoked" });
-    else send({ type: "boxes", selfName: list.selfName, boxes: list.boxes, emptyText: list.emptyText });
+    else send({ type: "boxes", selfName: list.selfName, boxes: list.boxes, emptyText: list.emptyText, validUntil: list.validUntil });
   }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

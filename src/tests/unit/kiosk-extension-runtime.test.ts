@@ -580,11 +580,16 @@ describe("workspaces.js", () => {
   });
 
   it("on the kiosk's own desktop, reads the list and hands it to the worker — again when Settings saves it", async () => {
-    const list = { self: { name: "laptop" }, boxes: [{ name: "Main", url: "https://main.example.com/" }], labels: { empty: "Leer auf Ctrl+Shift+{n}." } };
+    const list = {
+      self: { name: "laptop" },
+      boxes: [{ name: "Main", url: "https://main.example.com/" }],
+      labels: { empty: "Leer auf Ctrl+Shift+{n}." },
+      sessionExpiresAt: 1_900_000_000_000,
+    };
     const w = load("http://localhost:3005/", { list });
     await flushMicrotasks();
     expect(w.fetchMock).toHaveBeenCalledWith("/setup-api/linked-boxes", expect.objectContaining({ credentials: "same-origin" }));
-    expect(sent(w)).toContainEqual({ type: "boxes", selfName: "laptop", boxes: list.boxes, emptyText: "Leer auf Ctrl+Shift+{n}." });
+    expect(sent(w)).toContainEqual({ type: "boxes", selfName: "laptop", boxes: list.boxes, emptyText: "Leer auf Ctrl+Shift+{n}.", validUntil: 1_900_000_000_000 });
     for (const fn of w.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
     await flushMicrotasks();
     expect(w.fetchMock).toHaveBeenCalledTimes(2);
@@ -592,7 +597,7 @@ describe("workspaces.js", () => {
     const ask = w.message({ type: "readBoxes" });
     expect(ask.async).toBe(true);
     await flushMicrotasks();
-    expect(ask.answer()).toEqual({ selfName: "laptop", boxes: list.boxes, emptyText: "Leer auf Ctrl+Shift+{n}." });
+    expect(ask.answer()).toEqual({ selfName: "laptop", boxes: list.boxes, emptyText: "Leer auf Ctrl+Shift+{n}.", validUntil: 1_900_000_000_000 });
   });
 
   it("never reads the list anywhere else, and hands the worker nothing when the box refuses", async () => {
@@ -693,9 +698,11 @@ describe("background.js: switching linked ClawBoxes", () => {
   }
 
   const DESK = { id: 1, url: "http://localhost:3005/", active: true };
+  // Read under an owner session that lasts another hour.
   const list = {
     selfName: "laptop",
     boxes: [{ name: "Main", url: "https://main.example.com/" }, { name: "NAS", url: "http://nas.example.net:3005/" }],
+    validUntil: Date.now() + 3_600_000,
   };
 
   beforeEach(() => { vi.useFakeTimers(); });
@@ -793,6 +800,28 @@ describe("background.js: switching linked ClawBoxes", () => {
     await r.call({ type: "switchBox", slot: 2 });
     expect(r.chrome.tabs.create).not.toHaveBeenCalled();
     expect(r.session.linkedBoxes).toBeUndefined();
+  });
+
+  it("uses its copy of the list no longer than the session that read it", async () => {
+    // The session ran out with the desktop tab closed: neither /login nor a
+    // refused read ever told the worker.
+    const w = loadWorker([{ id: 2, url: "https://main.example.com/" }], { stored: { ...list, validUntil: Date.now() - 1 } });
+    await w.call({ type: "switchBox", slot: 3 }, 2);
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(w.session.linkedBoxes).toBeUndefined();
+    expect(w.indicators()).toEqual([[2, expect.objectContaining({ slot: 3, kind: "empty" })]]);
+
+    // A copy with no session end given is good for nothing past now, too.
+    const n = loadWorker([DESK]);
+    await n.call({ type: "boxes", selfName: "laptop", boxes: list.boxes }, 1);
+    expect((n.session.linkedBoxes as { validUntil: number }).validUntil).toBe(0);
+    await n.call({ type: "switchBox", slot: 2 }, 1);
+    expect(n.chrome.tabs.create).not.toHaveBeenCalled();
+
+    // Still inside the session: used as it is, without asking the desktop.
+    const ok = loadWorker([DESK], { stored: list });
+    await ok.call({ type: "switchBox", slot: 2 });
+    expect(ok.chrome.tabs.create).toHaveBeenCalledWith({ url: "https://main.example.com/", active: true });
   });
 
   it("runs quick presses one after the other: one tab per box, the last key wins", async () => {

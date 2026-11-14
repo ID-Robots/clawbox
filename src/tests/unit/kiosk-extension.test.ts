@@ -92,6 +92,8 @@ const RELEASES: readonly { version: string; files: string }[] = [
   { version: "1.6.1", files: "f47af3210c8cfdb790619ad9d8b8c3f96d0f52593c3682252505fd6df2d3a298" },
   // The owner's list in session storage only, forgotten on the kiosk's /login and on a refused read.
   { version: "1.6.2", files: "8e827c04002d9040e992d2ab5bf541f7faee19dcbad153ba45d144760cf3d532" },
+  // The kept list is used no longer than the session that read it.
+  { version: "1.6.3", files: "94d918220f0dc388308170e4a1d903cd6461fb394c17f0b7c9104502940f12f2" },
 ];
 
 /**
