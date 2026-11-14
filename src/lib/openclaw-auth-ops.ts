@@ -31,7 +31,7 @@
 import { spawnOpenclawCli, restartGateway, gatewayIsAbsent, gatewayReadyWaitMs } from "@/lib/openclaw-config";
 import { gatewayWsCall, GatewayWsUnavailableError, waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
 import { readGatewayProviderAuth } from "@/lib/openclaw-auth-store";
-import { readUnitState, runUnitJob, UNIT_JOB_SETTLE_BUDGET_MS } from "@/lib/gateway-unit-job";
+import { readUnitState, runUnitJob, unitIsStopped, UNIT_JOB_SETTLE_BUDGET_MS } from "@/lib/gateway-unit-job";
 import { DATA_DIR } from "@/lib/config-store";
 import fs from "fs";
 import path from "@/lib/runtime-path";
@@ -97,6 +97,11 @@ const defaultDeps: AuthOpsDeps = {
       settleBudgetMs: waitOut ? UNIT_JOB_SETTLE_BUDGET_MS : STOP_SETTLE_MS,
     });
     if (stop.kind === "in-flight") throw new Error("the gateway is still stopping");
+    // A start or restart asked for while the stop was pending takes its place
+    // (gateway-unit-job.ts, `unitJobWasCanceled`): no job is left and the unit
+    // is UP. Offline work must not run beside it — the CLI is refused, and the
+    // account pool renews tokens on the strength of the gateway being down.
+    if (stop.kind === "settled" && !unitIsStopped(stop.state)) throw new Error("the gateway did not stay stopped");
   },
   startGateway: async () => {
     try {

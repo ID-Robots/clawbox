@@ -321,9 +321,11 @@ const WATCH_MS = 60_000;
  */
 const ALIGN_SLACK_MS = 3 * KEEPER_MS;
 /**
- * How long the offline window goes on renewing accounts: the gateway is down
- * while it does, and each renewal is a request to Anthropic (under a second;
- * twenty at its timeout). An account not reached comes due on its own.
+ * How long the offline window spends ASKING Anthropic for renewals: the
+ * gateway is down while it does, and each is a request (under a second; twenty
+ * at its timeout). The pastes are not counted — one is a CLI start-up, 5-14 s
+ * on a Jetson, and counting them left the fifth account of a pool for a window
+ * of its own. An account not reached comes due on its own.
  */
 const WINDOW_RENEWAL_BUDGET_MS = 30_000;
 /** How far back the first look at the crons reaches: a failure just before a restart still counts. */
@@ -509,8 +511,9 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   // inside the window (`pasteAll`), the gateway already stopped, each pasted
   // before the next is renewed, none after one of them could not be pasted: a
   // stop that cannot be made, or that takes minutes while the gateway finishes
-  // what it is answering, costs the chat one account, as it always did, and a
-  // window that cannot write costs it one more — never all of them at once.
+  // what it is answering, costs the chat one account, as it always did; a
+  // window that cannot write costs it at most one more, and only one that was
+  // due anyway — never all of them, in one pass or over many.
   const tokens = new Map<string, { fingerprint: string; expires: number | null }>();
   const toPaste: { id: string; account: string; token: { access: string; expires: number | null } }[] = [];
   let offlineFailed = false;
@@ -524,6 +527,10 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     const fingerprint = tokenFingerprint(token.access);
     tokens.set(id, { fingerprint, expires: token.expires });
     if (ours.some((p) => p.profileId === id && p.fingerprint === fingerprint)) continue;
+    // Read as it is, a token can be past its end (the chat was elsewhere for
+    // hours and nobody asked for it). That one is never pasted: the window
+    // renews it, or it stays owed.
+    if (token.expires !== null && token.expires <= now) continue;
     toPaste.push({ id, account: account.id, token });
   }
   if (toPaste.length > 0) {
@@ -551,7 +558,7 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
       // nothing — one profile core keeps refusing must not keep every other
       // account from ever being renewed.
       let lost = false;
-      const renewUntil = Date.now() + WINDOW_RENEWAL_BUDGET_MS;
+      let renewalMs = 0;
       const renewed: string[] = [];
       for (const account of wanted) {
         const id = poolProfileId(account.id);
@@ -563,10 +570,18 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
         // a margin at most, whatever keeps the window opening.
         const due = held.expires - now < OAUTH_REFRESH_MARGIN_MS;
         const lately = now - (runtime().earlyRenewedAt.get(account.id) ?? Number.NEGATIVE_INFINITY) < OAUTH_REFRESH_MARGIN_MS;
-        if (!lost && (due || !lately) && Date.now() < renewUntil) {
+        // ...and never before this window has written a token: a window that
+        // cannot write (the store busy, a gateway that did not stay stopped)
+        // would otherwise spend one more account with hours left on every
+        // pass, until the gateway held a refused token for each of them. A
+        // due account is renewed either way, as it always was.
+        const ahead = !lately && pasted > 0;
+        if (!lost && (due || ahead) && renewalMs < WINDOW_RENEWAL_BUDGET_MS) {
           // The same token back: no grant to renew with, or Anthropic could
           // not be asked. It stays as it is and comes due on its own.
+          const asked = Date.now();
           const answer = await gatewayCredentialFor(account.id, { renewBefore });
+          renewalMs += Date.now() - asked;
           const fingerprint = answer ? tokenFingerprint(answer.access) : held.fingerprint;
           if (answer && fingerprint !== held.fingerprint) {
             tokens.set(id, { fingerprint, expires: answer.expires });
