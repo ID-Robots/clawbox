@@ -2190,6 +2190,20 @@ describe("TASK-2533 second review pass", () => {
     expect(personalHeldAtRetry === null || personalHeldAtRetry === false).toBe(true);
   });
 
+  it("an account the owner adds while another answers goes into the gateway at once: only a paste-back after a limit waits for a window", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const work = await pool.addOAuthAccount({ label: "Work Max", email: "work@example.com", tokens: oauth("sk-ant-oat01-work") });
+    await gw.keepGatewayMirror();
+    expect(core.profiles.has(p(work.id))).toBe(true);
+
+    const personal = await pool.addOAuthAccount({ label: "Personal Max", email: "me@example.com", tokens: oauth("sk-ant-oat01-personal") });
+    await gw.syncGatewayNow();
+
+    expect(core.profiles.has(p(personal.id))).toBe(true);
+    expect(core.order?.slice(0, 2)).toEqual([p(work.id), p(personal.id)]);
+  });
+
   it("the minute's back-off holds back only what it already tried: an account limited since is out at once", async () => {
     const core = fakeCore();
     core.tellsConfigOrder = true;

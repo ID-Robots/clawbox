@@ -393,6 +393,13 @@ interface GatewayRuntime {
    * gateway stop of its own at every keeper pass.
    */
   pasteRefusals: Map<string, { count: number; at: number }>;
+  /**
+   * The pool profiles this process logged out for a limit (syncLocked), until
+   * one is pasted back: the paste-backs that wait for a window the pool opens
+   * anyway. An account the owner just added is not one of them — it goes in
+   * at once, as it always did.
+   */
+  limitedOut: Set<string>;
 }
 
 function runtime(): GatewayRuntime {
@@ -416,6 +423,7 @@ function runtime(): GatewayRuntime {
     owedPassAt: 0,
     owedKey: null,
     pasteRefusals: new Map(),
+    limitedOut: new Set(),
   }));
 }
 
@@ -693,10 +701,11 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
   //  - a limited one never while the gateway holds another of the pool's or
   //    the owner's sign-in answers — it would only answer with its limit; it is
   //    back when it can answer;
-  //  - one back from its limit, not the active one, while another answers,
-  //    waits for a window the pass opens anyway (a renewal; the alignment
-  //    below brings every account's renewal into one), instead of a stop of
-  //    its own at every reset;
+  //  - one back from its limit (logged out for it, limitedOut), not the
+  //    active one, while another answers, waits for a window the pass opens
+  //    anyway (a renewal; the alignment below brings every account's renewal
+  //    into one), instead of a stop of its own at every reset — an account
+  //    the owner just added goes in at once;
   //  - so does the active one while another answers, once core refused to
   //    take it back (pasteBackedOff): asked again on a widening interval, not
   //    with a stop at every keeper pass.
@@ -705,7 +714,8 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
     const id = poolProfileId(account.id);
     const inGateway = ours.some((p) => p.profileId === id);
     if (!inGateway && effectiveStatus(account, now) === "limited" && (answersHeld || signInUsable || poolHeld)) continue;
-    if (!inGateway && answersHeld && (account.id !== pool.activeId || pasteBackedOff(id, now))) {
+    const backFromLimit = runtime().limitedOut.has(id) && account.id !== pool.activeId;
+    if (!inGateway && answersHeld && (backFromLimit || pasteBackedOff(id, now))) {
       deferred.push(account);
       continue;
     }
@@ -761,7 +771,10 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
         if (landed) pasted += 1;
         // A logged-out account core would not take back (pasteBackedOff).
         const refusals = runtime().pasteRefusals;
-        if (landed) refusals.delete(id);
+        if (landed) {
+          refusals.delete(id);
+          runtime().limitedOut.delete(id);
+        }
         else if (!ours.some((p) => p.profileId === id)) refusals.set(id, { count: (refusals.get(id)?.count ?? 0) + 1, at: Date.now() });
         return landed;
       };
@@ -875,6 +888,9 @@ async function syncLocked(opts: { force?: boolean; noWindow?: boolean } = {}): P
   // candidate list — and its write is owed.
   const after = d.read();
   if (after.kind !== "present") return outcome("failed", "write_lost", changed);
+  for (const id of takenOut) {
+    if (!after.profiles.some((p) => p.profileId === id)) runtime().limitedOut.add(id);
+  }
   const owed: string[] = [];
   const held = new Set<string>();
   for (const account of wanted) {
@@ -1777,4 +1793,5 @@ export function _setGatewayDepsForTests(overrides: Partial<GatewayDeps> | null):
   state.owedPassAt = 0;
   state.owedKey = null;
   state.pasteRefusals.clear();
+  state.limitedOut.clear();
 }
