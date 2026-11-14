@@ -6,7 +6,7 @@ import { readJsonObject } from "@/lib/bounded-json";
 import { readFailureKind } from "@/lib/config-store";
 import { boxSwitcherLabels, readLinkedBoxes, thisBoxName, writeLinkedBoxes } from "@/lib/linked-boxes";
 import { MAX_LINKED_BOXES, parseLinkedBoxesWrite } from "@/lib/linked-boxes-shape";
-import { personSession } from "@/lib/owner-session";
+import { personSession, sessionExpiresAt } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
@@ -14,10 +14,13 @@ import { isSameOriginRequest } from "@/lib/same-origin";
  * Ctrl+Shift+2 … Ctrl+Shift+9 switch to them (slot 1 is always this box).
  * The rules are src/lib/linked-boxes-shape.ts; the store src/lib/linked-boxes.ts.
  *
- * GET `{ self: { name }, boxes: [{ name, url }], max, labels: { empty } }` —
- *     `self.name` is what slot 1 is called (this box's hostname), `max` how
- *     many boxes the list holds, `labels` the kiosk extension's indicator
- *     words in the box's language (`{n}` left in for the slot).
+ * GET `{ self: { name }, boxes: [{ name, url }], max, labels: { empty },
+ *       sessionExpiresAt }` — `self.name` is what slot 1 is called (this
+ *     box's hostname), `max` how many boxes the list holds, `labels` the kiosk
+ *     extension's indicator words in the box's language (`{n}` left in for the
+ *     slot), `sessionExpiresAt` when the owner's session that read it runs out
+ *     (ms since the epoch): the kiosk extension uses its copy of the list no
+ *     longer than that.
  * PUT `{ boxes: [{ name, url }] }` — the whole list, replaced; answers what GET
  *     answers. 400 `invalid_body` / `too_many` / `invalid_name` /
  *     `invalid_url` / `duplicate` / `self` (this box: the address the request
@@ -43,16 +46,19 @@ async function ownerOnly(req: Request, write: boolean): Promise<NextResponse | n
   return null;
 }
 
-async function answer(boxes: Awaited<ReturnType<typeof readLinkedBoxes>>): Promise<NextResponse> {
-  const [name, labels] = await Promise.all([thisBoxName(), boxSwitcherLabels()]);
-  return NextResponse.json({ self: { name }, boxes, max: MAX_LINKED_BOXES, labels }, { headers: NO_STORE });
+async function answer(req: Request, boxes: Awaited<ReturnType<typeof readLinkedBoxes>>): Promise<NextResponse> {
+  const [name, labels, expiresAt] = await Promise.all([thisBoxName(), boxSwitcherLabels(), sessionExpiresAt(req)]);
+  return NextResponse.json(
+    { self: { name }, boxes, max: MAX_LINKED_BOXES, labels, sessionExpiresAt: expiresAt },
+    { headers: NO_STORE },
+  );
 }
 
 export async function GET(req: Request) {
   const refused = await ownerOnly(req, false);
   if (refused) return refused;
   try {
-    return await answer(await readLinkedBoxes());
+    return await answer(req, await readLinkedBoxes());
   } catch (err) {
     console.error("[linked-boxes] the list could not be read:", readFailureKind(err));
     return refuse(500, "store_read_failed", "The linked ClawBoxes could not be read.");
@@ -99,5 +105,5 @@ export async function PUT(req: Request) {
     console.error("[linked-boxes] the list could not be saved:", readFailureKind(err));
     return refuse(500, "store_write_failed", "The linked ClawBoxes could not be saved. Nothing was changed.");
   }
-  return answer(kept);
+  return answer(req, kept);
 }

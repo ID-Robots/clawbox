@@ -62,6 +62,15 @@ async function cookieClaims(request: Request): Promise<Record<string, unknown> |
 }
 
 /**
+ * When the request's session cookie runs out, in ms since the epoch — read
+ * from the verified cookie, so null for none, a forged or a revoked one.
+ */
+export async function sessionExpiresAt(request: Request): Promise<number | null> {
+  const exp = (await cookieClaims(request))?.exp;
+  return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : null;
+}
+
+/**
  * True only when the request carries a valid, unexpired, un-revoked session
  * cookie issued to the OWNER — i.e. a browser the owner logged into. A cookie
  * from before multi-user (no `u` claim) is the owner's.

@@ -136,4 +136,15 @@ describe("route-auth with ClawBox users", () => {
     expect(await hasOwnerSession(request(sign({ u: "alice", sv: ALICE_SV })))).toBe(false);
     expect(await hasOwnerSession(request(sign({ u: "root" })))).toBe(false);
   });
+
+  it("sessionExpiresAt reads the end of a verified session only", async () => {
+    // The kiosk extension keeps the owner's linked-box list no longer than this (TASK-2519).
+    const { sessionExpiresAt } = await import("@/lib/owner-session");
+    const exp = Math.floor(Date.now() / 1000) + 900;
+    expect(await sessionExpiresAt(request(sign({ u: "clawbox", exp })))).toBe(exp * 1000);
+    expect(await sessionExpiresAt(request())).toBeNull();
+    const forged = sign({ u: "clawbox", exp }).replace(/.$/, (c) => (c === "0" ? "1" : "0"));
+    expect(await sessionExpiresAt(request(forged))).toBeNull();
+    expect(await sessionExpiresAt(request(sign({ u: "clawbox", exp: Math.floor(Date.now() / 1000) - 5 })))).toBeNull();
+  });
 });

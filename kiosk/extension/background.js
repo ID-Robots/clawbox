@@ -136,6 +136,10 @@ async function goHome() {
 // kiosk's own /login (signed out, the session ran out, another person signing
 // in) and a list read the box refuses (401/403) forget it ("boxesRevoked"),
 // so the next person at the kiosk cannot reach the owner's boxes by the keys.
+// And it is used no longer than the session that read it lasts (`validUntil`,
+// the route's `sessionExpiresAt`): a session that runs out with the desktop tab
+// closed reaches neither of those, so past that time the copy is dropped and
+// the desktop is asked again — which, signed out, answers nothing.
 const MAX_BOXES = 8;
 const MAX_BOX_NAME = 40;
 const BOXES_KEY = "linkedBoxes";
@@ -191,9 +195,15 @@ function tabUrl(t) {
   return t.url || t.pendingUrl || "";
 }
 
+/** The kept copy of the list while the session that read it lasts, else null (and the copy dropped). */
 async function storedBoxes() {
   const got = await chrome.storage.session.get(BOXES_KEY);
-  return got[BOXES_KEY] || null;
+  const list = got[BOXES_KEY] || null;
+  if (list && !(Number.isFinite(list.validUntil) && list.validUntil > Date.now())) {
+    await forgetBoxes();
+    return null;
+  }
+  return list;
 }
 
 /** The box's words for an empty slot (`{n}` for the number), or "". */
@@ -207,6 +217,8 @@ async function saveBoxes(list) {
     selfName: boxName(list && list.selfName) || "",
     boxes: cleanBoxes(list && list.boxes),
     emptyText: cleanLabel(list && list.emptyText),
+    // No session end given is no promise at all: a copy good for nothing past now.
+    validUntil: list && Number.isFinite(list.validUntil) ? list.validUntil : 0,
   };
   await chrome.storage.session.set({ [BOXES_KEY]: clean });
   return clean;

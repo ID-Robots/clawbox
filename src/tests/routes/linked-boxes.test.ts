@@ -13,7 +13,7 @@ const { dataDir, store, who } = await vi.hoisted(async () => {
   return {
     dataDir: nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "clawbox-linked-boxes-")),
     store: { get: vi.fn() },
-    who: { personSession: vi.fn() },
+    who: { personSession: vi.fn(), sessionExpiresAt: vi.fn() },
   };
 });
 vi.mock("@/lib/config-store", () => ({
@@ -44,6 +44,7 @@ function put(body: unknown, headers: Record<string, string> = {}) {
 beforeEach(() => {
   vi.clearAllMocks();
   who.personSession.mockResolvedValue(OWNER);
+  who.sessionExpiresAt.mockResolvedValue(1_900_000_000_000);
   store.get.mockResolvedValue("main-box");
   fs.rmSync(LINKED_BOXES_FILE, { force: true });
 });
@@ -66,6 +67,7 @@ describe("/setup-api/linked-boxes", () => {
       boxes: [],
       max: 8,
       labels: { empty: "Nothing on Ctrl+Shift+{n} yet. Add a ClawBox in Settings → Linked ClawBoxes." },
+      sessionExpiresAt: 1_900_000_000_000,
     });
   });
 
