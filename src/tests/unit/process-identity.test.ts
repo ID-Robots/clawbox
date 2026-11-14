@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { processStartKey } from "@/lib/process-identity";
+
+// It starts a real process (`sleep`): both ceilings, as test-timeout-hygiene asks.
+vi.setConfig({ testTimeout: 15_000, hookTimeout: 15_000 });
 
 /**
  * `processStartKey` is what lets a record say WHICH process a pid was — the
