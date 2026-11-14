@@ -524,3 +524,49 @@ d("record_rebuild_kept_build: the serving build's id, on the boot's own count", 
     expect(fs.existsSync(note)).toBe(false);
   });
 });
+
+// ── 5. The cache is moved, not copied: it does not count twice ─────────────
+
+d("set_previous_build_aside: room for two builds is judged without the cache", () => {
+  function park(availKb: number, cacheKb: number): { status: number | null; parked: boolean; kept: boolean; out: string } {
+    const project = path.join(tmp, "clawbox");
+    const build = path.join(project, ".next");
+    fs.mkdirSync(path.join(build, "standalone"), { recursive: true });
+    fs.writeFileSync(path.join(build, "standalone", "server.js"), Buffer.alloc(100 * 1024, 1));
+    if (cacheKb > 0) {
+      fs.mkdirSync(path.join(build, "cache", "turbopack"), { recursive: true });
+      fs.writeFileSync(path.join(build, "cache", "turbopack", "db"), Buffer.alloc(cacheKb * 1024, 1));
+    }
+    const script = [
+      "set -euo pipefail",
+      `df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/x 1 1 %s 1%% /\\n' ${availKb}; }`,
+      fn("set_previous_build_aside"),
+      `set_previous_build_aside ${JSON.stringify(build)} ${JSON.stringify(path.join(project, ".next-old"))}`,
+    ].join("\n");
+    const r = bash(script);
+    return {
+      status: r.status,
+      parked: fs.existsSync(path.join(project, ".next-old", "standalone", "server.js")),
+      kept: fs.existsSync(path.join(project, ".next-old", "cache", "turbopack", "db")),
+      out: r.out + r.err,
+    };
+  }
+
+  it("parks a build whose disk holds two builds once its cache is left out of the sum", () => {
+    // ~100 KB of build and ~2 MB of cache, 1 MB free: twice the build fits,
+    // twice build + cache would not.
+    const r = park(1024, 2048);
+    expect(r.status).toBe(0);
+    expect(r.out).not.toContain("clearing the old one instead of keeping it");
+    expect(r.parked).toBe(true);
+    // The cache goes with the parked tree, for carry_build_cache to move on.
+    expect(r.kept).toBe(true);
+  });
+
+  it("still clears the old build when even the build alone does not fit twice", () => {
+    const r = park(150, 2048);
+    expect(r.status).toBe(0);
+    expect(r.out).toContain("clearing the old one instead of keeping it");
+    expect(r.parked).toBe(false);
+  });
+});
