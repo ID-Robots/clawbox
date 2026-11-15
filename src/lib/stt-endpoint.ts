@@ -218,9 +218,12 @@ function savedBaseUrlShape(raw: string): string | null {
 
 /**
  * Every character the key file may hold: printable ASCII without the space
- * (U+0021–U+007E). A key travels in an `Authorization: Bearer` header, whose
- * value is ASCII, and a saved base URL is ASCII already (the normaliser builds
- * it from the parsed URL: punycode host, percent-encoded path).
+ * (U+0021–U+007E). A key travels in an `Authorization: Bearer` header, and a
+ * bearer token is ASCII (RFC 6750's `b64token` is a subset of this set);
+ * beyond it, Node and Python send at most U+0080–U+00FF, as raw Latin-1
+ * bytes a server may read differently. A saved base URL is ASCII already (the
+ * normaliser builds it from the parsed URL: punycode host, percent-encoded
+ * path).
  */
 const STORED_CHARS = Array.from({ length: 0x7e - 0x20 }, (_, i) => String.fromCharCode(0x21 + i)).join("");
 
@@ -245,6 +248,11 @@ function parseApiKey(raw: string): string | null {
   const key = raw.trim();
   if (!key || key.length > STT_ENDPOINT_LIMITS.apiKeyMax) return null;
   return fromStoredChars(key);
+}
+
+/** A key as {@link writeSttEndpointKey} would store it, or null when it would refuse it. PURE. */
+export function storableSttEndpointKey(raw: string): string | null {
+  return parseApiKey(raw);
 }
 
 /**

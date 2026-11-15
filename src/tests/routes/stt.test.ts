@@ -787,6 +787,20 @@ describe("the owner's own speech server and the local-only AI lock", () => {
     expect(fs.existsSync(keyFile())).toBe(false);
   });
 
+  it("does not carry a stored key the key file no longer takes into a new save", async () => {
+    const { POST } = await endpointRoute();
+    await POST(endpointPost({ baseUrl: ENDPOINT, apiKey: "k1" }));
+    const fs = await import("fs");
+    // A key an earlier build stored with a character outside printable ASCII.
+    fs.writeFileSync(keyFile(), JSON.stringify({ v: 1, for: ENDPOINT, key: "kéy-1" }), { mode: 0o600 });
+    const res = await POST(endpointPost({ baseUrl: ENDPOINT, model: "other" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, configured: true, model: "other", apiKeySet: false });
+    expect(store.get("stt_endpoint")).toEqual({ baseUrl: ENDPOINT, model: "other" });
+    expect(store.get("stt_primary")).toBe("endpoint");
+    expect(fs.existsSync(keyFile())).toBe(false);
+  });
+
   it("is the owner's: the agent's bearer cannot save or remove a server", async () => {
     ownerSessionMock.mockResolvedValue(false);
     const { POST, DELETE } = await endpointRoute();

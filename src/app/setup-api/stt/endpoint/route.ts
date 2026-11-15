@@ -13,6 +13,7 @@ import {
   probeSttEndpoint,
   readSttEndpoint,
   readSttEndpointKey,
+  storableSttEndpointKey,
   validateSttEndpointInput,
   writeSttEndpoint,
   writeSttEndpointKey,
@@ -125,10 +126,14 @@ export async function POST(req: Request) {
       const saved = await readSttEndpoint();
       // A key on file belongs to the origin it was saved for: it is reused for
       // that origin only, so re-aiming the endpoint never mails the old
-      // server's key to a new host.
-      const keptKey = !input.clearApiKey && saved && originOf(saved.baseUrl) === originOf(input.value.baseUrl)
+      // server's key to a new host. And only when the key file would take it
+      // today: a key an earlier build stored with a character outside
+      // printable ASCII is not carried into a save that would then refuse it
+      // half-way, after the old key is already gone.
+      const storedKey = !input.clearApiKey && saved && originOf(saved.baseUrl) === originOf(input.value.baseUrl)
         ? readSttEndpointKey(saved.baseUrl)
         : null;
+      const keptKey = storedKey === null ? null : storableSttEndpointKey(storedKey);
       const apiKey = input.apiKey ?? keptKey;
       const probe = await probeSttEndpoint(input.value, apiKey);
       if (!probe.ok) {
