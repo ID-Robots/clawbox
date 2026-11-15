@@ -112,9 +112,11 @@ export function readSttEndpointKey(baseUrl: string): string | null {
  * Written 0600 and atomically (temp + rename), so a crash never leaves half a
  * key; bound to `baseUrl`. Both values come from an owner's request, so they
  * are validated HERE, at the write, by the same rules the route applies — one
- * line of at most `apiKeyMax` with no whitespace or control character, and a
- * base URL already in its normalised, on-the-LAN form — and only the validated
- * values are serialised. Anything else throws and nothing is written.
+ * line of at most `apiKeyMax` printable ASCII characters with no whitespace,
+ * and a base URL already in its normalised, on-the-LAN form — and what is
+ * serialised is not the request's text but a copy of it rebuilt from the
+ * module's own character set ({@link fromStoredChars}). Anything else throws
+ * and nothing is written.
  */
 export function writeSttEndpointKey(key: string, baseUrl: string): void {
   const safeKey = parseApiKey(key);
@@ -211,14 +213,38 @@ function savedBaseUrlShape(raw: string): string | null {
   if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password || url.search || url.hash) return null;
   const host = url.hostname.replace(/^\[|\]$/g, "");
   if (!host || (net.isIP(host) && !isLanAddress(host))) return null;
-  return raw;
+  return fromStoredChars(raw);
 }
 
-/** A key as the owner may give it: trimmed, one line, no whitespace, at most `apiKeyMax`. Empty or invalid → null. */
+/**
+ * Every character the key file may hold: printable ASCII without the space
+ * (U+0021–U+007E). A key travels in an `Authorization: Bearer` header, whose
+ * value is ASCII, and a saved base URL is ASCII already (the normaliser builds
+ * it from the parsed URL: punycode host, percent-encoded path).
+ */
+const STORED_CHARS = Array.from({ length: 0x7e - 0x20 }, (_, i) => String.fromCharCode(0x21 + i)).join("");
+
+/**
+ * `value` copied out of {@link STORED_CHARS} one character at a time, or null
+ * when any of its characters is not in that set. The key file is written only
+ * from these copies, so it can hold nothing but printable ASCII inside the
+ * module's own JSON shape, whatever a request sent.
+ */
+function fromStoredChars(value: string): string | null {
+  let copy = "";
+  for (const ch of value) {
+    const at = STORED_CHARS.indexOf(ch);
+    if (at < 0) return null;
+    copy += STORED_CHARS[at];
+  }
+  return copy;
+}
+
+/** A key as the owner may give it: trimmed, one line of printable ASCII with no whitespace, at most `apiKeyMax`. Empty or invalid → null. */
 function parseApiKey(raw: string): string | null {
   const key = raw.trim();
-  if (!key || key.length > STT_ENDPOINT_LIMITS.apiKeyMax || /[\u0000-\u001f\u007f\s]/.test(key)) return null;
-  return key;
+  if (!key || key.length > STT_ENDPOINT_LIMITS.apiKeyMax) return null;
+  return fromStoredChars(key);
 }
 
 /**
