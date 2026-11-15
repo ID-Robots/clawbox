@@ -672,7 +672,7 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     for (const leak of ["secret", "example.invalid", "abc123", "https://"]) expect(lines[0]).not.toContain(leak);
   });
 
-  it("says once in the device log why the core found the embedder not ok, with addresses, keys and paths taken out", async () => {
+  it("says once in the device log why the core found the embedder not ok, in fixed labels only", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { gateway, reload, invalidated } = await box();
     gateway.probe = {
@@ -685,27 +685,25 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     expect((await reload()).errorCode).toBe("provider_degraded");
     await invalidated();
     const lines = warn.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("readiness probe"));
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain("401");
-    for (const leak of ["example.invalid", "claw_PLACEHOLDER", "/var/lib"]) expect(lines[0]).not.toContain(leak);
+    expect(lines).toEqual(["[clawkeep-memory] the embedder did not pass the core's readiness probe (doctor.memory.status): HTTP 401"]);
   });
 
+  // The keyword-only line reads the probe's sentence back out of the reading
+  // (`providerUnavailableReason`), so both lines are driven with it.
   it.each([
-    ["a bare 64-hex token", `the proxy refused ${"5e".repeat(32)} (401)`, ["5e5e5e5e"]],
-    ["an Authorization: Basic value", "401 with Authorization: Basic dXNlcjpwYXNzd29yZDEyMw==", ["dXNlcjpwYXNzd29yZDEyMw"]],
-    ["a scheme-less user and password", "connect to owner:hunter2secret@192.0.2.44:8081 refused", ["hunter2secret", "owner:", "192.0.2.44"]],
-    ["a bare address and port", "connect ECONNREFUSED 198.51.100.7:8081", ["198.51.100.7"]],
-  ])("takes %s out of the not-ok line", async (_shape, sentence, leaks) => {
+    ["the readiness probe's not-ok line", "openai-compatible", "readiness probe"],
+    ["the keyword-only line", "none", "fallen back to keyword-only"],
+  ])("prints no part of a credential the core's sentence holds on %s", async (_line, provider, marker) => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { gateway, reload } = await box();
-    gateway.probe = { agentId: "main", provider: "openai-compatible", embedding: { ok: false, error: sentence } };
+    gateway.probe = { agentId: "main", provider, embedding: { ok: false, error: "connect owner:pa/ss@192.0.2.44:8081 refused" } };
     await reload();
-    const lines = warn.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("readiness probe"));
+    const lines = warn.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes(marker));
     expect(lines).toHaveLength(1);
-    for (const leak of leaks) expect(lines[0]).not.toContain(leak);
+    for (const part of ["owner", "pa/ss", "192.0.2.44", ":8081"]) expect(lines[0]).not.toContain(part);
   });
 
-  /** The core's sentence as the not-ok line carries it, after its fixed prefix. */
+  /** The detail the not-ok line carries after its fixed prefix. */
   async function loggedReason(sentence: string): Promise<string> {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     warn.mockClear();
@@ -716,69 +714,89 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     return line.slice(line.indexOf("(doctor.memory.status): ") + "(doctor.memory.status): ".length);
   }
 
-  it("keeps compact JSON's status code, and takes a model digest's name:tag as it would a user and password", async () => {
-    const json = await loggedReason('embeddings failed {"code":401,"email":"x@y.example"}');
-    expect(json).toContain('"code":401');
-    // Accepted: `name:tag@` reads exactly like `user:password@`, and a doubt is redacted.
-    const digest = await loggedReason(`pull qwen3-embedding:0.6b@sha256:${"5e".repeat(32)} failed`);
-    expect(digest).not.toContain("qwen3-embedding:0.6b");
-    expect(digest).toContain("[redacted]@sha256:");
-  });
+  /** The detail the keyword-only line carries for the same sentence, between its dash and its count. */
+  async function loggedUnavailableReason(sentence: string): Promise<string> {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warn.mockClear();
+    const { gateway, reload } = await box();
+    gateway.probe = { agentId: "main", provider: "none", embedding: { ok: false, error: sentence } };
+    await reload();
+    const line = warn.mock.calls.map((call) => call.join(" ")).find((l) => l.includes("fallen back to keyword-only")) ?? "";
+    return line.split(" — ")[1]?.split("; ")[0] ?? "";
+  }
 
-  // Whatever follows the host. A dotted host under a letter TLD is already
-  // taken by the e-mail rule, so the address after the `@` here is one that
-  // only the user and password rule itself can take the password before.
   it.each([
-    ["a host followed by a colon and text", "connect owner:hunter2pw@host: refused"],
-    ["an address followed by a colon and text", "connect owner:hunter2pw@192.0.2.10: timeout"],
-    ["an address followed by a query", "connect owner:hunter2pw@192.0.2.10?x=1 failed"],
-    ["an address followed by a fragment", "connect owner:hunter2pw@192.0.2.10#frag failed"],
-    ["an IPv6 literal", "connect owner:hunter2pw@[2001:db8::1]:8080 refused"],
-    ["a host followed by any other character", "connect owner:hunter2pw@host>"],
-  ])("takes the password out of a scheme-less user and password before %s", async (_case, sentence) => {
-    const reason = await loggedReason(sentence);
-    expect(reason).not.toBe("");
-    expect(reason).not.toContain("hunter2pw");
+    ["a timeout", "embedding request timed out", "timeout"],
+    ["a refused connection's code", "connect ECONNREFUSED 198.51.100.7:8081", "ECONNREFUSED"],
+    ["a status in compact JSON", 'embeddings failed {"code":401,"email":"x@y.example"}', "HTTP 401"],
+    ["a rate limit and a quota", "429 Too Many Requests: rate limit reached, check your quota", "HTTP 429, rate limited, quota"],
+    ["a refused key", "403 Forbidden: invalid api key", "HTTP 403, forbidden, invalid key"],
+    ["a missing model", "model text-embedding-3-small not found (404)", "HTTP 404, not found"],
+    ["an undici connect timeout", "TypeError: fetch failed (UND_ERR_CONNECT_TIMEOUT)", "UND_ERR_CONNECT_TIMEOUT, fetch failed"],
+    ["a refused connection with a credential in it", "connect owner:pa/ss@192.0.2.44:8081 refused", "refused"],
+    ["a sentence it has no label for", `pull qwen3-embedding:0.6b@sha256:${"5e".repeat(32)} failed`, "no recognised detail"],
+    ["no sentence at all", "", "no reason given"],
+  ])("names %s with the labels of its own table", async (_case, sentence, said) => {
+    expect(await loggedReason(sentence)).toBe(said);
   });
 
-  // What the redaction's doc says it leaves, pinned so a change to it is seen.
-  it.each([
-    ["a password holding a slash", "connect owner:pa/ss@192.0.2.44:8081 refused", "owner:pa/ss@"],
-    ["the part of a password after its first @", "connect us:p@ss@192.0.2.45 refused", "[redacted]@ss@"],
-    ["a password holding whitespace", "connect owner:pa ss@host.example.com refused", "owner:pa"],
-    ["a 64-hex run glued to a word character", `refused tok_${"5e".repeat(32)}`, `tok_${"5e".repeat(32)}`],
-    ["a hex run longer than 64", `refused ${"5e".repeat(32)}a`, `${"5e".repeat(32)}a`],
-    ["a loopback address and port", "connect ECONNREFUSED 127.0.0.1:8081", "127.0.0.1:8081"],
-    ["the word after an ordinary Basic, which is taken", "HTTP Basic authentication required", "HTTP Basic [redacted] required"],
-    ["a password holding a quote", 'connect owner:pa"ss@192.0.2.46 refused', 'owner:pa"ss@'],
-    ["a password holding a comma", "connect owner:pa,ss@192.0.2.46 refused", "owner:pa,ss@"],
-    ["a password holding a brace", "connect owner:pa}ss@192.0.2.46 refused", "owner:pa}ss@"],
-    ["the port of an address that is not loopback", "connect ECONNREFUSED 198.51.100.7:8081", "[redacted]:8081"],
-    ["a host without a scheme under a TLD the sanitizer does not list", "refused by embed.vendor.invalid", "embed.vendor.invalid"],
-    ["a user and password whose @ ends the text", "invalid proxy owner:placeholderpw@", "owner:placeholderpw@"],
-    ["a user and password whose @ is followed by a space", "invalid proxy owner:placeholderpw@ host", "owner:placeholderpw@ host"],
-    ["a user and password whose @ is followed by a hyphen", "invalid proxy owner:placeholderpw@-host", "owner:placeholderpw@-host"],
-    ["a user and password whose @ is followed by a percent sign", "invalid proxy owner:placeholderpw@%68ost", "owner:placeholderpw@%68ost"],
-    ["an empty user", "connect :placeholderpw@192.0.2.47 refused", ":placeholderpw@"],
-  ])("leaves what its doc says it leaves: %s", async (_case, sentence, kept) => {
-    expect(await loggedReason(sentence)).toContain(kept);
+  it("says nothing but labels from its own list, or the one fallback, on either line about any sentence", async () => {
+    const { CORE_FAILURE_LABELS, CORE_FAILURE_UNRECOGNISED } = await lib();
+    const labels = new Set(CORE_FAILURE_LABELS);
+    // Every sentence the line's earlier redaction was tested with, and the
+    // gateway's own sentence, which the reading carries when there is no verdict.
+    const sentences = [
+      "embedding request timed out",
+      PENDING,
+      "Error: embeddings request to https://api.example.invalid/v1/embeddings failed (401) for key claw_PLACEHOLDER0000000000 at /var/lib/openclaw/openclaw.json",
+      "Error: embeddings request to https://api.example.invalid/v1/embeddings failed (401) for key claw_PLACEHOLDER0000000000 at /home/clawbox/.openclaw/openclaw.json",
+      `the proxy refused ${"5e".repeat(32)} (401)`,
+      "401 with Authorization: Basic dXNlcjpwYXNzd29yZDEyMw==",
+      "connect to owner:hunter2secret@192.0.2.44:8081 refused",
+      "connect ECONNREFUSED 198.51.100.7:8081",
+      'embeddings failed {"code":401,"email":"x@y.example"}',
+      `pull qwen3-embedding:0.6b@sha256:${"5e".repeat(32)} failed`,
+      "connect owner:hunter2pw@host: refused",
+      "connect owner:hunter2pw@192.0.2.10: timeout",
+      "connect owner:hunter2pw@192.0.2.10?x=1 failed",
+      "connect owner:hunter2pw@192.0.2.10#frag failed",
+      "connect owner:hunter2pw@[2001:db8::1]:8080 refused",
+      "connect owner:hunter2pw@host>",
+      "connect owner:pa/ss@192.0.2.44:8081 refused",
+      "connect us:p@ss@192.0.2.45 refused",
+      "connect owner:pa ss@host.example.com refused",
+      `refused tok_${"5e".repeat(32)}`,
+      `refused ${"5e".repeat(32)}a`,
+      "connect ECONNREFUSED 127.0.0.1:8081",
+      "HTTP Basic authentication required",
+      'connect owner:pa"ss@192.0.2.46 refused',
+      "connect owner:pa,ss@192.0.2.46 refused",
+      "connect owner:pa}ss@192.0.2.46 refused",
+      "refused by embed.vendor.invalid",
+      "invalid proxy owner:placeholderpw@",
+      "invalid proxy owner:placeholderpw@ host",
+      "invalid proxy owner:placeholderpw@-host",
+      "invalid proxy owner:placeholderpw@%68ost",
+      "connect :placeholderpw@192.0.2.47 refused",
+      "ab:cd".repeat(8_000),
+      `${"x".repeat(1_200)} key claw_PLACEHOLDER0000000000`,
+      `https://x/${"a".repeat(995)} MARKER`,
+    ];
+    const offList: Array<[line: string, sentence: string, said: string]> = [];
+    for (const sentence of sentences) {
+      for (const [line, said] of [["not-ok", await loggedReason(sentence)], ["keyword-only", await loggedUnavailableReason(sentence)]]) {
+        const parts = said.split(", ");
+        const labelsOnly = parts.every((part) => labels.has(part)) && new Set(parts).size === parts.length;
+        if (said !== CORE_FAILURE_UNRECOGNISED && !labelsOnly) offList.push([line, sentence.slice(0, 80), said]);
+      }
+    }
+    expect(offList).toEqual([]);
   });
 
-  it("reads only the head of a very long sentence, and says at most 200 characters of it", async () => {
-    // 40,000 characters with no whitespace and no "@": the shape the patterns
-    // would scan quadratically if they ran on the whole sentence.
-    const long = await loggedReason("ab:cd".repeat(8_000));
-    expect(long).not.toBe("");
-    expect(long.length).toBeLessThanOrEqual(200);
-    const cut = await loggedReason(`${"x".repeat(1_200)} key claw_PLACEHOLDER0000000000`);
-    expect(cut).not.toBe("");
-    expect(cut.length).toBeLessThanOrEqual(200);
-    expect(cut).not.toContain("claw_");
-    // The cut itself, shown by content: past 1,000 characters a word is gone even
-    // though the URL before it shrinks to a placeholder that leaves room for it.
-    const past = await loggedReason(`https://x/${"a".repeat(995)} MARKER`);
-    expect(past).toContain("[endpoint]");
-    expect(past).not.toContain("MARKER");
+  it("reads only the first 1,000 characters of the core's sentence", async () => {
+    // Text a remote server wrote can be one long run: the patterns never see more.
+    expect(await loggedReason(`${"x".repeat(995)} 401`)).toBe("HTTP 401");
+    expect(await loggedReason(`${"x".repeat(1_000)} 401`)).toBe("no recognised detail");
   });
 
   it("logs the not-ok again after a recovery, and for another embedder setting that fails the same way", async () => {
@@ -792,7 +810,7 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     gateway.probe = FAILED;
     await invalidated();
     expect(probeLines()).toHaveLength(2);
-    // Another endpoint refusing the same way: the redacted sentence is the same, the embedder is not.
+    // Another endpoint refusing the same way: the labels are the same, the embedder is not.
     await configure({ baseUrl: "https://other.example.invalid/v1" });
     await reload();
     expect(probeLines()).toHaveLength(3);
@@ -2662,7 +2680,7 @@ describe("a configured embedder the core could not start", () => {
     }
   });
 
-  it("logs it once per verdict with the core's reason, and never its address, key or path", async () => {
+  it("logs it once per verdict with the labels for the core's reason, and never its address, key or path", async () => {
     const script = path.join(tmpDir, "fake-openclaw");
     await fs.writeFile(script, `#!/bin/sh\ncat <<'JSON'\n${JSON.stringify(EMBEDDER_UNAVAILABLE_STATUS)}\nJSON\n`, { mode: 0o755 });
     process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
@@ -2679,7 +2697,7 @@ describe("a configured embedder the core could not start", () => {
       const lines = all.filter((line) => line.includes("fallen back to keyword-only"));
       expect(lines).toHaveLength(1);
       expect(lines[0]).toContain("openai-compatible");
-      expect(lines[0]).toContain("401");
+      expect(lines[0]).toContain(" — HTTP 401; ");
       expect(lines[0]).not.toContain("claw_PLACEHOLDER");
       expect(lines[0]).not.toContain("example.invalid");
       expect(lines[0]).not.toContain("/home/");

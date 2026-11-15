@@ -30,7 +30,6 @@ import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
 import { readPlanGate } from "@/lib/paid-plan-gate-server";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
-import { sanitizeText } from "@/lib/incident-sanitize";
 import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { askOpenclawGateway, openclawGatewayRuns, startOpenclawGatewayAfterOffline, stopOpenclawGatewayForOffline } from "@/lib/openclaw-auth-ops";
 import { resolveMemoryEmbedder } from "@/lib/memory-embedder";
@@ -943,7 +942,7 @@ async function askEmbedder(key: string, agentId: string, held: EmbedderVerdict |
   // No embedder at all (`none`) is the embedder-unavailable line's to say.
   noteEmbedderProbe(key, embedding.ok || provider === "none"
     ? ""
-    : `the embedder did not pass the core's readiness probe (doctor.memory.status): ${redactCoreSentence(cleanString(embedding.error)) || "no reason given"}`);
+    : `the embedder did not pass the core's readiness probe (doctor.memory.status): ${coreFailureLabels(cleanString(embedding.error)) || "no reason given"}`);
   return (embedderVerdict = {
     key,
     ok: embedding.ok,
@@ -964,8 +963,9 @@ async function askEmbedder(key: string, agentId: string, held: EmbedderVerdict |
  * says only "not ready", and this is what tells a refused key from an endpoint
  * that is down from a probe this box can no longer ask. A call that could not
  * be made names its error's class and code only, never its message; a not-ok
- * carries the core's sentence through `redactCoreSentence`. An empty line (an
- * ok) clears it, so the next failure is said again.
+ * names the fixed labels `coreFailureLabels` finds in the core's sentence,
+ * never the sentence. An empty line (an ok) clears it, so the next failure is
+ * said again.
  */
 let loggedEmbedderProbe = "";
 function noteEmbedderProbe(key: string, line: string): void {
@@ -1581,13 +1581,12 @@ function noteProviderFallback(status: ClawKeepMemoryStatus): void {
 
 /**
  * A configured embedder the core could not start, in the device log, once per
- * verdict like the line above — with the core's own reason, which is the one
- * thing that tells a refused key from an endpoint that is not there.
- *
- * The reason is the core's (already redacted by it for tools) and is put
- * through the credential shapes here as well, with addresses and paths taken
- * out: it is the device log, and the rule of the line above holds — never the
- * endpoint and never the key. It never reaches the status the API answers.
+ * verdict like the line above — with the fixed labels `coreFailureLabels`
+ * finds in the core's reason, which tell a refused key from an endpoint that
+ * is not there. The reason itself is never printed: it can be the readiness
+ * probe's sentence (`memoryStatusFromGateway` puts it in the reading), and the
+ * rule of the line above holds — never the endpoint and never the key. It
+ * never reaches the status the API answers either.
  */
 let loggedEmbedderUnavailable = "";
 function noteEmbedderUnavailable(status: ClawKeepMemoryStatus, raw: unknown): void {
@@ -1603,56 +1602,87 @@ function noteEmbedderUnavailable(status: ClawKeepMemoryStatus, raw: unknown): vo
   );
 }
 
-/** The core's own sentence for why no embedder started, made safe for the device log. */
+/** The fixed labels for the core's own sentence on why no embedder started. */
 function coreEmbedderFailure(raw: unknown, agentId: string): string {
   const custom = asRecord(asRecord(agentStatusRow(raw, agentId).status).custom);
-  return redactCoreSentence(cleanString(custom.providerUnavailableReason) || cleanString(asRecord(custom.providerState).reason));
+  return coreFailureLabels(cleanString(custom.providerUnavailableReason) || cleanString(asRecord(custom.providerState).reason));
 }
 
 /**
- * A sentence the core wrote about its embedder, for the device log, at most
- * 200 characters, read from its first 1,000 only. The cut comes first: text a
- * remote server wrote can be one long run without whitespace, on which these
- * patterns cost the square of its length on the web server's only thread, and
- * nothing past 1,000 characters can reach the 200 that are kept.
+ * What the device log may say about a sentence the core wrote on its embedder:
+ * the labels of this table whose pattern it matches, in table order, and never
+ * a piece of the sentence. The sentence is free text that a remote server can
+ * write, and redacting credentials out of it by their shapes always left some
+ * shape behind; here the line can only say words written in this file, so
+ * nothing the sentence holds can reach the log.
  *
- * Taken out, in order: every `scheme://` run (an endpoint goes whole, user and
- * password with it); paths under the usual roots; the word after `Basic`, in
- * any case (6 or more characters, also after an ordinary "Basic");
- * `user:password@` written without a scheme, when neither half holds
- * whitespace, `/`, `@`, a quote, a comma or a brace and the `@` is followed by
- * a letter, a digit, `_` or `[` (whatever comes after the host: a doubt is
- * redacted) — which also takes the `name:tag@` of a model digest such as
- * `qwen3-embedding:0.6b@sha256:…`; a run of exactly 64 hex digits standing
- * alone. Then `sanitizeText`: the credential shapes and named values it knows,
- * e-mail addresses, IP addresses other than loopback, home paths, query
- * strings, and host names under the TLDs it lists.
- *
- * What stays includes, and is not limited to: any credential whose shape or
- * name `sanitizeText` does not know; a password holding whitespace, `/`, a
- * quote, a comma or a brace (the pair is not matched; the host after it may
- * still go, as above); of a password holding `@`, the part after its first `@`
- * (unless a later rule takes it with the host); a `user:password@` whose `@`
- * ends the text or is followed by a space, `-` or `%`; an empty user
- * (`:password@host`); a credential the 1,000-character cut goes through, whose
- * broken shape no rule matches, so its head can be printed when earlier text
- * shrank (a long URL becoming `[endpoint]`); a 64-hex run glued to a word
- * character, or longer than 64; a loopback `address:port`; the port of any
- * other bare `address:port`; a host written without a scheme under a TLD
- * `sanitizeText` does not list.
+ * Every pattern is linear (no nested quantifier) and only tested, so no match
+ * reaches the output. A misread label is a wrong word, never a leak.
  */
-function redactCoreSentence(said: string): string {
+const CORE_FAILURE_TABLE: ReadonlyArray<readonly [label: string, pattern: RegExp]> = [
+  // HTTP statuses (4xx and 5xx cannot be an address octet).
+  ["HTTP 400", /\b400\b/],
+  ["HTTP 401", /\b401\b/],
+  ["HTTP 402", /\b402\b/],
+  ["HTTP 403", /\b403\b/],
+  ["HTTP 404", /\b404\b/],
+  ["HTTP 408", /\b408\b/],
+  ["HTTP 413", /\b413\b/],
+  ["HTTP 422", /\b422\b/],
+  ["HTTP 429", /\b429\b/],
+  ["HTTP 500", /\b500\b/],
+  ["HTTP 502", /\b502\b/],
+  ["HTTP 503", /\b503\b/],
+  ["HTTP 504", /\b504\b/],
+  // Node's socket and DNS codes, undici's and the TLS ones worth telling apart.
+  ["ECONNREFUSED", /\bECONNREFUSED\b/],
+  ["ECONNRESET", /\bECONNRESET\b/],
+  ["ETIMEDOUT", /\bETIMEDOUT\b/],
+  ["ENOTFOUND", /\bENOTFOUND\b/],
+  ["EAI_AGAIN", /\bEAI_AGAIN\b/],
+  ["EHOSTUNREACH", /\bEHOSTUNREACH\b/],
+  ["ENETUNREACH", /\bENETUNREACH\b/],
+  ["EPIPE", /\bEPIPE\b/],
+  ["UND_ERR_CONNECT_TIMEOUT", /\bUND_ERR_CONNECT_TIMEOUT\b/],
+  ["UND_ERR_HEADERS_TIMEOUT", /\bUND_ERR_HEADERS_TIMEOUT\b/],
+  ["UND_ERR_BODY_TIMEOUT", /\bUND_ERR_BODY_TIMEOUT\b/],
+  ["UND_ERR_SOCKET", /\bUND_ERR_SOCKET\b/],
+  ["CERT_HAS_EXPIRED", /\bCERT_HAS_EXPIRED\b/],
+  ["DEPTH_ZERO_SELF_SIGNED_CERT", /\bDEPTH_ZERO_SELF_SIGNED_CERT\b/],
+  ["SELF_SIGNED_CERT_IN_CHAIN", /\bSELF_SIGNED_CERT_IN_CHAIN\b/],
+  ["UNABLE_TO_VERIFY_LEAF_SIGNATURE", /\bUNABLE_TO_VERIFY_LEAF_SIGNATURE\b/],
+  ["ERR_TLS_CERT_ALTNAME_INVALID", /\bERR_TLS_CERT_ALTNAME_INVALID\b/],
+  // Words.
+  ["timeout", /\btime[ds]? ?out\b/i],
+  ["unauthorized", /\bunauthori[sz]ed\b/i],
+  ["forbidden", /\bforbidden\b/i],
+  ["invalid key", /\binvalid[ _](?:api[ _])?key\b/i],
+  ["rate limited", /\brate[ _-]?limit/i],
+  ["quota", /quota/i],
+  ["not found", /\bnot found\b/i],
+  ["refused", /\brefused\b/i],
+  ["aborted", /\baborted\b/i],
+  ["fetch failed", /\bfetch failed\b/i],
+  ["certificate", /\bcertificate\b/i],
+];
+
+/** Every label `coreFailureLabels` can say, in the order it says them. */
+export const CORE_FAILURE_LABELS: readonly string[] = CORE_FAILURE_TABLE.map(([label]) => label);
+
+/** What it says for a sentence in which no label is found. */
+export const CORE_FAILURE_UNRECOGNISED = "no recognised detail";
+
+/**
+ * The labels for `said`, joined with ", "; `CORE_FAILURE_UNRECOGNISED` when
+ * there are none, and "" for no sentence at all. Only its first 1,000
+ * characters are read: text a remote server wrote can be one long run, and
+ * matching must stay cheap on the web server's only thread.
+ */
+function coreFailureLabels(said: string): string {
   const head = said.slice(0, 1_000);
   if (!head) return "";
-  const cut = head
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[endpoint]")
-    .replace(/(?:~|\/(?:home|root|tmp|var|srv|opt|usr|etc|mnt|media|data))\/\S*/g, "[path]")
-    .replace(/\bBasic\s+[A-Za-z0-9+/=._~-]{6,}/gi, "Basic [redacted]")
-    .replace(/[^\s:@/"',{}]+:[^\s@/"',{}]+@(?=[\w[])/g, "[redacted]@")
-    .replace(/\b[0-9a-f]{64}\b/gi, "[redacted]")
-    .replace(/\s+/g, " ");
-  // `sanitizeText`'s cap adds an ellipsis past 200; the line keeps 200.
-  return sanitizeText(cut, { maxChars: 200 }).slice(0, 200);
+  const found = CORE_FAILURE_TABLE.filter(([, pattern]) => pattern.test(head)).map(([label]) => label);
+  return found.join(", ") || CORE_FAILURE_UNRECOGNISED;
 }
 
 /**
