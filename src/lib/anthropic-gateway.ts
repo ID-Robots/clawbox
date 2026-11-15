@@ -98,7 +98,7 @@
  * chat stays on the pool's Claude accounts (`not_transferable`).
  */
 
-import { logoutOpenclawAuthProfiles, setOpenclawAuthOrder, withOpenclawGatewayStopped } from "@/lib/openclaw-auth-ops";
+import { logoutOpenclawAuthProfiles, openclawGatewayHeldOffline, setOpenclawAuthOrder, withOpenclawGatewayStopped } from "@/lib/openclaw-auth-ops";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
 import { gatewayIsAbsent, openclawIsAbsent, readConfigStrict, runOpenclawConfigUnset, spawnOpenclawCli } from "@/lib/openclaw-config";
 import { gatewayWsCall } from "@/lib/openclaw-gateway-ws";
@@ -152,6 +152,11 @@ export interface GatewayDeps {
    * service owner, and started again after. Absent: the pastes run as they are.
    */
   offline?: <T>(work: () => Promise<T>) => Promise<T>;
+  /**
+   * Is the gateway held stopped for other offline work (a memory index pass)?
+   * Asked before the pass renews anything. Absent: never.
+   */
+  held?: () => Promise<boolean>;
   /** Core's removal of one profile, its order and config entries. */
   logout: (profileId: string, agent: readonly string[]) => Promise<void>;
   /** Core's stored order for Anthropic; an empty list clears it. */
@@ -248,6 +253,7 @@ const defaultDeps: GatewayDeps = {
   // again (the owner's box, 2026-11-14: two stops of seven, five minutes
   // down each).
   offline: (work) => withOpenclawGatewayStopped(work, { waitOutStop: true }),
+  held: () => openclawGatewayHeldOffline(),
   logout: async (profileId, agent) => {
     await logoutOpenclawAuthProfiles(PROVIDER, [profileId], agentIdOf(agent));
   },
@@ -454,6 +460,13 @@ async function writeOrderMarker(next: OrderMarker): Promise<void> {
 async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerOutcome> {
   const d = deps();
   if (d.absent()) return outcome("skipped", "no_gateway");
+  // A memory index pass holds the gateway stopped, for as long as a full
+  // rebuild takes, and owns the state the pastes would be written to. Nothing
+  // is renewed and no window is opened under it: the paste would be refused
+  // (and Anthropic has refused the gateway's copy of a renewed token by then),
+  // and the window's own start would bring the gateway up under the pass. The
+  // keeper's next pass finds the gateway back and does the work.
+  if (await d.held?.()) return outcome("skipped", "offline_hold");
   const before = d.read();
   if (before.kind === "unreadable") return outcome("failed", "store_unreadable");
   const ours = before.kind === "present" ? before.profiles.filter((p) => isPoolProfile(p.profileId)) : [];

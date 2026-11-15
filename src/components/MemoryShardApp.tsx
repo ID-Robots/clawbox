@@ -254,6 +254,25 @@ function MemoryIndexCard({ initial, onError }: {
     }
   }, []);
 
+  /**
+   * Did a pass start after the run that was on record at `beforeStartedAtMs`?
+   * One that is going, or one that has already finished: a short pass can be
+   * over before the box is asked. Told apart from the run that was there
+   * before the click by its start time, which is the box's own clock on both
+   * sides, so an older success is not taken for this attempt. Adopts the
+   * reading it took; false when it cannot be read.
+   */
+  const passStartedSince = useCallback(async (beforeStartedAtMs: number): Promise<boolean> => {
+    try {
+      const body = await jsonOrError<unknown>(await fetch("/setup-api/clawkeep/memory"));
+      if (!isMemoryStatus(body)) return false;
+      setStatus(body);
+      return body.run.status === "running" || body.run.startedAtMs > beforeStartedAtMs;
+    } catch {
+      return false;
+    }
+  }, []);
+
   // Poll fast while a run is in flight so "running" turns into a real outcome
   // on its own, and slowly the rest of the time — the status probe shells out
   // to the OpenClaw CLI and this box has 8 GB. The first read happens here too
@@ -298,6 +317,8 @@ function MemoryIndexCard({ initial, onError }: {
 
   const startIndex = async (mode: MemoryIndexMode) => {
     setBusy(mode);
+    // The run on record before this press, to tell this attempt's from it.
+    const beforeStartedAtMs = status?.run.startedAtMs ?? 0;
     try {
       const res = await fetch("/setup-api/clawkeep/memory/index", {
         method: "POST",
@@ -305,14 +326,17 @@ function MemoryIndexCard({ initial, onError }: {
         body: JSON.stringify({ mode }),
       });
       if (res.status === 409) {
-        // Two different declines wear this code now: single-flight, and the
-        // owner's switch being off. "Indexing is already running" over a
+        // Three different declines wear this code now: single-flight, the
+        // owner's switch being off, and an incremental pass the running
+        // assistant does by itself. "Indexing is already running" over a
         // switched-off shard would send them looking for a run that was never
         // started, so the route's `kind` decides which sentence they get.
         const refusal = await res.json().catch(() => null) as { kind?: unknown } | null;
         onError(refusal?.kind === "disabled"
           ? t("clawkeep.memory.disabledError")
-          : t("clawkeep.memory.alreadyRunning"));
+          : refusal?.kind === "gateway_indexes"
+            ? t("clawkeep.memory.gatewayIndexes")
+            : t("clawkeep.memory.alreadyRunning"));
       } else {
         const { run } = await jsonOrError<{ run?: unknown }>(res);
         // The route answers with the run it just started. Adopt it now, so
@@ -323,7 +347,13 @@ function MemoryIndexCard({ initial, onError }: {
       }
       await load();
     } catch {
-      onError(t("clawkeep.memory.startFailed"));
+      // A request that FAILED is not yet a pass that could not be started. A
+      // full pass on OpenClaw stops the assistant first and waits for that
+      // stop, which takes minutes on an assistant in use; a tunnel drops the
+      // request near 100 s while the box carries on and starts the pass. The
+      // run on record decides, so the owner is not told to try again over a
+      // pass that is about to begin, is going, or has already finished.
+      if (!(await passStartedSince(beforeStartedAtMs))) onError(t("clawkeep.memory.startFailed"));
     } finally {
       setBusy(null);
     }
