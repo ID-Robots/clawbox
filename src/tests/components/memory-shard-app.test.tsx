@@ -65,6 +65,8 @@ let indexRefusalKind: string | null = null;
 let indexDrops = false;
 /** ...and by then the box has the pass on record as going. */
 let indexDropsWithRunOnRecord = false;
+/** ...or as already finished. */
+let indexDropsWithRunFinished = false;
 // A promise a POST/PUT waits on before answering — never resolved when a test
 // needs the request to stay in flight.
 let indexGate: Promise<void> | null = null;
@@ -84,6 +86,10 @@ function installFetch() {
       if (indexDrops) {
         if (indexDropsWithRunOnRecord) {
           memory = { ...memory, run: { status: "running", mode: "full", trigger: "manual", startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "" } };
+        }
+        if (indexDropsWithRunFinished) {
+          const at = Date.now();
+          memory = { ...memory, run: { status: "succeeded", mode: "full", trigger: "manual", startedAtMs: at - 2_000, finishedAtMs: at, durationMs: 2_000, error: "" } };
         }
         throw new TypeError("Failed to fetch");
       }
@@ -135,6 +141,7 @@ describe("the Memory Shard app", () => {
     indexRefusalKind = null;
     indexDrops = false;
     indexDropsWithRunOnRecord = false;
+    indexDropsWithRunFinished = false;
     indexGate = null;
     scheduleGate = null;
     statusGate = null;
@@ -501,12 +508,32 @@ describe("the Memory Shard app", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Full reindex" }));
     fireEvent.click(screen.getAllByRole("button", { name: "Full reindex" }).at(-1)!);
     await waitFor(() => expect(indexCalls).toEqual([{ mode: "full" }]));
-    // The card has adopted the run the box has on record...
-    await waitFor(() => expect((memory.run as { status: string }).status).toBe("running"));
-    await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/setup-api/clawkeep/memory")).length).toBeGreaterThan(1));
+    // The card has adopted the run the box has on record: it says so...
+    expect(await screen.findByText(/running now/)).toBeTruthy();
     // ...and says nothing about a pass that could not be started.
-    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(screen.queryByText(/could not be started/)).toBeNull();
+  });
+
+  it("does not say so either when the dropped request's pass has already finished", async () => {
+    // A short pass can be over before the box is asked: the run on record is
+    // then a success that STARTED after the one that was there before the press.
+    indexDrops = true;
+    indexDropsWithRunFinished = true;
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Full reindex" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Full reindex" }).at(-1)!);
+    await waitFor(() => expect(indexCalls).toEqual([{ mode: "full" }]));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Index now" })).toBeTruthy());
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/setup-api/clawkeep/memory")).length).toBeGreaterThan(1));
+    expect(screen.queryByText(/could not be started/)).toBeNull();
+  });
+
+  it("is not reassured by an older success that was already on record before the press", async () => {
+    indexDrops = true;
+    memory = { ...LOCAL_MEMORY, run: { status: "succeeded", mode: "full", trigger: "manual", startedAtMs: 1_700_000_000_000, finishedAtMs: 1_700_000_060_000, durationMs: 60_000, error: "" } };
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Index now" }));
+    expect(await screen.findByText(/could not be started/)).toBeTruthy();
   });
 
   it("still says a pass could not be started when the request failed and nothing is going", async () => {

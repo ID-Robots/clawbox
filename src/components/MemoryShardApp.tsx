@@ -254,13 +254,20 @@ function MemoryIndexCard({ initial, onError }: {
     }
   }, []);
 
-  /** Is a run on record as going? Adopts the reading it took; false when it cannot be read. */
-  const runIsGoing = useCallback(async (): Promise<boolean> => {
+  /**
+   * Did a pass start after the run that was on record at `beforeStartedAtMs`?
+   * One that is going, or one that has already finished: a short pass can be
+   * over before the box is asked. Told apart from the run that was there
+   * before the click by its start time, which is the box's own clock on both
+   * sides, so an older success is not taken for this attempt. Adopts the
+   * reading it took; false when it cannot be read.
+   */
+  const passStartedSince = useCallback(async (beforeStartedAtMs: number): Promise<boolean> => {
     try {
       const body = await jsonOrError<unknown>(await fetch("/setup-api/clawkeep/memory"));
       if (!isMemoryStatus(body)) return false;
       setStatus(body);
-      return body.run.status === "running";
+      return body.run.status === "running" || body.run.startedAtMs > beforeStartedAtMs;
     } catch {
       return false;
     }
@@ -310,6 +317,8 @@ function MemoryIndexCard({ initial, onError }: {
 
   const startIndex = async (mode: MemoryIndexMode) => {
     setBusy(mode);
+    // The run on record before this press, to tell this attempt's from it.
+    const beforeStartedAtMs = status?.run.startedAtMs ?? 0;
     try {
       const res = await fetch("/setup-api/clawkeep/memory/index", {
         method: "POST",
@@ -343,8 +352,8 @@ function MemoryIndexCard({ initial, onError }: {
       // stop, which takes minutes on an assistant in use; a tunnel drops the
       // request near 100 s while the box carries on and starts the pass. The
       // run on record decides, so the owner is not told to try again over a
-      // pass that is about to begin.
-      if (!(await runIsGoing())) onError(t("clawkeep.memory.startFailed"));
+      // pass that is about to begin, is going, or has already finished.
+      if (!(await passStartedSince(beforeStartedAtMs))) onError(t("clawkeep.memory.startFailed"));
     } finally {
       setBusy(null);
     }

@@ -35,6 +35,7 @@ import { readUnitState, runUnitJob, unitIsStopped, UNIT_JOB_SETTLE_BUDGET_MS } f
 import { DATA_DIR } from "@/lib/config-store";
 import fs from "fs";
 import path from "@/lib/runtime-path";
+import { processStore } from "@/lib/process-store";
 
 /**
  * On disk while ClawBox holds the gateway stopped for offline work (a memory
@@ -42,6 +43,26 @@ import path from "@/lib/runtime-path";
  * next start puts the gateway back (`restoreOpenclawGatewayAfterCrash`).
  */
 const OFFLINE_HOLD_PATH = path.join(DATA_DIR, ".openclaw-offline-hold.json");
+
+/**
+ * Who in THIS process has the gateway stopped, or is about to: a memory index
+ * pass (`pass`, from the moment it asks for the stop until it has started the
+ * gateway again) and the short windows of `withOpenclawGatewayStopped`
+ * (`windows`, each from before its stop until after its start).
+ *
+ * The two end by STARTING the gateway, so they must never overlap: a window
+ * that passed its check a moment before a pass took its hold would otherwise
+ * finish under the pass and bring the gateway up over it. The hold record on
+ * disk cannot rule that out — it is written by the pass, after the window has
+ * looked. So ownership is claimed here, synchronously (no `await` between the
+ * look and the claim): a window is refused while a pass owns the gateway, and
+ * a pass waits for the windows already open to finish before it stops
+ * anything. In the process store, not a module-level `let`: the boot hook and
+ * the route handlers load two copies of this module (see process-store.ts).
+ */
+function offlineOwnership(): { pass: boolean; windows: number; waiters: Array<() => void> } {
+  return processStore(`openclaw-auth-ops.offline:${OFFLINE_HOLD_PATH}`, () => ({ pass: false, windows: 0, waiters: [] as Array<() => void> }));
+}
 
 
 /** One CLI start-up on a Jetson is 10-12 s; the gateway's own write is quicker. */
@@ -154,6 +175,12 @@ let deps: AuthOpsDeps = defaultDeps;
 /** Tests only. */
 export function _setAuthOpsDepsForTests(next: Partial<AuthOpsDeps> | null): void {
   deps = next ? { ...defaultDeps, ...next } : defaultDeps;
+  if (!next) {
+    const owner = offlineOwnership();
+    owner.pass = false;
+    owner.windows = 0;
+    owner.waiters.length = 0;
+  }
 }
 
 /** An agent named for the gateway request, or nothing (the core's default agent). */
@@ -318,9 +345,21 @@ export async function setOpenclawAuthOrder(provider: string, order: string[] | n
  */
 export async function stopOpenclawGatewayForOffline(): Promise<void> {
   if (gatewayIsAbsent()) return;
-  // No record, no stop: a gateway held stopped with nothing on disk to say so
-  // would stay stopped if this server exited before starting it again.
-  fs.writeFileSync(OFFLINE_HOLD_PATH, JSON.stringify({ pid: process.pid, at: Date.now() }) + "\n", { mode: 0o600 });
+  // Claimed before anything is awaited: from here no new window opens (see
+  // `offlineOwnership`), and the ones already open are let finish — their own
+  // start included — so that start does not land under the pass.
+  const owner = offlineOwnership();
+  owner.pass = true;
+  try {
+    while (owner.windows > 0) await new Promise<void>((resolve) => { owner.waiters.push(resolve); });
+    // No record, no stop: a gateway held stopped with nothing on disk to say so
+    // would stay stopped if this server exited before starting it again.
+    fs.writeFileSync(OFFLINE_HOLD_PATH, JSON.stringify({ pid: process.pid, at: Date.now() }) + "\n", { mode: 0o600 });
+  } catch (err) {
+    // Nothing was stopped, so nothing will be started again to release this.
+    owner.pass = false;
+    throw err;
+  }
   // Waited out, like the account pool's window. A gateway that is answering
   // turns drains for as long as its unit allows (TimeoutStopSec=330) and is
   // killed at the end of it; the minute this used to wait was over long before
@@ -343,9 +382,14 @@ export async function stopOpenclawGatewayForOffline(): Promise<void> {
  * leftover, and reading it as a hold would refuse every token paste and key
  * save from then on. Held means: the record, a live holder, AND a unit that is
  * down or stopping. A hold left by a server that has exited is not one either:
- * `restoreOpenclawGatewayAfterCrash` deals with that at start-up.
+ * `restoreOpenclawGatewayAfterCrash` deals with that at start-up. A pass of
+ * this very process counts from the moment it asked for its stop, before the
+ * record exists (`offlineOwnership`).
  */
 export async function openclawGatewayHeldOffline(): Promise<boolean> {
+  // A pass of this very process, from before its stop: the record below is
+  // written only once the windows it waits for have closed.
+  if (offlineOwnership().pass) return true;
   let hold: { pid?: unknown } | null = null;
   try {
     hold = JSON.parse(fs.readFileSync(OFFLINE_HOLD_PATH, "utf8")) as { pid?: unknown };
@@ -384,8 +428,14 @@ export async function openclawGatewayRuns(): Promise<boolean> {
 /** Start the gateway after `stopOpenclawGatewayForOffline`. */
 export async function startOpenclawGatewayAfterOffline(): Promise<void> {
   if (gatewayIsAbsent()) return;
-  await deps.startGateway();
-  fs.rmSync(OFFLINE_HOLD_PATH, { force: true });
+  try {
+    await deps.startGateway();
+    fs.rmSync(OFFLINE_HOLD_PATH, { force: true });
+  } finally {
+    // The pass is over whether or not the gateway answered in time: other
+    // offline work may have the gateway again (and starts it itself).
+    offlineOwnership().pass = false;
+  }
 }
 
 /**
@@ -448,7 +498,23 @@ export async function withOpenclawGatewayStopped<T>(work: () => Promise<T>, opti
   // holds the state the CLI below would need: `work` would be refused, and the
   // start in the `finally` would bring the gateway up under the pass. Refused
   // here, before anything is stopped or started; the caller tries again later.
-  if (await openclawGatewayHeldOffline()) throw new OpenclawGatewayHeldOfflineError();
+  // The look and the claim are one synchronous step, so a pass cannot take
+  // its hold in between (`offlineOwnership`).
+  const owner = offlineOwnership();
+  if (owner.pass) throw new OpenclawGatewayHeldOfflineError();
+  owner.windows += 1;
+  try {
+    // Another web server's pass (its record on disk, beside a unit that is down).
+    if (await openclawGatewayHeldOffline()) throw new OpenclawGatewayHeldOfflineError();
+    return await stoppedAround(work, options);
+  } finally {
+    owner.windows -= 1;
+    if (owner.windows === 0) for (const wake of owner.waiters.splice(0)) wake();
+  }
+}
+
+/** The stop, the work and the start of one `withOpenclawGatewayStopped` window. */
+async function stoppedAround<T>(work: () => Promise<T>, options: { waitOutStop?: boolean }): Promise<T> {
   // The stop is inside the `try`: a stop that throws (a job still running when
   // its client gave up) may still stop the unit afterwards, and the gateway
   // must be started again on every way out. A start issued while that stop is

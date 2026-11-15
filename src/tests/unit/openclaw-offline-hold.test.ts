@@ -206,6 +206,74 @@ describe("other offline work while a pass holds the gateway stopped", () => {
   });
 });
 
+describe("a pass and a window that ask for the gateway at the same moment", () => {
+  // The record on disk is written by the pass, after a window has looked: a
+  // window that passed its check a moment earlier would finish under the pass
+  // and start the gateway over it. Ownership is claimed in the process instead.
+  it("lets a window that is already open finish, its start included, before the pass stops anything", async () => {
+    const d = deps();
+    const order: string[] = [];
+    d.stopGateway.mockImplementation(async (waitOut?: boolean) => { order.push(waitOut ? "pass stop" : "window stop"); });
+    d.startGateway.mockImplementation(async () => { order.push("window start"); });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const window = withOpenclawGatewayStopped(async () => { order.push("window work"); await gate; return "done"; });
+    await vi.waitFor(() => expect(order).toContain("window work"));
+
+    const pass = stopOpenclawGatewayForOffline();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The pass has stopped nothing and written nothing while the window is open.
+    expect(order).toEqual(["window stop", "window work"]);
+    expect(fs.existsSync(HOLD)).toBe(false);
+
+    release();
+    await expect(window).resolves.toBe("done");
+    await pass;
+    expect(order).toEqual(["window stop", "window work", "window start", "pass stop"]);
+    expect(fs.existsSync(HOLD)).toBe(true);
+  });
+
+  it("refuses a window from the moment the pass has asked, before its record is on disk", async () => {
+    const d = deps();
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const first = withOpenclawGatewayStopped(async () => { await gate; return "done"; });
+    await vi.waitFor(() => expect(d.stopGateway).toHaveBeenCalledTimes(1));
+    const pass = stopOpenclawGatewayForOffline();
+    expect(fs.existsSync(HOLD)).toBe(false);
+    expect(await openclawGatewayHeldOffline()).toBe(true);
+    const late = vi.fn(async () => "late");
+    await expect(withOpenclawGatewayStopped(late)).rejects.toBeInstanceOf(OpenclawGatewayHeldOfflineError);
+    expect(late).not.toHaveBeenCalled();
+    release();
+    await first;
+    await pass;
+  });
+
+  it("gives the gateway back to other offline work when the pass could not even write its record", async () => {
+    const d = deps();
+    const write = vi.spyOn(fs, "writeFileSync").mockImplementationOnce(() => { throw new Error("EROFS: read-only file system"); });
+    try {
+      await expect(stopOpenclawGatewayForOffline()).rejects.toThrow(/EROFS/);
+    } finally {
+      write.mockRestore();
+    }
+    await expect(withOpenclawGatewayStopped(async () => "done")).resolves.toBe("done");
+    expect(d.stopGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives the gateway back when the pass's start was issued but not answered in time", async () => {
+    const d = deps();
+    await stopOpenclawGatewayForOffline();
+    d.startGateway.mockRejectedValueOnce(new Error("the gateway did not answer"));
+    await expect(startOpenclawGatewayAfterOffline()).rejects.toThrow(/did not answer/);
+    // The record stays for the boot recovery; the unit is coming up, so it holds nothing.
+    d.unitUp.value = true;
+    expect(await openclawGatewayHeldOffline()).toBe(false);
+    await expect(withOpenclawGatewayStopped(async () => "done")).resolves.toBe("done");
+  });
+});
+
 describe("whether a gateway is running to keep the index current", () => {
   it("answers the unit's state", async () => {
     const d = deps();
