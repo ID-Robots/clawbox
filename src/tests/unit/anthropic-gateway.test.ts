@@ -2113,8 +2113,11 @@ describe("TASK-2533 second review pass", () => {
     // Nothing that answers is in with its current token: Work stays (precondition).
     expect(core.profiles.has(p(work.id))).toBe(true);
     const windows = offlineWindows;
-    const lists = () => core.calls.filter((c) => c.method === "cron.list").length;
-    const before = lists();
+    // A pass is told by what it says of the paste it leaves for the keeper (the
+    // automations are not asked about while no account's token is in: nothing
+    // is bound to a lifetime the paste will replace).
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const passes = () => errors.mock.calls.filter((c) => c.map(String).join(" ").includes("left for the keeper's next pass")).length;
 
     vi.useFakeTimers({ toFake: ["Date"] });
     const t0 = Date.now();
@@ -2124,7 +2127,8 @@ describe("TASK-2533 second review pass", () => {
     }
     expect(offlineWindows).toBe(windows);
     // Minutes 1, 3 and 7: two minutes after a pass that left it owing, then four.
-    expect(lists() - before).toBe(3);
+    expect(passes()).toBe(3);
+    errors.mockRestore();
 
     // The keeper's window takes the renewal; Work is out with it.
     core.refusePasteOf.clear();
@@ -2200,8 +2204,10 @@ describe("TASK-2533 second review pass", () => {
 
     // Personal answers, but core still holds its OLD token: a binding made on
     // it now would be replaced when the paste lands, and the token is the one
-    // Anthropic refused. The owner's sign-in answers meanwhile.
-    expect(runCron(core, "inbox")).toBe("anthropic:default");
+    // Anthropic refused. The owner's sign-in does not stand in for an account
+    // that is only waiting for its paste (it leads the jobs when the pool's
+    // accounts are limited): the job stays where it is.
+    expect(runCron(core, "inbox")).toBe(p(work.id));
 
     // The paste lands: the job follows it in the pass that pasted it.
     core.refusePasteOf.clear();
@@ -3059,6 +3065,8 @@ describe("TASK-2533 renewal on the owner's box (2026-11-15 08:36) — path (a): 
     const ids = await threeAccounts(core);
     addCron(core, { id: "reply-check", payload: { kind: "agentTurn", message: "m", model: `${SONNET}@${p(ids[0])}` }, binding: { profileId: p(ids[0]), lifetime: lifetime(core, p(ids[0])), source: "user" } });
     await gw.bindGatewayCrons();
+    // The lost run below must be later than the adoption it follows, whatever the clock's grain.
+    await new Promise((resolve) => setTimeout(resolve, 5));
     // One core bound itself (a chat made it) after the box's look: source `auto`, no record of the box's.
     addCron(core, { id: "social-post", binding: { profileId: p(ids[0]), lifetime: lifetime(core, p(ids[0])), source: "auto" } });
 
@@ -3130,10 +3138,10 @@ describe("TASK-2533 renewal on the owner's box (2026-11-15 08:36) — path (a): 
     }
   });
 
-  it("P4 — with the pool's current token in none of its accounts' profiles (every paste owed) and no sign-in of the owner's, no job is bound at all: nothing is moved onto a lifetime the next paste replaces", async () => {
+  it("P4 — with every pool account's paste owed, the owner's own sign-in does not take the jobs either: nothing is moved onto a lifetime the next paste replaces, and they follow the lead in the pass that pastes it", async () => {
     const core = fakeCore();
-    core.profiles.delete("anthropic:default");
     const ids = await threeAccounts(core);
+    expect(core.profiles.has("anthropic:default")).toBe(true);
     addCron(core, { id: "reply-check", payload: { kind: "agentTurn", message: "m", model: `${SONNET}@${p(ids[0])}` }, binding: { profileId: p(ids[0]), lifetime: lifetime(core, p(ids[0])), source: "user" } });
     await gw.bindGatewayCrons();
     const asked = core.calls.length;
@@ -3154,6 +3162,30 @@ describe("TASK-2533 renewal on the owner's box (2026-11-15 08:36) — path (a): 
     core.refusePasteOf.clear();
     await gw.keepGatewayMirror();
     expect(core.profiles.get(p(ids[0]))?.secret).toBe("sk-ant-oat01-alpha-v2");
+    expect(runCron(core, "reply-check")).toBe(p(ids[0]));
+  });
+
+  it("P5 — a pool secret store that cannot be read says nothing about the accounts: no job is moved while it lasts (not onto the owner's sign-in), and they are bound as usual after", async () => {
+    const core = fakeCore();
+    const ids = await threeAccounts(core);
+    addCron(core, { id: "reply-check", payload: { kind: "agentTurn", message: "m", model: `${SONNET}@${p(ids[0])}` }, binding: { profileId: p(ids[0]), lifetime: lifetime(core, p(ids[0])), source: "user" } });
+    await gw.bindGatewayCrons();
+    const asked = core.calls.length;
+
+    // The store's key is gone for a while (a boot that has not made it yet).
+    const keyFile = path.join(root, "data", ".session-secret");
+    const key = fs.readFileSync(keyFile);
+    const reset = (await import("@/lib/project-secrets"))._resetSecretKeyCacheForTests;
+    fs.rmSync(keyFile);
+    reset();
+    await gw.bindGatewayCrons();
+    expect(updatesTo(core, asked)).toEqual([]);
+    expect((core.crons.get("reply-check") as FakeCron).binding?.profileId).toBe(p(ids[0]));
+
+    fs.writeFileSync(keyFile, key, { mode: 0o600 });
+    reset();
+    await gw.bindGatewayCrons();
+    expect(updatesTo(core, asked)).toEqual([]);
     expect(runCron(core, "reply-check")).toBe(p(ids[0]));
   });
 });

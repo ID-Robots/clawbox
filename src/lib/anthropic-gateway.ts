@@ -611,16 +611,26 @@ function otherProfiles(store: Extract<GatewayProviderAuthRead, { kind: "present"
  * has, and the paste that lands next gives the profile a new authorization
  * lifetime — so an automation bound to it before is refused again after
  * (renewal path (a), see the header of src/lib/anthropic-cron-binding.ts).
- * The pool's token is read as it is, never renewed here. False when the pool
- * cannot say.
+ * The pool's token is read as it is, never renewed here.
+ *
+ * `no`: core holds another token, or the account can no longer answer (gone,
+ * expired, revoked). `unknown`: the pool's own secret store could not be read,
+ * which says nothing about the account — the caller changes nothing then.
  */
-async function coreHoldsCurrentToken(profile: ProviderAuthProfile): Promise<boolean> {
-  if (!isPoolProfile(profile.profileId)) return true;
+type HoldsCurrent = "yes" | "no" | "unknown";
+
+async function coreHoldsCurrentToken(profile: ProviderAuthProfile): Promise<HoldsCurrent> {
+  if (!isPoolProfile(profile.profileId)) return "yes";
+  const accountId = profile.profileId.slice(POOL_PROFILE_PREFIX.length);
   try {
-    const current = await gatewayCredentialFor(profile.profileId.slice(POOL_PROFILE_PREFIX.length), { renew: false });
-    return !!current && tokenFingerprint(current.access) === profile.fingerprint;
+    const current = await gatewayCredentialFor(accountId, { renew: false });
+    if (current) return tokenFingerprint(current.access) === profile.fingerprint ? "yes" : "no";
+    // No credential: the pool marks an account that cannot answer (expired,
+    // revoked) before it says so; one still marked fine has a store outage.
+    const account = (await readPoolState()).accounts.find((a) => a.id === accountId);
+    return account && account.kind === "oauth" && effectiveStatus(account, Date.now()) === "ok" ? "unknown" : "no";
   } catch {
-    return false;
+    return "unknown";
   }
 }
 
@@ -1612,7 +1622,7 @@ async function bindCronsLocked(): Promise<CronBindingResult | null> {
   state.windowRan = false;
   let result = await bindCronsOnce();
   const d = deps();
-  for (let attempt = 1; afterWindow && d.ready && !d.absent() && (result === null || result.unread) && attempt <= POST_WINDOW_BIND_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; afterWindow && d.ready && !d.absent() && result?.unread === true && attempt <= POST_WINDOW_BIND_ATTEMPTS; attempt += 1) {
     if (!(await d.ready())) break;
     result = await bindCronsOnce();
   }
@@ -1650,24 +1660,41 @@ async function bindCronsOnce(): Promise<CronBindingResult | null> {
     // binding captures the profile's authorization lifetime, and the paste still
     // owed gives the profile a new one — an automation bound before it would be
     // refused again the moment it lands. Such an account is skipped: the jobs
-    // go to the first account in the order whose token is in, and follow the
-    // lead in the same pass as its paste once it is.
+    // go to the next account in the order whose token is in, and follow the lead
+    // in the same pass as its paste once it is. While an account of the pool
+    // that is not limited waits for its paste, the owner's own sign-in does not
+    // take the jobs (it leads them only when the pool's accounts are limited,
+    // as before), and a limited one is not a stand-in: nothing is moved. Nothing
+    // is moved either when the pool's own store could not be read.
     const skipped: string[] = [];
+    let waiting = false;
+    let unreadable = false;
     const pick = async (accept: (id: string) => boolean): Promise<ProviderAuthProfile | undefined> => {
       for (const id of order) {
         const profile = usable(id);
         if (!profile || !accept(id)) continue;
-        if (await coreHoldsCurrentToken(profile)) return profile;
+        const holds = await coreHoldsCurrentToken(profile);
+        if (holds === "unknown") {
+          unreadable = true;
+          return undefined;
+        }
+        if (holds === "yes") return !isPoolProfile(id) && waiting ? undefined : profile;
         skipped.push(id);
+        if (isPoolProfile(id) && !limitedPool(id)) waiting = true;
       }
       return undefined;
     };
-    const lead = chat.onAnthropic ? (await pick((id) => !limitedPool(id))) ?? (await pick(() => true)) : undefined;
+    let lead: ProviderAuthProfile | undefined;
+    if (chat.onAnthropic) {
+      lead = await pick((id) => !limitedPool(id));
+      if (!lead && !waiting && !unreadable) lead = await pick(() => true);
+    }
     const skippedIds = [...new Set(skipped)];
-    const skippedKey = skippedIds.join(",") || null;
+    const skippedKey = unreadable ? "unreadable" : skippedIds.join(",") || null;
     if (skippedKey !== runtime().bindSkipped) {
       runtime().bindSkipped = skippedKey;
-      if (skippedKey) console.error(`[anthropic-gateway] automations are not bound to ${skippedKey} yet: core does not hold the pool's current token of ${skippedIds.length > 1 ? "them" : "it"} (a paste is owed), and a binding made now would be replaced when it lands${lead ? `; they follow ${lead.profileId} meanwhile` : ""}`);
+      if (unreadable) console.error("[anthropic-gateway] automations are left as they are: the pool's own credential store could not be read, so whether core holds its current token is not known");
+      else if (skippedKey) console.error(`[anthropic-gateway] automations are not bound to ${skippedKey} yet: core does not hold the pool's current token of ${skippedIds.length > 1 ? "them" : "it"} (a paste is owed, or the account can no longer answer), and a binding made now would be replaced when it lands${lead ? `; they follow ${lead.profileId} meanwhile` : ""}`);
     }
     // With the pool in, every Anthropic job is the box's to bind. With it out,
     // only the ones the box adopted: onto what leads now, or given back.

@@ -94,6 +94,9 @@
  * "MCP authorization was disconnected or replaced" (code
  * `MCP_AUTHORIZATION_RETIRED`) for one an explicit `model@profile` selected
  * (source `user`) — the owner's box, 2026-11-15 08:37, every job bound by hand.
+ * That wording is core's one error for any retired MCP authority, so a job
+ * whose own MCP server connection was retired matches too: bounded, one
+ * update per failed run and one forced run per BINDING_RETRY_WINDOW_MS.
  */
 const BINDING_FAILURE_RE = /no recorded inference account|inference account was replaced|selected automation account is unavailable|requires an available stored inference account|MCP authorization was disconnected or replaced|MCP_AUTHORIZATION_RETIRED/i;
 
