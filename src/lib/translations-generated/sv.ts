@@ -2549,7 +2549,7 @@ const table: Record<string, string> = {
   "localModels.sttEndpoint.error.model": "Modellnamnet måste vara en rad på högst 200 tecken.",
   "localModels.sttEndpoint.error.unauthorized": "Servern nekade API-nyckeln.",
   "localModels.sttEndpoint.error.unreachable": "Servern gick inte att nå. Kontrollera adressen och att den körs.",
-  "localModels.sttEndpoint.hint": "En OpenAI-kompatibel tal-till-text-server på den här boxen eller i ditt lokala nätverk. Inspelningar skickas först till den servern; om den misslyckas tar boxens egen motor över, och sedan ClawBox AI:s moln om boxen använder det. Med endast lokal AI på skickas de bara till den servern. Vad som händer med dem där beror på hur den är inställd.",
+  "localModels.sttEndpoint.hint": "En OpenAI-kompatibel tal-till-text-server på den här boxen eller i ditt lokala nätverk. Så länge den är motorn som används skickas inspelningar först till den; om den misslyckas tar boxens egen motor över, och sedan ClawBox AI:s moln om boxen använder det. Med endast lokal AI på provas inget annat. Vad som händer med inspelningar på servern beror på hur den är inställd.",
   "localModels.sttEndpoint.httpKeyWarning": "Adressen är vanlig HTTP: API-nyckeln, och inspelningarna med den, skickas okrypterade till servern. Använd https:// om inte servern finns i ett nätverk du litar på.",
   "localModels.sttEndpoint.inUse": "Diktering och röstmeddelanden från kanaler transkriberas av {url} ({model}).",
   "localModels.sttEndpoint.localOnly": "Endast lokal AI är på: inspelningar transkriberas av den här servern eller av boxens egen motor, aldrig i molnet. Om den valda motorn misslyckas slutar inspelningen med ett fel.",

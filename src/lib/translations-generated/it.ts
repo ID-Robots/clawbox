@@ -2549,7 +2549,7 @@ const table: Record<string, string> = {
   "localModels.sttEndpoint.error.model": "Il nome del modello deve essere una riga di massimo 200 caratteri.",
   "localModels.sttEndpoint.error.unauthorized": "Il server ha rifiutato la chiave API.",
   "localModels.sttEndpoint.error.unreachable": "Impossibile raggiungere il server. Controlla l'indirizzo e che sia in esecuzione.",
-  "localModels.sttEndpoint.hint": "Un server di trascrizione vocale compatibile con OpenAI su questo box o nella tua rete locale. Le registrazioni vanno prima a quel server; se non riesce, subentra il motore di questo box e poi il cloud di ClawBox AI, se questo box lo usa. Con l'IA solo locale attiva, vanno solo a quel server. Cosa succede lì dipende da come è configurato.",
+  "localModels.sttEndpoint.hint": "Un server di trascrizione vocale compatibile con OpenAI su questo box o nella tua rete locale. Finché è il motore in uso, le registrazioni vanno prima a lui; se non riesce, subentra il motore di questo box e poi il cloud di ClawBox AI, se questo box lo usa. Con l'IA solo locale attiva, non si prova nient'altro. Cosa succede alle registrazioni sul server dipende da come è configurato.",
   "localModels.sttEndpoint.httpKeyWarning": "Questo indirizzo è HTTP semplice: la chiave API, e con essa le registrazioni, viaggiano in chiaro fino al server. Usa https:// a meno che il server non sia su una rete di cui ti fidi.",
   "localModels.sttEndpoint.inUse": "La dettatura e i messaggi vocali dei canali sono trascritti da {url} ({model}).",
   "localModels.sttEndpoint.localOnly": "L'IA solo locale è attiva: le registrazioni sono trascritte da questo server o dal motore di questo box, mai nel cloud. Se il motore scelto non riesce, la registrazione termina con un errore.",

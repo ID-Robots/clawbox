@@ -2549,7 +2549,7 @@ const table: Record<string, string> = {
   "localModels.sttEndpoint.error.model": "De modelnaam moet één regel van maximaal 200 tekens zijn.",
   "localModels.sttEndpoint.error.unauthorized": "De server weigerde de API-sleutel.",
   "localModels.sttEndpoint.error.unreachable": "De server is niet bereikbaar. Controleer het adres en of hij draait.",
-  "localModels.sttEndpoint.hint": "Een OpenAI-compatibele spraak-naar-tekstserver op deze box of in uw lokale netwerk. Opnamen gaan eerst naar die server; als die faalt, neemt de eigen engine van deze box het over, en daarna de cloud van ClawBox AI als deze box die gebruikt. Met alleen-lokale AI aan gaan ze alleen naar die server. Wat er daar mee gebeurt, hangt af van hoe die is ingesteld.",
+  "localModels.sttEndpoint.hint": "Een OpenAI-compatibele spraak-naar-tekstserver op deze box of in uw lokale netwerk. Zolang die de gebruikte engine is, gaan opnamen eerst naar die server; als die faalt, neemt de eigen engine van deze box het over, en daarna de cloud van ClawBox AI als deze box die gebruikt. Met alleen-lokale AI aan wordt niets anders geprobeerd. Wat er op de server met opnamen gebeurt, hangt af van hoe die is ingesteld.",
   "localModels.sttEndpoint.httpKeyWarning": "Dit adres is gewoon HTTP: de API-sleutel, en daarmee de opnamen, gaan onversleuteld naar de server. Gebruik https://, tenzij de server in een netwerk staat dat u vertrouwt.",
   "localModels.sttEndpoint.inUse": "Dicteren en spraakberichten uit kanalen worden uitgeschreven door {url} ({model}).",
   "localModels.sttEndpoint.localOnly": "Alleen-lokale AI staat aan: opnamen worden uitgeschreven door deze server of door de eigen engine van deze box, nooit in de cloud. Als de gekozen engine faalt, eindigt de opname met een fout.",

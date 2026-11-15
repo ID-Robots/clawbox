@@ -2137,7 +2137,7 @@ export const it: Record<string, string> = {
   "localModels.external.error.hermesWindow": "Hermes richiede una finestra di contesto di almeno {min} token.",
   "localModels.external.error.generic": "Non ha funzionato. Riprova tra un momento.",
   "localModels.sttEndpoint.title": "Il tuo server vocale",
-  "localModels.sttEndpoint.hint": "Un server di trascrizione vocale compatibile con OpenAI su questo box o nella tua rete locale. Le registrazioni vanno prima a quel server; se non riesce, subentra il motore di questo box e poi il cloud di ClawBox AI, se questo box lo usa. Con l'IA solo locale attiva, vanno solo a quel server. Cosa succede lì dipende da come è configurato.",
+  "localModels.sttEndpoint.hint": "Un server di trascrizione vocale compatibile con OpenAI su questo box o nella tua rete locale. Finché è il motore in uso, le registrazioni vanno prima a lui; se non riesce, subentra il motore di questo box e poi il cloud di ClawBox AI, se questo box lo usa. Con l'IA solo locale attiva, non si prova nient'altro. Cosa succede alle registrazioni sul server dipende da come è configurato.",
   "localModels.sttEndpoint.httpKeyWarning": "Questo indirizzo è HTTP semplice: la chiave API, e con essa le registrazioni, viaggiano in chiaro fino al server. Usa https:// a meno che il server non sia su una rete di cui ti fidi.",
   "localModels.sttEndpoint.notConfigured": "Nessun server vocale salvato.",
   "localModels.sttEndpoint.setUp": "Aggiungi un server",

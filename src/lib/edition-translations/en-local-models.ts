@@ -233,7 +233,7 @@ export const localModelsEn: Record<string, string> = {
   "localModels.external.error.hermesWindow": "Hermes needs a context window of at least {min} tokens.",
   "localModels.external.error.generic": "That did not work. Try again in a moment.",
   "localModels.sttEndpoint.title": "Your speech server",
-  "localModels.sttEndpoint.hint": "An OpenAI-compatible speech-to-text server on this box or your local network. Recordings go to that server first; if it fails, the box's own engine takes over, and then ClawBox AI's cloud if this box uses it. With local-only AI on, they go to this server alone. What happens to them there depends on how it is set up.",
+  "localModels.sttEndpoint.hint": "An OpenAI-compatible speech-to-text server on this box or your local network. While it is the engine in use, recordings go to it first; if it fails, the box's own engine takes over, then ClawBox AI's cloud if this box uses it. With local-only AI on, nothing else is tried. What happens to recordings on the server depends on how it is set up.",
   "localModels.sttEndpoint.httpKeyWarning": "This address is plain HTTP: the API key, and the recordings with it, travel unencrypted to the server. Use https:// unless the server is on a network you trust.",
   "localModels.sttEndpoint.notConfigured": "No speech server saved.",
   "localModels.sttEndpoint.setUp": "Add a server",
