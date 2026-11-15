@@ -48,10 +48,10 @@ const OFFLINE_HOLD_PATH = path.join(DATA_DIR, ".openclaw-offline-hold.json");
 const AUTH_TIMEOUT_MS = 60_000;
 
 /**
- * How long a stop whose client gave up is waited for (a key save, a memory
- * pass): with the client's own 15 s, a minute. A tunnel gives up near 100 s,
- * and "still stopping" is then the honest answer. The account pool's window
- * is the exception (`waitOutStop`).
+ * How long a stop whose client gave up is waited for (a key save): with the
+ * client's own 15 s, a minute. A tunnel gives up near 100 s, and "still
+ * stopping" is then the honest answer. The account pool's window and a memory
+ * index pass are the exceptions (`waitOutStop`, `stopOpenclawGatewayForOffline`).
  */
 const STOP_SETTLE_MS = 45_000;
 
@@ -74,6 +74,12 @@ export interface AuthOpsDeps {
    * that is stopping, down or cannot be read may stay stopped, so it is started.
    */
   gatewayUnitRunning: () => Promise<boolean>;
+  /**
+   * Is the gateway unit KNOWN to be down or stopping (inactive, failed,
+   * deactivating)? The offline hold's question: a unit that cannot be read is
+   * not known to be down, so a leftover hold record beside it holds nothing.
+   */
+  gatewayUnitDown: () => Promise<boolean>;
   /** Wait for a gateway that is coming up to answer; false when it did not in time. */
   waitForGateway: () => Promise<boolean>;
 }
@@ -135,6 +141,10 @@ const defaultDeps: AuthOpsDeps = {
   gatewayUnitRunning: async () => {
     const state = await readUnitState("clawbox-gateway.service");
     return !!state && ["active", "activating", "reloading"].includes(state.activeState);
+  },
+  gatewayUnitDown: async () => {
+    const state = await readUnitState("clawbox-gateway.service");
+    return !!state && ["inactive", "failed", "deactivating"].includes(state.activeState);
   },
   waitForGateway: () => waitForGatewayRpcReady(gatewayReadyWaitMs()),
 };
@@ -311,7 +321,64 @@ export async function stopOpenclawGatewayForOffline(): Promise<void> {
   // No record, no stop: a gateway held stopped with nothing on disk to say so
   // would stay stopped if this server exited before starting it again.
   fs.writeFileSync(OFFLINE_HOLD_PATH, JSON.stringify({ pid: process.pid, at: Date.now() }) + "\n", { mode: 0o600 });
-  await deps.stopGateway();
+  // Waited out, like the account pool's window. A gateway that is answering
+  // turns drains for as long as its unit allows (TimeoutStopSec=330) and is
+  // killed at the end of it; the minute this used to wait was over long before
+  // that, so the pass gave up, the caller started the gateway again behind the
+  // same stop, and the assistant was down for six minutes with nothing indexed
+  // (the owner's box, 2026-11-15, three times in one day). The pass's claim on
+  // the run record is re-stamped while this waits (`startMemoryIndex`).
+  await deps.stopGateway(true);
+}
+
+/**
+ * Is the gateway held stopped right now for offline work of a live web server
+ * (a memory index pass between `stopOpenclawGatewayForOffline` and
+ * `startOpenclawGatewayAfterOffline`)?
+ *
+ * The record alone does not say so. It outlives a start that was issued but
+ * not answered in time (`startOpenclawGatewayAfterOffline` removes it only
+ * after the gateway answered, and on a box with large agent databases that
+ * wait runs out), so a hold beside a gateway that is up or coming up is a
+ * leftover, and reading it as a hold would refuse every token paste and key
+ * save from then on. Held means: the record, a live holder, AND a unit that is
+ * down or stopping. A hold left by a server that has exited is not one either:
+ * `restoreOpenclawGatewayAfterCrash` deals with that at start-up.
+ */
+export async function openclawGatewayHeldOffline(): Promise<boolean> {
+  let hold: { pid?: unknown } | null = null;
+  try {
+    hold = JSON.parse(fs.readFileSync(OFFLINE_HOLD_PATH, "utf8")) as { pid?: unknown };
+  } catch {
+    return false;
+  }
+  const pid = typeof hold?.pid === "number" ? hold.pid : 0;
+  if (pid <= 0) return false;
+  if (pid !== process.pid) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return false;
+    }
+  }
+  return deps.gatewayUnitDown();
+}
+
+/** Offline work was asked for while another piece of offline work holds the gateway stopped. */
+export class OpenclawGatewayHeldOfflineError extends Error {
+  constructor() {
+    super("the gateway is held stopped for other offline work");
+    this.name = "OpenclawGatewayHeldOfflineError";
+  }
+}
+
+/**
+ * Is the gateway's unit up (running, starting or reloading)? False on a box
+ * with no gateway, and where the unit cannot be asked.
+ */
+export async function openclawGatewayRuns(): Promise<boolean> {
+  if (gatewayIsAbsent()) return false;
+  return deps.gatewayUnitRunning();
 }
 
 /** Start the gateway after `stopOpenclawGatewayForOffline`. */
@@ -361,6 +428,9 @@ export async function restoreOpenclawGatewayAfterCrash(): Promise<boolean> {
  * gateway stopped through its service owner, and start the gateway again
  * whatever `work` did. A box with no gateway answering runs `work` as it is.
  *
+ * Refused with `OpenclawGatewayHeldOfflineError`, and nothing stopped or
+ * started, while a memory index pass holds the gateway stopped.
+ *
  * `waitOutStop`: a stop that is still running after a minute is waited for as
  * long as the unit may take, instead of given up on. Giving up starts the
  * gateway again with `work` not run — the assistant went down for nothing,
@@ -374,6 +444,11 @@ export async function restoreOpenclawGatewayAfterCrash(): Promise<boolean> {
  */
 export async function withOpenclawGatewayStopped<T>(work: () => Promise<T>, options: { waitOutStop?: boolean } = {}): Promise<T> {
   if (gatewayIsAbsent()) return work();
+  // A memory index pass holds the gateway stopped for as long as it runs, and
+  // holds the state the CLI below would need: `work` would be refused, and the
+  // start in the `finally` would bring the gateway up under the pass. Refused
+  // here, before anything is stopped or started; the caller tries again later.
+  if (await openclawGatewayHeldOffline()) throw new OpenclawGatewayHeldOfflineError();
   // The stop is inside the `try`: a stop that throws (a job still running when
   // its client gave up) may still stop the unit afterwards, and the gateway
   // must be started again on every way out. A start issued while that stop is

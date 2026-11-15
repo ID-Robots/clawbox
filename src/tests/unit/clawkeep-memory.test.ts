@@ -51,6 +51,8 @@ vi.mock("@/lib/openclaw-auth-ops", () => ({
       throw err;
     }
   },
+  // No gateway unit is up in these suites: an owner's incremental pass runs.
+  openclawGatewayRuns: vi.fn(async () => false),
   stopOpenclawGatewayForOffline: vi.fn(async () => undefined),
   startOpenclawGatewayAfterOffline: vi.fn(async () => undefined),
 }));
@@ -351,19 +353,28 @@ describe("what the first Index now click actually runs", () => {
 
   // OpenClaw 2026.11.3 refuses `memory status` while its gateway runs: the
   // gateway's own memory.status answers (v2: health + details.legacy).
-  async function fromGateway(health: "ready" | "degraded", message?: string) {
+  async function fromGateway(
+    health: "ready" | "degraded",
+    message?: string,
+    shape: { providerState?: Record<string, unknown>; vectorIndex?: Record<string, unknown>; dirty?: boolean; identity?: Record<string, unknown> } = {},
+  ) {
     const failing = path.join(tmpDir, "openclaw-refuses");
     await fs.writeFile(failing, "#!/bin/sh\necho 'Cannot admit memory.cli' >&2\nexit 1\n", { mode: 0o755 });
     process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = failing;
     const { getMemoryStatus } = await lib();
     const ws = await import("@/lib/openclaw-gateway-ws");
     const { dbPath: _dbPath, workspaceDir: _workspaceDir, extraPaths: _extraPaths, ...legacy } = (REAL_STATUS as Array<{ status: Record<string, unknown> }>)[0].status;
-    const vector = { ...(legacy.vector as Record<string, unknown>) };
+    const vector: Record<string, unknown> = { ...(legacy.vector as Record<string, unknown>), ...(shape.vectorIndex ? { index: shape.vectorIndex } : {}) };
     delete vector.available;
     delete vector.semanticAvailable;
+    const custom = {
+      ...(legacy.custom as Record<string, unknown>),
+      ...(shape.providerState ? { providerState: shape.providerState } : {}),
+      ...(shape.identity ? { indexIdentity: shape.identity } : {}),
+    };
     vi.mocked(ws.gatewayWsCall).mockResolvedValueOnce({
       version: 2, agentId: "main", providerId: "memory-core", status: health, ...(message ? { message } : {}),
-      details: { legacy: { ...legacy, vector } },
+      details: { legacy: { ...legacy, vector, custom, ...(shape.dirty === undefined ? {} : { dirty: shape.dirty }) } },
     });
     return { status: await getMemoryStatus(), ws };
   }
@@ -376,8 +387,46 @@ describe("what the first Index now click actually runs", () => {
   });
 
   it("takes the gateway's own degraded health for the index's", async () => {
-    const { status } = await fromGateway("degraded", "Memory embeddings are pending. Search results may be incomplete.");
+    const { status } = await fromGateway("degraded", "Memory embeddings are unavailable. Keyword search remains available.");
     expect(status.available).toBe(true);
+    expect(status.health).toBe("degraded");
+  });
+
+  // memory.status is answered from a read-only manager that never starts the
+  // embedding provider, so on 2026.11.3 it says "pending" on every reading —
+  // right after a search that returned vector scores included. The card read
+  // that as a broken embedder and told the owner to index again, which stops
+  // the assistant for a full pass over an index with nothing wrong with it.
+  const PENDING = "Memory embeddings are pending. Search results may be incomplete.";
+  const pendingOnly = {
+    providerState: { mode: "pending", requestedProvider: "openai-compatible" },
+    vectorIndex: { state: "complete" },
+    dirty: false,
+    identity: { status: "valid" },
+  };
+
+  it("reads a valid, complete index whose only remark is 'embeddings are pending' as healthy", async () => {
+    const { status } = await fromGateway("degraded", PENDING, pendingOnly);
+    expect(status.available).toBe(true);
+    expect(status.health).toBe("healthy");
+    expect(status.errorCode).not.toBe("provider_degraded");
+  });
+
+  it("keeps the gateway's verdict when a pending reading comes with changes still to index", async () => {
+    const { status } = await fromGateway("degraded", PENDING, { ...pendingOnly, dirty: true });
+    expect(status.health).toBe("degraded");
+  });
+
+  it("keeps the gateway's verdict when a pending reading comes with a vector index that is not complete", async () => {
+    const { status } = await fromGateway("degraded", PENDING, { ...pendingOnly, vectorIndex: { state: "incomplete" } });
+    expect(status.health).toBe("degraded");
+  });
+
+  it("keeps the gateway's verdict when the provider is degraded rather than not yet asked", async () => {
+    const { status } = await fromGateway("degraded", "Memory embeddings are unavailable. Keyword search remains available.", {
+      ...pendingOnly,
+      providerState: { mode: "degraded", providerId: "openai-compatible", reason: "401" },
+    });
     expect(status.health).toBe("degraded");
   });
 
@@ -1259,6 +1308,38 @@ describe("what a scheduled slot runs against a disowned index (TASK-1197)", () =
     expect(started).toMatchObject({ accepted: false, declined: "gateway_indexes" });
     expect(await indexCalls()).toEqual([]);
     expect(vi.mocked(stopOpenclawGatewayForOffline)).not.toHaveBeenCalled();
+  });
+
+  it("leaves an owner's incremental pass to a gateway that is running, and stops nothing", async () => {
+    // "Index now" used to stop the assistant, wait a minute for a stop that
+    // takes five on a gateway in use, give up and start it again: six minutes
+    // down with nothing indexed. The running gateway does this work itself.
+    await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    const ops = await import("@/lib/openclaw-auth-ops");
+    vi.mocked(ops.stopOpenclawGatewayForOffline).mockClear();
+    vi.mocked(ops.openclawGatewayRuns).mockResolvedValueOnce(true);
+    const started = await startMemoryIndex("incremental", "manual");
+    expect(started).toMatchObject({ accepted: false, declined: "gateway_indexes" });
+    expect(await indexCalls()).toEqual([]);
+    expect(vi.mocked(ops.stopOpenclawGatewayForOffline)).not.toHaveBeenCalled();
+  });
+
+  it("still runs an owner's FULL pass offline while the gateway is running", async () => {
+    await withRecordingCli((status) => { status.chunks = 512; status.files = 7; });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    const ops = await import("@/lib/openclaw-auth-ops");
+    vi.mocked(ops.stopOpenclawGatewayForOffline).mockClear();
+    vi.mocked(ops.openclawGatewayRuns).mockResolvedValue(true);
+    try {
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      await settledMemoryRun(tmpDir);
+      expect(vi.mocked(ops.stopOpenclawGatewayForOffline)).toHaveBeenCalledTimes(1);
+      const [index] = await indexCalls();
+      expect(index).toContain("--force");
+    } finally {
+      vi.mocked(ops.openclawGatewayRuns).mockResolvedValue(false);
+    }
   });
 
   it("steps aside, and starts the gateway again, when another run took the record over while the gateway stopped", async () => {
@@ -2307,5 +2388,41 @@ describe("a box whose default agent is not called main", () => {
     expect(result).toMatchObject({ accepted: false, declined: "agent_changed" });
     expect(result.run.status).not.toBe("running");
     expect(await calls(argv, "memory index")).toEqual([]);
+  });
+});
+
+describe("what a failed pass leaves in the device log", () => {
+  // OpenClaw 2026.11.3 closes the agent database after a failure and says so,
+  // so the CLI's last line is a receipt and the reason sits above it. The
+  // owner's box logged "clean-close receipt: written" for a full pass that had
+  // run 82 minutes with the assistant stopped; what it had actually said was
+  // "worker task capacity reached".
+  it("names the failure, not the database's close receipt under it", async () => {
+    const { lastMeaningfulLine } = await import("@/lib/clawkeep-memory");
+    const tail = [
+      "Indexing session files… 19158/30949 · elapsed 36:08 · eta 22:14 62%",
+      "Indexing session files… 19158/30949 · elapsed 36:10 · eta 22:15 62%",
+      "Memory index failed (main): worker task capacity reached",
+      "[state/agent-db] agent database clean-close receipt: written",
+      "",
+    ].join("\n");
+    const said = lastMeaningfulLine(tail);
+    expect(said).toContain("Memory index failed (main): worker task capacity reached");
+    expect(said).not.toContain("clean-close receipt");
+    expect(said).not.toContain("elapsed");
+  });
+
+  it("skips a receipt printed behind a clock, and keeps only the last line that says something", async () => {
+    const { lastMeaningfulLine } = await import("@/lib/clawkeep-memory");
+    const said = lastMeaningfulLine([
+      "loading index...", "vector dimension mismatch: index 768, model 1024",
+      "03:02:09 [state/agent-db] agent database clean-close receipt: active-leases",
+    ].join("\n"));
+    expect(said).toBe("vector dimension mismatch: index 768, model 1024");
+  });
+
+  it("answers nothing for a pass that said nothing but its progress and its receipt", async () => {
+    const { lastMeaningfulLine } = await import("@/lib/clawkeep-memory");
+    expect(lastMeaningfulLine("Indexing memory files… 3/9 · elapsed 0:01 · eta 0:02 33%\n[state/agent-db] agent database clean-close receipt: written\n")).toBe("");
   });
 });

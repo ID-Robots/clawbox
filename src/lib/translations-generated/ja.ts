@@ -781,6 +781,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.folders.removing": "削除中…",
   "clawkeep.memory.folders.title": "読み込むフォルダー",
   "clawkeep.memory.fullReindex": "完全な再インデックス",
+  "clawkeep.memory.gatewayIndexes": "アシスタントがこのインデックスを自動で最新に保っています。実行するものはありません。",
   "clawkeep.memory.health.degraded": "要確認",
   "clawkeep.memory.health.healthy": "正常",
   "clawkeep.memory.health.unavailable": "利用不可",

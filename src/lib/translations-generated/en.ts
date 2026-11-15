@@ -781,6 +781,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.folders.removing": "Removing…",
   "clawkeep.memory.folders.title": "Folders it reads",
   "clawkeep.memory.fullReindex": "Full reindex",
+  "clawkeep.memory.gatewayIndexes": "The assistant keeps this index up to date by itself. There is nothing to run.",
   "clawkeep.memory.health.degraded": "Needs attention",
   "clawkeep.memory.health.healthy": "Healthy",
   "clawkeep.memory.health.unavailable": "Unavailable",

@@ -781,6 +781,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.folders.removing": "正在移除…",
   "clawkeep.memory.folders.title": "读取的文件夹",
   "clawkeep.memory.fullReindex": "完全重建索引",
+  "clawkeep.memory.gatewayIndexes": "助手会自行保持此索引为最新，无需手动运行。",
   "clawkeep.memory.health.degraded": "需要处理",
   "clawkeep.memory.health.healthy": "正常",
   "clawkeep.memory.health.unavailable": "不可用",

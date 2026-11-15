@@ -32,9 +32,13 @@ vi.mock("@/lib/gateway-unit-job", () => ({
 
 import {
   _setAuthOpsDepsForTests,
+  OpenclawGatewayHeldOfflineError,
+  openclawGatewayHeldOffline,
+  openclawGatewayRuns,
   restoreOpenclawGatewayAfterCrash,
   startOpenclawGatewayAfterOffline,
   stopOpenclawGatewayForOffline,
+  withOpenclawGatewayStopped,
 } from "@/lib/openclaw-auth-ops";
 
 const HOLD = path.join(tmp, ".openclaw-offline-hold.json");
@@ -48,6 +52,7 @@ function deps() {
     startGateway,
     gatewayUnitUp: async () => unitUp.value,
     gatewayUnitRunning: async () => unitUp.value,
+    gatewayUnitDown: async () => !unitUp.value,
   });
   return { stopGateway, startGateway, unitUp };
 }
@@ -64,6 +69,15 @@ describe("the offline hold", () => {
     expect(JSON.parse(fs.readFileSync(HOLD, "utf8"))).toMatchObject({ pid: process.pid });
     await startOpenclawGatewayAfterOffline();
     expect(fs.existsSync(HOLD)).toBe(false);
+  });
+
+  it("waits a slow stop out for the pass, as long as the unit may take", async () => {
+    // A gateway in use drains until its unit's stop timeout. The minute this
+    // used to wait was over long before that: the pass gave up, the gateway
+    // was started again behind the same stop, and nothing was indexed.
+    const d = deps();
+    await stopOpenclawGatewayForOffline();
+    expect(d.stopGateway).toHaveBeenCalledWith(true);
   });
 
   it("stops nothing when the hold cannot be written", async () => {
@@ -130,3 +144,74 @@ describe("the offline hold", () => {
     expect(d.startGateway).not.toHaveBeenCalled();
   });
 });
+
+describe("other offline work while a pass holds the gateway stopped", () => {
+  it("is refused before anything is stopped or started", async () => {
+    // The account pool's token window and a key save both end by starting the
+    // gateway; under a running index pass that start brings it up over the
+    // pass, and the CLI they run would be refused the state anyway.
+    const d = deps();
+    await stopOpenclawGatewayForOffline();
+    d.stopGateway.mockClear();
+    const work = vi.fn(async () => "done");
+    await expect(withOpenclawGatewayStopped(work)).rejects.toBeInstanceOf(OpenclawGatewayHeldOfflineError);
+    await expect(withOpenclawGatewayStopped(work, { waitOutStop: true })).rejects.toBeInstanceOf(OpenclawGatewayHeldOfflineError);
+    expect(work).not.toHaveBeenCalled();
+    expect(d.stopGateway).not.toHaveBeenCalled();
+    expect(d.startGateway).not.toHaveBeenCalled();
+  });
+
+  it("runs again once the pass has started the gateway and dropped its hold", async () => {
+    const d = deps();
+    await stopOpenclawGatewayForOffline();
+    await startOpenclawGatewayAfterOffline();
+    d.stopGateway.mockClear();
+    d.startGateway.mockClear();
+    await expect(withOpenclawGatewayStopped(async () => "done")).resolves.toBe("done");
+    expect(d.stopGateway).toHaveBeenCalledTimes(1);
+    expect(d.startGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not take a hold record left beside a gateway that is up for a hold", async () => {
+    // startOpenclawGatewayAfterOffline drops the record only once the gateway
+    // has answered; a start that was issued but slow to answer leaves it
+    // behind. Read as a hold, it would refuse every token paste from then on.
+    const d = deps();
+    fs.writeFileSync(HOLD, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    d.unitUp.value = true;
+    expect(await openclawGatewayHeldOffline()).toBe(false);
+    await expect(withOpenclawGatewayStopped(async () => "done")).resolves.toBe("done");
+  });
+
+  it("does not take the record of a server that has exited for a hold", async () => {
+    deps();
+    fs.writeFileSync(HOLD, JSON.stringify({ pid: 2 ** 22 + 12345, at: Date.now() }));
+    expect(await openclawGatewayHeldOffline()).toBe(false);
+  });
+
+  it("is held by a live server's record beside a unit that is down or stopping, and by nothing without a record", async () => {
+    const { readUnitState } = await import("@/lib/gateway-unit-job");
+    expect(await openclawGatewayHeldOffline()).toBe(false);
+    for (const [activeState, held] of [["inactive", true], ["failed", true], ["deactivating", true], ["active", false], ["activating", false]] as const) {
+      _setAuthOpsDepsForTests(null);
+      fs.writeFileSync(HOLD, JSON.stringify({ pid: process.pid, at: Date.now() }));
+      vi.mocked(readUnitState).mockResolvedValueOnce({ activeState } as Awaited<ReturnType<typeof readUnitState>>);
+      expect(await openclawGatewayHeldOffline()).toBe(held);
+    }
+    // A unit that cannot be read is not known to be down.
+    _setAuthOpsDepsForTests(null);
+    fs.writeFileSync(HOLD, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    vi.mocked(readUnitState).mockResolvedValueOnce(null as Awaited<ReturnType<typeof readUnitState>>);
+    expect(await openclawGatewayHeldOffline()).toBe(false);
+  });
+});
+
+describe("whether a gateway is running to keep the index current", () => {
+  it("answers the unit's state", async () => {
+    const d = deps();
+    expect(await openclawGatewayRuns()).toBe(false);
+    d.unitUp.value = true;
+    expect(await openclawGatewayRuns()).toBe(true);
+  });
+});
+
