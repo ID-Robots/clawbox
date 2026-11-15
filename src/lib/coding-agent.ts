@@ -14981,15 +14981,18 @@ function requestEnd(run: CodingRun, state: LiveRun, kind: "stop" | "pause"): voi
 }
 
 /** What a cloud run's feed says when the local-only AI lock paused it. */
-export const PAUSED_BY_CLOUD_AI_LOCK = "Paused: the local-only AI lock went on, and this run's model is in the cloud. Resume it on the box's own engine, or once the lock is off.";
+export const PAUSED_BY_CLOUD_AI_LOCK = "Paused: the local-only AI lock went on, and this run's model is in the cloud. Resume it once the lock is off, or start a new run on the box's own engine.";
 
 /**
  * A run on a cloud model (ClawBox AI, Anthropic, OpenAI) that was already
  * going when the local-only AI lock went on (TASK-2501) is PAUSED: its CLI
  * talks to the provider directly, with no hop on the box a request could be
  * refused at, so the lock can only end the process. A pause, not a stop: the
- * session and the work are kept, and the run resumes on the box's own engine
- * (`provider: "local"`), or on its own provider once the lock is off. A run
+ * session and the work are kept, and the run resumes on its own provider once
+ * the lock is off. Work that must go on under the lock is a NEW run on the
+ * box's own engine (`provider: "local"`): the session lives in the cloud
+ * provider's state folder, which a `local` run's Claude Code does not read
+ * (`harnessStateDir`), so a resume there would not find it. A run
  * on the box's engine is left alone. Every new process a run starts asks the
  * lock already (`assertProviderReady`, the resume's provider check), so this
  * covers the one that was running when the lock went on — within a minute,
