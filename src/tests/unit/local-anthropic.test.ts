@@ -327,9 +327,18 @@ describe("server-sent events off the engine", () => {
     const event = new SseDataDecoder();
     const piece = "data: " + "y".repeat(64 * 1024) + "\n";
     expect(() => { for (let i = 0; i < 20; i++) event.push(piece); }).toThrow(/event longer than/);
-    // Empty data lines count as well: their separators make the event.
+    // Empty data lines count as well: their separators make the event. The
+    // cap is checked line by line, so a blank line later in the same chunk
+    // does not end an event that already outgrew it.
     const empties = new SseDataDecoder();
-    expect(() => empties.push("data:\n".repeat(MAX_SSE_PENDING_CHARS + 1))).toThrow(/event longer than/);
+    expect(() => empties.push("data:\n".repeat(MAX_SSE_PENDING_CHARS + 2) + "\n")).toThrow(/event longer than/);
+    // The cap is the joined event's length: exactly MAX passes, one more does not.
+    const exact = new SseDataDecoder();
+    expect(exact.push("data: " + "z".repeat(MAX_SSE_PENDING_CHARS) + "\n\n")[0]).toHaveLength(MAX_SSE_PENDING_CHARS);
+    const half = "z".repeat(MAX_SSE_PENDING_CHARS / 2 - 1);
+    expect(exact.push(`data: ${half}\r\ndata: ${half}z\r\n\r\n`)[0]).toHaveLength(MAX_SSE_PENDING_CHARS);
+    expect(new SseDataDecoder().push("data:\n".repeat(MAX_SSE_PENDING_CHARS + 1) + "\n")[0]).toHaveLength(MAX_SSE_PENDING_CHARS);
+    expect(() => new SseDataDecoder().push("data: " + "z".repeat(MAX_SSE_PENDING_CHARS + 1) + "\n\n")).toThrow(/event longer than/);
     // Ended events reset the count: a long answer in many events is fine.
     const many = new SseDataDecoder();
     for (let i = 0; i < 40; i++) expect(many.push(piece + "\n")).toHaveLength(1);

@@ -436,9 +436,11 @@ export class SseDataDecoder {
       } else if (line.startsWith("data:")) {
         const payload = line.slice(5).replace(/^ /, "");
         this.data.push(payload);
-        // Its separator counts too: an endless run of empty `data:` lines
-        // grows the event as surely as long ones do.
-        this.dataChars += payload.length + 1;
+        // The separator before it counts too: an endless run of empty
+        // `data:` lines grows the event as surely as long ones do. So the
+        // count is the joined event's exact length, and an event of exactly
+        // MAX_SSE_PENDING_CHARS still passes.
+        this.dataChars += payload.length + (this.data.length > 1 ? 1 : 0);
         if (this.dataChars > MAX_SSE_PENDING_CHARS) {
           throw new Error(`the engine sent an event longer than ${MAX_SSE_PENDING_CHARS} characters without ending it`);
         }
