@@ -202,11 +202,15 @@ describe("the key file", () => {
 
   it("validates both values at the write and writes nothing it refuses", () => {
     const file = path.join(root, "data", ".stt-endpoint-key");
-    for (const key of ["", "   ", "two words", "line\nbreak", "nul\u0000", "x".repeat(10_000)]) {
+    // Not one line of printable ASCII (a Bearer header value): refused at the
+    // write as at the route, non-ASCII and non-breaking spaces included.
+    for (const key of ["", "   ", "two words", "line\nbreak", "nul\u0000", "x".repeat(10_000), "kéy-123", "k 123", "ключ"]) {
       expect(() => writeSttEndpointKey(key, RECORD.baseUrl)).toThrow(/invalid speech server key/);
+      if (key.trim()) expect(validateSttEndpointInput({ baseUrl: RECORD.baseUrl, apiKey: key })).toMatchObject({ ok: false, code: "invalid_api_key" });
     }
-    // An address the route would never have saved: public, not normalised, not http(s).
-    for (const url of ["", "http://8.8.8.8/v1", `${RECORD.baseUrl}/`, `${RECORD.baseUrl}?x=1`, `${RECORD.baseUrl}#f`, `${RECORD.baseUrl}\n`, "file:///etc/passwd", "http://user:pw@127.0.0.1:8000/v1"]) {
+    // An address the route would never have saved: public, not normalised, not
+    // http(s), or not ASCII (the normaliser's punycode host is what it saves).
+    for (const url of ["", "http://8.8.8.8/v1", `${RECORD.baseUrl}/`, `${RECORD.baseUrl}?x=1`, `${RECORD.baseUrl}#f`, `${RECORD.baseUrl}\n`, "file:///etc/passwd", "http://user:pw@127.0.0.1:8000/v1", "http://bücher.localhost:8000/v1"]) {
       expect(() => writeSttEndpointKey("k-123", url)).toThrow(/invalid speech server address/);
     }
     expect(fs.existsSync(file)).toBe(false);
@@ -216,6 +220,15 @@ describe("the key file", () => {
     expect(saved && saved.length).toBeGreaterThan(STT_ENDPOINT_LIMITS.baseUrlMax);
     writeSttEndpointKey("k-123", saved as string);
     expect(readSttEndpointKey(saved as string)).toBe("k-123");
+    // A name the owner typed in Unicode is saved (and bound) in its ASCII form.
+    const named = normalizeSttEndpointUrl("http://bücher.localhost:8000/v1");
+    expect(named).toBe("http://xn--bcher-kva.localhost:8000/v1");
+    writeSttEndpointKey("k-123", named as string);
+    expect(readSttEndpointKey(named as string)).toBe("k-123");
+    // Every printable ASCII character a key may hold survives the copy as it is.
+    const printable = Array.from({ length: 94 }, (_, i) => String.fromCharCode(0x21 + i)).join("");
+    writeSttEndpointKey(printable, RECORD.baseUrl);
+    expect(readSttEndpointKey(RECORD.baseUrl)).toBe(printable);
     // Surrounding whitespace is trimmed off, as the route does.
     writeSttEndpointKey("  k-123\n", RECORD.baseUrl);
     expect(JSON.parse(fs.readFileSync(file, "utf-8"))).toEqual({ v: 1, for: RECORD.baseUrl, key: "k-123" });
