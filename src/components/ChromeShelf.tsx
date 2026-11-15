@@ -258,7 +258,7 @@ export default function ChromeShelf({
   const [isMobile, setIsMobile] = useState(false);
   // The app whose name is showing, drawn below at the bar's level (see
   // `renderApp`): not inside the app row, which scrolls and so would clip it.
-  const [appTip, setAppTip] = useState<{ name: string; x: number; y: number } | null>(null);
+  const [appTip, setAppTip] = useState<{ id: string; name: string; x: number; y: number } | null>(null);
   const deskScreens = useDeskScreens();
   const mainIns = deskScreens ? mainInsets() : null;
 
@@ -267,7 +267,13 @@ export default function ChromeShelf({
     // and the open apps; the desktop one every pinned app). What fits in it
     // never does: the row and the tray below are sized by the room the bar
     // has, whatever the device, orientation or zoom.
-    const checkLayout = () => setIsMobile(window.innerWidth < 768);
+    const checkLayout = () => {
+      setIsMobile(window.innerWidth < 768);
+      // The icons move (or the other bar replaces them) under a resting
+      // pointer, which fires no mouseleave: a name left showing would float
+      // where its icon no longer is.
+      setAppTip(null);
+    };
     checkLayout();
     window.addEventListener("resize", checkLayout);
     return () => {
@@ -489,7 +495,7 @@ export default function ChromeShelf({
       // placed from the icon's own box.
       onMouseEnter={(e) => {
         const box = e.currentTarget.getBoundingClientRect();
-        setAppTip({ name: app.name, x: box.left + box.width / 2, y: box.top });
+        setAppTip({ id: app.id, name: app.name, x: box.left + box.width / 2, y: box.top });
       }}
       onMouseLeave={() => setAppTip(null)}
       className="relative shrink-0 w-11 h-11 flex items-center justify-center rounded-lg hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
@@ -527,7 +533,10 @@ export default function ChromeShelf({
   // deltaX) already scrolls it and is left alone.
   const scrollRowWithWheel = (e: WheelEvent<HTMLDivElement>) => {
     if (e.deltaX !== 0 || e.deltaY === 0) return;
-    e.currentTarget.scrollLeft += e.deltaY;
+    // `deltaMode`: Firefox reports a notch of a wheel as a few LINES, not
+    // pixels; a page is the row's own width.
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? e.currentTarget.clientWidth : 1;
+    e.currentTarget.scrollLeft += e.deltaY * unit;
   };
 
   // The tray's buttons, for BOTH bars from one list so the two cannot drift:
@@ -718,10 +727,14 @@ export default function ChromeShelf({
       </div>
 
       {/* The hovered app's name. Fixed and drawn here, not inside the app row,
-          which scrolls and would clip it; hidden while a menu is open. */}
-      {appTip && !ctxMenu && (
+          which scrolls and would clip it; hidden while a menu is open and once
+          the app it names has left the bar (no mouseleave fires for a button
+          that unmounts under a resting pointer). `aria-hidden`: the button
+          already carries the name, so a screen reader hears it once. */}
+      {appTip && !ctxMenu && !shelfMenu && apps.some((a) => a.id === appTip.id) && (
         <div
           data-testid="shelf-tooltip"
+          aria-hidden="true"
           className="fixed px-2 py-1 bg-[#1e2939] text-white text-xs rounded pointer-events-none whitespace-nowrap border border-white/10"
           style={{
             zIndex: DESKTOP_LAYERS.shelf,

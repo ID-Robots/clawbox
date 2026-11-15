@@ -82,6 +82,9 @@ interface Measure {
   /** App buttons wholly inside the row, and whether a click at their centre reaches them. */
   apps: Array<Box & { id: string; covered: string }>;
   appCount: number;
+  /** The row's first app, wherever it is: at scrollLeft 0 it must not start left of the row. */
+  firstApp: Box | null;
+  rowScrollLeft: number;
   launcherCovered: string;
   pageOverflow: number;
 }
@@ -126,7 +129,10 @@ function measure(page: Page): Promise<Measure> {
           return rowBox && b.l >= rowBox.l - 0.5 && b.r <= rowBox.r + 0.5;
         }).map((el) => ({ ...box(el), id: el.getAttribute("data-testid") ?? "?", covered: covered(el) }))
       : [];
+    const firstApp = row?.querySelector('[data-testid^="shelf-app-"]');
     return {
+      firstApp: firstApp ? box(firstApp) : null,
+      rowScrollLeft: row ? row.scrollLeft : 0,
       width: window.innerWidth,
       flavour: row?.getAttribute("data-testid") === "shelf-mobile-apps" ? "phone" : row ? "desktop" : "none",
       bar: bar ? box(bar) : null,
@@ -184,6 +190,9 @@ for (const [name, scenario] of Object.entries(SCENARIOS)) {
     for (const [width, height] of SIZES) {
       await page.setViewportSize({ width, height });
       await settle(page);
+      // The bar re-renders on `resize`; wait for the one this width asks for
+      // instead of assuming two frames were enough.
+      await expect(page.getByTestId(width < 768 ? "shelf-mobile-apps" : "shelf-desktop-apps"), `${name} apps at ${width}x${height}: the bar for this width`).toBeVisible();
       const m = await measure(page);
       const at = `${name} apps at ${width}x${height}`;
 
@@ -228,8 +237,34 @@ for (const [name, scenario] of Object.entries(SCENARIOS)) {
       }
       expect(m.apps.length, `${at}: some app is in view`).toBeGreaterThan(0);
 
-      // A row that has more apps than room is a scroller, not a pile.
+      // A row that has more apps than room is a scroller, not a pile — and one
+      // that starts at its FIRST app (`justify-center-safe`): a plain `center`
+      // would clip half of them off the left edge, out of reach.
       if (m.apps.length < m.appCount) expect(m.rowScrolls, `${at}: hidden apps are scrolled to, not clipped`).toBe(true);
+      if (m.rowScrolls) {
+        expect(m.rowScrollLeft, `${at}: nothing scrolled it`).toBe(0);
+        expect(m.firstApp!.l, `${at}: the first app is not clipped off the left of its row`).toBeGreaterThanOrEqual(row.l - 0.5);
+      }
+
+      // Shedding is by priority and only when the room is gone: a button the
+      // bar keeps never outranks one it dropped, and nothing is dropped on a bar
+      // that has the room (every desktop width does).
+      const has = (id: string) => ids.includes(id);
+      if (has("shelf-screenshot-button")) expect(has("shelf-tray-button"), `${at}: the clock outlasts the screenshot button`).toBe(true);
+      if (has("shelf-tray-button")) expect(has("shelf-clawkeep-shield-button"), `${at}: the shield outlasts the clock`).toBe(true);
+      if (width >= 768) {
+        for (const id of ["shelf-clawkeep-shield-button", "shelf-screenshot-button", "shelf-tray-button"]) {
+          expect(has(id), `${at}: ${id} stays while there is room for it`).toBe(true);
+        }
+      }
+
+      // With room to spare, the apps sit in the MIDDLE of the bar, launcher
+      // and all, as they always did: half the free width either side.
+      if (name === "few" && width >= 1280) {
+        const group = (launcher.l + row.r) / 2;
+        const bar = m.bar!;
+        expect(Math.abs(group - (bar.l + bar.r) / 2), `${at}: launcher and apps are centred on the bar`).toBeLessThanOrEqual(2);
+      }
 
       const dir = process.env.SHELF_SHOTS_DIR;
       if (dir) {

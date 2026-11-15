@@ -251,6 +251,51 @@ describe("the app names", () => {
   });
 });
 
+describe("the app names, once the bar changes under a resting pointer", () => {
+  // No mouseleave fires for a button that unmounts or moves while the pointer
+  // rests on it: the name would be left floating where its icon no longer is.
+  it("drops the name of an app that has left the bar", () => {
+    const view = renderAt(880);
+    fireEvent.mouseEnter(screen.getByTestId("shelf-app-vnc"));
+    expect(screen.getByTestId("shelf-tooltip")).toHaveTextContent("vnc");
+
+    view.rerender(
+      <ChromeShelf
+        apps={MANY.filter((a) => a.id !== "vnc")}
+        onAppClick={vi.fn()}
+        onLauncherClick={vi.fn()}
+        onTrayClick={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId("shelf-app-vnc")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("shelf-tooltip")).not.toBeInTheDocument();
+  });
+
+  it("drops the name when the window is resized, as the icons are not where they were", () => {
+    renderAt(880);
+    fireEvent.mouseEnter(screen.getByTestId("shelf-app-files"));
+    expect(screen.getByTestId("shelf-tooltip")).toBeInTheDocument();
+
+    fireEvent(window, new Event("resize"));
+    expect(screen.queryByTestId("shelf-tooltip")).not.toBeInTheDocument();
+  });
+
+  it("drops the name when the shelf's own menu opens", () => {
+    const { container } = renderAt(880);
+    fireEvent.mouseEnter(screen.getByTestId("shelf-app-files"));
+    expect(screen.getByTestId("shelf-tooltip")).toBeInTheDocument();
+
+    fireEvent.contextMenu(container.querySelector("[data-mascot-ground]")!);
+    expect(screen.queryByTestId("shelf-tooltip")).not.toBeInTheDocument();
+  });
+
+  it("is hidden from assistive tech, which already has the button's own name", () => {
+    renderAt(880);
+    fireEvent.mouseEnter(screen.getByTestId("shelf-app-files"));
+    expect(screen.getByTestId("shelf-tooltip")).toHaveAttribute("aria-hidden", "true");
+  });
+});
+
 describe("the app row's wheel", () => {
   it("turns a vertical wheel into a sideways scroll, so a mouse can reach what the row scrolled away", () => {
     renderAt(880);
@@ -259,6 +304,15 @@ describe("the app row's wheel", () => {
 
     fireEvent.wheel(row, { deltaY: 120 });
     expect(row.scrollLeft).toBe(120);
+  });
+
+  it("counts a notch in lines (Firefox) as lines, not as pixels", () => {
+    renderAt(880);
+    const row = screen.getByTestId("shelf-desktop-apps");
+    row.scrollLeft = 0;
+
+    fireEvent.wheel(row, { deltaY: 3, deltaMode: 1 });
+    expect(row.scrollLeft).toBe(48);
   });
 
   it("leaves a trackpad's own sideways swipe alone", () => {
