@@ -31,6 +31,24 @@
  * automation that runs on Anthropic, the profile core's order leads with: the
  * account that can answer.
  *
+ * A RENEWAL: PATH (a), NOT (b). A renewal could keep the automations admitted
+ * in two ways: (b) write the new token in a way core counts as a REFRESH, which
+ * keeps the profile's authorization lifetime, or (a) bind the jobs again. In
+ * 2026.11.3 only core's own OAuth refresh carries a lifetime on
+ * (`continueAuthProfileAuthorization`, called by its refresh-owner writers; a
+ * supplied JSON field "cannot grant it"), and the pool's accounts are `token`
+ * profiles whose refresh token the pool alone holds — every paste, the only
+ * way to put a renewed token in, is written with a `replace` intent. Core's
+ * docs say the same: "Successful credential refresh preserves the authorization
+ * lifetime; logout, terminal authorization loss, and replacement do not", and
+ * "a retired binding must not reacquire a later authorization" — which is why
+ * a job bound by hand does not survive the next renewal, and why the
+ * binding is made again, by core's own `cron.update`, for EVERY job (source
+ * `user` and source `auto` alike) in the pass that pasted, and only onto an
+ * account core holds the pool's current token of: one whose paste is still
+ * owed gets a new lifetime when it lands, and a binding made before would be
+ * refused again then (the owner's box, 2026-11-15 08:36: "still owed").
+ *
  * MODEL-LESS JOBS keep inheriting the agent's default model. Core binds only
  * with an explicit model, so such a job is adopted in two updates: the agent
  * default `@profile` (the binding is captured), then `model: null` — core
@@ -68,8 +86,16 @@
  * planning wins; the job is planned again from what it now is.
  */
 
-/** A job's last run failed on its recorded inference account, not on the model. */
-const BINDING_FAILURE_RE = /no recorded inference account|inference account was replaced|selected automation account is unavailable|requires an available stored inference account/i;
+/**
+ * A job's last run failed on its recorded inference account, not on the model.
+ * Core says it two ways once the account's authorization lifetime was
+ * replaced: "Automation inference account was replaced" for a binding it
+ * captured for itself (source `auto`), and the MCP authority contract's
+ * "MCP authorization was disconnected or replaced" (code
+ * `MCP_AUTHORIZATION_RETIRED`) for one an explicit `model@profile` selected
+ * (source `user`) — the owner's box, 2026-11-15 08:37, every job bound by hand.
+ */
+const BINDING_FAILURE_RE = /no recorded inference account|inference account was replaced|selected automation account is unavailable|requires an available stored inference account|MCP authorization was disconnected or replaced|MCP_AUTHORIZATION_RETIRED/i;
 
 /** A run lost to its account is run again once in this long, and only when it is this recent: its moment has passed. */
 export const BINDING_RETRY_WINDOW_MS = 2 * 60 * 60_000;

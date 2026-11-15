@@ -73,6 +73,8 @@ function fakeCore() {
     refusePaste: false,
     /** Ids whose paste core refuses, whatever `refusePaste` says. */
     refusePasteOf: new Set<string>(),
+    /** What core says when it refuses a paste. */
+    pasteRefusalText: "the auth store is busy",
     refuseOrder: false,
     /**
      * OpenClaw 2026.11.3's `models.authOrderSet`: with no stored order and a
@@ -179,7 +181,7 @@ function fakeCore() {
     },
     paste: async (profileId, token) => {
       if (core.pasteTakesMs > 0) vi.setSystemTime(Date.now() + core.pasteTakesMs);
-      if (core.refusePaste || core.refusePasteOf.has(profileId)) throw new Error("the auth store is busy");
+      if (core.refusePaste || core.refusePasteOf.has(profileId)) throw new Error(core.pasteRefusalText);
       core.pastes.push({ profileId, ...token });
       core.profiles.set(profileId, { type: "token", secret: token.access, expires: token.expires });
       // Explicit upsert is replacement: a new authorization lifetime.
@@ -273,7 +275,8 @@ function cronUpdate(core: ReturnType<typeof fakeCore>, params: Record<string, un
       const profileId = model.slice(at + 1);
       if (!core.profiles.has(profileId) && !core.otherProfiles.has(profileId)) throw new Error("The selected automation account is unavailable.");
       if (!core.lifetimes.has(profileId)) core.lifetimes.set(profileId, crypto.randomUUID());
-      job.binding = { profileId, lifetime: core.lifetimes.get(profileId) as string };
+      // An explicit `model@profile` is a `user` selection (captureCronInferenceBinding).
+      job.binding = { profileId, lifetime: core.lifetimes.get(profileId) as string, source: "user" };
     }
     job.payload.model = model;
   } else if (model === null) {
@@ -292,7 +295,14 @@ function runCron(core: ReturnType<typeof fakeCore>, id: string, now = Date.now()
     return text;
   };
   if (!job.binding) return fail("Automation has no recorded inference account. Explicitly select its account with a model@profile update before running it.");
-  if (core.lifetimes.get(job.binding.profileId) !== job.binding.lifetime) return fail("Automation inference account was replaced. Explicitly select an authorized account again.");
+  if (core.lifetimes.get(job.binding.profileId) !== job.binding.lifetime) {
+    // The owner's box, 2026-11-15 08:37: a binding an explicit `model@profile`
+    // made (source `user`) is refused with the MCP authority contract's
+    // retirement, one core captured for itself (`auto`) with the account's.
+    return fail(job.binding.source === "user"
+      ? "MCP authorization was disconnected or replaced (MCP_AUTHORIZATION_RETIRED)"
+      : "Automation inference account was replaced. Explicitly select an authorized account again.");
+  }
   job.state = { lastStatus: "ok", lastRunAtMs: now };
   return job.binding.profileId;
 }
@@ -1561,7 +1571,7 @@ describe("automations follow the pool across a swap and a renewal (TASK-2533, Op
 
     expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
     expect(core.lifetimes.get(p(work.id))).not.toBe(before);
-    expect((core.crons.get("inbox") as FakeCron).binding).toEqual({ profileId: p(work.id), lifetime: core.lifetimes.get(p(work.id)) });
+    expect((core.crons.get("inbox") as FakeCron).binding).toEqual({ profileId: p(work.id), lifetime: core.lifetimes.get(p(work.id)), source: "user" });
     expect(runCron(core, "inbox")).toBe(p(work.id));
   });
 
@@ -2188,6 +2198,16 @@ describe("TASK-2533 second review pass", () => {
 
     await gw.bindGatewayCrons();
 
+    // Personal answers, but core still holds its OLD token: a binding made on
+    // it now would be replaced when the paste lands, and the token is the one
+    // Anthropic refused. The owner's sign-in answers meanwhile.
+    expect(runCron(core, "inbox")).toBe("anthropic:default");
+
+    // The paste lands: the job follows it in the pass that pasted it.
+    core.refusePasteOf.clear();
+    core.refuseOrder = false;
+    await gw.keepGatewayMirror();
+    expect(core.profiles.get(p(personal.id))?.secret).toBe("sk-ant-oat01-personal-v2");
     expect(runCron(core, "inbox")).toBe(p(personal.id));
   });
 
@@ -2929,5 +2949,211 @@ describe("TASK-2533 renewal follow-up (the owner's box, 2026-11-14 20:05)", () =
     expect(core.logouts).toEqual([]);
     expect(core.profiles.has(p(delta.id))).toBe(false);
     expect(core.order?.[0]).toBe(p(alpha.id));
+  });
+});
+
+describe("TASK-2533 renewal on the owner's box (2026-11-15 08:36) — path (a): core counts a paste as a REPLACEMENT, so the jobs are re-bound, and only to an account whose token core holds", () => {
+  // What the box showed after the 08:36 renewal (OpenClaw 2026.11.3), with
+  // placeholder accounts: every automation bound to the renewed accounts was
+  // refused before any model call — "MCP_AUTHORIZATION_RETIRED" for the ones
+  // an explicit `model@profile` bound (source `user`), "Automation inference
+  // account was replaced" for the ones core bound itself (source `auto`) — and
+  // one account's paste was refused ("Cannot admit models.auth … requires
+  // exclusive offline state ownership"), left "still owed".
+  //
+  // WHICH PATH. Path (b), a renewal core counts as a REFRESH, does not exist
+  // for the pool's `token` profiles in 2026.11.3: only core's own OAuth
+  // refresh carries a lifetime on (`continueAuthProfileAuthorization`, the
+  // refresh-owner writers); `paste-token` is written with a `replace` intent,
+  // "even when the operator supplies identical bytes". So path (a): after
+  // each paste core confirmed, every job is bound again to an account that
+  // holds the pool's current token, in the same pass.
+  const SONNET = "anthropic/claude-sonnet-5-5";
+  const NAMES = ["Alpha", "Bravo", "Charlie"];
+  const email = (i: number) => `${NAMES[i].toLowerCase()}@example.com`;
+  const REFUSED_TEXT = "Cannot admit models.auth for token credentials: requires exclusive offline state ownership";
+
+  const threeAccounts = async (core: ReturnType<typeof fakeCore>): Promise<string[]> => {
+    core.tellsConfigOrder = true;
+    core.orderKeepsOthers = true;
+    const ids: string[] = [];
+    for (const [i, name] of NAMES.entries()) {
+      ids.push((await pool.addOAuthAccount({ label: `${name} Max`, email: email(i), tokens: oauth(`sk-ant-oat01-${name.toLowerCase()}`) })).id);
+    }
+    await gw.keepGatewayMirror();
+    return ids;
+  };
+
+  /** The accounts in `which` come due together and Anthropic renews each one in the keeper's next pass. */
+  const renewalDue = async (ids: string[], which: number[], tag: string) => {
+    for (const i of which) {
+      const held = await pool.gatewayCredentialFor(ids[i], { renew: false });
+      await pool.replaceCredential(ids[i], { kind: "oauth", tokens: oauth(held?.access as string, 2 * H), email: email(i) });
+    }
+    let n = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (String(url).endsWith("/api/oauth/usage")) return new Response("{}", { status: 503 });
+      n += 1;
+      return new Response(JSON.stringify({ access_token: `sk-ant-oat01-${tag}-renewed-${n}`, refresh_token: `${tag}-r-${n}`, expires_in: 28_800 }), { status: 200 });
+    }));
+  };
+
+  const lifetime = (core: ReturnType<typeof fakeCore>, profileId: string) => core.lifetimes.get(profileId) as string;
+  const statusOf = async (profileId: string | null) => {
+    const account = (await pool.readPoolState()).accounts.find((a) => p(a.id) === profileId);
+    return account ? account.status : profileId;
+  };
+  /** The `payload.model` of every `cron.update` the gateway was asked since the first `from` requests. */
+  const updatesTo = (core: ReturnType<typeof fakeCore>, from = 0) => core.calls.slice(from).filter((c) => c.method === "cron.update")
+    .map((c) => String(((c.params.patch as { payload?: { model?: string | null } }).payload ?? {}).model ?? ""));
+
+  it("P1 [path (a)] — a paste replaces the lifetime (no refresh exists for a token profile), and every job, user and auto, is re-bound with the pass that pasted: its next run is admitted, and the owner's hand re-bind does not need to survive the next renewal", async () => {
+    const core = fakeCore();
+    const ids = await threeAccounts(core);
+    // Alpha's three jobs the owner bound by hand (user); Bravo's two, bound by core itself (auto).
+    for (const id of ["reply-check", "night-report", "final-report"]) {
+      addCron(core, { id, payload: { kind: "agentTurn", message: "m", model: `${SONNET}@${p(ids[0])}` }, binding: { profileId: p(ids[0]), lifetime: lifetime(core, p(ids[0])), source: "user" } });
+    }
+    for (const id of ["social-post", "outreach-digest"]) addCron(core, { id, binding: { profileId: p(ids[1]), lifetime: lifetime(core, p(ids[1])), source: "auto" } });
+    await gw.bindGatewayCrons();
+    for (const id of ["reply-check", "night-report", "final-report", "social-post", "outreach-digest"]) expect(await statusOf(runCron(core, id))).toBe("ok");
+
+    const before = new Map(NAMES.map((_, i) => [ids[i], lifetime(core, p(ids[i]))] as const));
+    // Every account of the pool renewed: one gateway stop, three pastes.
+    await renewalDue(ids, [0, 1, 2], "first");
+    // At each job update, core holds the renewed token of the account it is bound to (never before its paste).
+    const heldAtUpdate: (string | undefined)[] = [];
+    core.beforeCall = (method, params) => {
+      if (method !== "cron.update") return;
+      const model = ((params.patch as { payload?: { model?: string | null } }).payload ?? {}).model;
+      if (typeof model === "string" && model.includes("@")) heldAtUpdate.push(core.profiles.get(model.slice(model.lastIndexOf("@") + 1))?.secret);
+    };
+    const windows = offlineWindows;
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect(offlineWindows).toBe(windows + 1);
+
+    // Core replaced every lifetime: a refresh would have kept them (path (b) is not offered).
+    for (const i of [0, 1, 2]) expect(lifetime(core, p(ids[i]))).not.toBe(before.get(ids[i]));
+    expect(heldAtUpdate.length).toBeGreaterThan(0);
+    for (const held of heldAtUpdate) expect(held).toMatch(/^sk-ant-oat01-first-renewed-/);
+    // No watcher minute in between: the pass's own binding made every next run admitted.
+    for (const id of ["reply-check", "night-report", "final-report", "social-post", "outreach-digest"]) {
+      const ran = runCron(core, id);
+      expect(ran).not.toMatch(/replaced|MCP_AUTHORIZATION|no recorded/);
+      expect(await statusOf(ran)).toBe("ok");
+    }
+
+    // The owner binds a job by hand onto Bravo between two renewals; the next renewal takes it along.
+    cronUpdate(core, { id: "reply-check", patch: { payload: { kind: "agentTurn", model: `${SONNET}@${p(ids[1])}` } } });
+    expect(await statusOf(runCron(core, "reply-check"))).toBe("ok");
+    await renewalDue(ids, [0, 1, 2], "second");
+    await gw.keepGatewayMirror();
+    for (const id of ["reply-check", "night-report", "final-report", "social-post", "outreach-digest"]) {
+      expect(runCron(core, id)).not.toMatch(/replaced|MCP_AUTHORIZATION|no recorded/);
+      expect(await statusOf((core.crons.get(id) as FakeCron).binding?.profileId ?? null)).toBe("ok");
+    }
+  });
+
+  it("P2 — a scheduled run the restart's first seconds lost to the replaced lifetime, refused \"MCP_AUTHORIZATION_RETIRED\" (a user binding), is read as lost to its account: the job is re-bound and the run started again, once", async () => {
+    const core = fakeCore();
+    const ids = await threeAccounts(core);
+    addCron(core, { id: "reply-check", payload: { kind: "agentTurn", message: "m", model: `${SONNET}@${p(ids[0])}` }, binding: { profileId: p(ids[0]), lifetime: lifetime(core, p(ids[0])), source: "user" } });
+    await gw.bindGatewayCrons();
+    // One core bound itself (a chat made it) after the box's look: source `auto`, no record of the box's.
+    addCron(core, { id: "social-post", binding: { profileId: p(ids[0]), lifetime: lifetime(core, p(ids[0])), source: "auto" } });
+
+    await renewalDue(ids, [0], "first");
+    // The scheduler's catch-up runs as the gateway answers again, before the box has looked.
+    const refused: string[] = [];
+    core.afterWindow = () => {
+      refused.push(runCron(core, "reply-check"), runCron(core, "social-post"));
+    };
+    await gw.keepGatewayMirror();
+
+    expect(refused[0]).toMatch(/MCP_AUTHORIZATION_RETIRED/);
+    expect(refused[1]).toMatch(/inference account was replaced/);
+    expect(core.calls.filter((c) => c.method === "cron.run").map((c) => c.params.id).sort()).toEqual(["reply-check", "social-post"]);
+    for (const id of ["reply-check", "social-post"]) expect(await statusOf(runCron(core, id))).toBe("ok");
+    // Once, not on every look.
+    await gw.bindGatewayCrons();
+    expect(core.calls.filter((c) => c.method === "cron.run").length).toBe(2);
+  });
+
+  it("P3 — a paste core refuses (\"requires exclusive offline state ownership\") leaves its account owed: no job is bound to it while it is, they follow the next account whose token core holds, and move to it in the pass that finally pastes it", async () => {
+    const core = fakeCore();
+    const ids = await threeAccounts(core);
+    for (const id of ["reply-check", "night-report"]) {
+      addCron(core, { id, payload: { kind: "agentTurn", message: "m", model: `${SONNET}@${p(ids[0])}` }, binding: { profileId: p(ids[0]), lifetime: lifetime(core, p(ids[0])), source: "user" } });
+    }
+    for (const id of ["social-post", "outreach-digest"]) addCron(core, { id, binding: { profileId: p(ids[0]), lifetime: lifetime(core, p(ids[0])), source: "auto" } });
+    await gw.bindGatewayCrons();
+    const bound = lifetime(core, p(ids[0]));
+    const asked = core.calls.length;
+
+    // Alpha (the lead) and Bravo are renewed; core refuses Alpha's paste.
+    core.pasteRefusalText = REFUSED_TEXT;
+    core.refusePasteOf.add(p(ids[0]));
+    await renewalDue(ids, [0, 1], "first");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await gw.keepGatewayMirror();
+
+      // Alpha is owed: core still holds its old token and lifetime.
+      expect(core.profiles.get(p(ids[0]))?.secret).toBe("sk-ant-oat01-alpha");
+      expect(lifetime(core, p(ids[0]))).toBe(bound);
+      expect(core.profiles.get(p(ids[1]))?.secret).toMatch(/^sk-ant-oat01-first-renewed-/);
+      expect(errors.mock.calls.map((c) => c.map(String).join(" ")).some((line) => line.includes("still owed") && line.includes(p(ids[0])))).toBe(true);
+      // No job was bound to the account whose paste is owed: a binding made now is replaced when it lands.
+      expect(updatesTo(core, asked).length).toBeGreaterThan(0);
+      expect(updatesTo(core, asked).some((model) => model.endsWith(`@${p(ids[0])}`))).toBe(false);
+      for (const id of ["reply-check", "night-report", "social-post", "outreach-digest"]) {
+        expect(runCron(core, id)).toBe(p(ids[1]));
+      }
+      const said = errors.mock.calls.map((c) => c.map(String).join(" ")).filter((line) => line.includes("automations are not bound to"));
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain(p(ids[0]));
+      // The same minute again says nothing more.
+      await gw.bindGatewayCrons();
+      expect(errors.mock.calls.map((c) => c.map(String).join(" ")).filter((line) => line.includes("automations are not bound to"))).toHaveLength(1);
+    } finally {
+      errors.mockRestore();
+    }
+
+    // The next pass pastes it: its lifetime is replaced, and the jobs are on it in that same pass.
+    core.refusePasteOf.clear();
+    await gw.keepGatewayMirror();
+    expect(core.profiles.get(p(ids[0]))?.secret).toMatch(/^sk-ant-oat01-first-renewed-/);
+    expect(lifetime(core, p(ids[0]))).not.toBe(bound);
+    for (const id of ["reply-check", "night-report", "social-post", "outreach-digest"]) {
+      expect(runCron(core, id)).toBe(p(ids[0]));
+      expect((core.crons.get(id) as FakeCron).state.lastStatus).toBe("ok");
+    }
+  });
+
+  it("P4 — with the pool's current token in none of its accounts' profiles (every paste owed) and no sign-in of the owner's, no job is bound at all: nothing is moved onto a lifetime the next paste replaces", async () => {
+    const core = fakeCore();
+    core.profiles.delete("anthropic:default");
+    const ids = await threeAccounts(core);
+    addCron(core, { id: "reply-check", payload: { kind: "agentTurn", message: "m", model: `${SONNET}@${p(ids[0])}` }, binding: { profileId: p(ids[0]), lifetime: lifetime(core, p(ids[0])), source: "user" } });
+    await gw.bindGatewayCrons();
+    const asked = core.calls.length;
+
+    // The pool renewed every account on its own (coding runs asked for tokens) and core refuses every paste.
+    core.pasteRefusalText = REFUSED_TEXT;
+    for (const [i, id] of ids.entries()) {
+      core.refusePasteOf.add(p(id));
+      await pool.replaceCredential(id, { kind: "oauth", tokens: oauth(`sk-ant-oat01-${NAMES[i].toLowerCase()}-v2`), email: email(i) });
+    }
+    await gw.keepGatewayMirror();
+    await gw.bindGatewayCrons();
+
+    expect(updatesTo(core, asked)).toEqual([]);
+    expect((core.crons.get("reply-check") as FakeCron).binding?.profileId).toBe(p(ids[0]));
+
+    // Core takes them: the job follows the lead in the pass that pasted it.
+    core.refusePasteOf.clear();
+    await gw.keepGatewayMirror();
+    expect(core.profiles.get(p(ids[0]))?.secret).toBe("sk-ant-oat01-alpha-v2");
+    expect(runCron(core, "reply-check")).toBe(p(ids[0]));
   });
 });

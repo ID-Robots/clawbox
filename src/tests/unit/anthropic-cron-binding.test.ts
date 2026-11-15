@@ -108,6 +108,18 @@ describe("planning the adoptions", () => {
     // Any other failure is the model's, not the account's.
     expect(plan([job({ id: "j", lastStatus: "error", lastError: "You've hit your weekly limit", lastRunAtMs: NOW - 1000 })], records)).toEqual([]);
   });
+
+  it("reads core's other wording for the same loss — the MCP authority contract's retirement of a `user` binding (the owner's box, 2026-11-15) — as lost to the account, record or no record", () => {
+    // `model@profile` bindings (source user) are refused "MCP_AUTHORIZATION_RETIRED"; the records say they are current.
+    const records: CronBindingRecords = { j: { profileId: POOL_A, authorization: "life-1", inherits: false, model: `anthropic/claude-sonnet-5-5@${POOL_A}`, revision: "r1", at: NOW - 60_000 } };
+    for (const lastError of ["MCP authorization was disconnected or replaced", "McpConnectionAuthorityError: MCP_AUTHORIZATION_RETIRED"]) {
+      const lost = { lastStatus: "error", lastError, lastRunAtMs: NOW - 1000 };
+      expect(plan([job({ id: "j", model: `anthropic/claude-sonnet-5-5@${POOL_A}`, ...lost })], records)[0]).toMatchObject({ steps: [`anthropic/claude-sonnet-5-5@${POOL_A}`], retry: true });
+      expect(plan([job({ id: "k", model: "anthropic/claude-sonnet-5-5", ...lost })], {})[0]).toMatchObject({ retry: true });
+    }
+    // Temporarily unavailable is not lost: nothing is re-bound for it.
+    expect(plan([job({ id: "j", model: `anthropic/claude-sonnet-5-5@${POOL_A}`, lastStatus: "error", lastError: "MCP authorization state is temporarily unavailable", lastRunAtMs: NOW - 1000 })], records)).toEqual([]);
+  });
 });
 
 describe("applying the adoptions (CodeRabbit review on #1526)", () => {

@@ -452,6 +452,8 @@ interface GatewayRuntime {
   limitedOut: Set<string>;
   /** A pass's offline window started the gateway again: the binding that follows waits for it to answer (bindCronsLocked). */
   windowRan: boolean;
+  /** The profiles the automations were last said not to follow because core does not hold the pool's current token of them (said once, not every minute). */
+  bindSkipped: string | null;
 }
 
 function runtime(): GatewayRuntime {
@@ -478,6 +480,7 @@ function runtime(): GatewayRuntime {
     pasteRefusals: new Map(),
     limitedOut: new Set(),
     windowRan: false,
+    bindSkipped: null,
   }));
 }
 
@@ -598,6 +601,27 @@ function otherProfiles(store: Extract<GatewayProviderAuthRead, { kind: "present"
   const profiles = store.profiles.filter((p) => !isPoolProfile(p.profileId));
   const ordered = (store.order ?? []).flatMap((id) => profiles.filter((p) => p.profileId === id));
   return [...ordered, ...profiles.filter((p) => !ordered.includes(p))];
+}
+
+/**
+ * Does core hold the token the pool holds for this profile NOW? A profile that
+ * is not the pool's (the owner's own sign-in) is core's own to keep current.
+ * One of the pool's holds an older token while its paste is owed (refused, or
+ * not yet made): the pool renewed it, Anthropic refuses the one core still
+ * has, and the paste that lands next gives the profile a new authorization
+ * lifetime — so an automation bound to it before is refused again after
+ * (renewal path (a), see the header of src/lib/anthropic-cron-binding.ts).
+ * The pool's token is read as it is, never renewed here. False when the pool
+ * cannot say.
+ */
+async function coreHoldsCurrentToken(profile: ProviderAuthProfile): Promise<boolean> {
+  if (!isPoolProfile(profile.profileId)) return true;
+  try {
+    const current = await gatewayCredentialFor(profile.profileId.slice(POOL_PROFILE_PREFIX.length), { renew: false });
+    return !!current && tokenFingerprint(current.access) === profile.fingerprint;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1621,8 +1645,30 @@ async function bindCronsOnce(): Promise<CronBindingResult | null> {
     // the store when its logout waits for an account that answers).
     const limitedPool = (id: string) => isPoolProfile(id)
       && pool.accounts.some((a) => poolProfileId(a.id) === id && effectiveStatus(a, now) === "limited");
-    const leadId = chat.onAnthropic ? order.find((id) => usable(id) && !limitedPool(id)) ?? order.find((id) => usable(id)) : undefined;
-    const lead = leadId ? usable(leadId) : undefined;
+    // ...and only an account core HOLDS THE POOL'S CURRENT TOKEN of (TASK-2533,
+    // the owner's box 2026-11-15 08:37: "still owed" after a refused paste). A
+    // binding captures the profile's authorization lifetime, and the paste still
+    // owed gives the profile a new one — an automation bound before it would be
+    // refused again the moment it lands. Such an account is skipped: the jobs
+    // go to the first account in the order whose token is in, and follow the
+    // lead in the same pass as its paste once it is.
+    const skipped: string[] = [];
+    const pick = async (accept: (id: string) => boolean): Promise<ProviderAuthProfile | undefined> => {
+      for (const id of order) {
+        const profile = usable(id);
+        if (!profile || !accept(id)) continue;
+        if (await coreHoldsCurrentToken(profile)) return profile;
+        skipped.push(id);
+      }
+      return undefined;
+    };
+    const lead = chat.onAnthropic ? (await pick((id) => !limitedPool(id))) ?? (await pick(() => true)) : undefined;
+    const skippedIds = [...new Set(skipped)];
+    const skippedKey = skippedIds.join(",") || null;
+    if (skippedKey !== runtime().bindSkipped) {
+      runtime().bindSkipped = skippedKey;
+      if (skippedKey) console.error(`[anthropic-gateway] automations are not bound to ${skippedKey} yet: core does not hold the pool's current token of ${skippedIds.length > 1 ? "them" : "it"} (a paste is owed), and a binding made now would be replaced when it lands${lead ? `; they follow ${lead.profileId} meanwhile` : ""}`);
+    }
     // With the pool in, every Anthropic job is the box's to bind. With it out,
     // only the ones the box adopted: onto what leads now, or given back.
     if (poolIn && !lead) return null;
