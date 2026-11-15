@@ -159,7 +159,12 @@ restart_gateway() {
 }
 
 KEY_EXISTED=0
-[ -f data/.stt-endpoint-key ] && { KEY_EXISTED=1; cp -p data/.stt-endpoint-key "$WORK/key"; }
+# Nothing is changed yet, so a backup that fails stops the test here: the
+# cleanup would otherwise put back a missing or partial copy.
+if [ -f data/.stt-endpoint-key ]; then
+  cp -p data/.stt-endpoint-key "$WORK/key" || { echo "CONFIG_UNREADABLE stt key"; exit 0; }
+  KEY_EXISTED=1
+fi
 # Hermes'"'"' voice markers: whatever was there before is put back, and only that.
 MARKERS="$HOME/.hermes/config.yaml.clawbox-voice-lock.json $HOME/.hermes/config.yaml.clawbox-voice-standdown.json"
 mkdir -p "$WORK/markers"

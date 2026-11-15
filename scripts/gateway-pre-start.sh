@@ -4597,10 +4597,16 @@ def _clawbox_audio_lock_off_marker():
     return os.path.join(os.path.dirname(_store_path), ".channel-audio-lock-off") if _store_path else ""
 
 
+# The mark, removed only once the config it switched back on is written (the
+# gateway config write, as `_clawbox_tts_held_to_remove`): a write that fails
+# leaves it, so the next start switches the audio back on again.
+_clawbox_audio_mark_to_remove = None
+
+
 def _clawbox_audio_lock_switch():
     import os
 
-    global changed, _clawbox_lock_applied
+    global changed, _clawbox_lock_applied, _clawbox_audio_mark_to_remove
     _marker = _clawbox_audio_lock_off_marker()
     _tools = cfg.get("tools") if isinstance(cfg.get("tools"), dict) else {}
     _media = _tools.get("media") if isinstance(_tools.get("media"), dict) else {}
@@ -4639,11 +4645,15 @@ def _clawbox_audio_lock_switch():
         if _audio.get("enabled") is False:
             del _audio["enabled"]
             changed = True
+            _clawbox_audio_mark_to_remove = _marker
             print("  Channel transcription back on: the switch local-only AI turned off is no longer needed")
-        try:
-            os.unlink(_marker)
-        except OSError:
-            pass
+        else:
+            # Nothing of ours to switch back on, so nothing to write first: a
+            # mark kept now would one day turn on a switch the owner set.
+            try:
+                os.unlink(_marker)
+            except OSError:
+                pass
 
 
 _clawbox_audio_lock_switch()
@@ -5601,6 +5611,11 @@ if changed:
         if globals().get("_clawbox_tts_held_to_remove"):
             try:
                 os.unlink(globals()["_clawbox_tts_held_to_remove"])
+            except OSError:
+                pass
+        if globals().get("_clawbox_audio_mark_to_remove"):
+            try:
+                os.unlink(globals()["_clawbox_audio_mark_to_remove"])
             except OSError:
                 pass
         _record_memory_rebuild(_memory_index_changes)

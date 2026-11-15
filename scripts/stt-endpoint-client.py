@@ -65,6 +65,23 @@ def is_lan(addr):
     return any(ip in net for net in _LAN if net.version == ip.version)
 
 
+def sends_key_in_clear(base):
+    """Would a key go unencrypted to another machine? An http:// address
+    whose host is not this box's loopback: `sendsKeyInClear` in
+    src/components/local-ai/ExternalEngineCard.tsx, the same rule Settings
+    warns the owner by."""
+    parsed = urllib.parse.urlsplit(base)
+    if parsed.scheme != "http":
+        return False
+    host = (parsed.hostname or "").lower()
+    if host == "localhost":
+        return False
+    try:
+        return not ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return True
+
+
 _real_getaddrinfo = socket.getaddrinfo
 
 
@@ -176,6 +193,10 @@ def main():
     headers = {"Content-Type": "multipart/form-data; boundary=%s" % boundary, "Accept": "application/json"}
     if key:
         headers["Authorization"] = "Bearer %s" % key
+        if sends_key_in_clear(base):
+            # Sent all the same (a LAN server on plain HTTP is a supported
+            # setup), and said, as Settings says it to the owner.
+            sys.stderr.write("stt-endpoint-client: note: the key goes to the speech server over plain http://, unencrypted\n")
     req = urllib.request.Request(base.rstrip("/") + "/audio/transcriptions", data=body, headers=headers, method="POST")
     # No proxy: a LAN request routed through an outbound proxy would leave the network.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)

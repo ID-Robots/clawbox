@@ -86,8 +86,24 @@ describe.skipIf(!hasPython3)("stt-endpoint-client.py", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0].url).toBe("/v1/audio/transcriptions");
     expect(seen[0].auth).toBe("Bearer lan-key");
+    // Loopback: no plain-HTTP note.
+    expect(r.stderr).not.toMatch(/unencrypted/);
     expect(seen[0].body).toContain('name="model"\r\n\r\nasr-small');
     expect(seen[0].body).toContain('filename="voice.ogg"');
+  });
+
+  it("names a key that would go over plain HTTP to another machine, by the rule Settings warns by", () => {
+    const probe = spawnSync("python3", ["-c", [
+      "import importlib.util, sys",
+      "spec = importlib.util.spec_from_file_location('client', sys.argv[1])",
+      "m = importlib.util.module_from_spec(spec)",
+      "spec.loader.exec_module(m)",
+      "print(' '.join(str(m.sends_key_in_clear(u)) for u in sys.argv[2:]))",
+    ].join("\n"), SCRIPT,
+      "http://192.168.1.20:8000/v1", "http://asr.lan/v1", // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
+      "https://192.168.1.20/v1", "http://127.0.0.2:8000/v1", "http://localhost:8000/v1", "http://[::1]:8000/v1"], // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
+    { encoding: "utf-8" });
+    expect(probe.stdout.trim()).toBe("True True False False False False");
   });
 
   it("sends no key when none is saved, and ignores an outbound proxy", async () => {

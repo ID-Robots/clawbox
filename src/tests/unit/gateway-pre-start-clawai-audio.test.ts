@@ -99,7 +99,7 @@ function migrate(
   routeIsOurs = true,
   v2 = false,
   opts: MigrateOptions = {},
-): { cfg: Config; changed: boolean; log: string; lockApplied: boolean } {
+): { cfg: Config; changed: boolean; log: string; lockApplied: boolean; markToRemove: string | null } {
   const profile = opts.clawaiProfile === undefined ? CLAWAI_PROFILE : opts.clawaiProfile;
   const auth = (cfg.auth ?? {}) as { profiles?: Record<string, unknown> };
   const injected = profile !== null && auth.profiles?.[TRANSCRIBE_AUTH_PROFILE] === undefined;
@@ -116,13 +116,13 @@ function migrate(
     `_clawai_proxy_base_url = ${JSON.stringify(PROXY)}`,
     ...(v2 ? ["CLAWBOX_OPENCLAW_V2 = True"] : []),
     POLICY,
-    "print(json.dumps({'cfg': cfg, 'changed': changed, 'lockApplied': globals().get('_clawbox_lock_applied', False)}))",
+    "print(json.dumps({'cfg': cfg, 'changed': changed, 'lockApplied': globals().get('_clawbox_lock_applied', False), 'markToRemove': globals().get('_clawbox_audio_mark_to_remove')}))",
   ].join("\n");
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: opts.whisperHome?.home ?? dir };
   if (opts.whisperHome) env.PYTHONPATH = opts.whisperHome.pythonPath;
   else delete env.PYTHONPATH;
   const lines = execFileSync("python3", ["-c", program, file], { encoding: "utf-8", env }).trim().split("\n");
-  const out = JSON.parse(lines[lines.length - 1]) as { cfg: Config; changed: boolean; lockApplied: boolean };
+  const out = JSON.parse(lines[lines.length - 1]) as { cfg: Config; changed: boolean; lockApplied: boolean; markToRemove: string | null };
   if (injected) {
     const outAuth = out.cfg.auth as { profiles?: Record<string, unknown> };
     const profiles = outAuth.profiles ?? {};
@@ -823,10 +823,37 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh speech-to-text under the loca
       expect(existsSync(marker)).toBe(true);
     });
     withStore({ ai_cloud_lock: false }, () => {
-      const { cfg } = migrate({ tools: { media: { audio: { enabled: false } } } }, false);
+      const { cfg, markToRemove } = migrate({ tools: { media: { audio: { enabled: false } } } }, false);
       expect(audio(cfg)).toEqual({});
+      // Removed only once the config it switched back on is written (the
+      // gateway config write, after this pass): a failed write keeps it, and
+      // the next start switches the audio back on again.
+      expect(existsSync(marker)).toBe(true);
+      expect(markToRemove).toBe(marker);
+    });
+  });
+
+  it("drops a mark with nothing left to switch back on at once, so it can never turn on the owner's switch", () => {
+    const marker = path.join(dir, ".channel-audio-lock-off");
+    withStore({ ai_cloud_lock: false }, () => {
+      writeFileSync(marker, "");
+      const { cfg, changed, markToRemove } = migrate({ tools: { media: { audio: {} } } }, false);
+      expect(changed).toBe(false);
+      expect(audio(cfg)).toEqual({});
+      expect(markToRemove).toBeNull();
       expect(existsSync(marker)).toBe(false);
     });
+  });
+
+  it("removes the mark only after the gateway config write has landed", () => {
+    const script = readFileSync(SCRIPT, "utf-8");
+    const write = script.indexOf('os.replace(tmp_path, cfg_path)\n        cfg_written = True\n        print("  Updated gateway config")');
+    const unlink = script.indexOf('os.unlink(globals()["_clawbox_audio_mark_to_remove"])');
+    expect(write).toBeGreaterThan(0);
+    expect(unlink).toBeGreaterThan(write);
+    expect(script.slice(write, unlink)).not.toMatch(/except Exception/);
+    // The pass itself removes it only on the branch with nothing to write.
+    expect(POLICY.match(/os\.unlink\(_marker\)/g)).toHaveLength(1);
   });
 
   it("never turns on a switch the owner turned off, and leaves an owner's own route alone", () => {

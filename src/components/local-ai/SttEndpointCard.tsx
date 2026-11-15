@@ -3,6 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { BUTTON, CARD, CardHeading, FOCUS_RING, PRIMARY_BUTTON } from "@/components/local-ai/ui";
+import { sendsKeyInClear } from "@/components/local-ai/ExternalEngineCard";
+import { externalEngineOrigin } from "@/lib/external-engine-shared";
 
 /**
  * Settings → Local AI → Speech to text → Your speech server (TASK-2501 PR-D).
@@ -107,6 +109,14 @@ export default function SttEndpointCard({ onChanged, refreshSignal }: {
   const configured = endpoint?.configured === true;
   const inUse = configured && stt?.primary === "endpoint";
   const localOnly = stt?.localOnly === true;
+  // A key that would go unencrypted to another machine is SAID, not held
+  // back: a LAN server on plain HTTP is the common case, and the recordings
+  // take that road with or without a key. A saved key counts only for its own
+  // origin, the one the save path would send it to.
+  const keyForThisAddress = endpoint?.apiKeySet === true
+    && externalEngineOrigin(form.baseUrl) !== ""
+    && externalEngineOrigin(form.baseUrl) === externalEngineOrigin(endpoint?.baseUrl ?? "");
+  const inClear = editing && sendsKeyInClear(form, keyForThisAddress);
   const say = (m: Message) => ("raw" in m ? m.raw : t(m.key, m.params));
   const set = <K extends keyof Form>(key: K, value: Form[K]) => setForm((f) => ({ ...f, [key]: value }));
 
@@ -292,6 +302,12 @@ export default function SttEndpointCard({ onChanged, refreshSignal }: {
                   onChange={(e) => set("clearApiKey", e.target.checked)} />
                 {t(`${P}clearKey`)}
               </label>
+            )}
+            {inClear && (
+              <p role="note" data-testid="local-ai-stt-endpoint-http-warning"
+                className="mt-1.5 rounded-lg border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-200">
+                {t(`${P}httpKeyWarning`)}
+              </p>
             )}
           </div>
           <div className="flex flex-wrap gap-2 pt-1">

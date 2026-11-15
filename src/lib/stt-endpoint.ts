@@ -143,7 +143,7 @@ export function deleteSttEndpointKey(): void {
 export function sttEndpointFromValue(raw: unknown): SttEndpointRecord | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const { baseUrl, model } = raw as { baseUrl?: unknown; model?: unknown };
-  const url = normalizeSttEndpointUrl(baseUrl);
+  const url = storedBaseUrl(baseUrl);
   const name = parseModel(model);
   if (!url || !name) return null;
   return { baseUrl: url, model: name };
@@ -241,6 +241,22 @@ function fromStoredChars(value: string): string | null {
     copy += STORED_CHARS[at];
   }
   return copy;
+}
+
+/**
+ * A stored base URL as the route saved it, or null: {@link savedBaseUrlShape}
+ * and the External engine's host and path refusals, the rules the save
+ * applied, but NOT the raw-input length limit. Normalising percent-encodes
+ * the path, so a saved address may be longer than the limit its typed form
+ * met, and a record must not read as no record for that.
+ */
+function storedBaseUrl(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const url = savedBaseUrlShape(raw);
+  if (!url) return null;
+  const parsed = new URL(url);
+  if (refusedEngineHost(parsed.hostname) || /\/setup-api\//.test(parsed.pathname)) return null;
+  return url;
 }
 
 /** A key as the owner may give it: trimmed, one line of printable ASCII with no whitespace, at most `apiKeyMax`. Empty or invalid → null. */
@@ -438,13 +454,20 @@ export function lanFetch(lookupImpl: LookupFn = defaultLookup): typeof fetch {
           chunks.push(chunk);
         });
         res.on("end", () => {
-          const status = res.statusCode ?? 502;
-          const out = new Headers();
-          for (const [key, value] of Object.entries(res.headers)) {
-            if (value !== undefined) out.set(key, Array.isArray(value) ? value.join(", ") : value);
+          // Inside a listener a throw is no rejection: it would reach the
+          // process. A status `Response` refuses (outside 200–599) or a header
+          // `Headers` refuses is an answer that is not one.
+          try {
+            const status = res.statusCode ?? 502;
+            const out = new Headers();
+            for (const [key, value] of Object.entries(res.headers)) {
+              if (value !== undefined) out.set(key, Array.isArray(value) ? value.join(", ") : value);
+            }
+            const empty = status === 204 || status === 205 || status === 304;
+            resolve(new Response(empty ? null : Buffer.concat(chunks), { status, headers: out }));
+          } catch (err) {
+            reject(err);
           }
-          const empty = status === 204 || status === 205 || status === 304;
-          resolve(new Response(empty ? null : Buffer.concat(chunks), { status, headers: out }));
         });
         res.on("error", reject);
         res.on("close", () => { if (!res.complete) reject(new Error("the answer was cut off")); });
