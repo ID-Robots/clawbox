@@ -64,6 +64,28 @@ describe("SttEndpointCard", () => {
     expect(document.body.textContent).not.toContain("lan-key");
   });
 
+  it("warns, without holding the save back, when a key would go over plain HTTP to another machine", async () => {
+    stub({ status: () => SAVED });
+    render(<I18nProvider><SttEndpointCard /></I18nProvider>);
+    fireEvent.click(await screen.findByTestId("local-ai-stt-endpoint-edit"));
+    const warning = () => screen.queryByTestId("local-ai-stt-endpoint-http-warning");
+    // The saved key, for its own plain-HTTP LAN address.
+    await waitFor(() => expect(warning()?.textContent).toMatch(/travel unencrypted to the server/));
+    expect((screen.getByTestId("local-ai-stt-endpoint-save") as HTMLButtonElement).disabled).toBe(false);
+    // The key being removed: nothing left to send.
+    fireEvent.click(screen.getByTestId("local-ai-stt-endpoint-clear-key"));
+    expect(warning()).toBeNull();
+    fireEvent.click(screen.getByTestId("local-ai-stt-endpoint-clear-key"));
+    // https://, the box's own loopback, or another origin (the saved key stays behind) and no key typed.
+    for (const url of ["https://192.168.1.20:8000/v1", "http://127.0.0.1:8000/v1", "http://192.168.1.21:8000/v1"]) { // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
+      fireEvent.change(screen.getByLabelText("Server address"), { target: { value: url } });
+      expect(warning()).toBeNull();
+    }
+    // …and a key typed for that other plain-HTTP address.
+    fireEvent.change(screen.getByLabelText("API key (optional)"), { target: { value: "lan-key" } });
+    expect(warning()).not.toBeNull();
+  });
+
   it("names a refused address in the owner's words", async () => {
     stub({ save: () => json({ error: "x", code: "address_refused" }, 400) });
     render(<I18nProvider><SttEndpointCard /></I18nProvider>);
@@ -99,6 +121,8 @@ describe("SttEndpointCard", () => {
   it("says the local-only AI lock in words", async () => {
     stub({ status: () => ({ ...NOT_CONFIGURED, localOnly: true }) });
     render(<I18nProvider><SttEndpointCard /></I18nProvider>);
-    expect((await screen.findByTestId("local-ai-stt-endpoint-local-only")).textContent).toMatch(/never in the cloud/);
+    // The translated words, not only the element: until the table loads, t() answers the raw key.
+    await waitFor(() =>
+      expect(screen.getByTestId("local-ai-stt-endpoint-local-only").textContent).toMatch(/never in the cloud/));
   });
 });

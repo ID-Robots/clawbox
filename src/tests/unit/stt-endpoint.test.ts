@@ -73,6 +73,15 @@ describe("normalizeSttEndpointUrl and validation", () => {
     expect(sttEndpointFromValue({ baseUrl: "http://8.8.8.8/v1", model: "m" })).toBeNull();
     expect(sttEndpointFromValue({ baseUrl: RECORD.baseUrl })).toBeNull();
     expect(sttEndpointFromValue("x")).toBeNull();
+    // A saved address is read as it was saved: normalising percent-encodes the
+    // path, so it may be longer than the limit the typed address met.
+    const long = normalizeSttEndpointUrl(`http://127.0.0.1:8000/${"ä".repeat(400)}`) as string;
+    expect(long.length).toBeGreaterThan(STT_ENDPOINT_LIMITS.baseUrlMax);
+    expect(sttEndpointFromValue({ baseUrl: long, model: "m" })).toEqual({ baseUrl: long, model: "m" });
+    // …and only in the shape the save writes, with the save's host and path rules.
+    for (const baseUrl of [`${RECORD.baseUrl}/`, `${RECORD.baseUrl}?x=1`, "http://169.254.169.254/v1", "http://metadata.google.internal/v1", "http://127.0.0.1/setup-api/local-ai/v1", "file:///v1"]) {
+      expect(sttEndpointFromValue({ baseUrl, model: "m" })).toBeNull();
+    }
   });
 });
 
@@ -302,5 +311,26 @@ describe("lanFetch — the address checked is the address dialled", () => {
     const res = await fetchImpl(`http://127.0.0.1:${port}/redirect`);
     expect(res.status).toBe(302);
     expect(hits).toHaveLength(1);
+  });
+
+  it("turns a status no Response can carry into a rejection, never an uncaught throw", async () => {
+    const net = await import("net");
+    const odd = net.createServer((socket) => {
+      socket.once("data", () => socket.end("HTTP/1.1 600 Odd\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"));
+    });
+    await new Promise<void>((resolve) => odd.listen(0, "127.0.0.1", resolve));
+    const oddPort = (odd.address() as import("net").AddressInfo).port;
+    const uncaught = vi.fn();
+    process.on("uncaughtException", uncaught);
+    try {
+      const fetchImpl = (await import("@/lib/stt-endpoint")).lanFetch(async () => [{ address: "127.0.0.1" }]);
+      await expect(fetchImpl(`http://127.0.0.1:${oddPort}/v1/models`)).rejects.toThrow(RangeError);
+      const out = await transcribeAtEndpoint({ baseUrl: `http://127.0.0.1:${oddPort}/v1`, model: "m1" }, null, AUDIO);
+      expect(out.ok).toBe(false);
+      expect(uncaught).not.toHaveBeenCalled();
+    } finally {
+      process.off("uncaughtException", uncaught);
+      await new Promise<void>((resolve) => odd.close(() => resolve()));
+    }
   });
 });

@@ -5,7 +5,6 @@ import http from "http";
 import type { AddressInfo } from "net";
 import os from "os";
 import path from "path";
-import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 
 // POST /setup-api/chat/transcribe — the owner's own speech server as an engine,
 // and the local-only AI lock (TASK-2501 PR-D).
@@ -81,8 +80,10 @@ beforeEach(async () => {
   process.env.CLAWBOX_ROOT = tmpHome;
   // A box linked to ClawBox AI: without the lock the cloud is a real engine.
   fs.writeFileSync(path.join(openclawHome, "openclaw.json"), JSON.stringify({
-    models: { providers: { [CLAWBOX_AI_PROVIDER]: { baseUrl: "https://clawbox.com/api/ai", apiKey: TOKEN } } },
-    auth: { profiles: { [`${CLAWBOX_AI_PROVIDER}:default`]: { provider: CLAWBOX_AI_PROVIDER, mode: "api_key" } } },
+    // The keys a provisioned box has on disk, written out: the fixture must not
+    // follow the TypeScript constant if it ever changes.
+    models: { providers: { deepseek: { baseUrl: "https://clawbox.com/api/ai", apiKey: TOKEN } } },
+    auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
   }));
   writeStore({});
   localStt.installed.mockResolvedValue({ installed: false, detail: "The on-box transcriber is not installed." });
