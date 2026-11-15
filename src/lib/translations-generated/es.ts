@@ -2543,7 +2543,7 @@ const table: Record<string, string> = {
   "localModels.sttEndpoint.error.model": "El nombre del modelo debe ser una línea de hasta 200 caracteres.",
   "localModels.sttEndpoint.error.unauthorized": "El servidor rechazó la clave API.",
   "localModels.sttEndpoint.error.unreachable": "No se pudo contactar con el servidor. Compruebe la dirección y que esté en marcha.",
-  "localModels.sttEndpoint.hint": "Un servidor de voz a texto compatible con OpenAI en esta caja o en su red local. Las grabaciones van primero a ese servidor; si falla, se encarga el motor propio de esta caja y después la nube de ClawBox AI, si esta caja la usa. Con la IA solo local activada, van solo a ese servidor. Lo que ocurra con ellas allí depende de su configuración.",
+  "localModels.sttEndpoint.hint": "Un servidor de voz a texto compatible con OpenAI en esta caja o en su red local. Mientras sea el motor en uso, las grabaciones van primero a él; si falla, se encarga el motor propio de esta caja y después la nube de ClawBox AI, si esta caja la usa. Con la IA solo local activada, no se intenta nada más. Lo que ocurra con las grabaciones en el servidor depende de su configuración.",
   "localModels.sttEndpoint.httpKeyWarning": "Esta dirección es HTTP sin cifrar: la clave de API, y con ella las grabaciones, viajan sin cifrar hasta el servidor. Usa https:// salvo que el servidor esté en una red de confianza.",
   "localModels.sttEndpoint.inUse": "El dictado y las notas de voz de los canales los transcribe {url} ({model}).",
   "localModels.sttEndpoint.localOnly": "La IA solo local está activada: las grabaciones las transcribe este servidor o el motor propio de esta caja, nunca la nube. Si el motor elegido falla, la grabación termina con un error.",

@@ -2543,7 +2543,7 @@ const table: Record<string, string> = {
   "localModels.sttEndpoint.error.model": "モデル名は 200 文字以内の 1 行にしてください。",
   "localModels.sttEndpoint.error.unauthorized": "サーバーが API キーを拒否しました。",
   "localModels.sttEndpoint.error.unreachable": "サーバーに接続できません。アドレスと、サーバーが動作していることを確認してください。",
-  "localModels.sttEndpoint.hint": "このボックスまたはローカルネットワーク上の OpenAI 互換の音声認識サーバーです。録音はまずこのサーバーに送られます。失敗した場合はこのボックス自身のエンジンが引き継ぎ、このボックスが ClawBox AI を使っていれば次にそのクラウドが引き継ぎます。ローカル専用 AI がオンのときは、このサーバーにだけ送られます。サーバーでの扱いはその設定によります。",
+  "localModels.sttEndpoint.hint": "このボックスまたはローカルネットワーク上の OpenAI 互換の音声認識サーバーです。使用中のエンジンである間は、録音はまずこのサーバーに送られます。失敗した場合はこのボックス自身のエンジンが引き継ぎ、このボックスが ClawBox AI を使っていれば次にそのクラウドが引き継ぎます。ローカル専用 AI がオンのときは、ほかには何も試しません。サーバーでの録音の扱いはその設定によります。",
   "localModels.sttEndpoint.httpKeyWarning": "このアドレスは暗号化されていない HTTP です。API キーと録音は暗号化されずにサーバーへ送られます。信頼できるネットワーク上のサーバーでない限り、https:// を使ってください。",
   "localModels.sttEndpoint.inUse": "音声入力とチャネルのボイスメモは {url}({model})で文字起こしされます。",
   "localModels.sttEndpoint.localOnly": "ローカル専用 AI がオンです: 録音はこのサーバーまたはこのボックス自身のエンジンで文字起こしされ、クラウドには送られません。選んだエンジンが失敗すると、録音はエラーになります。",

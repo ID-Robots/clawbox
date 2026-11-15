@@ -2118,7 +2118,7 @@ export const de: Record<string, string> = {
   "localModels.external.error.hermesWindow": "Hermes braucht ein Kontextfenster von mindestens {min} Tokens.",
   "localModels.external.error.generic": "Das hat nicht geklappt. Versuchen Sie es gleich noch einmal.",
   "localModels.sttEndpoint.title": "Ihr Sprachserver",
-  "localModels.sttEndpoint.hint": "Ein OpenAI-kompatibler Sprache-zu-Text-Server auf dieser Box oder in Ihrem lokalen Netzwerk. Aufnahmen gehen zuerst an diesen Server; schlägt er fehl, übernimmt die Engine dieser Box und danach die Cloud von ClawBox AI, sofern diese Box sie nutzt. Ist Nur-lokale KI aktiv, gehen sie nur an diesen Server. Was dort mit ihnen geschieht, hängt von dessen Einrichtung ab.",
+  "localModels.sttEndpoint.hint": "Ein OpenAI-kompatibler Sprache-zu-Text-Server auf dieser Box oder in Ihrem lokalen Netzwerk. Solange er die genutzte Engine ist, gehen Aufnahmen zuerst an ihn; schlägt er fehl, übernimmt die Engine dieser Box und danach die Cloud von ClawBox AI, sofern diese Box sie nutzt. Ist Nur-lokale KI aktiv, wird nichts anderes versucht. Was mit Aufnahmen auf dem Server geschieht, hängt von dessen Einrichtung ab.",
   "localModels.sttEndpoint.httpKeyWarning": "Diese Adresse ist reines HTTP: Der API-Schlüssel und mit ihm die Aufnahmen gehen unverschlüsselt an den Server. Nutzen Sie https://, außer der Server steht in einem Netzwerk, dem Sie vertrauen.",
   "localModels.sttEndpoint.notConfigured": "Kein Sprachserver gespeichert.",
   "localModels.sttEndpoint.setUp": "Server hinzufügen",
