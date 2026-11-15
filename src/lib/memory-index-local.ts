@@ -276,7 +276,7 @@ async function pauseBeforeRetry(ms: number, signal: AbortSignal | undefined): Pr
   });
 }
 
-/** The pass was abandoned — the two-hour budget, or a web server going down. */
+/** The pass was abandoned — a stop, or a web server going down. */
 export class IndexPassAbortedError extends Error {
   constructor() {
     super("Indexing was stopped");

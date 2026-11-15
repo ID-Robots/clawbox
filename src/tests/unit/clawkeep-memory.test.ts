@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import { IDLE_MEMORY_RUN, settledMemoryRun } from "@/tests/helpers/memory-run-state";
+import { processStartKey } from "@/lib/process-identity";
 import path from "node:path";
 
 /**
@@ -236,26 +237,80 @@ describe("run state", () => {
     await fs.mkdir(tmpDir, { recursive: true });
     await fs.writeFile(path.join(tmpDir, "memory-index-state.json"), JSON.stringify({
       status: "running", mode: "full", trigger: "manual",
-      // Older than INDEX_TIMEOUT_MS as well as naming a dead pid: on a kernel
-      // with a large pid_max, 999999 can exist and the age is what makes the
-      // reconcile deterministic.
-      startedAtMs: Date.now() - 3 * 60 * 60_000, finishedAtMs: 0, durationMs: 0,
-      error: "", childPid: 999_999,
+      // No pid is safe to call dead — on a kernel with a large pid_max, 999999
+      // can exist — so the record names a process from another boot: whatever
+      // holds the number now is not the one that was recorded.
+      startedAtMs: Date.now() - 60_000, finishedAtMs: 0, durationMs: 0,
+      error: "", childPid: 999_999, childStartKey: "a-boot-before-this-one:1",
     }));
     const run = await readMemoryRunState();
     expect(run.status).toBe("failed");
     expect(run.error).toContain("interrupted");
   });
 
+  it("keeps a run whose process is still going, however long it has been at it", async () => {
+    const { readMemoryRunState } = await lib();
+    // A pass has no time limit. Three days is a full re-embed of a large
+    // corpus on a small box; the two-hour bound called it interrupted and
+    // freed its lock under a pass that was alive and working.
+    const startedAtMs = Date.now() - 3 * 24 * 60 * 60_000;
+    await fs.mkdir(path.join(tmpDir, "memory-index.lock"), { recursive: true });
+    await fs.writeFile(path.join(tmpDir, "memory-index-state.json"), JSON.stringify({
+      status: "running", mode: "full", trigger: "manual", startedAtMs, finishedAtMs: 0, durationMs: 0,
+      error: "", childPid: process.pid, childStartKey: processStartKey(process.pid),
+    }));
+    const run = await readMemoryRunState();
+    expect(run.status).toBe("running");
+    expect(run.startedAtMs).toBe(startedAtMs);
+    // …and its lock is still its own: nothing else may start on top of it.
+    await expect(fs.stat(path.join(tmpDir, "memory-index.lock"))).resolves.toBeTruthy();
+  });
+
+  it("does not take another process on the same pid for the run", async () => {
+    const { readMemoryRunState } = await lib();
+    // The power cut again, the way it really comes back: the pid on record is
+    // ALIVE — it is some other process a few seconds into the next boot. With
+    // no time limit to fall back on, the pid alone would hold "running" (and
+    // the lock, and every later pass) for ever. A young record on purpose: it
+    // is the process that decides, not the age.
+    await fs.mkdir(path.join(tmpDir, "memory-index.lock"), { recursive: true });
+    await fs.writeFile(path.join(tmpDir, "memory-index-state.json"), JSON.stringify({
+      status: "running", mode: "full", trigger: "manual",
+      startedAtMs: Date.now() - 60_000, finishedAtMs: 0, durationMs: 0,
+      error: "", childPid: process.pid, childStartKey: "a-boot-before-this-one:1",
+    }));
+    expect(processStartKey(process.pid)).not.toBe("");
+    const run = await readMemoryRunState();
+    expect(run.status).toBe("failed");
+    expect(run.errorCode).toBe("interrupted");
+    await expect(fs.stat(path.join(tmpDir, "memory-index.lock"))).rejects.toThrow();
+  });
+
+  it("reads a record written before the start key as lost, live pid or not", async () => {
+    const { readMemoryRunState } = await lib();
+    // A build before the key recorded the pid alone. Its pass did not outlive
+    // the web server that started it, and this is a later one.
+    await fs.writeFile(path.join(tmpDir, "memory-index-state.json"), JSON.stringify({
+      status: "running", mode: "incremental", trigger: "schedule",
+      startedAtMs: Date.now() - 60_000, finishedAtMs: 0, durationMs: 0, error: "", childPid: process.pid,
+    }));
+    const run = await readMemoryRunState();
+    expect(run.status).toBe("failed");
+    expect(run.errorCode).toBe("interrupted");
+  });
+
   it("never hands the UI the pid it ran under", async () => {
     const { readMemoryRunState } = await lib();
     await fs.writeFile(path.join(tmpDir, "memory-index-state.json"), JSON.stringify({
       status: "succeeded", mode: "incremental", trigger: "schedule",
-      startedAtMs: 1, finishedAtMs: 2, durationMs: 1, error: "", childPid: 4242,
+      startedAtMs: 1, finishedAtMs: 2, durationMs: 1, error: "", childPid: 4242, childStartKey: "boot-id:987654",
     }));
     const run = await readMemoryRunState();
     expect(JSON.stringify(run)).not.toContain("4242");
     expect("childPid" in run).toBe(false);
+    // …nor which process that was.
+    expect(JSON.stringify(run)).not.toContain("987654");
+    expect("childStartKey" in run).toBe(false);
   });
 });
 
@@ -816,6 +871,48 @@ describe("how a run ends", () => {
     expect(run.error).toContain("interrupted");
     expect(run.errorCode).toBe("interrupted");
     expect(run.error).not.toContain("embedding model");
+  });
+
+  it("arms no clock that could end a pass, and records which process is running it", async () => {
+    // A pass runs for as long as it needs: a full re-embed of 18,114 files on
+    // the on-box 4B model needs several hours, and the two-hour timer this
+    // module used to arm killed it every time, its unfinished rebuild never
+    // published. Nothing here waits that long for anything else, so any timer
+    // of an hour or more is that limit coming back under another name.
+    const script = path.join(tmpDir, "fake-index");
+    await fs.writeFile(script, `#!/bin/sh\nexec sleep 30\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    vi.resetModules();
+    const delays: number[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const timeouts = vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      delays.push(Number(ms ?? 0));
+      return realSetTimeout(fn, ms, ...rest);
+    }) as unknown as typeof setTimeout);
+    let childPid = 0;
+    try {
+      const { startMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      let childStartKey = "";
+      for (let i = 0; i < 100 && !childPid; i++) {
+        const onDisk = JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8"));
+        childPid = onDisk.childPid;
+        childStartKey = onDisk.childStartKey;
+        if (!childPid) await new Promise((r) => realSetTimeout(r, 20));
+      }
+      expect(childPid).toBeGreaterThan(0);
+      // The record names the process, not only its number.
+      expect(childStartKey).not.toBe("");
+      expect(childStartKey).toBe(processStartKey(childPid));
+      expect((await readMemoryRunState()).status).toBe("running");
+      expect(Math.max(0, ...delays)).toBeLessThan(60 * 60_000);
+    } finally {
+      timeouts.mockRestore();
+      // Never signal pid 0 (see the test above).
+      if (childPid > 0) process.kill(childPid, "SIGKILL");
+    }
+    expect((await settledRun()).status).toBe("failed");
   });
 });
 

@@ -4,6 +4,7 @@ import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { IDLE_MEMORY_RUN, settledMemoryRun } from "@/tests/helpers/memory-run-state";
+import { processStartKey } from "@/lib/process-identity";
 
 /**
  * Memory Shard's Hermes arm, at the seam.
@@ -303,7 +304,8 @@ describe("which arm runs the pass", () => {
   });
 
   it("records THIS process as the run's owner, so the reconcile still works", async () => {
-    // `acquireRunLock` asks `processIsAlive(childPid)`. For an in-process pass
+    // `acquireRunLock` asks whether `childPid` is still the process recorded
+    // with it (`childStartKey`). For an in-process pass
     // the answer that means "still going" is this very pid — and a run lost to
     // a web-server restart then reads dead and is reconciled as interrupted,
     // exactly as a killed child was. Read WHILE the pass is going, because the
@@ -318,13 +320,18 @@ describe("which arm runs the pass", () => {
 
     const statePath = path.join(clawkeepDir, "memory-index-state.json");
     let sawPid = 0;
+    let sawStartKey = "";
     for (let i = 0; i < 200 && !sawPid; i += 1) {
-      const state = JSON.parse(await fsp.readFile(statePath, "utf8")) as { childPid: number; status: string };
-      if (state.status === "running" && state.childPid) sawPid = state.childPid;
+      const state = JSON.parse(await fsp.readFile(statePath, "utf8")) as { childPid: number; childStartKey?: string; status: string };
+      if (state.status === "running" && state.childPid) {
+        sawPid = state.childPid;
+        sawStartKey = state.childStartKey ?? "";
+      }
       if (state.status !== "running") break;
       await new Promise((r) => setTimeout(r, 5));
     }
     expect(sawPid, "the run must record a live pid while it works").toBe(process.pid);
+    expect(sawStartKey, "and which process that pid is").toBe(processStartKey(process.pid));
     await settledMemoryRun(clawkeepDir);
   });
 
@@ -600,6 +607,7 @@ describe("how far the pass has got", () => {
       trigger: "manual",
       startedAtMs: Date.now(),
       childPid: process.pid,
+      childStartKey: processStartKey(process.pid),
       progress: { filesDone: 9_000, filesTotal: 12, chunks: -4 },
     }));
     const run = await readMemoryRunState();

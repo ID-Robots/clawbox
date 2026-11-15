@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { processStartKey } from "@/lib/process-identity";
 
 /**
  * TASK-398: the three routes behind the ClawKeep memory panel.
@@ -180,7 +181,8 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
     await fs.mkdir(path.join(DATA_DIR, "memory-index.lock"), { recursive: true });
     await fs.writeFile(path.join(DATA_DIR, "memory-index-state.json"), JSON.stringify({
       status: "running", mode: "full", trigger: "manual",
-      startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "", childPid: process.pid,
+      startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "",
+      childPid: process.pid, childStartKey: processStartKey(process.pid),
     }));
     const res = await indexPOST(new NextRequest("http://localhost/x", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "full" }),
@@ -208,7 +210,8 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
       await fs.mkdir(path.join(DATA_DIR, "memory-index.lock"), { recursive: true });
       await fs.writeFile(path.join(DATA_DIR, "memory-index-state.json"), JSON.stringify({
         status: "running", mode: "full", trigger: "manual",
-        startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "", childPid: process.pid,
+        startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "",
+      childPid: process.pid, childStartKey: processStartKey(process.pid),
       }));
       const started = performance.now();
       const res = await indexPOST(new NextRequest("http://localhost/x", {
@@ -269,7 +272,8 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
     await fs.mkdir(path.join(DATA_DIR, "memory-index.lock"), { recursive: true });
     await fs.writeFile(path.join(DATA_DIR, "memory-index-state.json"), JSON.stringify({
       status: "running", mode: "incremental", trigger: "schedule",
-      startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "", childPid: process.pid,
+      startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "",
+      childPid: process.pid, childStartKey: processStartKey(process.pid),
     }));
     const res = await indexPOST(new NextRequest("http://localhost/x", {
       method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
