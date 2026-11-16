@@ -1714,7 +1714,13 @@ async function bindCronsOnce(): Promise<CronBindingResult | null> {
       if (!read || read.kind !== "present") return null;
       const fit = (id: string) => !isPoolProfile(id) && read.profiles.some((p) => p.profileId === id && !p.fenced && p.fingerprint !== null
         && !(p.type === "token" && p.expires !== null && p.expires <= now));
-      return (read.order ?? []).find(fit) ?? read.profiles.map((p) => p.profileId).find(fit) ?? null;
+      // The order a turn resolves, as `order` above: the stored one, then
+      // openclaw.json's (for Anthropic, the owner's that the pool's leaving
+      // restored), then the store's own — not registration order before
+      // the owner's config, which would bind the job to an account the
+      // owner put second.
+      const configOrder = provider === PROVIDER ? chat.configOrderIds ?? [] : [];
+      return (read.order ?? []).find(fit) ?? configOrder.find(fit) ?? read.profiles.map((p) => p.profileId).find(fit) ?? null;
     };
     return await bindCronsToTarget(
       { call: d.call, readRecords: d.cronBindings.read, writeRecords: d.cronBindings.write },
@@ -1826,6 +1832,8 @@ async function readHeldUsageNow(): Promise<void> {
 
 interface CronJobView {
   id: string;
+  /** `payload.model` as core holds it now, or null (the job runs on its agent's default). */
+  model: string | null;
   lastStatus: string | null;
   lastError: string | null;
   lastRunAtMs: number | null;
@@ -1845,8 +1853,11 @@ export function parseCronJobs(payload: unknown): CronJobView[] {
     const status = state.lastStatus ?? state.lastRunStatus;
     const error = state.lastError;
     const at = state.lastRunAtMs ?? state.lastRunAt;
+    const payloadOf = job.payload && typeof job.payload === "object" ? (job.payload as Record<string, unknown>) : {};
+    const model = typeof payloadOf.model === "string" && payloadOf.model.trim() ? payloadOf.model.trim() : null;
     jobs.push({
       id,
+      model,
       lastStatus: typeof status === "string" ? status : null,
       lastError: typeof error === "string" && error ? error : null,
       lastRunAtMs: typeof at === "number" && Number.isFinite(at) ? at : null,
@@ -1907,9 +1918,17 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
     // The account THAT run used: only an adoption core had confirmed before
     // it started names it. A provisional record names the account the job is
     // being moved to, and a re-binding after the run (the swap that the same
-    // limit caused) names the account it was moved to — neither ran it.
+    // limit caused) names the account it was moved to — neither ran it. Nor
+    // does a record of a job the owner changed since (onto
+    // `model@anthropic:default`, say): its model is no longer the one the box
+    // left, and the record still names the pool's account until the binder's
+    // next pass — the limit is then nobody's that can be named. A job being
+    // given back whose first step landed (`model@account`, the record's model
+    // now) names the account it runs on, not the record's.
     const record = bindings[job.id];
-    const bound = record && !record.provisional && (record.boundAt ?? record.at) <= job.lastRunAtMs ? record.profileId : null;
+    const named = job.model ? splitModelRef(job.model).profileId : null;
+    const adopted = !!record && !record.provisional && record.model === job.model && (named === null || named === record.profileId);
+    const bound = adopted && (record.boundAt ?? record.at) <= job.lastRunAtMs ? record.profileId : null;
     const boundAccount = bound && isPoolProfile(bound) ? pool.accounts.find((a) => poolProfileId(a.id) === bound) ?? null : null;
     // A limit no account can be named for: Anthropic's word on every held
     // account first (once a scan), so a spent active account is the pool's

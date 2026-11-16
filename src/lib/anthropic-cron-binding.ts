@@ -599,8 +599,23 @@ export async function bindCronsToTarget(
     dirty = true;
     if (plan.retry && adopting) {
       // Once in a window, whether or not core starts it: a run that keeps
-      // failing is not forced again every minute.
-      records[job.id].retriedAt = now;
+      // failing is not forced again every minute. The reservation is written
+      // with the confirmed record BEFORE the run is started — a run started
+      // with no durable `retriedAt` could be forced again inside the window.
+      // Not written, the run is not started and the retry stays pending: the
+      // record keeps what landed (the job is still the box's to move, or to
+      // give back) with `at` the last confirmed adoption's, as a provisional
+      // one does, so the next pass still sees the run as lost and runs it then.
+      const confirmed = records[job.id];
+      confirmed.retriedAt = now;
+      if (!(await save())) {
+        const kept: CronBindingRecord = { ...confirmed, at: base?.at ?? 0 };
+        if (base?.retriedAt !== undefined) kept.retriedAt = base.retriedAt;
+        else delete kept.retriedAt;
+        records[job.id] = kept;
+        result.owed += 1;
+        continue;
+      }
       try {
         await deps.call("cron.run", { id: job.id, mode: "force" });
         result.rerun += 1;

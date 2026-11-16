@@ -181,3 +181,85 @@ describe("applying the adoptions (CodeRabbit review on #1526)", () => {
     expect(planCronBindings({ ...input, jobs: [job({ id: "j", lastStatus: "error", ...failed })], records: after })[0]).toMatchObject({ retry: true });
   });
 });
+
+describe("running a lost run again (CodeRabbit review of 8ac63f2 on #1526)", () => {
+  const failed = { lastError: "Automation inference account was replaced. Explicitly select an authorized account again.", lastRunAtMs: NOW - 1000 };
+  const records: CronBindingRecords = { j: { profileId: POOL_A, authorization: "life-1", inherits: true, model: null, revision: "r1", at: NOW - 60_000 } };
+  const input = { target: { profileId: POOL_A, authorization: "life-2" }, defaultModel: "anthropic/claude-opus-5-5", isPoolProfile: isPool, now: NOW };
+  /** cron.list with the lost run; the store fails the writes named (1-based). */
+  function fakeDeps(failWrites: number[] = [], opts: { model?: string; records?: CronBindingRecords } = {}) {
+    const calls: string[] = [];
+    let stored: CronBindingRecords = structuredClone(opts.records ?? records);
+    let writes = 0;
+    const storedAtRun: CronBindingRecords[] = [];
+    const deps: CronBindingDeps = {
+      call: async (method) => {
+        calls.push(method);
+        if (method === "cron.list") {
+          return { jobs: [{ id: "j", sessionTarget: "isolated", configRevision: "r1", payload: { kind: "agentTurn", ...(opts.model ? { model: opts.model } : {}) }, state: { lastStatus: "error", ...failed } }] };
+        }
+        if (method === "cron.run") storedAtRun.push(structuredClone(stored));
+        return { ok: true, configRevision: "r2" };
+      },
+      readRecords: async () => stored,
+      writeRecords: async (r) => {
+        writes += 1;
+        if (failWrites.includes(writes)) throw new Error("disk full");
+        stored = structuredClone(r);
+      },
+    };
+    // Refusals and reports of their own: the tests above left job "j" backed off in the module's.
+    const run = (now = NOW) => ({ ...input, now, refused: new Map(), reported: new Map() });
+    return { deps, calls, stored: () => stored, storedAtRun, run };
+  }
+
+  it("writes the confirmed adoption and its retry reservation before the run is started", async () => {
+    const f = fakeDeps();
+    expect(await bindCronsToTarget(f.deps, f.run())).toMatchObject({ bound: 1, rerun: 1, owed: 0 });
+    expect(f.calls.filter((m) => m === "cron.run")).toHaveLength(1);
+    // Durable when core was asked to run it: a pass that reads the store then forces nothing again.
+    expect(f.storedAtRun[0].j).toMatchObject({ retriedAt: NOW, authorization: "life-2" });
+    expect(f.storedAtRun[0].j.provisional).toBeUndefined();
+    // The job as core left it (its revision the update's answer).
+    expect(planCronBindings({ ...input, now: NOW + 60_000, jobs: [job({ id: "j", revision: "r2", lastStatus: "error", ...failed })], records: f.storedAtRun[0] })).toEqual([]);
+  });
+
+  it("starts no run when the reservation cannot be written, and leaves the retry pending for the next pass", async () => {
+    // The provisional record lands (write 1); the reservation does not (write 2); the pass's last write does.
+    const f = fakeDeps([2]);
+    expect(await bindCronsToTarget(f.deps, f.run())).toMatchObject({ rerun: 0, owed: 1 });
+    expect(f.calls.filter((m) => m === "cron.run")).toEqual([]);
+    const after = f.stored();
+    expect(after.j.retriedAt).toBeUndefined();
+    // The job is as the adoption left it (model-less again): the next pass still runs it once.
+    expect(planCronBindings({ ...input, now: NOW + 60_000, jobs: [job({ id: "j", lastStatus: "error", ...failed })], records: after })[0]).toMatchObject({ retry: true });
+
+    // ...and does: the store answers again.
+    const again = await bindCronsToTarget(f.deps, f.run(NOW + 60_000));
+    expect(again).toMatchObject({ rerun: 1 });
+    expect(f.storedAtRun[0].j).toMatchObject({ retriedAt: NOW + 60_000 });
+  });
+
+  it("starts no run when no write after the adoption lands", async () => {
+    const f = fakeDeps([2, 3]);
+    expect(await bindCronsToTarget(f.deps, f.run())).toMatchObject({ rerun: 0 });
+    expect(f.calls.filter((m) => m === "cron.run")).toEqual([]);
+    expect(planCronBindings({ ...input, now: NOW + 60_000, jobs: [job({ id: "j", lastStatus: "error", ...failed })], records: f.stored() })[0]).toMatchObject({ retry: true });
+  });
+
+  it("a job left pinned to the default stays the box's to give back when its reservation cannot be written", async () => {
+    // Its clear did not land last time: pinned to the default on a pool profile, its record model-less.
+    const pin = `anthropic/claude-opus-5-5@${POOL_B}`;
+    const pinned: CronBindingRecords = { j: { profileId: POOL_B, authorization: "life-1", inherits: true, model: null, revision: "r1", at: NOW - 60_000 } };
+    const f = fakeDeps([2], { model: pin, records: pinned });
+    expect(await bindCronsToTarget(f.deps, f.run())).toMatchObject({ bound: 1, rerun: 0, owed: 1 });
+    expect(f.calls.filter((m) => m === "cron.run")).toEqual([]);
+    const after = f.stored();
+    // Both updates landed: the job is model-less again, bound to A.
+    const now = job({ id: "j", revision: "r2", lastStatus: "error", ...failed });
+    expect(planCronBindings({ ...input, now: NOW + 60_000, jobs: [now], records: after })[0]).toMatchObject({ retry: true });
+    // The pool leaves before that pass: the job is still given back (A went with the pool).
+    const back = planCronBindings({ ...input, target: null, onlyAdopted: true, accountFor: () => "anthropic:default", now: NOW + 60_000, jobs: [now], records: after });
+    expect(back).toMatchObject([{ release: true, steps: ["anthropic/claude-opus-5-5@anthropic:default", null] }]);
+  });
+});

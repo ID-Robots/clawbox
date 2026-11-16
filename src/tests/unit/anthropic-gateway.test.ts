@@ -1431,13 +1431,13 @@ describe("failed gateway turns", () => {
 
   it("reads cron jobs whatever shape core gives them", () => {
     expect(gw.parseCronJobs({ jobs: [
-      { id: "a", state: { lastStatus: "error", lastError: "x", lastRunAtMs: 5 } },
+      { id: "a", payload: { kind: "agentTurn", model: " anthropic/claude-opus-5-5@anthropic:default " }, state: { lastStatus: "error", lastError: "x", lastRunAtMs: 5 } },
       { jobId: "b", lastRunStatus: "ok", lastRunAt: 6 },
       { name: "no id" },
       null,
     ] })).toEqual([
-      { id: "a", lastStatus: "error", lastError: "x", lastRunAtMs: 5 },
-      { id: "b", lastStatus: "ok", lastError: null, lastRunAtMs: 6 },
+      { id: "a", model: "anthropic/claude-opus-5-5@anthropic:default", lastStatus: "error", lastError: "x", lastRunAtMs: 5 },
+      { id: "b", model: null, lastStatus: "ok", lastError: null, lastRunAtMs: 6 },
     ]);
     expect(gw.parseCronJobs(null)).toEqual([]);
   });
@@ -3187,5 +3187,91 @@ describe("TASK-2533 renewal on the owner's box (2026-11-15 08:36) — path (a): 
     await gw.bindGatewayCrons();
     expect(updatesTo(core, asked)).toEqual([]);
     expect(runCron(core, "reply-check")).toBe(p(ids[0]));
+  });
+});
+
+describe("CodeRabbit review of 8ac63f2 on #1526", () => {
+  const LIMIT_TEXT = "anthropic/claude-opus-5-5: You've hit your weekly limit · resets Mon 9am";
+  const statusOf = async (id: string) => (await pool.readPoolState()).accounts.find((a) => a.id === id)?.status;
+
+  it("gives an adopted job back onto the account openclaw.json's restored order puts first, not the one registered first", async () => {
+    const core = fakeCore();
+    core.tellsConfigOrder = true;
+    // The owner's two own sign-ins: the default registered first, their order puts the other first.
+    core.profiles.set("anthropic:owner-second", { type: "oauth", secret: "sk-ant-oat01-the-owners-second-sign-in", expires: null });
+    core.configOrder = ["anthropic:owner-second", "anthropic:default"];
+    await twoClaudeAccounts();
+    addCron(core, { id: "own-model", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-sonnet-5-5" } });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "own-model")).toMatch(/^anthropic:clawbox-/);
+
+    // The owner moves the chat to another provider: the pool leaves, and the owner's order is back.
+    core.chatOnClaude = false;
+    core.chatModel = "deepseek/deepseek-v4-flash";
+    await gw.syncGatewayNow();
+
+    expect(core.configOrder).toEqual(["anthropic:owner-second", "anthropic:default"]);
+    expect(core.order).toBeNull(); // no stored order names an account: openclaw.json's is the one a turn resolves
+    expect((core.crons.get("own-model") as FakeCron).payload.model).toBe("anthropic/claude-sonnet-5-5");
+    expect(runCron(core, "own-model")).toBe("anthropic:owner-second");
+  });
+
+  it("a limit of a job the owner moved off the pool's account since is not blamed on that account; one still as the box left it is", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    addCron(core, { id: "moved", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-sonnet-5-5" } });
+    addCron(core, { id: "kept", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-sonnet-5-5" } });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "moved")).toBe(p(work.id));
+    expect(runCron(core, "kept")).toBe(p(work.id));
+    // Anthropic's usage endpoint answers nothing: the record is all that could name an account.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{\"error\":\"rate_limited\"}", { status: 429 })));
+
+    // The owner puts "moved" on their own sign-in; the box's record still names Work until the binder's next pass.
+    cronUpdate(core, { id: "moved", patch: { payload: { model: "anthropic/claude-sonnet-5-5@anthropic:default" } } });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 1_000);
+    expect(runCron(core, "moved")).toBe("anthropic:default");
+    (core.crons.get("moved") as FakeCron).state = { lastStatus: "error", lastError: LIMIT_TEXT, lastRunAtMs: Date.now() };
+
+    await gw.scanGatewayCrons();
+    await swap.whenSwapsSettled();
+    expect(await statusOf(work.id)).toBe("ok");
+    expect((await pool.readPoolState()).activeId).toBe(work.id);
+
+    // The job still as the box left it names Work.
+    vi.setSystemTime(Date.now() + 1_000);
+    (core.crons.get("kept") as FakeCron).state = { lastStatus: "error", lastError: LIMIT_TEXT, lastRunAtMs: Date.now() };
+    await gw.scanGatewayCrons();
+    await swap.whenSwapsSettled();
+    expect(await statusOf(work.id)).toBe("limited");
+    expect((await pool.readPoolState()).activeId).toBe(personal.id);
+  });
+
+  it("a limit of a job half given back — on the owner's sign-in, its own model still owed — is not blamed on the pool's account it left", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work } = await twoClaudeAccounts();
+    addCron(core, { id: "own-model", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-sonnet-5-5" } });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "own-model")).toBe(p(work.id));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{\"error\":\"rate_limited\"}", { status: 429 })));
+
+    // The pool leaves; core takes the move onto the owner's sign-in and refuses the model back.
+    core.refuseCronUpdate.add("anthropic/claude-sonnet-5-5");
+    core.chatOnClaude = false;
+    core.chatModel = "deepseek/deepseek-v4-flash";
+    await gw.syncGatewayNow();
+    const job = core.crons.get("own-model") as FakeCron;
+    expect(job.payload.model).toBe("anthropic/claude-sonnet-5-5@anthropic:default"); // precondition: half given back
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 1_000);
+    expect(runCron(core, "own-model")).toBe("anthropic:default");
+    job.state = { lastStatus: "error", lastError: LIMIT_TEXT, lastRunAtMs: Date.now() };
+    await gw.scanGatewayCrons();
+    await swap.whenSwapsSettled();
+    expect(await statusOf(work.id)).toBe("ok");
   });
 });
