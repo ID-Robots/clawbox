@@ -136,6 +136,17 @@ describe("BatteryIndicator — only the owner's desktop asks", () => {
   });
 });
 
+describe("BatteryIndicator — the class the shelf sheds it by", () => {
+  it("wears the class it is handed, so a narrow shelf can hide it, and nothing but its own otherwise", async () => {
+    const fetchMock = stubFetch(reply(reading(50, "discharging")));
+    render(<BatteryIndicator className="@max-[39rem]:hidden" />);
+    const indicator = await screen.findByTestId("shelf-battery");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(indicator.className).toContain("@max-[39rem]:hidden");
+    expect(indicator.className).toContain("h-10 px-1.5");
+  });
+});
+
 describe("BatteryIndicator — no battery to show", () => {
   async function expectGaveUp(fetchMock: ReturnType<typeof vi.fn>, container: HTMLElement) {
     await waitFor(() => expect(h.installs[0]?.stop).toHaveBeenCalled());
