@@ -32,7 +32,7 @@ import { readPlanGate } from "@/lib/paid-plan-gate-server";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { redactCredentialShapes, redactQuotedCredentialValues } from "@/lib/incident-sanitize";
 import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
-import { askOpenclawGateway, startOpenclawGatewayAfterOffline, stopOpenclawGatewayForOffline } from "@/lib/openclaw-auth-ops";
+import { askOpenclawGateway, openclawGatewayRuns, startOpenclawGatewayAfterOffline, stopOpenclawGatewayForOffline } from "@/lib/openclaw-auth-ops";
 import { resolveMemoryEmbedder } from "@/lib/memory-embedder";
 import {
   IndexPassAbortedError,
@@ -724,6 +724,33 @@ async function collectMemoryStatusJson(agentId: string): Promise<unknown> {
 }
 
 /**
+ * Is "Memory embeddings are pending" the ONLY thing the gateway holds against
+ * this index?
+ *
+ * `memory.status` is answered from a read-only manager of its own, and that
+ * manager never starts the embedding provider: its `providerState.mode` is
+ * `pending` on every reading, straight after a search that returned vector
+ * scores included (OpenClaw 2026.11.3, the owner's box, 2026-11-15). The core
+ * words that state before it looks at anything else, so its health is
+ * `degraded` for an index that is valid, complete and searchable, and the card
+ * told the owner "The embedding model is not ready. Check the model, then try
+ * indexing again." — advice that stops the assistant for a full pass over an
+ * index with nothing wrong with it.
+ *
+ * So `pending` is read as "not asked", and what the core would have checked
+ * next is checked here instead: an identity it stands by, no pending changes,
+ * and a vector index it calls complete. Anything short of that keeps the
+ * core's verdict.
+ */
+function embeddingsOnlyPending(legacy: Record<string, unknown>): boolean {
+  const custom = asRecord(legacy.custom);
+  if (cleanString(asRecord(custom.providerState).mode) !== "pending") return false;
+  if (cleanString(asRecord(custom.indexIdentity).status) !== "valid") return false;
+  if (legacy.dirty !== false) return false;
+  return cleanString(asRecord(asRecord(legacy.vector).index).state) === "complete";
+}
+
+/**
  * `memory.status` over the running gateway, in the CLI's row shape
  * (`[{agentId, status}]`, `status.dbPath` the agent database the core keeps the
  * index in). Null when no gateway is there to answer.
@@ -744,10 +771,10 @@ async function memoryStatusFromGateway(agentId: string): Promise<unknown | null>
   if (Object.keys(legacy).length === 0) throw new Error("memory status unavailable: the gateway reported no index details");
   // `vector.available` was the CLI's `--deep` probe; the gateway says the same
   // thing as its own health (`ready`, else `degraded` with a sentence such as
-  // "Memory embeddings are pending"), which stands in for it here.
-  const ready = cleanString(health.status) === "ready";
+  // "Memory embeddings are unavailable"), which stands in for it here.
   const vector = asRecord(legacy.vector);
   const custom = asRecord(legacy.custom);
+  const ready = cleanString(health.status) === "ready" || embeddingsOnlyPending(legacy);
   const message = cleanString(health.message);
   return [{
     agentId,
@@ -1173,7 +1200,13 @@ export async function parseMemoryStatus(
   // Search answers, so nothing above catches this either: it just never uses
   // the embedder the card names.
   else if (keywordOnly) health = "degraded";
-  else if (providerMode === "active" && indexIdentity === "valid") health = "healthy";
+  // `pending` is a provider nobody has asked yet, not one that fails to answer:
+  // the gateway reads memory.status from a manager that never starts it (see
+  // `embeddingsOnlyPending`). Everything that makes such a reading degraded —
+  // no vectors to search, a named reason, a fallback, a keyword-only index —
+  // has been ruled out above, so beside an identity the core stands by it is
+  // as healthy as a reading gets.
+  else if ((providerMode === "active" || providerMode === "pending") && indexIdentity === "valid") health = "healthy";
   // An index built by a different model — or one with no fingerprint at all —
   // is a KNOWN state, not an unknown one: search is degraded until it is
   // rebuilt, and the `error` below already says exactly that. Left as
@@ -1985,13 +2018,33 @@ function fixedFailure(
 }
 
 /**
+ * What the core prints on its way OUT of every run, pass or fail: the receipt
+ * for closing the agent database (`[state/agent-db] agent database clean-close
+ * receipt: written`, sometimes behind a clock). Never the reason for anything.
+ */
+const CLOSE_RECEIPT_RE = /\[state\/agent-db\] agent database clean-close receipt\b/;
+
+/** One redraw of the reporter's counter (`Indexing session files… 19158/30949 · elapsed 36:10 · eta 22:15 62%`). */
+const PROGRESS_REDRAW_RE = /^Indexing [a-z ]+… \d+\/\d+ · elapsed [\d:]+/;
+
+/**
  * The CLI's own last word, for the device log.
  *
  * Only the tail is kept (see `createIndexProgressReader`): nothing here needs
- * the transcript — just whatever it said before it gave up.
+ * the transcript — just whatever it said before it gave up. Its LAST line is
+ * not that since OpenClaw 2026.11.3: the core closes the agent database after
+ * the failure and says so, so every failed pass was logged as "agent database
+ * clean-close receipt: written" and the reason one line up — `Memory index
+ * failed (main): worker task capacity reached` on the owner's box, after 82
+ * minutes with the assistant stopped — was thrown away. The receipt and the
+ * counter's redraws are skipped: the last line that says something is the one
+ * kept.
  */
-function lastMeaningfulLine(text: string): string {
-  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+export function lastMeaningfulLine(text: string): string {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !CLOSE_RECEIPT_RE.test(line) && !PROGRESS_REDRAW_RE.test(line));
   return lines.length ? lines[lines.length - 1].slice(0, 300) : "";
 }
 
@@ -2253,6 +2306,10 @@ function localFailure(error: unknown): { error: string; errorCode: MemoryRunErro
  * resolveIndexMode). It starts nothing, so it takes no lock and writes no run
  * record — the status banner already says what the owner has to do.
  *
+ * The fourth is `gateway_indexes`: an incremental pass on OpenClaw, which the
+ * running gateway does by itself. The schedule's slot always; the owner's
+ * press while the gateway is up. It starts nothing and stops nothing either.
+ *
  * `embedderChanged` is the one pass the switch does not govern, and only on
  * the OpenClaw arm: the rebuild the box owes the CORE'S OWN index after it
  * wrote a new embedder into `memory.search` itself. That index exists whether
@@ -2303,10 +2360,16 @@ export async function startMemoryIndex(
   if (heldBack) return { accepted: false, declined: "full_reindex_required", run: await readMemoryRunState() };
   // OpenClaw 2026.11.3 runs `memory index` only with the gateway stopped, and
   // its running gateway keeps the index current by itself (it syncs on file
-  // changes and on search, docs/cli/memory.md). A schedule's incremental slot
-  // is that same work, so on OpenClaw it does not stop the chat for it; an
-  // owner's pass (and a full one the box itself needs) still runs, offline.
-  if (trigger === "schedule" && mode === "incremental" && !openclawIsAbsent()) {
+  // changes and on search, docs/cli/memory.md). An incremental pass is that
+  // same work, so on OpenClaw nothing stops the chat for it: not the
+  // schedule's slot, and not the owner's "Index now" while a gateway is up
+  // to do it. That press used to stop the assistant, wait a minute for a stop
+  // that takes five on a gateway in use, give up and start it again — six
+  // minutes down, nothing indexed, three times on the owner's box on
+  // 2026-11-15. With no gateway running there is nobody else to do the work
+  // and nothing to stop, so the owner's pass runs. A FULL pass (the owner's
+  // rebuild, and the one the box itself needs) still runs, offline.
+  if (mode === "incremental" && !openclawIsAbsent() && (trigger === "schedule" || await openclawGatewayRuns())) {
     return { accepted: false, declined: "gateway_indexes", run: await readMemoryRunState() };
   }
   if (!await acquireRunLock()) {
@@ -2382,9 +2445,10 @@ export async function startMemoryIndex(
   // Ends the run claim's heartbeat (the OpenClaw arm below); a no-op otherwise.
   let releaseClaim: () => Promise<void> = async () => {};
   if (!localArm) {
-    // The stop can take a minute (the gateway drains first), longer than a
-    // run may sit with no child before the reconcile calls it interrupted and
-    // frees the lock — so the claim is re-stamped while it waits.
+    // The stop can take minutes (a gateway in use drains until its unit's
+    // stop timeout, and the stop is waited out), far longer than a run may sit
+    // with no child before the reconcile calls it interrupted and frees the
+    // lock — so the claim is re-stamped while it waits.
     // Every stamp this call writes is remembered: the run on record is this
     // call's only while it carries one of them (another run's record carries
     // its own start time).

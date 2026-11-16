@@ -781,6 +781,7 @@ const table: Record<string, string> = {
   "clawkeep.memory.folders.removing": "Премахване…",
   "clawkeep.memory.folders.title": "Папки, които чете",
   "clawkeep.memory.fullReindex": "Пълно преиндексиране",
+  "clawkeep.memory.gatewayIndexes": "Асистентът сам поддържа този индекс актуален. Няма какво да се пуска.",
   "clawkeep.memory.health.degraded": "Изисква внимание",
   "clawkeep.memory.health.healthy": "Изправен",
   "clawkeep.memory.health.unavailable": "Недостъпен",

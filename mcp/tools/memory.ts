@@ -176,6 +176,7 @@ const NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
   owner_only: { code: "CONFLICT", next: `This box keeps that to the owner. Do not retry; tell the user they can do it in the Memory Shard app (${OPEN_APP} opens it).` },
   disabled: { code: "CONFLICT", next: "Memory Shard is switched off. Turn it on with memory_shard_enable if the user asks for that, or tell them it is off." },
   running: { code: "CONFLICT", next: "A pass is already running. Do not start another; memory_shard_status shows how far it has got." },
+  gateway_indexes: { code: "CONFLICT", next: "Nothing was started and nothing needs to be: the running assistant keeps this index up to date by itself. Do not retry. Only a full pass (mode full) rebuilds it, and that one stops the assistant while it runs, so it is the owner's to ask for." },
   not_running: { code: "CONFLICT", next: "No pass is running, so there is nothing to stop." },
   not_found: { code: "NOT_FOUND", next: "That folder is not inside the owner's Files, or is not a folder. Ask the user for its exact place in their Files." },
   hidden: { code: "BAD_ARGUMENT", next: "Hidden folders hold the box's and the apps' own files. Ask the user for the folder their documents are in." },

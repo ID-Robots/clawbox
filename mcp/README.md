@@ -1278,7 +1278,10 @@ pass), or the size ceiling and a fallen-back provider (no pass fixes those).
 `clawkeep/memory/*` routes. Those routes ask again who is writing
 (`src/lib/memory-shard-writer.ts`): a signed-in person, or this server's bearer;
 anything else is 403 `owner_only`. The assistant starts an **incremental** pass
-on its own — it reads only new and changed files. A **full** pass (asked for, or
+on its own — it reads only new and changed files. On an OpenClaw box whose
+gateway is running that pass is declined 409 `gateway_indexes` and nothing is
+stopped: the running gateway keeps its index current by itself, and the tool
+says so. A **full** pass (asked for, or
 the one an incremental ask would really run on a missing or disowned index, or
 the first build an armed schedule would start over an empty one — saving a
 schedule that is on, or switching Memory Shard on over one), a

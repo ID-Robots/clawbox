@@ -34,6 +34,8 @@ vi.mock("@/lib/openclaw-auth-ops", () => ({
       throw err;
     }
   },
+  // No gateway unit is up in these suites: an owner's incremental pass runs.
+  openclawGatewayRuns: vi.fn(async () => false),
   stopOpenclawGatewayForOffline: vi.fn(async () => undefined),
   startOpenclawGatewayAfterOffline: vi.fn(async () => undefined),
 }));
