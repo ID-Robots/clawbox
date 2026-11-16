@@ -537,6 +537,13 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     return { version: 2, agentId: "main", providerId: "memory-core", status: "degraded", message: PENDING, details: { legacy }, ...top };
   }
 
+  // With no verdict from the probe, memory.status's own reading stands, and
+  // the default one holds nothing but "pending" against a valid, complete
+  // index (`embeddingsOnlyPending`), which beta reads as healthy. One with
+  // pending changes keeps the gateway's degraded verdict instead, so it is the
+  // reading that shows whether an answer was taken as an ok.
+  const withChanges = () => gatewayStatus((legacy) => { legacy.dirty = true; });
+
   /**
    * A box whose gateway answers `memory.status` with `gateway.status` and
    * `doctor.memory.status` with `gateway.probe` (thrown when it is an Error),
@@ -625,10 +632,14 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     const { GatewayWsUnavailableError } = await import("@/lib/openclaw-gateway-ws");
     // A rejected call, and a gateway that is gone by the second request.
     for (const failure of [new Error("socket hang up"), new GatewayWsUnavailableError("gateway stopped")]) {
-      const { gateway, probes, reload } = await box();
+      const { gateway, probes, reload, invalidated } = await box();
       gateway.probe = failure;
-      const status = await reload();
+      // memory.status's own reading of a pending-only index: healthy.
+      expect((await reload()).health).toBe("healthy");
       expect(probes()).toBe(1);
+      gateway.status = withChanges();
+      const status = await invalidated();
+      expect(probes()).toBe(2);
       expect(status.health).not.toBe("healthy");
       expect(status.errorCode).not.toBe("status_unavailable");
       expect(status).toMatchObject({ available: true, files: 30, chunks: 123, provider: "openai-compatible", indexIdentity: "valid" });
@@ -647,15 +658,14 @@ describe("the status from the running gateway, and the embedder's own probe", ()
   });
 
   it("reads a ready memory.status that still says pending as it stands, and asks no probe", async () => {
-    // A KNOWN OPEN POINT, pinned as it is, not as it should be: the only
-    // `ready` answer seen on any pin (an earlier one) carried provider mode
-    // `pending`. No probe is asked over a `ready` answer, and `parseMemoryStatus`
-    // calls `healthy` only a mode of `active`, so this reads "unknown".
+    // The only `ready` answer seen on any pin (an earlier one) carried provider
+    // mode `pending`. No probe is asked over a `ready` answer, and
+    // `parseMemoryStatus` reads `pending` beside a valid identity as healthy.
     const { gateway, probes, reload } = await box();
     gateway.status = gatewayStatus(() => {}, { status: "ready", message: null });
     const { health, errorCode, semanticAvailable, vectors } = await reload();
     expect(probes()).toBe(0);
-    expect({ health, errorCode, semanticAvailable, vectors }).toEqual({ health: "unknown", errorCode: "", semanticAvailable: true, vectors: 123 });
+    expect({ health, errorCode, semanticAvailable, vectors }).toEqual({ health: "healthy", errorCode: "", semanticAvailable: true, vectors: 123 });
   });
 
   it("says once in the device log why the probe could not be asked: the error's class and code, nothing it carried", async () => {
@@ -821,8 +831,9 @@ describe("the status from the running gateway, and the embedder's own probe", ()
   it.each([
     ["says readiness was not checked", NOT_CHECKED],
     ["carries no verdict the core would give", { agentId: "main", provider: "openai-compatible", embedding: { ok: "yes" } }],
-  ])("is not healthy on an answer that %s", async (_case, answer) => {
+  ])("reads an answer that %s as no verdict, never as an ok", async (_case, answer) => {
     const { gateway, reload } = await box();
+    gateway.status = withChanges();
     gateway.probe = answer;
     const status = await reload();
     expect(status.health).not.toBe("healthy");
@@ -856,7 +867,8 @@ describe("the status from the running gateway, and the embedder's own probe", ()
   });
 
   it("does not carry an ok verdict over to another embedder setting", async () => {
-    const { probes, reload, invalidated, configure } = await box();
+    const { gateway, probes, reload, invalidated, configure } = await box();
+    gateway.status = withChanges();
     expect((await reload()).health).toBe("healthy");
     // The owner moves the index onto this box while its embedder is asleep.
     await configure({ baseUrl: PROXY });
@@ -991,10 +1003,10 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     const { probes, reload, invalidated } = await box({ baseUrl: PROXY });
     embedder.installed = true;
     embedder.healthy = false;
-    // No verdict yet: not asked, and the reading is the gateway's.
+    // No verdict yet: not asked, and the reading is memory.status's own.
     let status = await reload();
     expect(probes()).toBe(0);
-    expect(status.errorCode).toBe("provider_degraded");
+    expect(status.health).toBe("healthy");
     // Awake: asked.
     embedder.healthy = true;
     status = await invalidated();
@@ -1031,8 +1043,8 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     embedder.healthy = false;
     const status = await reload();
     expect(probes()).toBe(0);
-    expect(status.health).toBe("degraded");
-    expect(status.errorCode).toBe("provider_degraded");
+    expect(status.health).toBe("healthy");
+    expect(status.errorCode).toBe("");
   });
 
   it("never wakes the embedder through the proxy under the box's own name or address", async () => {
@@ -1041,7 +1053,7 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     embedder.healthy = false;
     const status = await reload();
     expect(probes()).toBe(0);
-    expect(status.errorCode).toBe("provider_degraded");
+    expect(status.health).toBe("healthy");
   });
 
   it("never wakes the embedder through a proxy root that is not loopback", async () => {
@@ -1053,7 +1065,7 @@ describe("the status from the running gateway, and the embedder's own probe", ()
       embedder.healthy = false;
       const status = await reload();
       expect(probes()).toBe(0);
-      expect(status.errorCode).toBe("provider_degraded");
+      expect(status.health).toBe("healthy");
     } finally {
       if (saved === undefined) delete process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL;
       else process.env.CLAWBOX_LOCAL_AI_PROXY_BASE_URL = saved;
@@ -1162,15 +1174,15 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     });
     const status = await reload();
     expect(probes()).toBe(0);
-    expect(status.health).toBe("degraded");
-    expect(status.errorCode).toBe("provider_degraded");
+    expect(status.health).toBe("healthy");
+    expect(status.errorCode).toBe("");
   });
 
   it("asks nothing when openclaw.json cannot say which embedder it names", async () => {
     const { probes, reload } = await box({ config: false });
     const status = await reload();
     expect(probes()).toBe(0);
-    expect(status.health).toBe("degraded");
+    expect(status.health).toBe("healthy");
   });
 
   it("asks a not-ok verdict again no sooner than 10 minutes after it", async () => {

@@ -773,7 +773,11 @@ async function memoryStatusFromGateway(agentId: string): Promise<unknown | null>
   // health is NOT that probe: it never asks the embedder (see EmbedderVerdict),
   // so on 2026.11.3 a healthy box reads "degraded", "Memory embeddings are
   // pending", for as long as the gateway runs. Not ready, the embedder's own
-  // probe decides; with no verdict from it the gateway's reading stands.
+  // probe decides. With no verdict from it, a reading that holds nothing but
+  // "pending" against the index (`embeddingsOnlyPending`) is read as ready, and
+  // any other keeps the gateway's verdict. Any answer the probe gave outweighs
+  // that reading, and so does an ok that ended (`lapsed`): it is the one
+  // reading that actually asked the embedder.
   const ready = cleanString(health.status) === "ready";
   const vector = asRecord(legacy.vector);
   const custom = asRecord(legacy.custom);
@@ -789,6 +793,9 @@ async function memoryStatusFromGateway(agentId: string): Promise<unknown | null>
     && cleanString(providerState.mode) === "pending"
     && cleanString(asRecord(vector.index).state) === "complete"
     && Boolean(provider) && provider !== "none";
+  const noVerdict = !verdict || (verdict.ok === null && !verdict.lapsed);
+  const onlyPending = !ready && noVerdict && embeddingsOnlyPending(legacy);
+  const available = ready || promoted || onlyPending;
   const reason = verdict?.ok === false && verdict.error ? verdict.error : message;
   return [{
     agentId,
@@ -798,10 +805,10 @@ async function memoryStatusFromGateway(agentId: string): Promise<unknown | null>
       // The provider the probe started, when one named it: a fallback or none
       // is a verdict of its own (`provider_mismatch`, `embedder_unavailable`).
       ...(verdict?.provider ? { provider: verdict.provider } : {}),
-      vector: { ...vector, available: (ready || promoted) && vector.enabled !== false },
+      vector: { ...vector, available: available && vector.enabled !== false },
       custom: promoted
         ? { ...custom, providerState: { ...providerState, mode: "active" } }
-        : !ready && reason && !cleanString(custom.providerUnavailableReason) ? { ...custom, providerUnavailableReason: reason } : custom,
+        : !available && reason && !cleanString(custom.providerUnavailableReason) ? { ...custom, providerUnavailableReason: reason } : custom,
     },
   }];
 }
@@ -843,6 +850,13 @@ interface EmbedderVerdict {
   generation: number;
   /** The last ask could not be made, or the core answered without checking. */
   lastAskFailed: boolean;
+  /**
+   * An ok that ENDED (above), until the core answers again. Not the absence of
+   * a verdict: a box with nothing to say about its embedder reads
+   * memory.status's pending-only reading as ready (`embeddingsOnlyPending`),
+   * while this one has cause to doubt it, so the gateway's verdict stands.
+   */
+  lapsed: boolean;
 }
 let embedderVerdict: EmbedderVerdict | null = null;
 const EMBEDDER_OK_REASK_MS = 30 * 60_000;
@@ -876,10 +890,10 @@ async function embedderVerdictFor(agentId: string, legacy: Record<string, unknow
   if (due && (!onBox || await isEmbedHealthy())) {
     held = await askEmbedder(key, agentId, held);
   } else if (onBox && held?.ok === true && !(await getEmbedProvisioningStatus()).installed) {
-    held = embedderVerdict = { ...held, ok: null };
+    held = embedderVerdict = { ...held, ok: null, lapsed: true };
   }
   if (held?.ok === true && held.lastAskFailed && Date.now() - held.answeredAtMs >= EMBEDDER_OK_LAPSE_MS) {
-    held = embedderVerdict = { ...held, ok: null };
+    held = embedderVerdict = { ...held, ok: null, lapsed: true };
   }
   return held;
 }
@@ -922,6 +936,7 @@ async function askEmbedder(key: string, agentId: string, held: EmbedderVerdict |
     nextAskAtMs: Date.now() + EMBEDDER_RETRY_MS,
     generation,
     lastAskFailed: true,
+    lapsed: held?.lapsed ?? false,
   });
   const couldNotAsk = (why: string): EmbedderVerdict => {
     noteEmbedderProbe(key, `the core's embedder readiness probe (doctor.memory.status) could not be asked: ${why}`);
@@ -954,6 +969,7 @@ async function askEmbedder(key: string, agentId: string, held: EmbedderVerdict |
     nextAskAtMs: Date.now() + (!embedding.ok ? EMBEDDER_RETRY_MS : embedding.cached === true && !provider ? 0 : EMBEDDER_OK_REASK_MS),
     generation,
     lastAskFailed: false,
+    lapsed: false,
   });
 }
 
