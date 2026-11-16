@@ -48,6 +48,21 @@ Two properties of the Hermes entry are load-bearing:
 To check a device: `hermes mcp list` (or `openclaw mcp status`) should name
 `clawbox`; `hermes mcp test clawbox` connects and lists its tools.
 
+### Every package it imports is declared
+
+The server runs from the checkout (`bun run mcp/clawbox-mcp.ts`), so its
+packages are whatever `bun install` put in the checkout's `node_modules`. A
+package the server imports must be named in the root `package.json`
+`dependencies`. Being there because another package depends on it is not
+enough. Up to 4.3.0, `zod` was imported by six of these files but never declared. It
+resolved only because the MCP SDK's copy happened to be hoisted to the top. On
+an install that leaves it out (bun's isolated linker, for example), the server
+dies on its first import with `Cannot find package 'zod'`. The gateway then logs
+`bundle-mcp: failed to start server "clawbox"` and retries after its 60 s
+cooldown. `src/tests/unit/mcp-server-declared-deps.test.ts` checks both halves:
+the import graph loads only declared packages, and the server starts and answers
+`tools/list` from a layout that holds only those.
+
 ### The server hangs up when it is idle
 
 OpenClaw's gateway spawns one of these processes per **session key** and holds
