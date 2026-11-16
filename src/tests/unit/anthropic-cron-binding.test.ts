@@ -329,6 +329,22 @@ describe("a give-back with no account to move onto (review of a59262b on #1526)"
     }
   });
 
+  it("keeps a model-less job the box's while its agent has no default model at all, and moves it once one is set (CodeRabbit on 1f8a488)", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const f = deps({ id: "j", sessionTarget: "isolated", configRevision: "r1", payload: { kind: "agentTurn" } },
+        { j: { profileId: POOL_A, authorization: "life-a", inherits: true, model: null, revision: "r1", at: NOW - 60_000 } });
+      const none = await bindCronsToTarget(f.d, { target: null, defaultModel: null, isPoolProfile: isPool, onlyAdopted: true, accountFor: () => "anthropic:default", now: NOW });
+      expect(none).toMatchObject({ released: 0, owed: 0 });
+      expect(f.updates).toEqual([]);
+      expect(f.stored().j).toBeDefined();
+      expect(await leave(f.d, "deepseek/deepseek-v4-flash", "deepseek:default")).toMatchObject({ released: 1 });
+      expect(f.updates).toEqual(["deepseek/deepseek-v4-flash@deepseek:default", null]);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
   it("gives a job its own model back at once, and its account once one is held", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     try {

@@ -346,10 +346,11 @@ export function planCronBindings(input: CronPlanInput): CronBindingPlan[] {
       const account = base && input.accountFor ? input.accountFor(base) : null;
       const steps: (string | null)[] = account ? [`${base}@${account}`, back] : job.model === back ? [] : [back];
       // None to move it onto (the chat still on Claude with no Anthropic
-      // account left, a default on a provider core holds no account of): the
-      // job is still bound to the removed profile, so it stays the box's —
-      // given its own model back now, and moved once an account is there.
-      const awaitAccount = !account && base !== null;
+      // account left, a default on a provider core holds no account of, or no
+      // agent default at all for a model-less job): the job is still bound to
+      // the removed profile, so it stays the box's — given its own model back
+      // now, and moved once there is a model with an account to run it on.
+      const awaitAccount = !account;
       plans.push({ job, steps, inherits: record.inherits, original: back, retry: false, release: true, ...(awaitAccount ? { awaitAccount } : {}) });
       continue;
     }
@@ -442,7 +443,7 @@ const awaitingSaid = new Set<string>();
 function noteAwaiting(id: string): void {
   if (awaitingSaid.has(id)) return;
   awaitingSaid.add(id);
-  console.error(`[anthropic-cron-binding] automation ${id} is still bound to the pool's removed account: no account its model runs on is held, so it is given back once there is one`);
+  console.error(`[anthropic-cron-binding] automation ${id} is still bound to the pool's removed account: no account its model (or its agent's default) runs on is held, so it is given back once there is one`);
 }
 
 /** What a refusal was for: the account and lifetime the job was being given, or a give-back. */
