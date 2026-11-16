@@ -4681,6 +4681,7 @@ const table: Record<string, string> = {
   "update.effectiveBranchPinned": "更新跟随 {branch}，即本设备上记录的分支。",
   "update.effectiveBranchRecovered": "更新跟随 {branch}，由本设备自身的构建推断得出。未记录任何分支。",
   "update.effectiveBranchUnresolved": "正在与发布通道 {branch} 比较。本设备不在任何分支上，也未记录分支，请在更新前于此处填写分支。",
+  "update.effectiveBranchWorkstation": "更新跟随 {branch}，即 ClawBox Workstation 通道：某个版本只有在 Workstation 上测试通过后才会进入该通道。测试版开关和此处记录的分支不适用于这台电脑。",
   "update.failedToCheck": "无法检查更新状态。",
   "update.forceConfirmAction": "是，执行完整更新",
   "update.forceConfirmBody": "尽管版本已是最新，这仍会重新执行完整更新——包括 OpenClaw 与系统服务的安装——然后{reboot}。可用它收尾一次恢复，或修复更新后异常的服务。",

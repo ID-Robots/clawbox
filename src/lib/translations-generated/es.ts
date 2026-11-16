@@ -4681,6 +4681,7 @@ const table: Record<string, string> = {
   "update.effectiveBranchPinned": "Las actualizaciones siguen {branch}, la rama registrada en este equipo.",
   "update.effectiveBranchRecovered": "Las actualizaciones siguen {branch}, deducida de la propia compilación de este equipo. No hay ninguna rama registrada.",
   "update.effectiveBranchUnresolved": "Se comprueba contra {branch}, el canal de versiones. Este equipo no está en ninguna rama ni tiene una registrada: escribe aquí una rama antes de actualizar.",
+  "update.effectiveBranchWorkstation": "Las actualizaciones siguen {branch}, el canal de ClawBox Workstation: una versión solo llega a él después de probarse en una Workstation. El interruptor de beta y la rama registrada aquí no se aplican en este equipo.",
   "update.failedToCheck": "No se pudo verificar el estado de la actualización.",
   "update.forceConfirmAction": "Sí, ejecutar la actualización completa",
   "update.forceConfirmBody": "Esto vuelve a ejecutar la actualización completa —incluida la configuración de OpenClaw y de los servicios del sistema— aunque la versión ya sea la actual, y después {reboot}. Úsalo para terminar una recuperación o arreglar servicios que funcionan mal tras una actualización.",

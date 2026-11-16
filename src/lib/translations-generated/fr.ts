@@ -4681,6 +4681,7 @@ const table: Record<string, string> = {
   "update.effectiveBranchPinned": "Les mises à jour suivent {branch}, la branche enregistrée sur cet appareil.",
   "update.effectiveBranchRecovered": "Les mises à jour suivent {branch}, déduite de la compilation de cet appareil. Aucune branche n'est enregistrée.",
   "update.effectiveBranchUnresolved": "Vérification par rapport à {branch}, le canal des versions. Cet appareil n'est sur aucune branche et n'en enregistre aucune : saisissez une branche ici avant de mettre à jour.",
+  "update.effectiveBranchWorkstation": "Les mises à jour suivent {branch}, le canal ClawBox Workstation : une version n'y arrive qu'après avoir été testée sur une Workstation. L'option bêta et la branche enregistrée ici ne s'appliquent pas à cet ordinateur.",
   "update.failedToCheck": "Impossible de vérifier l'état de la mise à jour.",
   "update.forceConfirmAction": "Oui, lancer la mise à jour complète",
   "update.forceConfirmBody": "Ceci relance la mise à jour complète — y compris la configuration d'OpenClaw et des services système — alors que la version est déjà à jour, puis {reboot}. Utilisez-la pour terminer une récupération ou réparer des services qui se comportent mal après une mise à jour.",

@@ -4681,6 +4681,7 @@ const table: Record<string, string> = {
   "update.effectiveBranchPinned": "Uppdateringar följer {branch}, grenen som är sparad på den här enheten.",
   "update.effectiveBranchRecovered": "Uppdateringar följer {branch}, framtagen ur enhetens eget bygge. Ingen gren är sparad.",
   "update.effectiveBranchUnresolved": "Jämför mot {branch}, releasekanalen. Enheten står inte på någon gren och har ingen sparad, så ange en gren här innan du uppdaterar.",
+  "update.effectiveBranchWorkstation": "Uppdateringar följer {branch}, ClawBox Workstation-kanalen: en version hamnar där först när den har testats på en Workstation. Beta-reglaget och en gren som sparas här gäller inte på den här datorn.",
   "update.failedToCheck": "Kunde inte kontrollera uppdateringsstatus.",
   "update.forceConfirmAction": "Ja, kör fullständig uppdatering",
   "update.forceConfirmBody": "Detta kör om hela uppdateringen — inklusive installationen av OpenClaw och systemtjänsterna — trots att versionen redan är aktuell, och {reboot} sedan. Använd det för att slutföra en återställning eller laga tjänster som beter sig konstigt efter en uppdatering.",

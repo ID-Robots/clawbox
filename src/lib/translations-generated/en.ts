@@ -4681,6 +4681,7 @@ const table: Record<string, string> = {
   "update.effectiveBranchPinned": "Updates follow {branch}, the branch recorded on this box.",
   "update.effectiveBranchRecovered": "Updates follow {branch}, worked out from this box's own build. No branch is recorded.",
   "update.effectiveBranchUnresolved": "Checking against {branch}, the release channel. This box is not on a branch and records none, so enter a branch here before updating.",
+  "update.effectiveBranchWorkstation": "Updates follow {branch}, the ClawBox Workstation channel: a version reaches it only after it was tested on a Workstation. The beta toggle and a branch recorded here do not apply on this computer.",
   "update.failedToCheck": "Failed to check update status.",
   "update.forceConfirmAction": "Yes, run full update",
   "update.forceConfirmBody": "This re-runs the full update — including OpenClaw and system-service setup — even though the version is already current, then {reboot}. Use it to finish a recovery or fix services that misbehave after an update.",

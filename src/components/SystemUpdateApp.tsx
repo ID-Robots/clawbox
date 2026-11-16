@@ -35,7 +35,8 @@ export { type ComponentVersion, type VersionInfo } from "@/components/UpdateRunV
 export { shipsOpenclaw };
 
 /** How the effective branch was decided — `EffectiveUpdateBranch` in src/lib/updater.ts. */
-type EffectiveBranchSource = "pin-file" | "checkout-branch" | "detached-recovered" | "default" | "unresolved";
+type EffectiveBranchSource =
+  | "pin-file" | "checkout-branch" | "detached-recovered" | "default" | "unresolved" | "workstation-channel";
 
 interface EffectiveBranch {
   branch: string;
@@ -71,6 +72,13 @@ function effectiveBranchText(
         "update.effectiveBranchRecovered",
         "Updates follow {branch}, worked out from this box's own build. No branch is recorded.",
       );
+    case "workstation-channel":
+      // A ClawBox Workstation's own channel (src/lib/update-channel.ts): the
+      // controls beside this line write `.update-branch`, which it does not read.
+      return tr(
+        "update.effectiveBranchWorkstation",
+        "Updates follow {branch}, the ClawBox Workstation channel: a version reaches it only after it was tested on a Workstation. The beta toggle and a branch recorded here do not apply on this computer.",
+      );
     case "unresolved":
       // The check looks at main; the update itself refuses to guess a channel
       // for a box that is not on a branch, and says so when it is started.
@@ -91,7 +99,7 @@ function readEffectiveBranch(value: unknown): EffectiveBranch | null {
   if (!v || typeof v.branch !== "string" || !v.branch) return null;
   const source: EffectiveBranchSource =
     v.source === "pin-file" || v.source === "checkout-branch" || v.source === "detached-recovered"
-      || v.source === "unresolved"
+      || v.source === "unresolved" || v.source === "workstation-channel"
       ? v.source
       : "default";
   return { branch: v.branch, source };
