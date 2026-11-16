@@ -2,7 +2,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path from "./runtime-path";
 import { CLOUDFLARED_DIR, getTunnelServiceState, startTunnelService } from "./cloudflared";
-import { get as getConfigValue } from "./config-store";
+import { get as getConfigValue, getKnownMany } from "./config-store";
 import { migrateLegacyPortalUrl } from "./portal-legacy-domain";
 import {
   type NamedTunnelCredential,
@@ -11,6 +11,7 @@ import {
   isRefusedToken,
   isValidTunnelToken,
   readNamedTunnelCredential,
+  tunnelModePath,
   writeNamedTunnelCredential,
 } from "./named-tunnel";
 
@@ -20,6 +21,10 @@ const PORTAL_HEARTBEAT_URL = migrateLegacyPortalUrl(
   "https://clawbox.com/api/portal/devices/heartbeat",
 );
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
+// Spelled here rather than imported from `./subscription-link`, which would pull
+// the portal-tier lookup into the heartbeat's graph for one string; the
+// subscription-link suite pins the two spellings together.
+const SUBSCRIPTION_LINK_TOKEN_KEY = "subscription_link_token";
 const MACHINE_ID_FILE = "/etc/machine-id";
 
 // In-memory cache of the last URL we successfully pushed. Survives the lifetime
@@ -92,15 +97,78 @@ function deriveDeviceName(deviceId: string): string {
   return `ClawBox-${suffix}`;
 }
 
-async function readClawAiToken(): Promise<string | null> {
+async function readPortalToken(key: string): Promise<string | null> {
   try {
-    const raw = await getConfigValue(CLAWBOX_AI_TOKEN_CONFIG_KEY);
+    const raw = await getConfigValue(key);
     if (typeof raw !== "string") return null;
     const trimmed = raw.trim();
     return trimmed.startsWith("claw_") ? trimmed : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * The credential the heartbeat names the owner's account with: the ClawBox AI
+ * token, or — on a box whose subscription is linked for its plan alone
+ * (TASK-2501) — the link's. The heartbeat registers the DEVICE with the
+ * account (Remote Control's tunnel hangs off it); it spends no AI, so the
+ * link's token is as good an account credential here as the chat one.
+ */
+async function readClawAiToken(): Promise<string | null> {
+  return (await readPortalToken(CLAWBOX_AI_TOKEN_CONFIG_KEY))
+    ?? (await readPortalToken(SUBSCRIPTION_LINK_TOKEN_KEY));
+}
+
+/**
+ * Does the store POSITIVELY hold no account credential — neither the ClawBox AI
+ * token nor a linked subscription's? False when it cannot be read: a store that
+ * failed to open is not an unpaired box, and revoking on it would take the
+ * owner's named hostname away over a read error.
+ */
+async function storeHoldsNoAccountToken(): Promise<boolean> {
+  const { values, known } = await getKnownMany([CLAWBOX_AI_TOKEN_CONFIG_KEY, SUBSCRIPTION_LINK_TOKEN_KEY]);
+  if (!known) return false;
+  const isToken = (raw: unknown) => typeof raw === "string" && raw.trim().startsWith("claw_");
+  return !isToken(values[CLAWBOX_AI_TOKEN_CONFIG_KEY]) && !isToken(values[SUBSCRIPTION_LINK_TOKEN_KEY]);
+}
+
+/**
+ * The account left the box — a subscription unlinked, a ClawBox AI sign-out —
+ * and no other account credential remains: the named tunnel the heartbeat
+ * provisioned for that account must not go on serving its hostname. Revokes it
+ * and drops the tunnel back to the quick one (only restarting a tunnel that is
+ * running). A box still holding either token keeps its tunnel: the hostname is
+ * the device's under that account. Never throws. True only when the named
+ * tunnel is gone: its credential removed and no tunnel left serving on it (a
+ * failed restart is reported false and retried by the next pass).
+ *
+ * Called by the unlink at once (`/setup-api/ai-models/subscription-link`), and
+ * by every heartbeat that finds no account token, which covers a sign-out.
+ */
+export async function revokeNamedTunnelWithoutAccount(reason: string): Promise<boolean> {
+  try {
+    if (!(await storeHoldsNoAccountToken())) return false;
+    if (await readNamedTunnelCredential()) return await revokeNamedTunnel(reason);
+    return (await retryStaleNamedTunnel(reason)) ?? false;
+  } catch (err) {
+    console.warn("[portal-heartbeat] could not revoke the named tunnel:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+/**
+ * Nothing on file — but an earlier revoke (an unlink, a sign-out, or the
+ * portal's own) may have removed the credential and then failed to restart the
+ * tunnel, which leaves the old cloudflared serving the hostname on the token it
+ * was started with. Every heartbeat and every unlink retries that restart until
+ * the named tunnel is no longer running. Null when no such tunnel runs;
+ * otherwise whether the restart went through.
+ */
+async function retryStaleNamedTunnel(reason: string): Promise<boolean | null> {
+  if (!(await staleNamedTunnelRunning())) return null;
+  console.warn(`[portal-heartbeat] the named tunnel still runs without its credential (${reason}); restarting it`);
+  return restartTunnelIfRunning("named tunnel revoked, retried");
 }
 
 /**
@@ -112,7 +180,16 @@ async function readClawAiToken(): Promise<string | null> {
 async function pushNow(tunnelUrl: string): Promise<void> {
   try {
     const token = await readClawAiToken();
-    if (!token) return;
+    if (!token) {
+      // No account on the box any more: whatever named tunnel an earlier
+      // account was given is not this box's to serve.
+      await revokeNamedTunnelWithoutAccount("no ClawBox account is linked to this box");
+      return;
+    }
+    // A revoke the portal asked for (unpaired, or no named tunnel for this box
+    // any more) leaves the account token on the box, so the retry above never
+    // runs for it: retry here too.
+    await retryStaleNamedTunnel("an earlier revoke could not restart the tunnel").catch(() => null);
 
     const deviceId = await getOrCreateDeviceId();
     const name = deriveDeviceName(deviceId);
@@ -141,7 +218,16 @@ async function pushNow(tunnelUrl: string): Promise<void> {
     if (res.ok) {
       lastPushedUrl = tunnelUrl;
       const answer: unknown = await res.json().catch(() => null);
+      // The account may have left the box (an unlink, a sign-out) or changed
+      // while the request was out: the answer was for the account that asked.
+      if ((await readClawAiToken()) !== token) {
+        await revokeNamedTunnelWithoutAccount("the account left while the heartbeat was answered");
+        return;
+      }
       await applyBoxTunnel(answer, stored);
+      // And should it leave while the credential was written, the unlink's own
+      // revoke may have run before the file landed: ask once more, after it.
+      await revokeNamedTunnelWithoutAccount("the account left while the named tunnel was written");
     } else if (res.status === 401 || res.status === 403) {
       // Token revoked or unpaired — stop trying until a config change clears
       // the in-memory state via process restart.
@@ -163,26 +249,55 @@ async function pushNow(tunnelUrl: string): Promise<void> {
 /**
  * Restart clawbox-tunnel so run-tunnel.sh re-reads the credential — but only
  * while it is running. A box whose owner switched Remote Access off must not
- * have it switched back on by a heartbeat.
+ * have it switched back on by a heartbeat. True when no tunnel runs on the old
+ * credential any more: the unit is stopped, or its restart went through.
  */
-async function restartTunnelIfRunning(reason: string): Promise<void> {
+async function restartTunnelIfRunning(reason: string): Promise<boolean> {
   try {
     const state = await getTunnelServiceState();
-    if (state !== "active" && state !== "activating") return;
+    if (state === "inactive" || state === "failed") return true;
+    // Not known to be stopped, and not known to be running: nothing is
+    // restarted, and nothing is claimed.
+    if (state !== "active" && state !== "activating") return false;
     const { bootPersisted, bootPersistWarning } = await startTunnelService();
     console.log(`[portal-heartbeat] restarted the tunnel: ${reason}`);
     if (!bootPersisted) console.warn(`[portal-heartbeat] ${bootPersistWarning}`);
+    return true;
   } catch (err) {
     console.warn("[portal-heartbeat] tunnel restart failed:", err instanceof Error ? err.message : err);
+    return false;
   }
 }
 
-/** Forget the named tunnel and drop back to the quick one. */
-async function revokeNamedTunnel(reason: string): Promise<void> {
+/**
+ * A named tunnel still running on a credential that is no longer on file.
+ * run-tunnel.sh writes `named` to tunnel.mode while it serves one and removes
+ * the file when it exits, so this survives a restart of this process too.
+ */
+async function staleNamedTunnelRunning(): Promise<boolean> {
+  let mode: string;
+  try {
+    mode = (await fs.readFile(tunnelModePath(), "utf-8")).trim();
+  } catch {
+    return false;
+  }
+  if (mode !== "named") return false;
+  if (await readNamedTunnelCredential()) return false;
+  const state = await getTunnelServiceState();
+  return state === "active" || state === "activating";
+}
+
+/**
+ * Forget the named tunnel and drop back to the quick one. True only when the
+ * credential was on disk, is now gone, and no tunnel still runs on it: a file
+ * that could not be removed is still served, and so is one whose tunnel could
+ * not be restarted, so neither is reported as revoked.
+ */
+async function revokeNamedTunnel(reason: string): Promise<boolean> {
   hostnameMismatch = false;
-  if (!(await clearNamedTunnelCredential())) return;
+  if (!(await clearNamedTunnelCredential())) return false;
   console.warn(`[portal-heartbeat] named tunnel credential removed (${reason}); back to the quick tunnel`);
-  await restartTunnelIfRunning("named tunnel revoked");
+  return restartTunnelIfRunning("named tunnel revoked");
 }
 
 /**
@@ -271,7 +386,24 @@ export function pushHeartbeatIfChanged(tunnelUrl: string | null): void {
  * request on top.
  */
 export function pushHeartbeatTick(tunnelUrl: string | null): void {
-  if (!tunnelUrl) return;
   if (inFlight) return;
+  if (!tunnelUrl) {
+    // Nothing to push yet, but a named tunnel left running without its
+    // credential is retried all the same: it may be the very process that
+    // has not published its URL.
+    inFlight = retryStaleNamedTunnelOnTick();
+    return;
+  }
   inFlight = pushNow(tunnelUrl);
+}
+
+/** The tick's stale-tunnel retry when there is no URL to push. Never throws. */
+async function retryStaleNamedTunnelOnTick(): Promise<void> {
+  try {
+    await retryStaleNamedTunnel("an earlier revoke could not restart the tunnel");
+  } catch (err) {
+    console.warn("[portal-heartbeat] stale tunnel retry failed:", err instanceof Error ? err.message : err);
+  } finally {
+    inFlight = null;
+  }
 }

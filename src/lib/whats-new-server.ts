@@ -13,6 +13,7 @@ import { CONFIG_ROOT, get, set } from "@/lib/config-store";
 import { readEditionSource, type EditionSource } from "@/lib/edition-source";
 import { readSwapPlan, swapAllowed, swapTargetFor } from "@/lib/harness-swap";
 import { planGateFor } from "@/lib/paid-plan-gate";
+import { readPlanEntitlement } from "@/lib/plan-entitlement";
 import {
   isWhatsNewVersion,
   NO_PLAN_CTA,
@@ -82,10 +83,14 @@ async function readPlanCta(source: EditionSource): Promise<WhatsNewPlanCta> {
   // all over a question only its plan section asks. The card still announces
   // the release; it just sells nothing it cannot check the owner lacks.
   try {
-    const plan = await readSwapPlan();
+    // The paid features are judged on the gate's own reader, which also counts
+    // a subscription linked for its plan alone (TASK-2501) — the card must not
+    // upsell what such a box can already switch on. The edition switch stays
+    // on the ClawBox AI plan the Harness card reads.
+    const [plan, entitlement] = await Promise.all([readSwapPlan(), readPlanEntitlement()]);
     const target = swapTargetFor(source);
     return {
-      paidFeatures: !planGateFor(plan.tier).satisfied,
+      paidFeatures: !planGateFor(entitlement.tier).satisfied,
       editionSwitch: target !== null && !swapAllowed(plan) ? target : null,
     };
   } catch (err) {

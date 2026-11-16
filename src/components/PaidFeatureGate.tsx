@@ -5,7 +5,6 @@ import { useState } from "react";
 import DeviceCodeCard from "./DeviceCodeCard";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
-import { readStoredUiTier } from "@/lib/clawbox-ai-tiers";
 import { useT } from "@/lib/i18n";
 import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
 import { isPaidPlan, type PaidFeature, type PlanGate } from "@/lib/paid-plan-gate";
@@ -24,10 +23,11 @@ import type { ClawboxLoginState } from "@/lib/use-clawbox-login";
  *
  * - STILL READING — the login poll's own first tick. A spinner and nothing
  *   else; see {@link paidGateFace} for why this may never be read as Free.
- * - NOT CONNECTED — this box has no ClawBox AI account at all. Nothing to
+ * - NOT CONNECTED — this box has no ClawBox account at all. Nothing to
  *   upgrade yet, so the answer is the device-code handoff the setup wizard and
  *   the Providers page already run (`useClawaiDeviceLogin`), not a link to a
- *   portal page that cannot reach this device.
+ *   portal page that cannot reach this device — in its `entitlement` scope,
+ *   which links the subscription and leaves the chat model alone (TASK-2501).
  * - FREE — there is an account and it does not pay for this. That IS the
  *   upgrade card, the same one Remote Control shows.
  * - PAID — nothing at all; the wizard is unchanged.
@@ -100,12 +100,17 @@ export default function PaidFeatureGate({
   const face = paidGateFace(login);
 
   const clawaiLogin = useClawaiDeviceLogin({
-    scope: "primary",
-    // The tier the customer last chose in the Providers panel. Choosing one
-    // here would either downgrade a Max subscriber's badge or 402 a Pro one.
-    // With nothing stored it stays Pro, not the panel's unpaired Free default:
-    // this card connects someone to a feature only a paid plan unlocks.
-    getTier: () => readStoredUiTier(),
+    // The subscription is linked for its PLAN alone (TASK-2501). This card
+    // stands in front of a feature, not a chat model: pairing here used to
+    // make ClawBox AI the box's primary model as a side effect, switching an
+    // owner who runs the local engine — or their own key — onto the cloud.
+    // The link unlocks the feature and leaves the chat model where it was;
+    // ClawBox AI as a model is still one sign-in away on the Providers page.
+    scope: "entitlement",
+    // No model tier is chosen by a link; the start route asks the portal for
+    // none whatever is sent, so a Free account links and meets the upgrade
+    // card rather than a 402.
+    getTier: () => "free",
     onStart: () => setError(null),
     onBusyChange: setBusy,
     onComplete: () => {
@@ -165,6 +170,10 @@ export default function PaidFeatureGate({
           {/* The one line the brief asks for: WHICH plan, and for WHAT. */}
           <p className="text-sm text-[var(--text-muted)] leading-relaxed">
             {t("paidGate.signInBody", { feature: name })}
+          </p>
+          {/* What the link does NOT do, said before the owner commits to it. */}
+          <p className="mt-2 text-xs text-[var(--text-muted)] leading-relaxed" data-testid="paid-gate-keeps-model">
+            {t("paidGate.signInKeepsModel")}
           </p>
         </div>
 
