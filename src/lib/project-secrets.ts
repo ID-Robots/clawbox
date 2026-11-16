@@ -678,8 +678,20 @@ export interface ResolvedRunSecrets {
    * after this resolve (`resumeRunOnce` refusing a resume) hands exactly these
    * back with `releaseRunSecretNames`, and leaves the copies the still-paused
    * run was holding for its next try.
+   *
+   * Scope AND name, because the same name can exist in two scopes: a paused run
+   * may hold a box-wide one-run copy of `TOKEN` while this resolve, a project
+   * entry of the same name now on top, claims that project copy. Releasing by
+   * name alone would take the box-wide copy the paused run still relies on
+   * (TASK-2501 PR-E, CodeRabbit's finding on #1511).
    */
-  claimed: string[];
+  claimed: RunSecretClaim[];
+}
+
+/** One one-run copy a resolve took for a run: a name IN a scope, never a bare name. */
+export interface RunSecretClaim {
+  name: string;
+  scope: string;
 }
 
 const NOTHING: ResolvedRunSecrets = { env: {}, names: [], unreadable: [], scopes: {}, expiresAt: {}, claimed: [] };
@@ -800,12 +812,12 @@ async function resolveRunSecrets(run: { project?: string | null; runId?: string 
   }
   const unclaimed = [...claims.values()].filter((entry) => entry.usedBy === undefined);
   /** The copies claimed for this run by THIS resolve — the ones a refusal gives back. */
-  let claimed: string[] = [];
+  let claimed: RunSecretClaim[] = [];
   if (unclaimed.length > 0) {
     for (const entry of unclaimed) entry.usedBy = runId!;
     try {
       await writeStore(entries);
-      claimed = unclaimed.map((entry) => entry.name);
+      claimed = unclaimed.map((entry) => ({ name: entry.name, scope: entry.scope }));
     } catch (err) {
       // Not written means not claimed, and an unclaimed one-run copy could go
       // to a second run as well. So this run does not get it either — nor a
@@ -938,24 +950,27 @@ export async function releaseRunSecrets(isOver: (runId: string) => boolean): Pro
 }
 
 /**
- * Give back exactly the one-run copies `names` claimed for `runId`, and nothing
+ * Give back exactly the one-run copies `claims` took for `runId`, and nothing
  * else. The undo for a resolve whose run was then refused (a resume the local-
  * only lock stopped): the copies this run ALREADY held before that resolve stay
  * its own, because the run is still paused and its next resume must be handed
- * them again. Answers the names removed.
+ * them again — including a copy of the SAME NAME in the other scope, which is
+ * why a claim carries its scope. Answers the names removed.
  *
  * `releaseRunSecrets` is the wrong tool here: it is keyed on the run being
  * OVER, and a refused resume leaves the run very much alive.
  */
-export async function releaseRunSecretNames(runId: string, names: readonly string[]): Promise<string[]> {
-  if (!names.length) return [];
-  const wanted = new Set(names);
+export async function releaseRunSecretNames(runId: string, claims: readonly RunSecretClaim[]): Promise<string[]> {
+  if (!claims.length) return [];
+  // Matched on scope AND name: the paused run may still hold a copy of the same
+  // name in the other scope, and that one is not this resolve's to give back.
+  const wanted = new Set(claims.map((claim) => `${claim.scope}\u0000${claim.name}`));
   return serialised(async () => {
     const entries = await readStore();
     const spent = entries.filter((entry) =>
       readSecretExpiry(entry.expiresAt) === SECRET_EXPIRY_RUN
       && entry.usedBy === runId
-      && wanted.has(entry.name));
+      && wanted.has(`${entry.scope}\u0000${entry.name}`));
     if (!spent.length) return [];
     await writeStore(entries.filter((entry) => !spent.includes(entry)));
     const lines = new Map<string, string[]>();

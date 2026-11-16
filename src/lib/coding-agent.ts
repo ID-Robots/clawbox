@@ -15337,6 +15337,12 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     const progressBefore = [...run.progress];
     const progressAtBefore = [...run.progressAt];
     const secretNamesBefore = run.secretNames;
+    // The account the record was opened on, kept for the same reason as the
+    // feed: `prepareRunAccount` moves `run.anthropicAccount` onto the account it
+    // picked for this attempt, and a refused resume never used it — the record
+    // would name an account that did not resume it (TASK-2501 PR-E,
+    // CodeRabbit's finding on #1511).
+    const accountBefore = run.anthropicAccount;
     const prepared = await prepareRunSecrets(run);
     // Asked ONCE MORE here (TASK-2501 PR-E): the gate above was read before the
     // tools, the worktree, the folder, the allow rules and the preparation, and
@@ -15356,6 +15362,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
       run.progressAt.length = 0;
       run.progressAt.push(...progressAtBefore);
       run.secretNames = secretNamesBefore;
+      run.anthropicAccount = accountBefore;
       dropRunSecrets(run.id);
       runSecretScopes.delete(run.id);
       runSecretExpiry.delete(run.id);

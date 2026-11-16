@@ -712,6 +712,30 @@ describe("the audit trail", () => {
     expect(fs.readFileSync(path.join(dataDir, "secrets-audit.log"), "utf-8")).not.toContain(TOKEN);
   });
 
+  it("gives a claimed one-run copy back by scope AND name, leaving the paused run's copy of the same name alone", async () => {
+    // The run was handed a box-wide one-run copy first…
+    await store.importSecret({ name: "ONE_RUN_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, source: "hermes", expiresAt: "run" });
+    await store.setSecretInject({ name: "ONE_RUN_TOKEN", scope: store.BOX_SCOPE, inject: true });
+    switchOn(true);
+    const held = await store.resolveSecretsForRun({ project: "shop", runId: "run-0000aa11" });
+    expect(held.claimed).toEqual([{ name: "ONE_RUN_TOKEN", scope: store.BOX_SCOPE }]);
+    // …and then the project's own copy of the SAME name arrives between the
+    // pause and the resume. The next resolve gets the project's value and claims
+    // that copy; the box-wide one stays the paused run's own.
+    await store.importSecret({ name: "ONE_RUN_TOKEN", value: "shop-one-run-value-000", scope: "shop", source: "hermes", expiresAt: "run" });
+    await store.setSecretInject({ name: "ONE_RUN_TOKEN", scope: "shop", inject: true });
+    const resolved = await store.resolveSecretsForRun({ project: "shop", runId: "run-0000aa11" });
+    expect(resolved.env.ONE_RUN_TOKEN).toBe("shop-one-run-value-000");
+    expect(resolved.claimed).toEqual([{ name: "ONE_RUN_TOKEN", scope: "shop" }]);
+
+    // A refused resume gives back exactly what this resolve claimed. Matched by
+    // name alone it would take the box-wide copy too, and the paused run would
+    // come back to a credential it no longer holds (TASK-2501 PR-E,
+    // CodeRabbit's finding on #1511).
+    expect(await store.releaseRunSecretNames("run-0000aa11", resolved.claimed)).toEqual(["ONE_RUN_TOKEN"]);
+    expect(rows().filter((row) => row.name === "ONE_RUN_TOKEN").map((row) => row.scope)).toEqual([store.BOX_SCOPE]);
+  });
+
   it("records nothing for a change the store refused", async () => {
     await expect(store.setSecret({ name: "PATH", value: TOKEN })).rejects.toMatchObject({ code: "reserved_name" });
     await expect(store.deleteSecret({ name: "MISSING_TOKEN" })).rejects.toMatchObject({ code: "not_found" });

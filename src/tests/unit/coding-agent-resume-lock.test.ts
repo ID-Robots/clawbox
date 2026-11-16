@@ -45,6 +45,50 @@ vi.mock("@/lib/feature-engine", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/feature-engine")>()),
   cloudAiLockOn: cloudLocked,
 }));
+// The account pool's pick, movable between the pause and the Resume: the
+// preparation moves `run.anthropicAccount` onto whatever it picks, and a
+// refused resume must not leave the record naming an account it never used.
+const poolPick = vi.hoisted(() => ({ id: null as string | null, credential: "sk-ant-test-credential" }));
+vi.mock("@/lib/anthropic-accounts", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/anthropic-accounts")>();
+  return {
+    ...real,
+    armCodingSwapConsumer: () => {},
+    // Readiness asks the pool whether ANY credential is there; the pick below is
+    // the account it would hand out, so the two say the same thing.
+    poolHasCredential: async () => ({
+      any: poolPick.id !== null,
+      hasKey: poolPick.id !== null,
+      hasLogin: false,
+      hasOAuth: false,
+      first: poolPick.id !== null ? "api_key" : null,
+    }),
+    prepareAccount: async () => {
+      const id = poolPick.id;
+      if (!id) return { prepared: null, health: { allLimited: false, room: null } as never };
+      return {
+        prepared: {
+          account: {
+            id,
+            label: `Account ${id}`,
+            email: null,
+            kind: "api_key" as const,
+            status: "ok" as const,
+            limitedUntil: null,
+            limitKind: null,
+            addedAt: 0,
+            lastUsedAt: null,
+            lastLimitedAt: null,
+            expiresAt: null,
+            authFailedAt: null,
+          },
+          credential: { kind: "api_key" as const, secret: poolPick.credential },
+        },
+        health: { allLimited: false, room: null } as never,
+      };
+    },
+  };
+});
 const resolveLocalEngine = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/local-engine", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/local-engine")>()),
@@ -130,7 +174,7 @@ function audit(): Record<string, unknown>[] {
 }
 
 /** A run the owner paused: live, with a session, which is what Resume comes back to. */
-async function pausedRun(provider: "clawbox-ai" | "local", name: string): Promise<string> {
+async function pausedRun(provider: "clawbox-ai" | "local" | "anthropic", name: string): Promise<string> {
   const run = await lib.startRun({ task: "Do the thing", directory: folder(name), source: "owner", provider });
   await vi.waitFor(() => { expect(lib.getRun(run.id)?.status).toBe("running"); }, { timeout: 20_000 });
   // The spawn returns before the child has exec'd anything, so a pause taken on
@@ -171,6 +215,7 @@ beforeEach(async () => {
   cloudLocked.mockReset().mockResolvedValue(false);
   cloudLockedSync.mockReset().mockReturnValue(false);
   armLockDuringPreparation.armed = false;
+  poolPick.id = null;
   resolveLocalEngine.mockReset().mockResolvedValue({
     kind: "clawext",
     model: "dsv41-flash",
@@ -281,6 +326,26 @@ describe("what a refused resume gives back", () => {
     }, { timeout: 10_000 });
     const taken = audit().filter((line) => line.action === "delete" && (line.names as string[] | undefined)?.includes("ONE_RUN_TOKEN"));
     expect(taken).toEqual([]);
+  });
+
+  it("leaves the record on the account it was opened on when the resume is refused", async () => {
+    // A run opened on one account, then the pool's pick has moved on by the time
+    // the owner presses Resume — an account switch in between, a limit, another
+    // run taking the first-line account. The preparation moves the record onto
+    // the new one; the refusal never resumed on it, so the record must come out
+    // naming the account the pause left (TASK-2501 PR-E, CodeRabbit's finding on
+    // #1511).
+    poolPick.id = "aaaabbbb";
+    const id = await pausedRun("anthropic", "eta");
+    expect(lib.getRun(id)!.anthropicAccount).toBe("aaaabbbb");
+    poolPick.id = "ccccdddd";
+    armLockDuringPreparation.armed = true;
+
+    await expect(lib.resumeRun(id)).rejects.toThrow(/local-only AI lock is on/);
+
+    const after = lib.getRun(id)!;
+    expect(after.anthropicAccount).toBe("aaaabbbb");
+    expect(after.status).toBe("paused");
   });
 
   it("gives the whole feed back, not just its length, when the preparation trimmed it", async () => {
