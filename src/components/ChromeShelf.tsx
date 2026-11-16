@@ -728,10 +728,11 @@ export default function ChromeShelf({
 
       {/* The hovered app's name. Fixed and drawn here, not inside the app row,
           which scrolls and would clip it; hidden while a menu is open and once
-          the app it names has left the bar (no mouseleave fires for a button
-          that unmounts under a resting pointer). `aria-hidden`: the button
+          the app it names is no longer DRAWN — pinned or listed as open, which
+          is narrower than being in `apps` (a closed app stays there) — since no
+          mouseleave fires for a button that unmounts under a resting pointer. `aria-hidden`: the button
           already carries the name, so a screen reader hears it once. */}
-      {appTip && !ctxMenu && !shelfMenu && apps.some((a) => a.id === appTip.id) && (
+      {appTip && !ctxMenu && !shelfMenu && [...pinnedApps, ...unpinnedApps].some((a) => a.id === appTip.id) && (
         <div
           data-testid="shelf-tooltip"
           aria-hidden="true"

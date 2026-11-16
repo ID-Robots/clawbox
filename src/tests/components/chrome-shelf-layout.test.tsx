@@ -271,6 +271,21 @@ describe("the app names, once the bar changes under a resting pointer", () => {
     expect(screen.queryByTestId("shelf-tooltip")).not.toBeInTheDocument();
   });
 
+  it("drops the name of an app the phone bar stops listing, though it stays in `apps`", () => {
+    // The phone bar draws Settings and the apps that are OPEN: closing one
+    // takes its button away and leaves its entry in `apps`.
+    const open = { ...makeApp("files"), isOpen: true, isPinned: false };
+    const props = { onAppClick: vi.fn(), onLauncherClick: vi.fn(), onTrayClick: vi.fn() };
+    Object.defineProperty(window, "innerWidth", { value: 400, configurable: true });
+    const view = render(<ChromeShelf {...props} apps={[makeApp("settings"), open]} />);
+    fireEvent.mouseEnter(screen.getByTestId("shelf-app-files"));
+    expect(screen.getByTestId("shelf-tooltip")).toHaveTextContent("files");
+
+    view.rerender(<ChromeShelf {...props} apps={[makeApp("settings"), { ...open, isOpen: false }]} />);
+    expect(screen.queryByTestId("shelf-app-files")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("shelf-tooltip")).not.toBeInTheDocument();
+  });
+
   it("drops the name when the window is resized, as the icons are not where they were", () => {
     renderAt(880);
     fireEvent.mouseEnter(screen.getByTestId("shelf-app-files"));
