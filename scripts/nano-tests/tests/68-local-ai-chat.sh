@@ -38,9 +38,12 @@
 # Two attempts, each on a session of its own: the turn passes when one does,
 # and a miss is noted. Afterwards the box is put back — the primary model and
 # tools.toolSearch as they were, the web apps the turn made uninstalled, Local
-# AI turned off again when this test turned it on. Skips when OpenClaw, the
-# llama.cpp runtime or the Gemma GGUF is not on the board (a download is up
-# to 3.4 GB, which is the installer's job, not this test's).
+# AI turned off again when this test turned it on. The primary is the model
+# active before the test; when its provider is no longer connected (no key or
+# sign-in, a dead account) the pick back would be refused, so that one step is
+# skipped with the reason and the chat stays on the local model. Skips when
+# OpenClaw, the llama.cpp runtime or the Gemma GGUF is not on the board (a
+# download is up to 3.4 GB, which is the installer's job, not this test's).
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
@@ -223,7 +226,7 @@ SWITCHED=0 CONFIGURED_HERE=0 RESTORED=0 NEW_APPS=""
 restore() {
   [ "$RESTORED" = 1 ] && return 0
   RESTORED=1
-  local id body after back
+  local id body after back unusable=""
   for id in $NEW_APPS; do
     board_api POST /setup-api/apps/uninstall "{\"appId\":\"$id\"}"
     if [ "$API_STATUS" = 200 ]; then
@@ -234,10 +237,32 @@ restore() {
   done
   if [ "$SWITCHED" = 1 ]; then
     if [ -n "$BEFORE_MODEL" ] && [[ $BEFORE_MODEL != llamacpp/* ]]; then
+      # The model active before the test can only be picked again while its
+      # provider is connected: a box whose credential for it is gone (a lab
+      # board's dead stand-in Anthropic accounts) answers the pick 400
+      # provider_credential_missing. Asked now, not at the start: that is
+      # what the pick below will be judged on. Every ClawBox AI id is its one
+      # row (canonicalChatModel), so a deepseek/* model matches that row.
+      board_api GET /setup-api/chat/model
+      # shellcheck disable=SC2016  # jq's own variables
+      [ "$API_STATUS" = 200 ] && unusable=$(api_json --arg m "$BEFORE_MODEL" --arg p "$BEFORE_PROVIDER" '
+        [(.options // [])[] | select((.model == $m or ($m | startswith("deepseek/")) and ((.model // "") | startswith("deepseek/")))
+          and ($p == "" or .provider == $p))] | first
+        | if . == null or .available != false then empty
+          elif .disabledByOwner then "\(.provider // "its provider") is switched off in Settings"
+          elif .reauthRequired then "\(.provider // "its provider") needs a new sign-in"
+          else "\(.provider // "its provider") is not connected (no API key or sign-in)" end')
+    fi
+    if [ -n "$unusable" ]; then
+      skip "the chat model is not put back on $BEFORE_MODEL, the model active before the test: $unusable on this board, so the pick would be refused; it stays on $LOCAL_MODEL"
+    elif [ -n "$BEFORE_MODEL" ] && [[ $BEFORE_MODEL != llamacpp/* ]]; then
       body=$(jq -cn --arg m "$BEFORE_MODEL" --arg p "$BEFORE_PROVIDER" '{model: $m} + (if $p == "" then {} else {provider: $p} end)')
       board_api POST /setup-api/chat/model "$body"
       back=$(api_json '.activeModel // empty')
-      if [ "$API_STATUS" = 200 ] && [ "$back" = "$BEFORE_MODEL" ]; then
+      if [ "$API_STATUS" = 400 ] && [ "$(api_json '.kind // empty')" = provider_credential_missing ]; then
+        unusable="its provider $(api_json '.provider // empty') is not connected"
+        skip "the chat model is not put back on $BEFORE_MODEL, the model active before the test: $(api_error) It stays on $LOCAL_MODEL"
+      elif [ "$API_STATUS" = 200 ] && [ "$back" = "$BEFORE_MODEL" ]; then
         ok "the chat model is back on $BEFORE_MODEL"
       elif [ "$API_STATUS" = 200 ] && [[ $BEFORE_MODEL == deepseek/* && $back == deepseek/* ]]; then
         # chat/model writes every ClawBox AI pick as its one chat id
@@ -263,6 +288,8 @@ restore() {
     after=$(jq -c '.toolSearch' <<<"$(cfg_snapshot)" 2>/dev/null)
     if [ "$after" = "$TOOLSEARCH_BEFORE" ]; then
       ok "tools.toolSearch is back to ${TOOLSEARCH_BEFORE}"
+    elif [ -n "$unusable" ]; then
+      note "tools.toolSearch is ${after:-unreadable} (was ${TOOLSEARCH_BEFORE}): the chat was not put back on $BEFORE_MODEL, and Tool Search stays as the on-device primary has it"
     else
       not_ok "tools.toolSearch is ${after:-unreadable} after the switch back, was ${TOOLSEARCH_BEFORE}"
     fi
