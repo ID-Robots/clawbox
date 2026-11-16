@@ -56,7 +56,9 @@
  * already holds. A clear that did not land is remembered and finished on the
  * next pass, so a job never stays pinned to a model it did not choose.
  *
- * WHAT IS LEFT ALONE: jobs on another provider, `main`-session jobs (they run
+ * WHAT IS LEFT ALONE: DISABLED jobs, whatever they name (never updated,
+ * cleared or given back; once the owner enables one again, it is planned like
+ * any other on the next pass), jobs on another provider, `main`-session jobs (they run
  * in the chat's own turn, with no binding of their own), jobs of an agent other
  * than `main` (the pool writes only `main`'s store), and a job whose model
  * names a profile that is not the pool's — the owner chose that account —
@@ -288,6 +290,10 @@ export function planCronBindings(input: CronPlanInput): CronBindingPlan[] {
   const plans: CronBindingPlan[] = [];
   for (const job of input.jobs) {
     if (input.skip?.has(job.id)) continue;
+    // A disabled job is never touched, whatever account it names: no binding,
+    // no clear, no give-back. Its record (if any) stays, so once the owner
+    // enables it again (a new config revision) it is planned from there.
+    if (!job.enabled) continue;
     if (job.kind !== "agentTurn" || job.sessionTarget === "main") continue;
     if (job.agentId !== null ? job.agentId !== "main" : input.defaultIsMain === false) continue;
     const record: CronBindingRecord | undefined = records[job.id];
@@ -341,7 +347,7 @@ export function planCronBindings(input: CronPlanInput): CronBindingPlan[] {
       && record.profileId === target.profileId
       && record.authorization === target.authorization
       && (record.revision === null || job.revision === null || record.revision === job.revision || pinnedDefault);
-    const retry = failed && job.enabled && now - lastRun <= BINDING_RETRY_WINDOW_MS
+    const retry = failed && now - lastRun <= BINDING_RETRY_WINDOW_MS
       && (record?.retriedAt === undefined || now - record.retriedAt > BINDING_RETRY_WINDOW_MS);
     const originalOf = inherits ? null : original;
     if (current && !failed) {
@@ -426,7 +432,8 @@ function reportLostRuns(listed: { jobs: readonly CronJobDefinition[]; complete: 
   if (listed.complete) for (const id of [...reported.keys()]) if (!jobs.some((j) => j.id === id)) reported.delete(id);
   for (const job of jobs) {
     // The box's own jobs are its to bind (a failure from before their adoption is history).
-    if (records[job.id] || planned.has(job.id) || skip.has(job.id) || job.kind !== "agentTurn" || job.sessionTarget === "main") continue;
+    // A disabled job runs nothing more to lose: nothing to say about it.
+    if (!job.enabled || records[job.id] || planned.has(job.id) || skip.has(job.id) || job.kind !== "agentTurn" || job.sessionTarget === "main") continue;
     if (job.lastStatus !== "error" || !job.lastError || !BINDING_FAILURE_RE.test(job.lastError) || job.lastRunAtMs === null) continue;
     if ((reported.get(job.id) ?? Number.NEGATIVE_INFINITY) >= job.lastRunAtMs) continue;
     reported.set(job.id, job.lastRunAtMs);
@@ -448,6 +455,8 @@ export async function bindCronsToTarget(
   const now = input.now ?? Date.now();
   const refusedFor = targetKey(input.target);
   const result: CronBindingResult = { bound: 0, released: 0, owed: 0, rerun: 0, unread: false };
+  /** The jobs bound or given back in this pass, for the log. */
+  const moved: string[] = [];
   let listed: { jobs: CronJobDefinition[]; complete: boolean };
   try {
     listed = await listAll(deps.call);
@@ -502,6 +511,7 @@ export async function bindCronsToTarget(
       delete records[job.id];
       dirty = true;
       result.released += 1;
+      moved.push(job.id);
       continue;
     }
     const before = records[job.id];
@@ -574,6 +584,7 @@ export async function bindCronsToTarget(
         delete records[job.id];
         dirty = true;
         result.released += 1;
+        moved.push(job.id);
       }
       continue;
     }
@@ -583,7 +594,10 @@ export async function bindCronsToTarget(
     // the job does not match and is planned whole again. A clear's record is
     // left as it was.
     if (landed === 0) continue;
-    if (adopting) result.bound += 1;
+    if (adopting) {
+      result.bound += 1;
+      moved.push(job.id);
+    }
     const base = records[job.id] ?? before;
     records[job.id] = {
       profileId: adopting && input.target ? input.target.profileId : (base?.profileId ?? input.target?.profileId ?? ""),
@@ -627,7 +641,7 @@ export async function bindCronsToTarget(
   if (dirty) await save();
   if (result.bound > 0 || result.owed > 0 || result.released > 0) {
     const on = input.target ? `on ${input.target.profileId}` : "given back";
-    console.error(`[anthropic-cron-binding] ${result.bound + result.released} automation(s) ${on}${result.owed > 0 ? `, ${result.owed} still owed` : ""}${result.rerun > 0 ? `, ${result.rerun} lost run(s) started again` : ""}`);
+    console.error(`[anthropic-cron-binding] ${result.bound + result.released} automation(s) ${on}${moved.length > 0 ? ` (${moved.join(", ")})` : ""}${result.owed > 0 ? `, ${result.owed} still owed` : ""}${result.rerun > 0 ? `, ${result.rerun} lost run(s) started again` : ""}`);
   }
   return result;
 }

@@ -4,7 +4,7 @@
  * in, `cron.update` steps out. The whole round trip against a stand-in for
  * core is in anthropic-gateway.test.ts.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   BINDING_RETRY_WINDOW_MS,
   bindCronsToTarget,
@@ -104,7 +104,8 @@ describe("planning the adoptions", () => {
     expect(plan([job({ id: "j", ...failed, lastRunAtMs: NOW - 120_000 })], records)).toEqual([]);
     const old = NOW - BINDING_RETRY_WINDOW_MS - 1;
     expect(plan([job({ id: "j", ...failed, lastRunAtMs: old })], {})[0]).toMatchObject({ retry: false });
-    expect(plan([job({ id: "j", ...failed, enabled: false, lastRunAtMs: NOW - 1000 })], {})[0]).toMatchObject({ retry: false });
+    // A disabled job is not touched at all, its lost run neither (below).
+    expect(plan([job({ id: "j", ...failed, enabled: false, lastRunAtMs: NOW - 1000 })], {})).toEqual([]);
     // Any other failure is the model's, not the account's.
     expect(plan([job({ id: "j", lastStatus: "error", lastError: "You've hit your weekly limit", lastRunAtMs: NOW - 1000 })], records)).toEqual([]);
   });
@@ -119,6 +120,76 @@ describe("planning the adoptions", () => {
     }
     // Temporarily unavailable is not lost: nothing is re-bound for it.
     expect(plan([job({ id: "j", model: `anthropic/claude-sonnet-5-5@${POOL_A}`, lastStatus: "error", lastError: "MCP authorization state is temporarily unavailable", lastRunAtMs: NOW - 1000 })], records)).toEqual([]);
+  });
+});
+
+describe("a disabled job is never touched (pool renewal keeps cron binding)", () => {
+  const pinned = `anthropic/claude-sonnet-5-5@${POOL_A}`;
+  const lost = { lastStatus: "error", lastError: "Automation inference account was replaced. Explicitly select an authorized account again.", lastRunAtMs: NOW - 1000 };
+
+  it("plans nothing for a disabled job: not a renewal's re-adoption, not a swap, not a lost run, not an owed clear, not a give-back", () => {
+    const records: CronBindingRecords = {
+      renewed: { profileId: POOL_A, authorization: "life-1", inherits: false, model: pinned, revision: "r1", at: NOW - 60_000 },
+      clear: { profileId: POOL_A, authorization: "life-1", inherits: true, model: `anthropic/claude-opus-5-5@${POOL_A}`, revision: "r1", at: NOW - 60_000 },
+    };
+    const jobs = [
+      job({ id: "renewed", model: pinned, enabled: false }),
+      job({ id: "clear", model: `anthropic/claude-opus-5-5@${POOL_A}`, enabled: false }),
+      job({ id: "new", enabled: false }),
+      job({ id: "lost", model: pinned, enabled: false, ...lost }),
+    ];
+    // A renewal (same account, new lifetime) and a swap (another account).
+    expect(plan(jobs, records, { profileId: POOL_A, authorization: "life-2" })).toEqual([]);
+    expect(plan(jobs, records, { profileId: POOL_B, authorization: "life-9" })).toEqual([]);
+    // The pool left: nothing given back either.
+    expect(planCronBindings({ jobs, target: null, records, defaultModel: "anthropic/claude-opus-5-5", isPoolProfile: isPool, onlyAdopted: true, accountFor: () => "anthropic:default", now: NOW })).toEqual([]);
+  });
+
+  it("a renewal re-adopts an enabled job pinned to the renewed account onto that SAME account — never another — and a job on an account outside the pool stays as it is", () => {
+    const records: CronBindingRecords = { j: { profileId: POOL_A, authorization: "life-1", inherits: false, model: pinned, revision: "r1", at: NOW - 60_000 } };
+    const plans = plan([
+      job({ id: "j", model: pinned }),
+      job({ id: "owners", model: "anthropic/claude-sonnet-5-5@anthropic:default" }),
+      job({ id: "work", model: "anthropic/claude-sonnet-5-5@anthropic:work-key" }),
+    ], records, { profileId: POOL_A, authorization: "life-2" });
+    expect(plans.map((p) => [p.job.id, p.steps])).toEqual([["j", [pinned]]]);
+  });
+
+  it("an enabled-again job is planned from its new revision on the next pass", () => {
+    const records: CronBindingRecords = { j: { profileId: POOL_A, authorization: "life-1", inherits: false, model: pinned, revision: "r1", at: NOW - 60_000 } };
+    expect(plan([job({ id: "j", model: pinned, enabled: false, revision: "r1" })], records, { profileId: POOL_A, authorization: "life-2" })).toEqual([]);
+    expect(plan([job({ id: "j", model: pinned, enabled: true, revision: "r2" })], records, { profileId: POOL_A, authorization: "life-2" }).map((p) => p.steps)).toEqual([[pinned]]);
+  });
+
+  it("sends no update and no run for a disabled job, keeps its record, and says nothing of its lost run", async () => {
+    const calls: string[] = [];
+    let stored: CronBindingRecords = { off: { profileId: POOL_A, authorization: "life-1", inherits: false, model: pinned, revision: "r1", at: NOW - 60_000 } };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const deps: CronBindingDeps = {
+        call: async (method, params) => {
+          calls.push(`${method}:${String(params.id ?? "")}`);
+          if (method === "cron.list") {
+            return { jobs: [
+              { id: "off", enabled: false, sessionTarget: "isolated", configRevision: "r1", payload: { kind: "agentTurn", model: pinned }, state: lost },
+              { id: "off-unbound", enabled: false, sessionTarget: "isolated", configRevision: "r1", payload: { kind: "agentTurn", model: "anthropic/claude-sonnet-5-5" }, state: lost },
+            ] };
+          }
+          return { ok: true, configRevision: "r2" };
+        },
+        readRecords: async () => stored,
+        writeRecords: async (r) => {
+          stored = structuredClone(r);
+        },
+      };
+      const result = await bindCronsToTarget(deps, { target: { profileId: POOL_A, authorization: "life-2" }, defaultModel: "anthropic/claude-opus-5-5", isPoolProfile: isPool, now: NOW });
+      expect(result).toMatchObject({ bound: 0, owed: 0, rerun: 0, released: 0, unread: false });
+      expect(calls.filter((c) => !c.startsWith("cron.list"))).toEqual([]);
+      expect(stored.off).toMatchObject({ profileId: POOL_A, authorization: "life-1", model: pinned });
+      expect(errors.mock.calls.flat().join(" ")).not.toMatch(/off-unbound|lost its run/);
+    } finally {
+      errors.mockRestore();
+    }
   });
 });
 

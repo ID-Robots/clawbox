@@ -3275,3 +3275,91 @@ describe("CodeRabbit review of 8ac63f2 on #1526", () => {
     expect(await statusOf(work.id)).toBe("ok");
   });
 });
+
+describe("a pool renewal never breaks an automation bound to a pool profile (core 2026.11.3 counts every paste as a replaced authorization)", () => {
+  const updatesOf = (core: ReturnType<typeof fakeCore>) => core.calls.filter((c) => c.method === "cron.update");
+  const stepOf = (c: { params: Record<string, unknown> }) => (c.params.patch as { payload: { model: string | null } }).payload.model;
+
+  it("re-adopts every enabled job pinned to the renewed profile onto that same profile in the renewal's own pass — and never touches a disabled job or one on an account outside the pool", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    const pinned = `anthropic/claude-sonnet-5-5@${p(work.id)}`;
+    addCron(core, { id: "pinned", payload: { kind: "agentTurn", message: "m", model: pinned } });
+    addCron(core, { id: "inherits" });
+    addCron(core, { id: "off", enabled: false, payload: { kind: "agentTurn", message: "m", model: pinned } });
+    addCron(core, { id: "owners", payload: { kind: "agentTurn", message: "m", model: "anthropic/claude-opus-5-5@anthropic:default" } });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "pinned")).toBe(p(work.id));
+    expect(runCron(core, "inherits")).toBe(p(work.id));
+    // Bound to Work by hand before the owner turned it off.
+    const off = core.crons.get("off") as FakeCron;
+    off.binding = { profileId: p(work.id), lifetime: core.lifetimes.get(p(work.id)) as string, source: "user" };
+    const offBefore = structuredClone(off);
+    const ownersBefore = structuredClone(core.crons.get("owners"));
+    const before = updatesOf(core).length;
+    const lifetime = core.lifetimes.get(p(work.id));
+
+    // The keeper renews Work's token: the paste gives the profile a new lifetime.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+    await gw.keepGatewayMirror();
+    expect(core.pastes.at(-1)).toMatchObject({ profileId: p(work.id), access: "sk-ant-oat01-work-v2" });
+    expect(core.lifetimes.get(p(work.id))).not.toBe(lifetime);
+
+    // In the same pass: the same selection saved again, on the renewed profile and no other.
+    const renewal = updatesOf(core).slice(before);
+    expect(renewal.map((c) => c.params.id)).toEqual(["pinned", "inherits", "inherits"]);
+    for (const step of renewal.map(stepOf)) if (step !== null) expect(step.endsWith(`@${p(work.id)}`)).toBe(true);
+    expect((core.crons.get("pinned") as FakeCron).payload.model).toBe(pinned);
+    expect((core.crons.get("inherits") as FakeCron).payload.model).toBeUndefined();
+    expect(runCron(core, "pinned")).toBe(p(work.id));
+    expect(runCron(core, "inherits")).toBe(p(work.id));
+
+    // Never asked about: the disabled job and the owner's own account's job.
+    const touched = new Set(updatesOf(core).map((c) => c.params.id));
+    expect(touched.has("off")).toBe(false);
+    expect(touched.has("owners")).toBe(false);
+    expect(core.crons.get("off")).toEqual(offBefore);
+    expect(core.crons.get("owners")).toEqual(ownersBefore);
+    expect(core.calls.some((c) => c.method === "cron.run" && (c.params.id === "off" || c.params.id === "owners"))).toBe(false);
+
+    // The owner enables the job again: the watcher's next look adopts it onto the renewed lifetime.
+    off.enabled = true;
+    off.revision += 1;
+    expect(runCron(core, "off")).toMatch(/MCP_AUTHORIZATION_RETIRED/);
+    await gw.bindGatewayCrons();
+    expect((core.crons.get("off") as FakeCron).payload.model).toBe(pinned);
+    expect(runCron(core, "off")).toBe(p(work.id));
+  });
+
+  it("a swap that takes an account out of the gateway leaves no enabled job bound to its removed profile; a disabled one waits until it is enabled", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    const onWork = `anthropic/claude-sonnet-5-5@${p(work.id)}`;
+    addCron(core, { id: "pinned", payload: { kind: "agentTurn", message: "m", model: onWork } });
+    addCron(core, { id: "inherits" });
+    addCron(core, { id: "off", enabled: false, payload: { kind: "agentTurn", message: "m", model: onWork } });
+    await gw.keepGatewayMirror();
+    for (const id of ["pinned", "inherits"]) expect(runCron(core, id)).toBe(p(work.id));
+
+    // Work leaves the pool: the active account moves to Personal, and Work's profile goes.
+    await pool.removeAccount(work.id);
+    await swap.whenSwapsSettled();
+    expect(core.profiles.has(p(work.id))).toBe(false);
+    for (const id of ["pinned", "inherits"]) {
+      const job = core.crons.get(id) as FakeCron;
+      expect(job.binding?.profileId).toBe(p(personal.id));
+      expect(job.payload.model ?? "").not.toContain(p(work.id));
+      expect(runCron(core, id)).toBe(p(personal.id));
+    }
+
+    const off = core.crons.get("off") as FakeCron;
+    expect(off.payload.model).toBe(onWork);
+    expect(off.revision).toBe(1);
+    off.enabled = true;
+    off.revision += 1;
+    await gw.bindGatewayCrons();
+    expect(off.payload.model).toBe(`anthropic/claude-sonnet-5-5@${p(personal.id)}`);
+    expect(runCron(core, "off")).toBe(p(personal.id));
+  });
+});
