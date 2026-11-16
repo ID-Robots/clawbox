@@ -151,6 +151,8 @@ describe("Hermes' spoken replies", () => {
     const { speakWithHermes } = await import("@/lib/hermes-tts");
     await speakWithHermes("Good morning.");
     expect(movedToLocal()).toBe(true);
+    // Hermes is asked to speak, and only after its voice is the box's own.
+    expect(dashboardFetch).toHaveBeenCalled();
     const moved = runHermesCli.mock.invocationCallOrder[runHermesCli.mock.calls.findIndex(([args]) => args[3] === "clawbox-local")];
     expect(dashboardFetch.mock.invocationCallOrder.every((order) => order > moved)).toBe(true);
   });
