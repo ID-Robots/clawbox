@@ -6,6 +6,7 @@ import {
   samplesFor,
   summarizeRaw,
 } from "../../../scripts/nano-stress/report.mjs";
+import { parseOptions, replyHolds, takeSseFrames } from "../../../scripts/nano-stress/board-stress.mjs";
 
 // scripts/nano-stress/report.mjs turns a board stress run's raw records (every
 // turn, a sample every few seconds, each unit's MainPID/NRestarts at a step's
@@ -50,6 +51,7 @@ function raw() {
     units: { gateway: "clawbox-gateway", web: "clawbox-setup" },
     board: { model: "Jetson test board", memTotalMb: 7607, swapTotalMb: 11996, cpus: 6, clawboxSha: "0123456789abcdef", clawboxBranch: "beta" },
     config: { turnTimeoutS: 240 },
+    cleanup: { sessions: 3, deleted: 2, left: ["agent:main:clawbox-stress-x-long"] },
     steps: [
       { id: "ramp-1", kind: "ramp", concurrency: 1, startedAt: 1000, endedAt: 20_000, unitsBefore: units(10, 0), unitsAfter: units(10, 0), oomKillsBefore: 0, oomKillsAfter: 0, healthyAfter: true },
       { id: "ramp-8", kind: "ramp", concurrency: 8, startedAt: 30_000, endedAt: 90_000, unitsBefore: units(10, 0), unitsAfter: units(11, 1), oomKillsBefore: 0, oomKillsAfter: 2, healthyAfter: false, slowChatSends: { count: 4, maxMs: 6235, maxPreparationMs: 4235 } },
@@ -70,7 +72,7 @@ function raw() {
       sample(10_000),
       sample(25_000),
       sample(31_000, { memAvailableKb: 900 * MB }),
-      sample(60_000, { memAvailableKb: 250 * MB, swapUsedKb: 2000 * MB, tempMaxC: 71.26, gatewayRssKb: 1200 * MB }),
+      sample(60_000, { memAvailableKb: 250 * MB, swapUsedKb: 2000 * MB, tempMaxC: 71.26, gatewayRssKb: 1200 * MB, gatewayCgroupKb: 900 * MB }),
       sample(89_000, { memAvailableKb: 1500 * MB }),
       sample(150_000),
     ],
@@ -119,6 +121,7 @@ describe("summarizeRaw", () => {
     expect(x.swapUsedMb.max).toBe(2000);
     expect(x.tempC.max).toBe(71.3);
     expect(x.gatewayRssMb).toEqual({ start: 400, max: 1200, end: 400 });
+    expect(x.gatewayCgroupMb).toEqual({ start: 500, max: 900, end: 500 });
   });
 
   it("finds restarts, a new main process, OOM kills and an unhealthy runtime", () => {
@@ -133,8 +136,9 @@ describe("summarizeRaw", () => {
       "ramp-8: openclaw not healthy within 120 s after the step",
       "ramp-8: MemAvailable fell to 250 MB",
       "long: recalled the code word 0/1 times",
+      "cleanup: 1 of 3 sessions could not be deleted",
     ]));
-    expect(findingsOf({ ...report, steps: [report.steps[0]] })).toEqual([]);
+    expect(findingsOf({ ...report, cleanup: null, steps: [report.steps[0]] })).toEqual([]);
   });
 
   it("compares the long session's first and last turns", () => {
@@ -153,7 +157,7 @@ describe("renderMarkdown", () => {
     const md = renderMarkdown([summarizeRaw(raw())]);
     expect(md).toContain("## OpenClaw");
     expect(md).toContain("`0123456789ab` (beta)");
-    expect(md).toContain("| ramp-8 | 8 | 1/3 | 10.0 | 30.0 | 30.0 | 5.0 | 5000→250 | 2000 | 71.3 | 10 | 400→1200 | 500 | 3 | 250 | 1 | 2 |");
+    expect(md).toContain("| ramp-8 | 8 | 1/3 | 10.0 | 30.0 | 30.0 | 5.0 | 5000→250 | 2000 | 71.3 | 10 | 500→900 | 1200 | 3 | 250 | 1 | 2 |");
     expect(md).toContain("- ramp-8: 2 OOM kill(s)");
     expect(md).toContain("code word recalled 0/1");
     expect(md).toContain('Gateway "slow chat send" log lines: ramp-8 4 (max 6.2 s, preparation 4.2 s).');
@@ -162,8 +166,67 @@ describe("renderMarkdown", () => {
   it("says so when nothing went wrong", () => {
     const clean = raw();
     clean.steps = [clean.steps[0]];
+    clean.cleanup = { sessions: 1, deleted: 1, left: [] };
     clean.turns = clean.turns.filter((t) => t.step === "ramp-1");
     const md = renderMarkdown([summarizeRaw(clean)]);
     expect(md).toContain("Findings: none");
+    expect(md).toContain("Cleanup: 1/1 test sessions deleted.");
+  });
+});
+
+// The board side's own checks (scripts/nano-stress/board-stress.mjs): what
+// counts as the right answer, and how a streamed Hermes turn is read.
+describe("replyHolds", () => {
+  it("wants the expected text as a whole token", () => {
+    expect(replyHolds("9", "9")).toBe(true);
+    expect(replyHolds("The answer is 9.", "9")).toBe(true);
+    expect(replyHolds("19", "9")).toBe(false);
+    expect(replyHolds("137", "37")).toBe(false);
+    expect(replyHolds("STRESS-AB12CD", "STRESS-AB12CD")).toBe(true);
+    expect(replyHolds("/tmp/x/sub/a.txt\n", "/tmp/x/sub/a.txt")).toBe(true);
+  });
+  it("does not count an echo of the prompt", () => {
+    const prompt = "Reply with exactly this text and nothing else: STRESS-AB12CD";
+    expect(replyHolds(prompt, "STRESS-AB12CD", prompt)).toBe(false);
+    expect(replyHolds(`${prompt}\nSTRESS-AB12CD`, "STRESS-AB12CD", prompt)).toBe(true);
+    expect(replyHolds("Reply with only OK.", "OK", "Reply with only OK.")).toBe(false);
+  });
+  it("tests a RegExp as it is (a hash prefix may run on)", () => {
+    const want = /(?:^|[^0-9a-f])0123456789abcdef/;
+    expect(replyHolds("0123456789abcdef", want)).toBe(true);
+    expect(replyHolds("0123456789abcdef0011223344", want)).toBe(true);
+    expect(replyHolds("f0123456789abcdef", want)).toBe(false);
+  });
+});
+
+describe("takeSseFrames", () => {
+  it("returns the complete frames and keeps a partial one for the next read", () => {
+    const { frames, rest } = takeSseFrames('event: delta\ndata: {"text":"po"}\n\nevent: tool\ndata: {"name":"terminal"}\n\nevent: done\ndata: {"te');
+    expect(frames).toEqual([
+      { event: "delta", data: { text: "po" } },
+      { event: "tool", data: { name: "terminal" } },
+    ]);
+    const next = takeSseFrames(rest + 'xt":"pong","sessionId":"s1"}\r\n\r\n');
+    expect(next.frames).toEqual([{ event: "done", data: { text: "pong", sessionId: "s1" } }]);
+    expect(next.rest).toBe("");
+  });
+  it("keeps a frame whose data is not JSON, with null data", () => {
+    expect(takeSseFrames("event: ping\ndata: hello\n\n").frames).toEqual([{ event: "ping", data: null }]);
+  });
+});
+
+describe("parseOptions", () => {
+  it("has the defaults the doc names and a work folder of the run's own", () => {
+    const { out, cfg } = parseOptions(["--out", "/tmp/clawbox-stress-x/raw.json"]);
+    expect(out).toBe("/tmp/clawbox-stress-x/raw.json");
+    expect(cfg).toMatchObject({ runtime: "auto", ramp: [1, 2, 4, 8], rampTurns: 3, longTurns: 32, toolTurns: 8, steps: ["idle", "ramp", "long", "tool"], turnTimeoutS: 240 });
+    expect(cfg.workDir).toMatch(/^\/tmp\/clawbox-stress-x\/stress-work-[0-9a-f]{8}$/);
+  });
+  it("refuses a missing record path and bad numbers", () => {
+    expect(() => parseOptions([])).toThrow(/usage/);
+    expect(() => parseOptions(["--out", "/tmp/r.json", "--ramp-turns", "0"])).toThrow(/rampTurns/);
+    expect(() => parseOptions(["--out", "/tmp/r.json", "--ramp", "x"])).toThrow(/--ramp/);
+    expect(() => parseOptions(["--out", "/tmp/r.json", "--runtime", "other"])).toThrow(/--runtime/);
+    expect(() => parseOptions(["--out", "/tmp/r.json", "--settle", "-1"])).toThrow(/settleS/);
   });
 });

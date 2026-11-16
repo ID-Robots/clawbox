@@ -27,9 +27,13 @@
 //   node board-stress.mjs --out /tmp/x/raw.json [--runtime auto|openclaw|hermes]
 //     [--ramp 1,2,4,8] [--ramp-turns 3] [--long-turns 32] [--tool-turns 8]
 //     [--steps idle,ramp,long,tool] [--turn-timeout 240] [--settle 20]
-//     [--sample-ms 2000] [--idle 30] [--work-dir /tmp/x/work]
+//     [--sample-ms 2000] [--idle 30]
+//
+// Imported (as the unit tests do), it only exports its pure helpers.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -37,45 +41,51 @@ import { setTimeout as sleep } from "node:timers/promises";
 const REPO = process.env.CLAWBOX_REPO || "/home/clawbox/clawbox";
 const DASH = process.env.CLAWBOX_DASHBOARD || "http://127.0.0.1";
 const GATEWAY_PORT = Number(process.env.GATEWAY_PORT || 18789);
+const HERMES_BIN = process.env.HERMES_BIN || path.join(os.homedir(), ".local/bin/hermes");
 const VERSION = 1;
 
 // ---- options ----------------------------------------------------------------
-const argv = process.argv.slice(2);
-function opt(name, fallback) {
-  const i = argv.indexOf(name);
-  if (i < 0) return fallback;
-  const v = argv[i + 1];
-  if (v === undefined) throw new Error(`${name} needs a value`);
-  return v;
-}
-const intList = (s) => String(s).split(",").map((x) => Number(x.trim())).filter((n) => Number.isInteger(n) && n > 0);
-const OUT = opt("--out", "");
-if (!OUT) {
-  console.error("usage: node board-stress.mjs --out <raw.json> [options]");
-  process.exit(2);
-}
 const RUN_ID = crypto.randomBytes(4).toString("hex");
-const cfg = {
-  runtime: opt("--runtime", "auto"),
-  ramp: intList(opt("--ramp", "1,2,4,8")),
-  rampTurns: Number(opt("--ramp-turns", 3)),
-  longTurns: Number(opt("--long-turns", 32)),
-  toolTurns: Math.min(8, Number(opt("--tool-turns", 8))),
-  steps: opt("--steps", "idle,ramp,long,tool").split(",").map((s) => s.trim()).filter(Boolean),
-  turnTimeoutS: Number(opt("--turn-timeout", 240)),
-  settleS: Number(opt("--settle", 20)),
-  sampleMs: Number(opt("--sample-ms", 2000)),
-  idleS: Number(opt("--idle", 30)),
-  workDir: opt("--work-dir", path.join(path.dirname(OUT), "work")),
-  runId: RUN_ID,
-};
-for (const k of ["rampTurns", "longTurns", "toolTurns", "turnTimeoutS", "sampleMs"]) {
-  if (!Number.isInteger(cfg[k]) || cfg[k] < 1) { console.error(`board-stress: ${k} must be a whole number above 0`); process.exit(2); }
+const intList = (v) => String(v).split(",").map((x) => Number(x.trim())).filter((n) => Number.isInteger(n) && n > 0);
+
+/** The run's options; throws on a missing or bad one. */
+export function parseOptions(argv) {
+  const opt = (name, fallback) => {
+    const i = argv.indexOf(name);
+    if (i < 0) return fallback;
+    const v = argv[i + 1];
+    if (v === undefined) throw new Error(`${name} needs a value`);
+    return v;
+  };
+  const out = opt("--out", "");
+  if (!out) throw new Error("usage: node board-stress.mjs --out <raw.json> [options]");
+  const c = {
+    runtime: opt("--runtime", "auto"),
+    ramp: intList(opt("--ramp", "1,2,4,8")),
+    rampTurns: Number(opt("--ramp-turns", 3)),
+    longTurns: Number(opt("--long-turns", 32)),
+    toolTurns: Math.min(8, Number(opt("--tool-turns", 8))),
+    steps: opt("--steps", "idle,ramp,long,tool").split(",").map((x) => x.trim()).filter(Boolean),
+    turnTimeoutS: Number(opt("--turn-timeout", 240)),
+    settleS: Number(opt("--settle", 20)),
+    sampleMs: Number(opt("--sample-ms", 2000)),
+    idleS: Number(opt("--idle", 30)),
+    // A folder of this run's own beside the record: the only one it deletes.
+    workDir: path.join(path.dirname(path.resolve(out)), `stress-work-${RUN_ID}`),
+    runId: RUN_ID,
+  };
+  if (!["auto", "openclaw", "hermes"].includes(c.runtime)) throw new Error("--runtime is auto, openclaw or hermes");
+  for (const k of ["rampTurns", "longTurns", "toolTurns", "turnTimeoutS", "sampleMs"]) {
+    if (!Number.isInteger(c[k]) || c[k] < 1) throw new Error(`${k} must be a whole number above 0`);
+  }
+  for (const k of ["settleS", "idleS"]) {
+    if (!Number.isFinite(c[k]) || c[k] < 0) throw new Error(`${k} must be 0 or more`);
+  }
+  if (c.ramp.length === 0) throw new Error("--ramp wants a list like 1,2,4,8");
+  return { out, cfg: c };
 }
-for (const k of ["settleS", "idleS"]) {
-  if (!Number.isFinite(cfg[k]) || cfg[k] < 0) { console.error(`board-stress: ${k} must be 0 or more`); process.exit(2); }
-}
-if (cfg.ramp.length === 0) { console.error("board-stress: --ramp wants a list like 1,2,4,8"); process.exit(2); }
+let OUT = "";
+let cfg = null;
 const T0 = Date.now();
 const rel = () => Date.now() - T0;
 const log = (...a) => console.error(`[${new Date().toISOString().slice(11, 19)}] ${a.join(" ")}`);
@@ -241,6 +251,45 @@ function stopSampler() {
   clearInterval(unitTimer);
 }
 
+// ---- checking a reply ---------------------------------------------------------------
+const escapeRe = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * Does `reply` hold `want`, once every echo of the prompt is taken out of it?
+ * A string must stand as a whole token ("9" is not in "19"); a RegExp is
+ * tested as it is. The prompt names what it asks for, so an echo of it must
+ * not pass (scripts/nano-tests/lib.sh guards its chat turn the same way).
+ */
+export function replyHolds(reply, want, prompt = "") {
+  let text = String(reply || "");
+  if (prompt) text = text.split(prompt).join(" ");
+  if (want instanceof RegExp) return want.test(text);
+  return new RegExp(`(?:^|[^A-Za-z0-9])${escapeRe(String(want))}(?![A-Za-z0-9])`).test(text);
+}
+
+/**
+ * Server-sent events out of a buffer: every complete `event:`/`data:` block,
+ * and what is left for the next read. `data` is parsed JSON, or null.
+ */
+export function takeSseFrames(buf) {
+  const frames = [];
+  let rest = buf.replace(/\r\n/g, "\n");
+  let cut;
+  while ((cut = rest.indexOf("\n\n")) >= 0) {
+    const block = rest.slice(0, cut);
+    rest = rest.slice(cut + 2);
+    let event = "message", data = "";
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) data += line.slice(5).trim();
+    }
+    let payload = null;
+    try { payload = data ? JSON.parse(data) : null; } catch { /* keep null */ }
+    frames.push({ event, data: payload });
+  }
+  return { frames, rest };
+}
+
 // ---- OpenClaw: the gateway's own socket ------------------------------------------
 async function gatewayToken() {
   const r = await ownerJson("GET", "/setup-api/gateway/ws-config");
@@ -325,13 +374,29 @@ function messageText(m) {
 
 async function openclawTurn(sess, message, timeoutMs) {
   const r = { ackMs: null, firstTokenMs: null, latencyMs: null, toolCalls: 0, text: "", error: null, model: null };
+  // A socket the gateway closed (a restart, a dropped connection) is opened
+  // again for the next turn, and counted, rather than failing every turn after.
+  if (!sess.gw || sess.gw.ws.readyState !== 1) {
+    sess.gw?.close();
+    try {
+      sess.gw = await Gateway.open(GW_TOKEN);
+      sess.reconnects = (sess.reconnects || 0) + 1;
+    } catch (e) {
+      r.error = { kind: "connection", message: `gateway reconnect: ${e.message}`.slice(0, 200) };
+      return r;
+    }
+  }
   const t0 = performance.now();
   const ms = () => Math.round(performance.now() - t0);
   let runId = null;
+  let settled = false;
   let resolveFinal;
   const final = new Promise((res) => { resolveFinal = res; });
   const toolIds = new Set();
   const l = (f) => {
+    // A turn given up on stays given up on: the abort's own "aborted" event
+    // must not turn a timeout into an answer.
+    if (settled) return;
     if (f.type === "closed") { r.error = r.error || { kind: "connection", message: "gateway socket closed mid-turn" }; resolveFinal(); return; }
     const p = f.payload || {};
     if (f.event === "chat") {
@@ -363,20 +428,37 @@ async function openclawTurn(sess, message, timeoutMs) {
       new Promise((res) => { timer = setTimeout(() => res(true), timeoutMs); }),
     ]);
     if (timedOut) {
+      settled = true;
+      sess.gw.listeners.delete(l);
+      r.latencyMs = null;
       r.error = { kind: "timeout", message: `no final within ${Math.round(timeoutMs / 1000)} s` };
       await sess.gw.req("chat.abort", { sessionKey: sess.key, ...(runId ? { runId } : {}) }, 10_000).catch(() => {});
     }
   } catch (e) {
     r.error = r.error || { kind: /timeout/.test(e.message) ? "timeout" : "rpc", message: e.message.slice(0, 200) };
   } finally {
+    settled = true;
     clearTimeout(timer);
-    sess.gw.listeners.delete(l);
+    sess.gw?.listeners.delete(l);
   }
   r.toolCalls = toolIds.size;
   return r;
 }
 
 // ---- Hermes: the desktop chat's own route, streamed ---------------------------
+async function stopHermesTurn(key, turnId) {
+  const q = new URLSearchParams({ sessionKey: key, ...(turnId ? { turnId } : {}) });
+  try {
+    const res = await fetch(`${DASH}/setup-api/hermes/chat?${q}`, { method: "DELETE", headers: ownerHeaders(), signal: AbortSignal.timeout(30_000) });
+    const json = await res.json().catch(() => null);
+    if (!res.ok) log(`stop ${key}: HTTP ${res.status}`);
+    return json?.stopped ?? null;
+  } catch (e) {
+    log(`stop ${key}: ${e.message}`);
+    return null;
+  }
+}
+
 async function hermesTurn(sess, message, timeoutMs) {
   const r = { ackMs: null, firstTokenMs: null, latencyMs: null, toolCalls: 0, text: "", error: null, model: null };
   const t0 = performance.now();
@@ -406,18 +488,9 @@ async function hermesTurn(sess, message, timeoutMs) {
       outer: for (;;) {
         const { value, done: eof } = await reader.read();
         if (eof) break;
-        buf += dec.decode(value, { stream: true });
-        let cut;
-        while ((cut = buf.indexOf("\n\n")) >= 0) {
-          const block = buf.slice(0, cut);
-          buf = buf.slice(cut + 2);
-          let event = "message", data = "";
-          for (const line of block.split("\n")) {
-            if (line.startsWith("event:")) event = line.slice(6).trim();
-            else if (line.startsWith("data:")) data += line.slice(5).trim();
-          }
-          let payload = null;
-          try { payload = data ? JSON.parse(data) : null; } catch { /* keep null */ }
+        const taken = takeSseFrames(buf + dec.decode(value, { stream: true }));
+        buf = taken.rest;
+        for (const { event, data: payload } of taken.frames) {
           if (event === "delta" && r.firstTokenMs === null) r.firstTokenMs = ms();
           if (event === "tool") toolEvents++;
           if (event === "done") { done = payload || {}; break outer; }
@@ -434,7 +507,10 @@ async function hermesTurn(sess, message, timeoutMs) {
     if (done) {
       r.text = String(done.text || "");
       r.model = typeof done.model === "string" ? done.model : null;
-      if (typeof done.sessionId === "string" && done.sessionId) sess.sessionId = done.sessionId;
+      if (typeof done.sessionId === "string" && done.sessionId) {
+        sess.sessionId = done.sessionId;
+        sess.hermesIds.add(done.sessionId);
+      }
       const calls = Array.isArray(done.toolCalls) ? done.toolCalls.length : 0;
       r.toolCalls = Math.max(calls, toolEvents);
       if (/^Error:/.test(r.text.trim())) r.error = { kind: "agent-error", message: r.text.trim().slice(0, 200) };
@@ -444,12 +520,8 @@ async function hermesTurn(sess, message, timeoutMs) {
     r.latencyMs = ms();
     const aborted = ac.signal.aborted;
     r.error = { kind: aborted ? "timeout" : "connection", message: aborted ? `no answer within ${Math.round(timeoutMs / 1000)} s` : String(e.message || e).slice(0, 200) };
-    if (aborted) {
-      await fetch(`${DASH}/setup-api/hermes/chat`, {
-        method: "DELETE", headers: ownerHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify({ sessionKey: sess.key, turnId }), signal: AbortSignal.timeout(10_000),
-      }).catch(() => {});
-    }
+    // A request going away does not end a Hermes turn; the owner's Stop does.
+    if (aborted) await stopHermesTurn(sess.key, turnId);
   } finally {
     clearTimeout(timer);
   }
@@ -461,7 +533,7 @@ let RUNTIME = null;
 let GW_TOKEN = null;
 const opened = [];
 async function openSession(label) {
-  const sess = { label, key: null, sessionId: null, gw: null };
+  const sess = { label, key: null, sessionId: null, hermesIds: new Set(), gw: null, reconnects: 0 };
   if (RUNTIME === "openclaw") {
     sess.key = `agent:main:clawbox-stress-${RUN_ID}-${label}`.toLowerCase();
     sess.gw = await Gateway.open(GW_TOKEN);
@@ -475,22 +547,52 @@ function closeSession(sess) {
   if (sess.gw) sess.gw.close();
   sess.gw = null;
 }
+// Hermes' own session ids, as its chat route and CLI write them.
+const HERMES_SESSION_ID_RE = /^(?:[0-9]{8}_[0-9]{6}_[0-9a-f]{6}|local-[0-9a-f]{64})$/;
+let cleanup = null;
 async function cleanupSessions() {
+  if (cleanup) return cleanup;
+  const result = { sessions: opened.length, deleted: 0, left: [] };
+  cleanup = result;
   if (RUNTIME === "openclaw") {
     let gw = null;
-    try {
-      gw = await Gateway.open(GW_TOKEN);
-      for (const s of opened) {
-        await gw.req("sessions.delete", { key: s.key, deleteTranscript: true }, 15_000).catch((e) => log("sessions.delete", s.key, e.message));
-      }
-    } catch (e) { log("cleanup: gateway", e.message); } finally { gw?.close(); }
-  } else {
-    // The route's own transcripts (data/chat-transcripts/<key>.jsonl). The Hermes
-    // sessions those turns opened stay in Hermes' own store, like any chat's.
+    for (let attempt = 1; attempt <= 3 && !gw; attempt++) {
+      try { gw = await Gateway.open(GW_TOKEN); } catch (e) { log(`cleanup: gateway (attempt ${attempt})`, e.message); await sleep(3000); }
+    }
     for (const s of opened) {
-      try { fs.rmSync(path.join(REPO, "data/chat-transcripts", `${s.key}.jsonl`), { force: true }); } catch { /* kept */ }
+      if (!gw) { result.left.push(s.key); continue; }
+      // A turn still running (a stop mid-turn) ends first, then the session goes.
+      await gw.req("chat.abort", { sessionKey: s.key }, 10_000).catch(() => {});
+      try {
+        await gw.req("sessions.delete", { key: s.key, deleteTranscript: true }, 15_000);
+        result.deleted++;
+      } catch (e) {
+        log("sessions.delete", s.key, e.message);
+        result.left.push(s.key);
+      }
+    }
+    gw?.close();
+  } else {
+    for (const s of opened) {
+      await stopHermesTurn(s.key);
+      let ok = true;
+      // The route's own transcript (data/chat-transcripts/<key>.jsonl) and the
+      // Hermes sessions its turns opened.
+      try { fs.rmSync(path.join(REPO, "data/chat-transcripts", `${s.key}.jsonl`), { force: true }); } catch { ok = false; }
+      for (const id of s.hermesIds) {
+        if (!HERMES_SESSION_ID_RE.test(id)) continue;
+        try {
+          execFileSync(HERMES_BIN, ["sessions", "delete", "--yes", id], { stdio: "ignore", timeout: 60_000 });
+        } catch (e) {
+          ok = false;
+          log(`hermes sessions delete ${id}: ${String(e.message).split("\n")[0]}`);
+        }
+      }
+      if (ok) result.deleted++; else result.left.push(s.key);
     }
   }
+  log(`cleanup: ${result.deleted}/${result.sessions} sessions deleted${result.left.length ? `, left: ${result.left.join(" ")}` : ""}`);
+  return result;
 }
 const turn = (sess, message, timeoutMs) => (RUNTIME === "openclaw" ? openclawTurn(sess, message, timeoutMs) : hermesTurn(sess, message, timeoutMs));
 
@@ -510,8 +612,11 @@ async function checkedTurn(step, sess, idx, kind, message, expect) {
   if (ok && expect) {
     let want = null;
     try { want = expect(r); } catch (e) { want = { failed: e.message }; }
-    if (want && typeof want === "object" && want.failed) { ok = false; error = { kind: "check", message: want.failed.slice(0, 200) }; }
-    else if (typeof want === "string" && !r.text.includes(want)) { ok = false; error = { kind: "wrong-answer", message: `reply lacks the expected "${want.slice(0, 40)}"` }; }
+    if (want && typeof want === "object" && !(want instanceof RegExp) && want.failed) { ok = false; error = { kind: "check", message: want.failed.slice(0, 200) }; }
+    else if ((typeof want === "string" || want instanceof RegExp) && !replyHolds(r.text, want, message)) {
+      ok = false;
+      error = { kind: "wrong-answer", message: `reply lacks the expected ${String(want).slice(0, 40)}` };
+    }
   }
   const rec = {
     step, chat: sess.label, idx, kind, startedAt, ok,
@@ -553,6 +658,11 @@ async function waitHealthy(budgetS) {
 function slowChatSends(fromMs, toMs) {
   if (RUNTIME !== "openclaw") return null;
   let text = "";
+  // journalctl answers an unreadable journal with nothing and exit 0: that is
+  // "unknown", not "no slow sends".
+  try {
+    if (!execFileSync("journalctl", ["-u", units.gateway, "-n", "1", "-o", "cat", "--no-pager"], { encoding: "utf8", timeout: 10_000 }).trim()) return null;
+  } catch { return null; }
   try {
     text = execFileSync("journalctl", ["-u", units.gateway, "--since", `@${Math.floor(fromMs / 1000)}`, "--until", `@${Math.ceil(toMs / 1000) + 1}`, "-o", "cat", "--no-pager"], { encoding: "utf8", timeout: 20_000, maxBuffer: 32 * 1024 * 1024 });
   } catch { return null; }
@@ -576,14 +686,17 @@ async function runStep(id, kind, concurrency, body) {
   let failure = null;
   try { await body(id); } catch (e) { failure = String(e.message || e).slice(0, 200); log(`step ${id} aborted: ${failure}`); }
   const endedAt = rel();
+  // Restarts and OOM kills are read after the recovery wait and the settle, so
+  // a crash at the tail of the load is this step's, not nobody's.
+  const healthyAfter = await waitHealthy(120);
+  if (cfg.settleS > 0 && !stopping) await sleep(cfg.settleS * 1000);
   const unitsAfter = await refreshUnits();
   const oomAfter = oomKills();
-  const healthyAfter = await waitHealthy(120);
-  const slow = slowChatSends(T0 + startedAt, T0 + endedAt);
-  steps.push({ id, kind, concurrency, startedAt, endedAt, unitsBefore, unitsAfter, oomKillsBefore: oomBefore, oomKillsAfter: oomAfter, healthyAfter, ...(slow ? { slowChatSends: slow } : {}), ...(failure ? { failure } : {}) });
+  const slow = slowChatSends(T0 + startedAt, Date.now());
+  const reconnects = opened.reduce((n, x) => n + (x.label.startsWith(id) ? x.reconnects || 0 : 0), 0);
+  steps.push({ id, kind, concurrency, startedAt, endedAt, unitsBefore, unitsAfter, oomKillsBefore: oomBefore, oomKillsAfter: oomAfter, healthyAfter, reconnects, ...(slow ? { slowChatSends: slow } : {}), ...(failure ? { failure } : {}) });
   log(`step ${id}: done in ${Math.round((endedAt - startedAt) / 1000)} s, healthy after: ${healthyAfter}`);
   writeOut(false);
-  if (cfg.settleS > 0) await sleep(cfg.settleS * 1000);
 }
 
 async function stepIdle(id) {
@@ -644,16 +757,21 @@ async function stepTool(id) {
   };
   const plan = [
     ["shell", "Run the shell command `cat /proc/sys/kernel/random/boot_id` and reply with only its output.",
-      () => fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim().slice(0, 8)],
+      () => new RegExp(`(?:^|[^0-9a-f])${fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim().slice(0, 8)}`)],
     ["write", `Use a tool to create the file ${notes} containing exactly one line: ${t2}. Then reply with only DONE.`, fileHas(t2)],
     ["hash", `Run \`sha256sum ${notes}\` and reply with only the first 16 characters of the hash it prints.`,
-      () => crypto.createHash("sha256").update(fs.readFileSync(notes)).digest("hex").slice(0, 16)],
+      () => new RegExp(`(?:^|[^0-9a-f])${crypto.createHash("sha256").update(fs.readFileSync(notes)).digest("hex").slice(0, 16)}`)],
     ["read", `Read the file ${notes} with a tool and reply with only its contents.`, () => t2],
     ["append", `Append a new line containing ${t5} to ${notes} with a shell command, then run \`wc -l < ${notes}\` and reply with only that number.`,
       () => { const miss = fileHas(t5)(); return miss || sh(`wc -l < ${JSON.stringify(notes)}`); }],
     ["count", "Run `ls -1 /usr/bin | wc -l` and reply with only the number it prints.", () => sh("ls -1 /usr/bin | wc -l")],
     ["stat", `Run \`stat -c %s ${notes}\` and reply with only the number it prints.`, () => String(fs.statSync(notes).size)],
-    ["multi", `Create the directory ${dir}/sub, write the text ${t8} into the file ${dir}/sub/a.txt, then run \`grep -rl ${t8} ${dir}\` and reply with only the path(s) it printed.`, () => "sub/a.txt"],
+    ["multi", `Create the directory ${dir}/sub, write the text ${t8} into the file ${dir}/sub/a.txt, then run \`grep -rl ${t8} ${dir}\` and reply with only the path(s) it printed.`,
+      () => {
+        const a = path.join(dir, "sub", "a.txt");
+        const body = fs.existsSync(a) ? fs.readFileSync(a, "utf8") : "";
+        return body.includes(t8) ? a : { failed: `${a} does not hold ${t8}` };
+      }],
   ].slice(0, cfg.toolTurns);
   try {
     let k = 0;
@@ -687,7 +805,7 @@ function writeOut(final) {
   const doc = {
     version: VERSION, tool: "clawbox-nano-stress", runId: RUN_ID, final,
     startedAt: new Date(T0).toISOString(), endedAt: new Date().toISOString(),
-    runtime: RUNTIME, units: { ...units }, board, config: cfg, steps, turns, samples,
+    runtime: RUNTIME, units: { ...units }, board, config: cfg, cleanup, steps, turns, samples,
   };
   const tmp = `${OUT}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(doc));
@@ -705,8 +823,6 @@ async function shutdown(signal) {
   writeOut(false);
   process.exit(130);
 }
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
-process.on("SIGINT", () => void shutdown("SIGINT"));
 
 async function main() {
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
@@ -724,12 +840,12 @@ async function main() {
   startSampler();
   try {
     for (const s of cfg.steps) {
-      if (stopping) break;
-      if (s === "idle") await runStep("idle", "idle", 0, stepIdle);
-      else if (s === "ramp") for (const n of cfg.ramp) await runStep(`ramp-${n}`, "ramp", n, (id) => stepRamp(id, n));
-      else if (s === "long") await runStep("long", "long", 1, stepLong);
-      else if (s === "tool") await runStep("tool", "tool", 1, stepTool);
-      else log(`unknown step ${s}: skipped`);
+      if (s === "idle" && !stopping) await runStep("idle", "idle", 0, stepIdle);
+      else if (s === "ramp") {
+        for (const n of cfg.ramp) if (!stopping) await runStep(`ramp-${n}`, "ramp", n, (id) => stepRamp(id, n));
+      } else if (s === "long" && !stopping) await runStep("long", "long", 1, stepLong);
+      else if (s === "tool" && !stopping) await runStep("tool", "tool", 1, stepTool);
+      else if (!["idle", "ramp", "long", "tool"].includes(s)) log(`unknown step ${s}: skipped`);
     }
   } finally {
     stopSampler();
@@ -741,12 +857,23 @@ async function main() {
   log(`done: ${turns.filter((t) => t.ok).length}/${turns.length} turns ok`);
 }
 
-main().then(() => process.exit(0), (e) => {
-  log(`failed: ${e.message}`);
+const isMain = process.argv[1] && fileURLToPath(import.meta.url) === fs.realpathSync(process.argv[1]);
+if (isMain) {
   try {
-    stopSampler();
-    writeOut(false);
-    fs.writeFileSync(`${OUT}.error`, String(e.message || e));
-  } catch { /* nothing more to do */ }
-  process.exit(1);
-});
+    ({ out: OUT, cfg } = parseOptions(process.argv.slice(2)));
+  } catch (e) {
+    console.error(`board-stress: ${e.message}`);
+    process.exit(2);
+  }
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  main().then(() => process.exit(0), (e) => {
+    log(`failed: ${e.message}`);
+    try {
+      stopSampler();
+      writeOut(false);
+      fs.writeFileSync(`${OUT}.error`, String(e.message || e));
+    } catch { /* nothing more to do */ }
+    process.exit(1);
+  });
+}

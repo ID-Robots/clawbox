@@ -2,7 +2,8 @@
 
 A repeatable load run for one ClawBox on a nano-lab board (TASK-2500). It is
 not part of the per-PR suite in [nano-hardware-tests.md](nano-hardware-tests.md):
-a full run takes 10–30 minutes and sends about sixty real chat turns. Run it
+a full run takes 10–30 minutes and, with the defaults, sends 85 real chat
+turns (45 in the ramp, 32 in the long session, 8 in the tool session). Run it
 by hand before a release, after a change to the gateway, Hermes or memory
 limits, or when a box is reported slow, and keep the summaries to compare.
 
@@ -24,8 +25,10 @@ talks to the box the way its desktop chat does:
 
 Each run uses sessions of its own (`clawbox-stress-<run>-…` on OpenClaw,
 `stress-<run>-…` on Hermes) and deletes them at the end, also when it is
-stopped. The Hermes sessions those turns opened stay in Hermes' own store, as
-any chat's do.
+stopped: on OpenClaw `chat.abort` then `sessions.delete` through the gateway,
+on Hermes the owner's Stop, the chat route's transcript file and
+`hermes sessions delete` for every Hermes session its turns opened. The record
+says how many it deleted, and the summary lists any it could not.
 
 | step | what it sends |
 |---|---|
@@ -35,16 +38,23 @@ any chat's do.
 | `tool` | one session of 8 turns that each need a tool: shell commands, writing, reading and appending a file in the run's own `/tmp` folder, `sha256sum`, `stat`, `grep -rl` |
 
 Every reply is checked against what the board itself knows (the marker sent,
-the file's real hash, `wc -l`, `boot_id`), so a turn that answered but answered
-wrong counts as a failed turn, not a fast one.
+the file's real hash, `wc -l`, `boot_id`, the files the agent was asked to
+write), as a whole token and with any echo of the prompt taken out first, so a
+turn that answered but answered wrong counts as a failed turn, not a fast one.
+A turn with no answer within the turn timeout is stopped (`chat.abort` on
+OpenClaw, the route's Stop on Hermes) and counts as an error with no latency.
 
 Every 2 s the run samples: MemAvailable, swap used, CPU busy % and load, the
-hottest thermal zone, and the resident memory of every process in the
-runtime's unit (`clawbox-gateway` on OpenClaw, `clawbox-hermes-dashboard` on
-Hermes) and in the web server's (`clawbox-setup`, where Hermes turns run). At
-each step's edges it reads each unit's `MainPID` and `NRestarts` and the
-kernel's `oom_kill` counter, and after each step it waits up to 120 s for the
-runtime to answer healthy again.
+hottest thermal zone, the memory of the runtime's unit (`clawbox-gateway` on
+OpenClaw, `clawbox-hermes-dashboard` on Hermes) and of the web server
+(`clawbox-setup`, where Hermes turns run). A unit's memory is its cgroup's
+`memory.current`, the headline, and the summed resident set of every process
+in it, an upper bound since shared pages count once per process. At a
+step's start, and again after it has waited up to 120 s for the runtime to
+answer healthy and the settle pause, it reads each unit's `MainPID` and
+`NRestarts` and the kernel's `oom_kill` counter, so a crash at the tail of the
+load is that step's. On OpenClaw it also counts the gateway's own
+`slow chat send` journal lines for the step.
 
 ## Running it
 
@@ -73,7 +83,12 @@ NANO_CI=nano-board scripts/nano-stress/run.sh <serial> -- \
 ```
 
 `--budget-min N` (default 150) caps the whole run; `--strict` exits 3 when the
-summary lists any finding.
+summary lists any finding. `run.sh` exits 0 when the run finished and was
+summarised, and 1 when it did not finish (out of budget, died, never started)
+or its record could not be read; a partial record is still summarised.
+
+Never edit `run.sh` while a run of it is going: bash reads a script as it runs
+it.
 
 ## What comes back
 
@@ -81,7 +96,8 @@ In the results folder, per runtime:
 
 - `raw-<runtime>.json`: every turn (step, latency, first token, tool calls,
   pass/fail and why) and every sample. No reply text is kept for a turn that
-  passed; a failed one keeps its first 120 characters.
+  passed; a failed one keeps the first 120 characters of the model's reply,
+  so treat the raw files as private.
 - `stress-<runtime>.json`: the per-step numbers ([report.mjs](../scripts/nano-stress/report.mjs)):
   latency p50/p95/max over every turn that got an answer, errors by kind,
   MemAvailable start/min/end, swap used, hottest zone, CPU, runtime and web
@@ -93,9 +109,11 @@ Several raw files can be summarised side by side:
 `node scripts/nano-stress/report.mjs --md both.md raw-openclaw.json raw-hermes.json`.
 
 A finding is a failed turn, an OOM kill, a unit restart or new main process, a
-runtime not healthy after a step, MemAvailable under 400 MB, or a missed recall.
+runtime not healthy after a step, MemAvailable under 400 MB, a missed recall,
+a gateway socket opened again mid-step, or a test session left undeleted.
 The numbers depend on the model the box is set to: compare runs on the same
 provider and model (the summary names the model the turns reported).
 
 Before pasting a summary into a public place, check it: it names the board
-model and the build, never a board's address, name or serial.
+model, the build and the model the turns reported, never a board's address,
+name or serial.

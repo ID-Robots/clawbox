@@ -20,9 +20,11 @@
 # STRESS_OPTIONs go to board-stress.mjs unchanged, e.g.
 #   -- --ramp 1,2,4,8 --ramp-turns 3 --long-turns 32 --tool-turns 8 --steps idle,ramp,long,tool
 #
-# Exit status: 0 when the record came back and was summarised; 1 when it did
-# not; 3 with --strict when the summary lists findings (failed turns, OOM
-# kills, restarts, low memory).
+# Exit status: 0 when the run finished and its record was summarised; 1 when
+# it did not finish (the budget ran out, it died, it would not start) or its
+# record could not be read — a partial record is still summarised then; 3 with
+# --strict when the summary lists findings (failed turns, OOM kills, restarts,
+# low memory).
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -70,26 +72,45 @@ say "board build: $(board_head | cut -c1-12)"
 
 STARTED=0
 FETCHED=0
+STOPPED=1
+# stop_board_side — SIGTERM the board script and wait (up to 150 s: it aborts
+# and deletes every session it opened first) until it is gone. Prints "gone"
+# or "alive <pid>"; returns non-zero while it still runs.
+stop_board_side() {
+  local out
+  # shellcheck disable=SC2016  # expanded on the board
+  out=$(board '
+    pid=$(cat "$1/raw.json.pid" 2>/dev/null)
+    case "$pid" in ""|*[!0-9]*) echo gone; exit 0 ;; esac
+    [ "$pid" -gt 1 ] || { echo gone; exit 0; }
+    kill -TERM "$pid" 2>/dev/null || { echo gone; exit 0; }
+    for _ in $(seq 1 150); do kill -0 "$pid" 2>/dev/null || { echo gone; exit 0; }; sleep 1; done
+    echo "alive $pid"
+  ' "$BOARD_DIR" 2>/dev/null | tail -n 1)
+  say "board side: ${out:-no answer}"
+  [ "$out" = gone ]
+}
 cleanup() {
   if [ "$STARTED" = 1 ] && [ "$FETCHED" = 0 ]; then
     say "stopping the board side (it deletes its own chat sessions)"
-    # shellcheck disable=SC2016  # expanded on the board
-    board '
-      pid=$(cat "$1/raw.json.pid" 2>/dev/null)
-      case "$pid" in ""|*[!0-9]*) exit 0 ;; esac
-      [ "$pid" -gt 1 ] || exit 0
-      kill -TERM "$pid" 2>/dev/null || exit 0
-      for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
-    ' "$BOARD_DIR" >/dev/null 2>&1
+    stop_board_side || STOPPED=0
   fi
-  if [ "$STARTED" = 1 ]; then
+  if [ "$STARTED" = 1 ] && [ "$STOPPED" = 1 ]; then
     # shellcheck disable=SC2016  # expanded on the board
     board 'case "$1" in /tmp/clawbox-stress-*) rm -rf -- "$1" ;; esac' "$BOARD_DIR" >/dev/null 2>&1
+  elif [ "$STARTED" = 1 ]; then
+    say "the board side still runs: $BOARD_DIR is kept on the board; stop it by the pid above"
   fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
+# The script travels inside the ONE command string the ssh hop carries
+# (lib.sh `board`), base64 twice over; Linux caps one argument at 128 KiB.
+if [ "$(wc -c < "$HERE/board-stress.mjs")" -gt 60000 ]; then
+  say "board-stress.mjs is over 60 KB: too big for one ssh argument; copy it with \`\$NANO_CI scp\` instead"
+  exit 1
+fi
 # shellcheck disable=SC2016  # expanded on the board
 started=$(board '
   dir=$1; shift
@@ -98,7 +119,7 @@ started=$(board '
   setsid -f node "$dir/stress.mjs" --out "$dir/raw.json" "$@" </dev/null >"$dir/stress.log" 2>&1
   for _ in $(seq 1 20); do [ -s "$dir/raw.json.pid" ] && break; sleep 0.5; done
   [ -s "$dir/raw.json.pid" ] && echo started || { echo "did not start:"; tail -n 5 "$dir/stress.log"; }
-' "$BOARD_DIR" "$(base64 -w0 "$HERE/board-stress.mjs")" "${STRESS_ARGS[@]}")
+ ' "$BOARD_DIR" "$(base64 -w0 "$HERE/board-stress.mjs")" --runtime "$RUNTIME" "${STRESS_ARGS[@]}")
 STARTED=1
 if [ "$(printf '%s\n' "$started" | tail -n 1)" != started ]; then
   say "the stress run did not start on the board:"
@@ -117,7 +138,7 @@ while :; do
     dir=$1; shown=$2
     total=$(wc -l < "$dir/stress.log" 2>/dev/null || echo 0)
     echo "@@lines $total"
-    [ "$total" -gt "$shown" ] && tail -n +"$((shown + 1))" "$dir/stress.log" | head -n 200
+    [ "$total" -gt "$shown" ] && tail -n +"$((shown + 1))" "$dir/stress.log"
     pid=$(cat "$dir/raw.json.pid" 2>/dev/null)
     if [ -s "$dir/raw.json" ]; then echo "@@state done"
     elif [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then echo "@@state running"
@@ -136,12 +157,14 @@ while :; do
 done
 
 if [ "$STATE" = budget ]; then
-  # The board side writes what it has to raw.json.partial when stopped.
-  cleanup_stop() {
-    # shellcheck disable=SC2016  # expanded on the board
-    board 'pid=$(cat "$1/raw.json.pid" 2>/dev/null); case "$pid" in ""|*[!0-9]*) exit 0;; esac; [ "$pid" -gt 1 ] && kill -TERM "$pid" 2>/dev/null; for _ in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done' "$BOARD_DIR" >/dev/null 2>&1
-  }
-  cleanup_stop
+  # Stopped, the board side writes what it has to raw.json.partial — only once
+  # it is gone is that file final.
+  if ! stop_board_side; then
+    STOPPED=0
+    FETCHED=1
+    say "the board side did not stop; nothing fetched"
+    exit 1
+  fi
 fi
 
 # The record comes back gzipped and base64-encoded over the same ssh hop.

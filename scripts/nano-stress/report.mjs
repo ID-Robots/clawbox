@@ -102,12 +102,16 @@ export function summarizeStep(step, raw) {
       cpuBusyPct: { mean: round1(meanOf(inside.map((s) => s.cpuBusyPct))), max: round1(maxOf(inside.map((s) => s.cpuBusyPct))) },
       load1Max: round1(maxOf(all.map((s) => s.load1))),
       gatewayRssMb: { start: mb(start?.gatewayRssKb), max: mb(maxOf(all.map((s) => s.gatewayRssKb))), end: mb(end?.gatewayRssKb) },
-      gatewayCgroupMbMax: mb(maxOf(all.map((s) => s.gatewayCgroupKb))),
+      // The unit's cgroup memory (memory.current) is the headline: the RSS sum
+      // counts a page shared between its processes once per process, so it
+      // is an upper bound.
+      gatewayCgroupMb: { start: mb(start?.gatewayCgroupKb), max: mb(maxOf(all.map((s) => s.gatewayCgroupKb))), end: mb(end?.gatewayCgroupKb) },
       gatewayProcsMax: maxOf(all.map((s) => s.gatewayProcs)),
       webRssMb: { start: mb(start?.webRssKb), max: mb(maxOf(all.map((s) => s.webRssKb))), end: mb(end?.webRssKb) },
     },
     units: unitDelta(step.unitsBefore, step.unitsAfter),
     slowChatSends: step.slowChatSends ?? null,
+    reconnects: step.reconnects ?? 0,
     oomKills: typeof step.oomKillsAfter === "number" && typeof step.oomKillsBefore === "number" ? step.oomKillsAfter - step.oomKillsBefore : null,
     healthyAfter: step.healthyAfter ?? null,
     ...(step.failure ? { failure: step.failure } : {}),
@@ -137,12 +141,14 @@ export function findingsOf(report) {
       if (u.restarts) f.push(`${s.id}: ${u.unit || role} restarted ${u.restarts} time(s)`);
       else if (u.pidChanged) f.push(`${s.id}: ${u.unit || role} has a new main process`);
     }
+    if (s.reconnects) f.push(`${s.id}: the gateway socket was opened again ${s.reconnects} time(s) mid-step`);
     if (s.healthyAfter === false) f.push(`${s.id}: ${report.runtime} not healthy within 120 s after the step`);
     const low = s.resources.memAvailableMb.min;
     if (typeof low === "number" && low < LOW_MEM_MB) f.push(`${s.id}: MemAvailable fell to ${low} MB`);
     if (s.failure) f.push(`${s.id}: step stopped early: ${s.failure}`);
     if (s.long && s.long.recall.ok < s.long.recall.asked) f.push(`${s.id}: recalled the code word ${s.long.recall.ok}/${s.long.recall.asked} times`);
   }
+  if (report.cleanup && report.cleanup.left?.length) f.push(`cleanup: ${report.cleanup.left.length} of ${report.cleanup.sessions} sessions could not be deleted`);
   return f;
 }
 
@@ -157,6 +163,7 @@ export function summarizeRaw(raw) {
     complete: raw.final === true,
     runtime: raw.runtime,
     units: raw.units,
+    cleanup: raw.cleanup ?? null,
     startedAt: raw.startedAt,
     endedAt: raw.endedAt,
     board: raw.board,
@@ -172,6 +179,7 @@ export function summarizeRaw(raw) {
       memAvailableMinMb: minOf(steps.map((s) => s.resources.memAvailableMb.min)),
       swapUsedMaxMb: maxOf(steps.map((s) => s.resources.swapUsedMb.max)),
       tempMaxC: maxOf(steps.map((s) => s.resources.tempC.max)),
+      gatewayCgroupMaxMb: maxOf(steps.map((s) => s.resources.gatewayCgroupMb.max)),
       gatewayRssMaxMb: maxOf(steps.map((s) => s.resources.gatewayRssMb.max)),
     },
     steps,
@@ -194,19 +202,21 @@ export function renderMarkdown(reports) {
     out.push(`- Run: ${r.startedAt} → ${r.endedAt}; turn timeout ${val(r.config?.turnTimeoutS)} s${r.models?.length ? `; model ${r.models.join(", ")}` : ""}`);
     const t = r.totals;
     out.push(`- Turns: ${t.ok}/${t.turns} ok; latency p50 ${sec(t.latencyMs.p50)} s, p95 ${sec(t.latencyMs.p95)} s; OOM kills ${t.oomKills}; unit restarts ${t.restarts}`);
-    out.push(`- Lowest MemAvailable ${val(t.memAvailableMinMb)} MB; most swap used ${val(t.swapUsedMaxMb)} MB; hottest zone ${val(t.tempMaxC)} °C; runtime RSS peak ${val(t.gatewayRssMaxMb)} MB`, "");
-    out.push("| step | chats | turns ok | p50 s | p95 s | max s | 1st token p50 s | MemAvail start→min MB | swap used max MB | temp max °C | CPU mean % | runtime RSS start→max MB | runtime cgroup max MB | runtime procs max | web RSS max MB | restarts | OOM |");
+    out.push(`- Lowest MemAvailable ${val(t.memAvailableMinMb)} MB; most swap used ${val(t.swapUsedMaxMb)} MB; hottest zone ${val(t.tempMaxC)} °C; runtime unit memory peak ${val(t.gatewayCgroupMaxMb)} MB (cgroup; RSS sum ${val(t.gatewayRssMaxMb)} MB)`, "");
+    out.push("| step | chats | turns ok | p50 s | p95 s | max s | 1st token p50 s | MemAvail start→min MB | swap used max MB | temp max °C | CPU mean % | runtime mem start→max MB | runtime RSS sum max MB | runtime procs max | web RSS max MB | restarts | OOM |");
     out.push("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     for (const s of r.steps) {
       const x = s.resources;
       const restarts = Object.values(s.units).reduce((n, u) => n + (u.restarts || 0), 0);
-      out.push(`| ${s.id} | ${s.concurrency || "–"} | ${s.turns.total ? `${s.turns.ok}/${s.turns.total}` : "–"} | ${sec(s.latencyMs.p50)} | ${sec(s.latencyMs.p95)} | ${sec(s.latencyMs.max)} | ${sec(s.latencyMs.firstTokenP50)} | ${val(x.memAvailableMb.start)}→${val(x.memAvailableMb.min)} | ${val(x.swapUsedMb.max)} | ${val(x.tempC.max)} | ${val(x.cpuBusyPct.mean)} | ${val(x.gatewayRssMb.start)}→${val(x.gatewayRssMb.max)} | ${val(x.gatewayCgroupMbMax)} | ${val(x.gatewayProcsMax)} | ${val(x.webRssMb.max)} | ${restarts} | ${val(s.oomKills)} |`);
+      out.push(`| ${s.id} | ${s.concurrency || "–"} | ${s.turns.total ? `${s.turns.ok}/${s.turns.total}` : "–"} | ${sec(s.latencyMs.p50)} | ${sec(s.latencyMs.p95)} | ${sec(s.latencyMs.max)} | ${sec(s.latencyMs.firstTokenP50)} | ${val(x.memAvailableMb.start)}→${val(x.memAvailableMb.min)} | ${val(x.swapUsedMb.max)} | ${val(x.tempC.max)} | ${val(x.cpuBusyPct.mean)} | ${val(x.gatewayCgroupMb.start)}→${val(x.gatewayCgroupMb.max)} | ${val(x.gatewayRssMb.max)} | ${val(x.gatewayProcsMax)} | ${val(x.webRssMb.max)} | ${restarts} | ${val(s.oomKills)} |`);
     }
     out.push("");
     const long = r.steps.find((s) => s.long);
     if (long) out.push(`Long session: ${long.turns.total} turns, p50 of the first five ${sec(long.long.firstFiveP50Ms)} s vs the last five ${sec(long.long.lastFiveP50Ms)} s; code word recalled ${long.long.recall.ok}/${long.long.recall.asked}.`);
     const tool = r.steps.find((s) => s.tool);
     if (tool) out.push(`Tool session: ${tool.turns.ok}/${tool.turns.total} turns right, ${tool.tool.turnsWithToolCalls} with tool calls seen (${tool.toolCalls} calls).`);
+    out.push("Runtime mem is the runtime unit's cgroup memory (memory.current); the RSS sum adds up its processes' resident sets, shared pages counted once per process.");
+    if (r.cleanup) out.push(`Cleanup: ${r.cleanup.deleted}/${r.cleanup.sessions} test sessions deleted.`);
     const slow = r.steps.filter((s) => s.slowChatSends?.count);
     if (slow.length) out.push(`Gateway "slow chat send" log lines: ${slow.map((s) => `${s.id} ${s.slowChatSends.count} (max ${sec(s.slowChatSends.maxMs)} s, preparation ${sec(s.slowChatSends.maxPreparationMs)} s)`).join("; ")}.`);
     out.push("", r.findings.length ? "Findings:" : "Findings: none — no failed turn, no OOM kill, no restart, MemAvailable stayed above " + LOW_MEM_MB + " MB.");
