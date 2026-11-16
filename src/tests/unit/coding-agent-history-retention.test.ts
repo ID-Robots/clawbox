@@ -331,6 +331,8 @@ describe("the owner's Clear", () => {
 describe("the setting's door", () => {
   const ds = () => path.join(home, ".claude-ds", "settings.json");
   const own = () => path.join(home, ".claude", "settings.json");
+  // A `local` run's own Claude Code state (TASK-2501 PR-E): its transcripts follow the mode too.
+  const local = () => path.join(home, ".claude-ds-local", "settings.json");
   const readJson = (file: string) => JSON.parse(fs.readFileSync(file, "utf-8"));
 
   it("refuses what the box does not offer — the retired modes included — before saving anything", async () => {
@@ -345,9 +347,10 @@ describe("the setting's door", () => {
     fs.writeFileSync(ds(), JSON.stringify({ model: "deepseek-v4-flash" }));
     const change = await lib.setHistoryRetention("everything");
     expect(change.policy.mode).toBe("everything");
-    expect(change.transcripts.map((t) => t.state)).toEqual(["kept", "kept"]);
+    expect(change.transcripts.map((t) => t.state)).toEqual(["kept", "kept", "kept"]);
     expect(readJson(ds())).toEqual({ model: "deepseek-v4-flash", cleanupPeriodDays: 36_500 });
     expect(readJson(own())).toEqual({ cleanupPeriodDays: 36_500 });
+    expect(readJson(local())).toEqual({ cleanupPeriodDays: 36_500 });
     const status = await lib.getCodingAgentStatus();
     expect(status).toMatchObject({ historyRetention: "everything", historyLiveKept: 30 });
     // The extended N went with its mode (SCA2 C1), its choices before it (SCA C3).
@@ -358,6 +361,7 @@ describe("the setting's door", () => {
     expect(back.policy).toEqual({ mode: "standard" });
     expect(readJson(ds())).toEqual({ model: "deepseek-v4-flash" });
     expect(readJson(own())).toEqual({});
+    expect(readJson(local())).toEqual({});
   });
 
   it("start over puts the setting back and hands Claude Code its period back", async () => {

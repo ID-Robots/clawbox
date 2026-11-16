@@ -39,6 +39,13 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => ({
   noteAllowanceRefusal,
 }));
 
+// The local-only AI lock (TASK-2501): off unless a case turns it on.
+const cloudAiLockOn = vi.hoisted(() => vi.fn(async () => false));
+vi.mock("@/lib/feature-engine", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/feature-engine")>()),
+  cloudAiLockOn,
+}));
+
 const generateClawaiImageBytes = vi.hoisted(() => vi.fn());
 class FakeImageError extends Error {
   constructor(readonly status: number, message: string) {
@@ -187,6 +194,23 @@ describe("who may ask at all", () => {
     // The other switch is still on, so the other route still works.
     const clip = await postAudio(body({ path: "intro.wav", text: "Hello" }, "audio"));
     expect(clip.status).toBe(200);
+  });
+
+  it("refuses both kinds under the local-only AI lock, whatever the run was started with, and asks no cloud", async () => {
+    liveRun({ media: { images: true, audio: true } });
+    cloudAiLockOn.mockResolvedValue(true);
+    try {
+      const picture = await postImage(body({ path: "hero.png", prompt: "a crab" }, "image"));
+      expect(picture.status).toBe(409);
+      expect(await picture.json()).toMatchObject({ code: "cloud_ai_locked", error: expect.stringMatching(/local-only AI lock is on/) });
+      const clip = await postAudio(body({ path: "intro.wav", text: "Hello" }, "audio"));
+      expect(clip.status).toBe(409);
+      expect((await clip.json()).code).toBe("cloud_ai_locked");
+      expect(generateClawaiImageBytes).not.toHaveBeenCalled();
+      expect(reserveRunMedia).not.toHaveBeenCalled();
+    } finally {
+      cloudAiLockOn.mockResolvedValue(false);
+    }
   });
 
   it("refuses past the per-run cap, and says how far the run got", async () => {
