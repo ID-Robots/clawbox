@@ -53,7 +53,8 @@
     "qrcode.react": "^4.2.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
-    "ws": "^8.22.0"
+    "ws": "^8.22.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0",
