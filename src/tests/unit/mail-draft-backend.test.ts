@@ -5,6 +5,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  canonicalJson,
   cleanBody,
   cleanLine,
   draftContentHash,
@@ -17,7 +18,6 @@ import {
   sendDraft,
   BACKEND_MAX_BYTES,
   MAX_PREVIEW_CHARS,
-  type MailDraft,
 } from "@/lib/mail-draft-backend";
 import {
   isLoopbackHost,
@@ -36,7 +36,8 @@ const CONFIG: DraftApprovalConfig = {
   authValue: "k-placeholder",
 };
 
-const BASE: MailDraft = {
+/** A backend's answer for one draft, as raw JSON. */
+const BASE: Record<string, unknown> = {
   id: "d1",
   to: ["ivan@example.com"],
   cc: [],
@@ -46,6 +47,12 @@ const BASE: MailDraft = {
   body: "Body",
   attachments: [],
 };
+
+function draftOf(raw: Record<string, unknown>) {
+  const draft = normalizeDraft(raw, String(raw.id));
+  if (!draft) throw new Error("not a draft");
+  return draft;
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -67,13 +74,16 @@ describe("normalizeDraft", () => {
       ),
     ).toEqual({
       id: "d1",
+      from: null,
       to: ["Ivan Ivanov <ivan@example.com>", "Ops <ops@example.com>"],
       cc: ["a@example.com", "b@example.com"],
       bcc: [],
+      replyTo: [],
       subject: "Offer",
       bodyType: "text",
       body: "Hi",
       attachments: [{ name: "offer.pdf", size: 2048 }],
+      hash: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
   });
 
@@ -85,13 +95,17 @@ describe("normalizeDraft", () => {
         toRecipients: [{ emailAddress: { name: "Acme Buyer", address: "buyer@acme.example" } }],
         ccRecipients: [],
         bccRecipients: [{ emailAddress: { address: "hidden@example.net" } }],
+        from: { emailAddress: { name: "Owner", address: "owner@acme.example" } },
+        replyTo: [{ emailAddress: { address: "replies@acme.example" } }],
         body: { contentType: "HTML", content: "<p>Hi <b>there</b></p>" },
       },
       "AAMk=",
     );
     expect(draft).toMatchObject({
+      from: "Owner <owner@acme.example>",
       to: ["Acme Buyer <buyer@acme.example>"],
       bcc: ["hidden@example.net"],
+      replyTo: ["replies@acme.example"],
       bodyType: "html",
       body: "<p>Hi <b>there</b></p>",
     });
@@ -103,31 +117,52 @@ describe("normalizeDraft", () => {
     expect(normalizeDraft({ to: [], subject: 5, body: "" }, "d1")).toBeNull();
     expect(normalizeDraft({ to: [], body: { content: 5 } }, "d1")).toBeNull();
     expect(normalizeDraft({ to: [], body: "", attachments: [{ size: 1 }] }, "d1")).toBeNull();
+    expect(normalizeDraft({ to: [], body: "", from: 7 }, "d1")).toBeNull();
+    expect(normalizeDraft({ to: [], body: "", replyTo: [null] }, "d1")).toBeNull();
     expect(normalizeDraft("nope", "d1")).toBeNull();
     expect(normalizeDraft([], "d1")).toBeNull();
   });
 });
 
 describe("draftContentHash", () => {
-  it("changes with everything that decides what is sent, and only with that", () => {
+  it("covers the backend's whole answer, whatever order it lists the fields in", () => {
     const base = draftContentHash(BASE);
     expect(draftContentHash({ ...BASE })).toBe(base);
+    const reversed = Object.fromEntries(Object.entries(BASE).reverse());
+    expect(draftContentHash(reversed)).toBe(base);
+    expect(draftOf(BASE).hash).toBe(base);
     for (const changed of [
       { ...BASE, to: ["ivan@example.com", "x@example.net"] },
       { ...BASE, cc: ["x@example.net"] },
       { ...BASE, bcc: ["x@example.net"] },
       { ...BASE, subject: "Hello!" },
       { ...BASE, body: "Body." },
-      { ...BASE, bodyType: "html" as const },
+      { ...BASE, bodyType: "html" },
       { ...BASE, attachments: [{ name: "a.pdf", size: 1 }] },
+      // What no card field shows but the mail carries: still bound.
+      { ...BASE, replyTo: ["attacker@example.net"] },
+      { ...BASE, from: "someone-else@example.net" },
+      { ...BASE, internetMessageHeaders: [{ name: "X-Redirect", value: "1" }] },
       { ...BASE, id: "d2" },
     ]) {
       expect(draftContentHash(changed)).not.toBe(base);
     }
+    expect(draftContentHash({ ...BASE, attachments: [{ name: "a.pdf", size: 1, sha256: "11" }] }))
+      .not.toBe(draftContentHash({ ...BASE, attachments: [{ name: "a.pdf", size: 1, sha256: "22" }] }));
+  });
+
+  it("is sha256 over a prefix and the canonical JSON, as the docs say", () => {
+    expect(canonicalJson({ b: 1, a: [{ d: 2, c: "x" }] })).toBe('{"a":[{"c":"x","d":2}],"b":1}');
   });
 });
 
 describe("what a card shows", () => {
+  it("shows where a link goes, not only its words", () => {
+    const text = htmlToText('<p><a href="https://evil.example/pay">Open invoice</a> or <a href="https://acme.example">https://acme.example</a></p>');
+    expect(text).toContain("Open invoice <https://evil.example/pay>");
+    expect(text).not.toContain("https://acme.example <");
+  });
+
   it("turns an HTML body into its words, scripts and markup gone", () => {
     const text = htmlToText("<div>Hello<br>World</div><script>alert(1)</script><ul><li>one</li><li>two</li></ul><img alt=\"logo\" src=\"x\">");
     expect(text).toContain("Hello\nWorld");
@@ -136,17 +171,24 @@ describe("what a card shows", () => {
     expect(text).not.toContain("<");
   });
 
-  it("removes what would make a line read differently from what is sent", () => {
-    expect(cleanLine("Pay‮gnp.exe\u0007\r\nnow", 100)).toBe("Paygnp.exe now");
-    expect(cleanBody("a\r\nb c​d﻿")).toBe("a\nb\nc​d");
+  it("shows, rather than hides, what would make a line read differently from what is sent", () => {
+    expect(cleanLine("Pay\u202egnp.exe\u0007\r\nnow", 100)).toBe("Pay[U+202E]gnp.exe[U+0007] now");
+    expect(cleanBody("a\r\nb\u2028c\u200bd\ufeff")).toBe("a\nb\nc\u200bd[U+FEFF]");
+    expect(draftView(draftOf({ ...BASE, subject: "Invoice \u202efdp.exe" }))).toMatchObject({
+      subject: "Invoice [U+202E]fdp.exe",
+      hiddenCharacters: true,
+    });
+    expect(draftView(draftOf({ ...BASE, to: ["a\u202e@example.com"] })).hiddenCharacters).toBe(true);
+    expect(draftView(draftOf(BASE)).hiddenCharacters).toBe(false);
   });
 
-  it("caps the preview but never the hash", () => {
-    const long = { ...BASE, body: "x".repeat(MAX_PREVIEW_CHARS + 50) };
-    const view = draftView(long);
-    expect(view.body).toHaveLength(MAX_PREVIEW_CHARS);
-    expect(view.bodyTruncated).toBe(true);
-    expect(draftContentHash(long)).not.toBe(draftContentHash({ ...long, body: long.body.slice(0, -1) }));
+  it("shows the whole body of anything the backend can send, and says when it could not", () => {
+    const big = draftView(draftOf({ ...BASE, body: "x".repeat(900_000) }));
+    expect(big.bodyTruncated).toBe(false);
+    expect(big.body).toHaveLength(900_000);
+    const huge = draftView({ ...draftOf(BASE), body: "x".repeat(MAX_PREVIEW_CHARS + 50) });
+    expect(huge.body).toHaveLength(MAX_PREVIEW_CHARS);
+    expect(huge.bodyTruncated).toBe(true);
   });
 });
 
@@ -155,7 +197,7 @@ describe("draft ids", () => {
     for (const id of ["AAMkAGI2THVSAAA=", "r-123_4.5", "abc@mail.example", "imap:42", "a/b+c=="]) {
       expect(isDraftId(id), id).toBe(true);
     }
-    for (const id of ["", "a b", "x?y=1", "x#y", "x\ny", "\"x\"", "a".repeat(513)]) {
+    for (const id of ["", "a b", "x?y=1", "x#y", "x\ny", "\"x\"", "a".repeat(513), ".", "..", "..."]) {
       expect(isDraftId(id), id).toBe(false);
     }
   });

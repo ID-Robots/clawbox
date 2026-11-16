@@ -51,7 +51,6 @@ import {
   type DraftApprovalConfig,
 } from "@/lib/mail-draft-approval-config";
 import {
-  draftContentHash,
   draftView,
   fetchDraft,
   isDraftId,
@@ -87,10 +86,15 @@ const MAX_TOKEN_LEN = 4096;
 const MAX_CARDS = 2000;
 const OPEN_KEEP_MS = 24 * 3600_000;
 const SETTLED_KEEP_MS = 30 * 24 * 3600_000;
-/** A Send that never came back (the server died mid-call) is settled as failed after this. */
+/** A Send that never came back (the server died mid-call) is settled as uncertain after this. */
 const SENDING_STALE_MS = 2 * 60_000;
 
-export type CardState = "open" | "sending" | "sent" | "kept" | "revised" | "changed" | "failed";
+/**
+ * `uncertain`: a Send reached the backend and its answer was lost — the mail
+ * may have gone. A plain reload never offers that draft's Send again; only the
+ * person's explicit "Review again", after being told to check the Sent folder.
+ */
+export type CardState = "open" | "sending" | "sent" | "kept" | "revised" | "changed" | "failed" | "uncertain";
 export type DecisionAction = "send" | "keep" | "revise";
 
 interface CardEntry {
@@ -198,7 +202,7 @@ function isEntry(value: unknown): value is CardEntry {
     typeof v === "object" && v !== null
     && typeof v.c === "string" && typeof v.u === "string" && typeof v.d === "string" && typeof v.h === "string"
     && typeof v.iat === "number" && typeof v.exp === "number" && typeof v.at === "number"
-    && ["open", "sending", "sent", "kept", "revised", "changed", "failed"].includes(v.state as string)
+    && ["open", "sending", "sent", "kept", "revised", "changed", "failed", "uncertain"].includes(v.state as string)
   );
 }
 
@@ -222,7 +226,7 @@ function readLedger(): CardEntry[] {
 
 function writeLedger(cards: CardEntry[], now: number): void {
   const kept = cards
-    .map((card) => (card.state === "sending" && now - card.at > SENDING_STALE_MS ? { ...card, state: "failed" as const, at: now } : card))
+    .map((card) => (card.state === "sending" && now - card.at > SENDING_STALE_MS ? { ...card, state: "uncertain" as const, at: now } : card))
     .filter((card) => (card.state === "open" ? card.exp > now - OPEN_KEEP_MS : card.at > now - SETTLED_KEEP_MS))
     .sort((a, b) => b.at - a.at)
     .slice(0, MAX_CARDS);
@@ -289,6 +293,37 @@ const GONE = () =>
   refusal(404, "gone", "This draft is no longer in the mailbox: it was sent or deleted.");
 
 /**
+ * What the ledger alone says about a draft, when that settles it: sent; a
+ * Send in flight; a Send whose answer was lost (unless the person asked to
+ * review it again, having been told to check the Sent folder).
+ */
+function settledAnswerIn(cards: CardEntry[], user: string, draftId: string, reopen: boolean): ApprovalAnswer | null {
+  const mine = cards.filter((card) => card.u === user && card.d === draftId);
+  const sent = mine.find((card) => card.state === "sent");
+  if (sent) return { status: 200, body: { state: "sent", decidedAt: sent.at } };
+  const now = Date.now();
+  // A claim older than a Send can take is one whose server went away mid-call.
+  const lost = (card: CardEntry) => card.state === "uncertain" || (card.state === "sending" && now - card.at > SENDING_STALE_MS);
+  const sending = mine.find((card) => card.state === "sending" && !lost(card));
+  if (sending) return { status: 200, body: { state: "sending", decidedAt: sending.at } };
+  if (!reopen) {
+    const latest = [...mine].sort((a, b) => b.at - a.at)[0];
+    if (latest && lost(latest)) return { status: 200, body: { state: "uncertain", decidedAt: latest.at } };
+  }
+  return null;
+}
+
+function settledAnswer(user: string, draftId: string, reopen: boolean): ApprovalAnswer | null {
+  let cards: CardEntry[];
+  try {
+    cards = readLedger();
+  } catch {
+    return UNAVAILABLE();
+  }
+  return settledAnswerIn(cards, user, draftId, reopen);
+}
+
+/**
  * The card for one draft, made for the signed-in person asking.
  *
  * `reopen` asks again about a draft the person already kept or sent back for
@@ -307,20 +342,29 @@ export async function mintCard(
   const key = await approvalKey();
   if (!key) return UNAVAILABLE();
 
+  // Answered from the ledger before the backend is asked: a draft already sent
+  // is not fetched again, and one whose Send is in flight or lost is not offered.
+  const early = settledAnswer(identity.username, draftId, opts.reopen === true);
+  if (early) return early;
+
+  const fetched = await fetchDraft(active.config, identity.username, draftId);
+  if (!fetched.ok) return fetched.reason === "not_found" ? GONE() : backendRefusal(fetched.reason);
+  const hash = fetched.draft.hash;
+  const view: DraftView = draftView(fetched.draft);
+
+  // EVERYTHING FROM HERE IS SYNCHRONOUS, and reads the ledger afresh. The
+  // await above let other requests run — another card minted, a Send claimed
+  // — and writing back a list read before it would undo them: a card just
+  // sent would be written back open.
   let cards: CardEntry[];
   try {
     cards = readLedger();
   } catch {
     return UNAVAILABLE();
   }
+  const again = settledAnswerIn(cards, identity.username, draftId, opts.reopen === true);
+  if (again) return again;
   const mine = cards.filter((card) => card.u === identity.username && card.d === draftId);
-  const sent = mine.find((card) => card.state === "sent");
-  if (sent) return { status: 200, body: { state: "sent", decidedAt: sent.at } };
-
-  const fetched = await fetchDraft(active.config, identity.username, draftId);
-  if (!fetched.ok) return fetched.reason === "not_found" ? GONE() : backendRefusal(fetched.reason);
-  const hash = draftContentHash(fetched.draft);
-  const view: DraftView = draftView(fetched.draft);
 
   // Already answered, and nothing has changed since: show the answer, not the
   // question again. A draft the assistant has revised has a new hash and is
@@ -464,7 +508,7 @@ export async function decideCard(
     reopen();
     return backendRefusal(fetched.reason);
   }
-  const hash = draftContentHash(fetched.draft);
+  const hash = fetched.draft.hash;
   if (hash !== claims.h) {
     close("changed");
     return refusal(409, "changed", "The draft changed after this card was shown, so it was not sent. Review the current version.");
@@ -491,7 +535,7 @@ export async function decideCard(
       close("failed");
       return refusal(502, "send_refused", "The mail service refused to send this draft. It is still in the Drafts folder.");
     default:
-      close("failed");
+      close("uncertain");
       return refusal(
         502,
         "send_uncertain",

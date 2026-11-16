@@ -36,9 +36,12 @@ cannot see gets a card saying the draft is not in their mailbox.
 
 - the signed-in user the card was made for (the owner or a member of staff);
 - the draft id;
-- a SHA-256 hash of the draft's content as the backend returned it. The hash
-  covers the recipients (To, Cc, Bcc), the subject, the body and its type, and
-  the attachment names and sizes;
+- a SHA-256 hash of the backend's **whole answer** for the draft:
+  `sha256("clawbox-mail-draft/v2\n" + canonical JSON)`, where canonical JSON
+  is the answer re-serialised with every object's keys sorted. The hash is not
+  limited to the fields the card shows. A Reply-To, a From, a header or an
+  attachment's bytes or digest, when the backend includes them, are bound as
+  firmly as the recipients and the body;
 - an expiry: 30 minutes, or `CLAWBOX_MAIL_DRAFT_TOKEN_TTL_S` seconds (10 s to
   24 h).
 
@@ -64,11 +67,31 @@ following, in order, and refuses if any check fails:
 | Send only: the draft re-read from the backend still has the approved hash | 409 `changed` |
 
 Only then does the server call the backend's send endpoint. A Send claims the
-card **before** the re-read, so two presses or two tabs cannot both send it. If
-the backend could not be reached before sending, the card is reopened. If the
-backend's answer to the send was lost (a timeout or a 5xx), the card is closed
-as failed and the person is told to check the Sent folder. ClawBox never
-reports that outcome as "not sent".
+card **before** the re-read, so two presses or two tabs cannot both send it.
+Every ledger write happens synchronously after the last network call, from a
+fresh read, so a card minted while a Send is running cannot undo the Send.
+
+If the backend could not be reached before sending, the card is reopened. If
+the backend's answer to the send was lost (a timeout or a 5xx), the card is
+closed as `uncertain`. The same applies to a server that stopped mid-send. An
+`uncertain` card never reports "not sent". A plain reload does not offer that
+draft's Send again. Only the person's explicit **Review again** does, after
+the card has told them to check their Sent folder.
+
+### What the card shows
+
+- From (when the backend names one), To, Cc, Bcc (always, when present),
+  Reply-To (when present), the subject, the body and the attachments.
+- An HTML body is shown as its words, through the mail viewer's sanitiser.
+  Each link is shown with its target (`Open invoice <https://…>`).
+- Characters that would make the card read differently from the mail are
+  shown as `[U+202E]`-style marks, never dropped silently, and the card warns
+  about them. These are controls, bidi overrides and isolates, and the BOM.
+- The whole body is shown, up to the backend's 1 MiB answer limit. A preview
+  that ever had to be cut offers no Send.
+- **Tell me what to change** goes to the assistant only after the server has
+  closed the card as `revised`. If the close fails, the request stays in the
+  box and nothing is sent to the assistant.
 
 ## The mail send backend
 
@@ -128,6 +151,9 @@ The second shape is a Microsoft Graph `message` passed straight through:
 answer ClawBox cannot read whole is refused rather than shown in part. An HTML
 body is shown as text, through the same sanitiser the mail viewer uses.
 
+Draft ids are one word of letters, digits and `. _ ~ + / = : @ -`, never only
+dots, and are percent-encoded into the path.
+
 `user` is the ClawBox user the card belongs to. A backend that serves one
 mailbox per person maps it to that person's mailbox. A backend for a single
 mailbox can ignore it.
@@ -151,9 +177,12 @@ Sends that draft.
 | 5xx, or no answer | The outcome is unknown |
 
 Between ClawBox's re-read and the backend's send there is a short window. A
-backend that can should close it: re-read the draft right before sending, or
-send with the mail provider's own concurrency check (for Graph, the message's
-`changeKey`). It answers 409 if the draft no longer matches.
+backend that can should close it. It can recompute `contentHash` over its own
+current answer, as described above, or send with the mail provider's own
+concurrency check (for Graph, the message's `changeKey`). It answers 409 if the
+draft no longer matches. Include attachment contents or a digest in the draft
+JSON if attachment swaps should be caught. A Graph backend can use
+`$expand=attachments`.
 
 ## Who can do what
 

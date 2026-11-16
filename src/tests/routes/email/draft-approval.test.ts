@@ -31,6 +31,7 @@ interface Draft {
   id: string;
   to: string[];
   cc: string[];
+  replyTo?: string[];
   subject: string;
   body: string;
 }
@@ -48,6 +49,8 @@ let mailbox: Record<string, Record<string, Draft>>;
 let sends: { user: string; draftId: string; contentHash: string; auth: string | null }[];
 let backendCalls: { method: string; url: string; auth: string | null }[];
 let sendAnswer: number;
+/** Holds ONE read of a draft after its answer was taken, until released. */
+let gate: { id: string; hit: boolean; wait: Promise<void> } | null;
 
 function writeConfig(extra: Record<string, unknown> = {}): void {
   fs.writeFileSync(
@@ -121,7 +124,12 @@ function fakeBackend(input: RequestInfo | URL, init?: RequestInit): Promise<Resp
   if (method === "GET") {
     const user = url.searchParams.get("user") ?? "";
     const draft = mailbox[user]?.[id];
-    return Promise.resolve(draft ? Response.json(draft) : new Response("{}", { status: 404 }));
+    const response = draft ? Response.json(structuredClone(draft)) : new Response("{}", { status: 404 });
+    if (gate && gate.id === id && !gate.hit) {
+      gate.hit = true;
+      return gate.wait.then(() => response);
+    }
+    return Promise.resolve(response);
   }
   const body = JSON.parse(String(init?.body)) as { user: string; draftId: string; contentHash: string };
   sends.push({ ...body, auth: authHeader });
@@ -150,6 +158,7 @@ beforeEach(async () => {
   sends = [];
   backendCalls = [];
   sendAnswer = 200;
+  gate = null;
   vi.stubGlobal("fetch", vi.fn(fakeBackend));
   vi.resetModules();
   auth = await import("@/lib/auth");
@@ -358,6 +367,8 @@ describe("Send", () => {
       (d: Draft) => { d.to.push("attacker@example.net"); },
       (d: Draft) => { d.cc = []; },
       (d: Draft) => { d.subject = "Offer for Globex"; },
+      // Nothing the card lists, everything the mail carries: where replies go.
+      (d: Draft) => { d.replyTo = ["attacker@example.net"]; },
     ]) {
       const { json } = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
       change(mailbox[OWNER][DRAFT_ID]);
@@ -430,6 +441,45 @@ describe("Send", () => {
     expect(res.json.kind).toBe("send_uncertain");
     // Settled: the same approval is not offered for a second try.
     expect((await answer(ownerCookie(), lost.json.token, "send")).json.kind).toBe("reused");
+  });
+
+  it("does not offer a Send whose answer was lost again on a plain look", async () => {
+    sendAnswer = 503;
+    const { json } = await mint(ownerCookie());
+    expect((await answer(ownerCookie(), json.token, "send")).json.kind).toBe("send_uncertain");
+    const look = await mint(ownerCookie());
+    expect(look.json).toMatchObject({ state: "uncertain" });
+    expect(look.json.token).toBeUndefined();
+    // Only the person's explicit "Review again" asks again.
+    sendAnswer = 200;
+    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect(reopened.json.state).toBe("open");
+    expect((await answer(ownerCookie(), reopened.json.token, "send")).status).toBe(200);
+    expect(sends).toHaveLength(2);
+  });
+
+  it("two cards made at once both stay usable", async () => {
+    mailbox[OWNER]["second-draft"] = { id: "second-draft", to: ["b@example.com"], cc: [], subject: "Two", body: "2" };
+    const [a, b] = await Promise.all([mint(ownerCookie()), mint(ownerCookie(), "second-draft")]);
+    expect((await answer(ownerCookie(), a.json.token, "send")).status).toBe(200);
+    expect((await answer(ownerCookie(), b.json.token, "send")).status).toBe(200);
+    expect(sends.map((x) => x.draftId).sort()).toEqual([DRAFT_ID, "second-draft"].sort());
+  });
+
+  it("a card made while a Send is running cannot undo the Send", async () => {
+    const { json } = await mint(ownerCookie());
+    let release!: () => void;
+    gate = { id: DRAFT_ID, hit: false, wait: new Promise<void>((resolve) => { release = resolve; }) };
+    // A second look reads the draft (still in the mailbox) and is held there...
+    const look = mint(ownerCookie());
+    await vi.waitFor(() => expect(gate?.hit).toBe(true));
+    // ...while the person's Send runs to the end.
+    expect((await answer(ownerCookie(), json.token, "send")).status).toBe(200);
+    release();
+    const late = await look;
+    expect(late.json.state).toBe("sent");
+    expect((await answer(ownerCookie(), json.token, "send")).json).toMatchObject({ kind: "reused", state: "sent" });
+    expect(sends).toHaveLength(1);
   });
 
   it("leaves the approval usable when the backend could not be reached before sending", async () => {

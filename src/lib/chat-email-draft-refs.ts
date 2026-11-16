@@ -29,7 +29,8 @@ const FENCE_RE = /^(?:```|~~~)/;
  * `local@host`) are made of, and nothing that could change a URL once encoded. The server checks the same
  * pattern (src/lib/mail-draft-backend.ts imports it from here).
  */
-export const DRAFT_ID_RE = /^[A-Za-z0-9._~+/=:@-]{1,512}$/;
+// Never only dots: `.` and `..` are path segments once in a URL, even encoded.
+export const DRAFT_ID_RE = /^(?!\.+$)[A-Za-z0-9._~+/=:@-]{1,512}$/;
 
 /** Most draft cards under one reply. */
 export const MAX_DRAFT_REFS = 5;

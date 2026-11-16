@@ -17,9 +17,10 @@
 // from anything the assistant said. The assistant only ever names a draft id.
 //
 // Everything a draft contains is text someone else may have written — on a bad
-// day, through a prompt injection. It is returned as plain strings with the
-// characters that could make it read differently from what is sent removed
-// (controls, bidi overrides), and never interpreted.
+// day, through a prompt injection. It is returned as plain strings, and the
+// characters that could make it read differently from what is sent (controls,
+// bidi overrides) are SHOWN as `[U+202E]`-style marks rather than silently
+// dropped: the card must read like the mail the recipient will get.
 
 import { createHash, randomBytes } from "crypto";
 import type { DraftApprovalConfig } from "@/lib/mail-draft-approval-config";
@@ -35,8 +36,12 @@ const MAX_RECIPIENTS = 500;
 const MAX_SUBJECT_CHARS = 1_000;
 const MAX_ADDRESS_CHARS = 400;
 const MAX_ATTACHMENTS = 100;
-/** What the card is given of the body. The hash always covers all of it. */
-export const MAX_PREVIEW_CHARS = 20_000;
+/**
+ * What the card is given of the body. Above the backend's own 1 MiB answer
+ * limit in practice, so a whole body is always shown; a card whose preview
+ * WAS cut offers no Send (the person would approve a tail they never saw).
+ */
+export const MAX_PREVIEW_CHARS = 1_000_000;
 
 /**
  * A draft id as ClawBox accepts it from the assistant and passes to the
@@ -45,7 +50,9 @@ export const MAX_PREVIEW_CHARS = 20_000;
 export { DRAFT_ID_RE };
 
 export function isDraftId(value: unknown): value is string {
-  return typeof value === "string" && DRAFT_ID_RE.test(value);
+  // `.` and `..` would be read as path segments once in the backend's URL
+  // (even percent-encoded), and reach paths other than this draft's.
+  return typeof value === "string" && DRAFT_ID_RE.test(value) && !/^\.+$/.test(value);
 }
 
 export interface DraftAttachment {
@@ -56,25 +63,35 @@ export interface DraftAttachment {
 /** One draft, normalised. `body` is exactly what the backend returned. */
 export interface MailDraft {
   id: string;
+  /** The sender, when the backend names one. */
+  from: string | null;
   to: string[];
   cc: string[];
   bcc: string[];
+  /** Where replies go, when the backend names it. */
+  replyTo: string[];
   subject: string;
   bodyType: "text" | "html";
   body: string;
   attachments: DraftAttachment[];
+  /** `draftContentHash` of the backend's whole answer. */
+  hash: string;
 }
 
 /** What a card shows. Plain text only. */
 export interface DraftView {
   id: string;
+  from: string | null;
   to: string[];
   cc: string[];
   bcc: string[];
+  replyTo: string[];
   subject: string;
   body: string;
   bodyTruncated: boolean;
   attachments: DraftAttachment[];
+  /** Something in it would read differently from what is sent; shown as `[U+…]`. */
+  hiddenCharacters: boolean;
 }
 
 export type BackendFailure = "unreachable" | "auth" | "bad_response";
@@ -94,19 +111,30 @@ export type SendDraftResult =
 /**
  * Characters that change how a line READS without being visible: C0/C1
  * controls (bar tab and newline, handled per field), DEL, the bidi embeddings,
- * overrides and isolates, the line/paragraph separators and the BOM.
+ * overrides and isolates, and the BOM.
  */
 const INVISIBLE_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\ufeff]/g;
+const INVISIBLE_TEST_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\ufeff]/;
 
-/** One line of text (an address, a subject): no line breaks of any kind. */
+/** Each such character as a visible mark, so the card shows that it is there. */
+function reveal(value: string): string {
+  return value.replace(INVISIBLE_RE, (ch) => `[U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}]`);
+}
+
+/** True when `value` holds a character `reveal` would mark. */
+export function hasInvisible(value: string): boolean {
+  return INVISIBLE_TEST_RE.test(value);
+}
+
+/** One line of text (an address, a subject): no line breaks of any kind, invisible characters shown. */
 export function cleanLine(value: string, max: number): string {
-  const line = value.replace(/[\r\n\t\u2028\u2029]+/g, " ").replace(INVISIBLE_RE, "").trim();
+  const line = reveal(value.replace(/[\r\n\t\u2028\u2029]+/g, " ")).trim();
   return line.length > max ? `${line.slice(0, max)}…` : line;
 }
 
-/** A body: line breaks kept, every other invisible character removed. */
+/** A body: line breaks kept, every other invisible character shown. */
 export function cleanBody(value: string): string {
-  return value.replace(/\r\n?/g, "\n").replace(/[\u2028\u2029]/g, "\n").replace(INVISIBLE_RE, "");
+  return reveal(value.replace(/\r\n?/g, "\n").replace(/[\u2028\u2029]/g, "\n"));
 }
 
 const BLOCK_TAGS = new Set([
@@ -133,6 +161,15 @@ export function htmlToText(html: string): string {
         const block = BLOCK_TAGS.has(node.tag);
         if (block) out.push("\n");
         if (node.tag === "td" || node.tag === "th") out.push(" ");
+        if (node.tag === "a" && node.href) {
+          // The target, not only the words: "Open invoice" must not hide where it goes.
+          const start = out.length;
+          walk(node.children);
+          const words = out.slice(start).join("").trim();
+          const target = node.href.replace(/^mailto:/i, "");
+          if (words !== target && words !== node.href) out.push(` <${node.href}>`);
+          continue;
+        }
         walk(node.children);
         if (block) out.push("\n");
       }
@@ -220,7 +257,13 @@ export function normalizeDraft(json: unknown, requestedId: string): MailDraft | 
   const to = recipients(draft.to, draft.toRecipients);
   const cc = recipients(draft.cc, draft.ccRecipients);
   const bcc = recipients(draft.bcc, draft.bccRecipients);
-  if (!to || !cc || !bcc) return null;
+  const replyTo = recipients(draft.replyTo);
+  if (!to || !cc || !bcc || !replyTo) return null;
+  let from: string | null = null;
+  if (draft.from != null) {
+    from = recipient(draft.from);
+    if (from === null) return null;
+  }
 
   const subject = typeof draft.subject === "string" ? draft.subject : draft.subject == null ? "" : null;
   if (subject === null) return null;
@@ -242,43 +285,55 @@ export function normalizeDraft(json: unknown, requestedId: string): MailDraft | 
   const files = attachments(draft.attachments);
   if (!files) return null;
 
-  return { id: requestedId, to, cc, bcc, subject, bodyType, body, attachments: files };
+  return { id: requestedId, from, to, cc, bcc, replyTo, subject, bodyType, body, attachments: files, hash: draftContentHash(json) };
 }
 
 /**
- * The fingerprint a card's approval is bound to: everything that decides what
- * is sent and to whom. Computed over the backend's own values, so any change
- * made after the card was shown — a recipient added, a word in the body, an
- * attachment — makes a different hash and the Send is refused.
+ * JSON with every object's keys in sorted order, so the same draft always
+ * serialises to the same text however the backend ordered its fields.
  */
-export function draftContentHash(draft: MailDraft): string {
-  const canonical = JSON.stringify([
-    "clawbox-mail-draft/v1",
-    draft.id,
-    draft.to,
-    draft.cc,
-    draft.bcc,
-    draft.subject,
-    draft.bodyType,
-    draft.body,
-    draft.attachments.map((a) => [a.name, a.size]),
-  ]);
-  return createHash("sha256").update(canonical, "utf8").digest("hex");
+export function canonicalJson(value: unknown, depth = 0): string {
+  if (depth > 64) return JSON.stringify(null);
+  if (Array.isArray(value)) return `[${value.map((v) => canonicalJson(v, depth + 1)).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const keys = Object.keys(value as Record<string, unknown>).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k], depth + 1)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * The fingerprint a card's approval is bound to: the backend's WHOLE answer
+ * for the draft, canonicalised — not a list of fields ClawBox thought to pick.
+ * A recipient added, a word in the body, a Reply-To, a header, an
+ * attachment's bytes (when the backend includes them or their digest):
+ * anything the backend reports that changes after the card was shown makes a
+ * different hash, and the Send is refused. The backend may recompute it the
+ * same way to check a send itself (docs/email-draft-approval.md).
+ */
+export function draftContentHash(raw: unknown): string {
+  return createHash("sha256").update(`clawbox-mail-draft/v2\n${canonicalJson(raw)}`, "utf8").digest("hex");
 }
 
 /** The draft as a card shows it: plain text, capped, with nothing invisible left in it. */
 export function draftView(draft: MailDraft): DraftView {
-  const text = cleanBody(draft.bodyType === "html" ? htmlToText(draft.body) : draft.body).trim();
+  const words = draft.bodyType === "html" ? htmlToText(draft.body) : draft.body;
+  const text = cleanBody(words).trim();
   const bodyTruncated = text.length > MAX_PREVIEW_CHARS;
+  const shown = [draft.from ?? "", ...draft.to, ...draft.cc, ...draft.bcc, ...draft.replyTo, draft.subject, words, ...draft.attachments.map((a) => a.name)];
   return {
     id: draft.id,
+    from: draft.from,
     to: draft.to,
     cc: draft.cc,
     bcc: draft.bcc,
+    replyTo: draft.replyTo,
     subject: cleanLine(draft.subject, MAX_SUBJECT_CHARS),
     body: bodyTruncated ? text.slice(0, MAX_PREVIEW_CHARS) : text,
     bodyTruncated,
     attachments: draft.attachments,
+    // Addresses were revealed when they were read; the marks are what to look for there.
+    hiddenCharacters: shown.some((part) => hasInvisible(part) || /\[U\+[0-9A-F]{4,6}\]/.test(part)),
   };
 }
 

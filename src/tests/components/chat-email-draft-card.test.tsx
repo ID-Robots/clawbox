@@ -148,6 +148,66 @@ describe("EmailDraftCard", () => {
     }
   });
 
+  it("keeps the change request when the card could not be closed, and sends nothing to the assistant", async () => {
+    const sent: string[] = [];
+    const listener = (e: Event) => sent.push((e as CustomEvent<ChatMessageDetail>).detail.text);
+    window.addEventListener(CHAT_MESSAGE_EVENT, listener);
+    try {
+      decideAnswers = [{ status: 503, body: { kind: "unavailable" } }];
+      render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+      const input = await screen.findByTestId("chat-email-draft-change");
+      fireEvent.change(input, { target: { value: "shorter" } });
+      fireEvent.click(screen.getByTestId("chat-email-draft-change-submit"));
+      await waitFor(() => expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.error.unavailable"));
+      expect(sent).toEqual([]);
+      expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).not.toBe("revised");
+    } finally {
+      window.removeEventListener(CHAT_MESSAGE_EVENT, listener);
+    }
+  });
+
+  it("shows the sender, where replies go, and a warning for hidden characters", async () => {
+    cardAnswers = [{ status: 200, body: { state: "open", token: "t", expiresAt: 1, draft: {
+      ...DRAFT, from: "Owner <owner@example.com>", replyTo: ["replies@example.net"], subject: "Invoice [U+202E]fdp.exe", hiddenCharacters: true,
+    } } }];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    expect((await screen.findByTestId("chat-email-draft-from")).textContent).toContain("owner@example.com");
+    expect(screen.getByTestId("chat-email-draft-reply-to").textContent).toContain("replies@example.net");
+    expect(screen.getByTestId("chat-email-draft-hidden-chars").textContent).toBe("chat.emailDraft.hiddenChars");
+    expect(screen.getByTestId("chat-email-draft-subject").textContent).toContain("[U+202E]");
+  });
+
+  it("offers no Send for a body it could not show whole", async () => {
+    cardAnswers = [{ status: 200, body: { state: "open", token: "t", expiresAt: 1, draft: { ...DRAFT, bodyTruncated: true } } }];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    const send = await screen.findByTestId("chat-email-draft-send");
+    expect(send.getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByTestId("chat-email-draft-too-long")).toBeTruthy();
+    fireEvent.click(send);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls.filter((c) => c.url === DECIDE_ROUTE)).toEqual([]);
+  });
+
+  it("a Send whose answer was lost is not offered again without the person asking", async () => {
+    cardAnswers = [{ status: 200, body: { state: "uncertain", decidedAt: 1 } }];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.error.sendUncertain"));
+    expect(screen.queryByTestId("chat-email-draft-send")).toBeNull();
+    cardAnswers = [{ status: 200, body: { state: "open", token: "tok-9", expiresAt: 1, draft: DRAFT } }];
+    fireEvent.click(screen.getByTestId("chat-email-draft-reload"));
+    await screen.findByTestId("chat-email-draft-send");
+    expect(calls.at(-1)).toEqual({ url: CARD_ROUTE, body: { draftId: "AAMk-1=", reopen: true } });
+  });
+
+  it("after a refusal, Show the current version is a plain look, never a reopen", async () => {
+    decideAnswers = [{ status: 410, body: { kind: "expired" } }];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.error.expired"));
+    fireEvent.click(screen.getByTestId("chat-email-draft-reload"));
+    await waitFor(() => expect(calls.at(-1)).toEqual({ url: CARD_ROUTE, body: { draftId: "AAMk-1=" } }));
+  });
+
   for (const [kind, key] of [
     ["disabled", "chat.emailDraft.error.disabled"],
     ["gone", "chat.emailDraft.error.gone"],

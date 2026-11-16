@@ -411,7 +411,7 @@ function registerDraftCardTool(reg: Registrar): void {
     { editions: ["openclaw", "hermes"], readOnly: true },
     async ({ draft_id }: { draft_id: string }) => {
       const id = draft_id.trim();
-      if (!/^[A-Za-z0-9._~+/=:@-]{1,512}$/.test(id)) {
+      if (!/^(?!\.+$)[A-Za-z0-9._~+/=:@-]{1,512}$/.test(id)) {
         throw new ToolError(
           "BAD_ARGUMENT",
           "That is not a draft id: an id is one word of letters, digits and . _ ~ + / = : @ -.",
