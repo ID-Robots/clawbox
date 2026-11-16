@@ -110,6 +110,8 @@ export function externalEngineFromState(state: Record<string, unknown> | null | 
     contextWindow: r.contextWindow,
     maxTokens: r.maxTokens,
     imageInput: r.imageInput === true,
+    // Absent on a record saved before TASK-2497: off, as those engines ran.
+    reasoning: r.reasoning === true,
     providerId: EXTERNAL_ENGINE_PROVIDER,
     harness: r.harness === "hermes" ? "hermes" : "openclaw",
     savedAt: typeof r.savedAt === "string" ? r.savedAt : "",
@@ -153,6 +155,7 @@ export function externalEngineSummary(record: ExternalEngineRecord | null) {
     contextWindow: record.contextWindow,
     maxTokens: record.maxTokens,
     imageInput: record.imageInput,
+    reasoning: record.reasoning,
     harness: record.harness,
   };
 }
@@ -171,11 +174,28 @@ export function externalEngineView(record: ExternalEngineRecord | null) {
     contextWindow: record.contextWindow,
     maxTokens: record.maxTokens,
     imageInput: record.imageInput,
+    reasoning: record.reasoning,
     apiKeySet: key !== null && key !== NO_KEY_PLACEHOLDER,
     harness: record.harness,
     savedAt: record.savedAt,
   };
 }
+
+/**
+ * The reasoning contract of a reasoning engine's model entry (TASK-2497), as
+ * OpenClaw documents it for a custom `openai-completions` route
+ * (docs/tools/thinking.md "Custom OpenAI-compatible endpoints",
+ * docs/gateway/config-tools/custom-providers.md, at 2026.10.9): `reasoning:
+ * true` makes the gateway send `reasoning_effort` for an enabled level, the
+ * ladder below is what the endpoint accepts (low / medium / high pass through
+ * as they are), and Off is mapped to `none` — without the mapping Off omits the
+ * field and the server's own default (often "think") stays in effect.
+ * gateway-pre-start.sh writes the same block; keep the two in step.
+ */
+export const EXTERNAL_ENGINE_REASONING_COMPAT = {
+  supportedReasoningEfforts: ["none", "low", "medium", "high"],
+  reasoningEffortMap: { off: "none" },
+} as const;
 
 /** The OpenClaw provider block (`models.providers.clawext`). */
 export function openclawExternalProviderDefinition(settings: ExternalEngineSettings, apiKey: string | null) {
@@ -187,11 +207,19 @@ export function openclawExternalProviderDefinition(settings: ExternalEngineSetti
       {
         id: settings.modelId,
         name: externalEngineDisplayName(settings.modelId),
-        reasoning: false,
+        reasoning: settings.reasoning === true,
         input: settings.imageInput ? ["text", "image"] : ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: settings.contextWindow,
         maxTokens: settings.maxTokens,
+        ...(settings.reasoning === true
+          ? {
+            compat: {
+              supportedReasoningEfforts: [...EXTERNAL_ENGINE_REASONING_COMPAT.supportedReasoningEfforts],
+              reasoningEffortMap: { ...EXTERNAL_ENGINE_REASONING_COMPAT.reasoningEffortMap },
+            },
+          }
+          : {}),
       },
     ],
   };
@@ -394,4 +422,77 @@ export async function probeExternalEngine(options: {
     };
   }
   return { ok: true, models: models.slice(0, PROBE_MAX_MODELS), latencyMs: Date.now() - started };
+}
+
+// ── The reasoning probe (TASK-2497) ─────────────────────────────────────────
+
+/** A tiny completion: the reasoning answer arrives first, so a small cap still shows it. */
+export const REASONING_PROBE_MAX_TOKENS = 64;
+export const REASONING_PROBE_TIMEOUT_MS = 20_000;
+/** A 64-token answer is a few KB; anything larger is not read. */
+const REASONING_PROBE_MAX_BODY_BYTES = 256 * 1024;
+
+/**
+ * Does the engine reason? One `POST {base}/chat/completions` with
+ * `reasoning_effort: "low"` and a 64-token cap, asked only by Test (never by
+ * Save), so Settings can SUGGEST the reasoning switch — it never turns it on.
+ *
+ * `true` when the answer carries `reasoning_content` (or `reasoning`, the
+ * spelling some servers use) with text in it; `false` when the engine answered
+ * without one, or refused the field (a 4xx: such a server could not take the
+ * effort OpenClaw would send). `null` when it could not be told — a timeout, a
+ * network error, a 5xx, a 408 or 429 (busy, not a refusal), a body that is
+ * not a completion — so a slow cluster is never read as "does not reason". Same address rules, no redirects, the key
+ * only as a bearer, and nothing of the engine's text is passed on.
+ */
+export async function probeExternalEngineReasoning(options: {
+  baseUrl: string;
+  apiKey: string | null;
+  modelId: string;
+  timeoutMs?: number;
+  fetchImpl?: typeof fetch;
+  lookupImpl?: LookupFn;
+}): Promise<boolean | null> {
+  const doFetch = options.fetchImpl ?? fetch;
+  if (await hostRefusal(options.baseUrl, options.lookupImpl ?? defaultLookup)) return null;
+  const headers: Record<string, string> = { Accept: "application/json", "Content-Type": "application/json" };
+  if (options.apiKey && options.apiKey !== NO_KEY_PLACEHOLDER) headers.Authorization = `Bearer ${options.apiKey}`;
+  let res: Response;
+  try {
+    res = await doFetch(`${options.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: options.modelId,
+        messages: [{ role: "user", content: "What is 2 + 3? Answer with the number only." }],
+        max_tokens: REASONING_PROBE_MAX_TOKENS,
+        reasoning_effort: "low",
+        stream: false,
+      }),
+      redirect: "manual",
+      cache: "no-store",
+      signal: AbortSignal.timeout(options.timeoutMs ?? REASONING_PROBE_TIMEOUT_MS),
+    });
+  } catch {
+    return null;
+  }
+  if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+    await res.body?.cancel().catch(() => {});
+    return false;
+  }
+  if (!res.ok) {
+    await res.body?.cancel().catch(() => {});
+    return null;
+  }
+  try {
+    const text = await readCapped(res, REASONING_PROBE_MAX_BODY_BYTES);
+    if (text === null) return null;
+    const payload = JSON.parse(text) as { choices?: Array<{ message?: Record<string, unknown> }> };
+    const message = Array.isArray(payload?.choices) ? payload.choices[0]?.message : undefined;
+    if (!message || typeof message !== "object") return null;
+    const thought = message.reasoning_content ?? message.reasoning;
+    return typeof thought === "string" && thought.trim() !== "";
+  } catch {
+    return null;
+  }
 }
