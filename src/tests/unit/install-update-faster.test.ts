@@ -255,6 +255,15 @@ d("build_is_current_for_checkout: a rebuild only when one could change something
     expect(stale.reason).toContain(".next/standalone/apps/box/.next/build-info.json was built on Node v1.0.0");
   });
 
+  it("rebuilds over a standalone entry that is a dangling link", () => {
+    const entry = path.join(project, ".next", "standalone", "server.js");
+    fs.rmSync(entry);
+    fs.symlinkSync(path.join(project, ".next", "standalone", "apps", "gone", "server.js"), entry);
+    const r = ask();
+    expect(r.status).toBe(1);
+    expect(r.reason).toContain("there is no complete build in .next");
+  });
+
   it("rebuilds when there is no complete build to keep", () => {
     fs.rmSync(path.join(project, ".next", "standalone", "server.js"));
     const r = ask();

@@ -4015,7 +4015,10 @@ build_is_current_for_checkout() {
   local -a failed=()
   local changes="" node_now="" refusal="" stamp served_entry="" served_stamp="" parked env_file line reason="" head="" whole=1
   if [ "${CLAWBOX_FORCE_REBUILD:-0}" = "1" ]; then failed+=("CLAWBOX_FORCE_REBUILD=1"); fi
-  if ! build_entry_present "$build_dir" || [ ! -f "$build_dir/BUILD_ID" ]; then
+  # `-f`, not build_entry_present: that one also accepts a dangling link, for
+  # a parked build whose nested entry is elsewhere. A build kept as the one to
+  # serve needs an entry that resolves to a file (verify_build_present's test).
+  if [ ! -f "$build_dir/standalone/server.js" ] || [ ! -f "$build_dir/BUILD_ID" ]; then
     failed+=("there is no complete build in .next")
     whole=0
   fi
