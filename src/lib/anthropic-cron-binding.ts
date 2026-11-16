@@ -183,6 +183,13 @@ export interface CronBindingRecord {
    */
   previousModel?: string | null;
   /**
+   * With `provisional`: the profile of the last adoption core CONFIRMED, or
+   * null when there was none — the account the job is still bound to while
+   * this update has not landed (the refusal back-off asks about that one,
+   * never about the destination core has not taken).
+   */
+  confirmedProfileId?: string | null;
+  /**
    * Being given back: the first update's model (`model@profile` onto the
    * account it runs on now), written before it is sent — a reply lost after
    * core took it still leaves the job the box's to finish giving back.
@@ -299,7 +306,12 @@ export function planCronBindings(input: CronPlanInput): CronBindingPlan[] {
     const record: CronBindingRecord | undefined = records[job.id];
     // The model is the one the box left: what it adopted is still its to move —
     // or the one an update it sent, unanswered, may have left.
+    // ...or a model-less job's clear that core took with its answer lost:
+    // the record still names the pin, the job has no model again — the state
+    // the box leaves every model-less job in, so it is still the box's to move
+    // or to give back (its hidden binding names the pool's profile).
     const ours = !!record && (record.model === job.model
+      || (record.inherits && job.model === null)
       || (record.provisional === true && record.previousModel !== undefined && record.previousModel === job.model)
       || (record.releasing !== undefined && record.releasing === job.model));
     if (input.onlyAdopted && !ours) continue;
@@ -499,7 +511,13 @@ export async function bindCronsToTarget(
     // Refused for another account or lifetime than the one leading now: the
     // move or the renewal since is news, and the job is asked at once.
     if (r.target !== undefined && r.target !== refusedFor) return false;
-    const on = records[id]?.profileId;
+    // The account the job is bound to NOW: its last confirmed adoption — never
+    // a provisional record's destination, which core has not taken — else the
+    // pool profile its own model names. Neither known: backed off as asked.
+    const record = records[id];
+    const confirmed = record ? (record.provisional ? record.confirmedProfileId ?? null : record.profileId) : null;
+    const model = jobs.find((j) => j.id === id)?.model ?? null;
+    const on = confirmed ?? (model ? splitModelRef(model).profileId : null);
     return !(on && input.heldProfiles && !input.heldProfiles.has(on));
   }).map(([id]) => id));
   const { refused: _refused, heldProfiles: _held, reported, ...planInput } = input;
@@ -532,6 +550,7 @@ export async function bindCronsToTarget(
         at: before?.at ?? 0,
         provisional: true,
         previousModel: job.model,
+        confirmedProfileId: before ? (before.provisional ? before.confirmedProfileId ?? null : before.profileId) : null,
         ...(before?.retriedAt !== undefined ? { retriedAt: before.retriedAt } : {}),
       };
       if (!(await save())) {

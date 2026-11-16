@@ -119,7 +119,7 @@
 
 import { logoutOpenclawAuthProfiles, openclawGatewayHeldOffline, setOpenclawAuthOrder, withOpenclawGatewayStopped } from "@/lib/openclaw-auth-ops";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
-import { gatewayIsAbsent, gatewayReadyWaitMs, openclawIsAbsent, readConfigForWrite, readConfigStrict, runOpenclawConfigSet, runOpenclawConfigUnset, spawnOpenclawCli, writeConfig } from "@/lib/openclaw-config";
+import { gatewayIsAbsent, gatewayReadyWaitMs, openclawIsAbsent, readConfigStrict, runOpenclawConfigSet, runOpenclawConfigUnset, setConfigAuthOrderOffline, spawnOpenclawCli } from "@/lib/openclaw-config";
 import { gatewayWsCall, waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
 import { processStore } from "@/lib/process-store";
 import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
@@ -364,13 +364,9 @@ const defaultDeps: GatewayDeps = {
   // The gateway is stopped: its config route is not there, and a CLI start-up
   // would keep it stopped for seconds more. The box's own writer, which waits
   // out a gateway that is starting.
-  setConfigOrderOffline: async (profileIds) => {
-    const config = (await readConfigForWrite()) as Record<string, unknown>;
-    const auth = config.auth && typeof config.auth === "object" ? (config.auth as Record<string, unknown>) : {};
-    const order = auth.order && typeof auth.order === "object" ? (auth.order as Record<string, unknown>) : {};
-    config.auth = { ...auth, order: { ...order, [PROVIDER]: [...profileIds] } };
-    await writeConfig(config as Awaited<ReturnType<typeof readConfigForWrite>>);
-  },
+  // One read-modify-write under core's config lock (a starting gateway waited
+  // out first), so no edit that lands meanwhile is written over.
+  setConfigOrderOffline: (profileIds) => setConfigAuthOrderOffline(PROVIDER, profileIds),
   usage: (access) => fetchAnthropicUsage(access),
   // The in-process socket only: a gateway that is not there is skipped this
   // time rather than paid for with a CLI start-up every minute.

@@ -193,6 +193,90 @@ describe("a disabled job is never touched (pool renewal keeps cron binding)", ()
   });
 });
 
+describe("CodeRabbit review of bcba2b4 on #1526", () => {
+  /** cron.list answers `jobs`; cron.update answers as `update` says; the records live in `stored`. */
+  function deps(jobs: Record<string, unknown>[], update: (params: Record<string, unknown>) => Record<string, unknown>, records: CronBindingRecords = {}) {
+    const updates: Record<string, unknown>[] = [];
+    let stored: CronBindingRecords = structuredClone(records);
+    const d: CronBindingDeps = {
+      call: async (method, params) => {
+        if (method === "cron.list") return { jobs: structuredClone(jobs) };
+        if (method === "cron.update") {
+          updates.push(params);
+          return update(params);
+        }
+        return { ok: true };
+      },
+      readRecords: async () => stored,
+      writeRecords: async (r) => {
+        stored = structuredClone(r);
+      },
+    };
+    return { d, updates, stored: () => stored };
+  }
+  const refuse = () => {
+    throw new Error("cron.update: the scheduler is busy");
+  };
+  const quiet = () => vi.spyOn(console, "error").mockImplementation(() => {});
+
+  it("never backs off a job whose CONFIRMED account left the gateway, even with a provisional record naming the account it is being moved to", async () => {
+    const errors = quiet();
+    try {
+      const pinned = `anthropic/claude-sonnet-5-5@${POOL_B}`;
+      // Confirmed on B; B has left the gateway, A leads.
+      const f = deps([{ id: "j", sessionTarget: "isolated", configRevision: "r1", payload: { kind: "agentTurn", model: pinned } }], refuse,
+        { j: { profileId: POOL_B, authorization: "life-b", inherits: false, model: pinned, revision: "r1", at: NOW - 60_000 } });
+      const refused = new Map();
+      const run = (now: number) => bindCronsToTarget(f.d, { target: { profileId: POOL_A, authorization: "life-a" }, defaultModel: "anthropic/claude-opus-5-5", isPoolProfile: isPool, refused, heldProfiles: new Set([POOL_A]), now });
+      await run(NOW);
+      await run(NOW + 60_000);
+      // Two refusals in a row, the record now provisional on A: B is still what the job is bound to.
+      expect(f.stored().j).toMatchObject({ provisional: true, profileId: POOL_A, confirmedProfileId: POOL_B });
+      await run(NOW + 120_000);
+      expect(f.updates).toHaveLength(3);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("backs off as before when the job's confirmed account is still held, and asks a job with no record by the pool profile its model names", async () => {
+    const errors = quiet();
+    try {
+      const f = deps([
+        { id: "held", sessionTarget: "isolated", configRevision: "r1", payload: { kind: "agentTurn", model: `anthropic/claude-sonnet-5-5@${POOL_A}` } },
+        { id: "gone", sessionTarget: "isolated", configRevision: "r1", payload: { kind: "agentTurn", model: `anthropic/claude-sonnet-5-5@${POOL_B}` } },
+        { id: "plain", sessionTarget: "isolated", configRevision: "r1", payload: { kind: "agentTurn", model: "anthropic/claude-sonnet-5-5" } },
+      ], refuse);
+      const refused = new Map();
+      const run = (now: number) => bindCronsToTarget(f.d, { target: { profileId: POOL_A, authorization: "life-a" }, defaultModel: "anthropic/claude-opus-5-5", isPoolProfile: isPool, refused, heldProfiles: new Set([POOL_A]), now });
+      await run(NOW);
+      await run(NOW + 60_000);
+      const before = f.updates.length;
+      await run(NOW + 120_000);
+      // Only the job whose own model names a profile that has left is asked again inside the back-off.
+      expect(f.updates.slice(before).map((u) => u.id)).toEqual(["gone"]);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("a model-less job whose clear core took with its answer lost is still the box's: given back when the pool leaves, not left on the removed profile", async () => {
+    const errors = quiet();
+    try {
+      const pin = `anthropic/claude-opus-5-5@${POOL_A}`;
+      // The pin landed, the clear landed too but its answer was lost: the record still names the pin.
+      const f = deps([{ id: "j", sessionTarget: "isolated", configRevision: "r3", payload: { kind: "agentTurn" } }], () => ({ ok: true, configRevision: "r4" }),
+        { j: { profileId: POOL_A, authorization: "life-a", inherits: true, model: pin, revision: "r2", at: NOW - 60_000 } });
+      const result = await bindCronsToTarget(f.d, { target: null, defaultModel: "anthropic/claude-opus-5-5", isPoolProfile: isPool, onlyAdopted: true, accountFor: () => "anthropic:default", now: NOW });
+      expect(f.updates.map((u) => (u.patch as { payload: { model: unknown } }).payload.model)).toEqual(["anthropic/claude-opus-5-5@anthropic:default", null]);
+      expect(result).toMatchObject({ released: 1, owed: 0 });
+      expect(f.stored().j).toBeUndefined();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+});
+
 describe("applying the adoptions (CodeRabbit review on #1526)", () => {
   /** A cron.list with one job, and a cron.update that answers as the test says. */
   function fakeDeps(opts: { model?: string | null; records?: CronBindingRecords | Error; writeFails?: boolean; updateFails?: boolean; lastError?: string; lastRunAtMs?: number }) {
