@@ -37,6 +37,12 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
+import { createHermesDriver, takeSseFrames } from "./hermes-chat.mjs";
+
+// The Hermes half (its chat route, frame names, Stop) lives in a hermes-named
+// file of its own: those frame names are ClawBox's, not OpenClaw gateway events
+// (scripts/harness-contract/scan.mjs). Re-exported: the unit tests use it here.
+export { takeSseFrames };
 
 const REPO = process.env.CLAWBOX_REPO || "/home/clawbox/clawbox";
 const DASH = process.env.CLAWBOX_DASHBOARD || "http://127.0.0.1";
@@ -267,29 +273,6 @@ export function replyHolds(reply, want, prompt = "") {
   return new RegExp(`(?:^|[^A-Za-z0-9])${escapeRe(String(want))}(?![A-Za-z0-9])`).test(text);
 }
 
-/**
- * Server-sent events out of a buffer: every complete `event:`/`data:` block,
- * and what is left for the next read. `data` is parsed JSON, or null.
- */
-export function takeSseFrames(buf) {
-  const frames = [];
-  let rest = buf.replace(/\r\n/g, "\n");
-  let cut;
-  while ((cut = rest.indexOf("\n\n")) >= 0) {
-    const block = rest.slice(0, cut);
-    rest = rest.slice(cut + 2);
-    let event = "message", data = "";
-    for (const line of block.split("\n")) {
-      if (line.startsWith("event:")) event = line.slice(6).trim();
-      else if (line.startsWith("data:")) data += line.slice(5).trim();
-    }
-    let payload = null;
-    try { payload = data ? JSON.parse(data) : null; } catch { /* keep null */ }
-    frames.push({ event, data: payload });
-  }
-  return { frames, rest };
-}
-
 // ---- OpenClaw: the gateway's own socket ------------------------------------------
 async function gatewayToken() {
   const r = await ownerJson("GET", "/setup-api/gateway/ws-config");
@@ -445,88 +428,8 @@ async function openclawTurn(sess, message, timeoutMs) {
   return r;
 }
 
-// ---- Hermes: the desktop chat's own route, streamed ---------------------------
-async function stopHermesTurn(key, turnId) {
-  const q = new URLSearchParams({ sessionKey: key, ...(turnId ? { turnId } : {}) });
-  try {
-    const res = await fetch(`${DASH}/setup-api/hermes/chat?${q}`, { method: "DELETE", headers: ownerHeaders(), signal: AbortSignal.timeout(30_000) });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) log(`stop ${key}: HTTP ${res.status}`);
-    return json?.stopped ?? null;
-  } catch (e) {
-    log(`stop ${key}: ${e.message}`);
-    return null;
-  }
-}
-
-async function hermesTurn(sess, message, timeoutMs) {
-  const r = { ackMs: null, firstTokenMs: null, latencyMs: null, toolCalls: 0, text: "", error: null, model: null };
-  const t0 = performance.now();
-  const ms = () => Math.round(performance.now() - t0);
-  const turnId = crypto.randomBytes(8).toString("hex");
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), timeoutMs);
-  let toolEvents = 0;
-  try {
-    const res = await fetch(`${DASH}/setup-api/hermes/chat`, {
-      method: "POST",
-      headers: ownerHeaders({ "Content-Type": "application/json", Accept: "text/event-stream" }),
-      body: JSON.stringify({ message, sessionKey: sess.key, turnId, ...(sess.sessionId ? { sessionId: sess.sessionId } : {}) }),
-      signal: ac.signal,
-    });
-    r.ackMs = ms();
-    const type = res.headers.get("content-type") || "";
-    let done = null, error = null;
-    if (!type.includes("text/event-stream")) {
-      const json = await res.json().catch(() => null);
-      if (res.ok && json && typeof json.text === "string") done = json;
-      else error = { kind: "http", message: `HTTP ${res.status}: ${String(json?.error || "").slice(0, 160)}` };
-    } else {
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      outer: for (;;) {
-        const { value, done: eof } = await reader.read();
-        if (eof) break;
-        const taken = takeSseFrames(buf + dec.decode(value, { stream: true }));
-        buf = taken.rest;
-        for (const { event, data: payload } of taken.frames) {
-          if (event === "delta" && r.firstTokenMs === null) r.firstTokenMs = ms();
-          if (event === "tool") toolEvents++;
-          if (event === "done") { done = payload || {}; break outer; }
-          if (event === "error" || event === "stopped") {
-            error = { kind: event === "error" ? "agent-error" : "aborted", message: String(payload?.error || payload?.message || event).slice(0, 200) };
-            break outer;
-          }
-        }
-      }
-      try { await reader.cancel(); } catch { /* ended */ }
-      if (!done && !error) error = { kind: "connection", message: "stream ended without an answer" };
-    }
-    r.latencyMs = ms();
-    if (done) {
-      r.text = String(done.text || "");
-      r.model = typeof done.model === "string" ? done.model : null;
-      if (typeof done.sessionId === "string" && done.sessionId) {
-        sess.sessionId = done.sessionId;
-        sess.hermesIds.add(done.sessionId);
-      }
-      const calls = Array.isArray(done.toolCalls) ? done.toolCalls.length : 0;
-      r.toolCalls = Math.max(calls, toolEvents);
-      if (/^Error:/.test(r.text.trim())) r.error = { kind: "agent-error", message: r.text.trim().slice(0, 200) };
-    }
-    if (error) r.error = error;
-  } catch (e) {
-    r.latencyMs = ms();
-    const aborted = ac.signal.aborted;
-    r.error = { kind: aborted ? "timeout" : "connection", message: aborted ? `no answer within ${Math.round(timeoutMs / 1000)} s` : String(e.message || e).slice(0, 200) };
-    // A request going away does not end a Hermes turn; the owner's Stop does.
-    if (aborted) await stopHermesTurn(sess.key, turnId);
-  } finally {
-    clearTimeout(timer);
-  }
-  return r;
-}
+// ---- Hermes: the desktop chat's own route, streamed (scripts/nano-stress/hermes-chat.mjs)
+const hermes = createHermesDriver({ dash: DASH, headers: ownerHeaders, log });
 
 // ---- sessions --------------------------------------------------------------------
 let RUNTIME = null;
@@ -574,7 +477,7 @@ async function cleanupSessions() {
     gw?.close();
   } else {
     for (const s of opened) {
-      await stopHermesTurn(s.key);
+      await hermes.stop(s.key);
       let ok = true;
       // The route's own transcript (data/chat-transcripts/<key>.jsonl) and the
       // Hermes sessions its turns opened.
@@ -594,7 +497,7 @@ async function cleanupSessions() {
   log(`cleanup: ${result.deleted}/${result.sessions} sessions deleted${result.left.length ? `, left: ${result.left.join(" ")}` : ""}`);
   return result;
 }
-const turn = (sess, message, timeoutMs) => (RUNTIME === "openclaw" ? openclawTurn(sess, message, timeoutMs) : hermesTurn(sess, message, timeoutMs));
+const turn = (sess, message, timeoutMs) => (RUNTIME === "openclaw" ? openclawTurn(sess, message, timeoutMs) : hermes.turn(sess, message, timeoutMs));
 
 // ---- the steps ------------------------------------------------------------------------
 const turns = [];
