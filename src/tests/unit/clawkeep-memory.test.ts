@@ -65,13 +65,16 @@ vi.mock("@/lib/memory-shard", async (importOriginal) => ({
 // The two facts about the on-box embedder a status read may ask without
 // waking it: does it answer its health URL, and is its model on disk. A test
 // that sets one gets that answer; null is the real function.
-const { embedder } = vi.hoisted(() => ({ embedder: { healthy: null as boolean | null, installed: null as boolean | null } }));
+// `fails` makes the health check throw instead of answering.
+const { embedder } = vi.hoisted(() => ({ embedder: { healthy: null as boolean | null, installed: null as boolean | null, fails: false } }));
 vi.mock("@/lib/embed-server", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/embed-server")>();
   return {
     ...real,
-    isEmbedHealthy: async (...args: Parameters<typeof real.isEmbedHealthy>) =>
-      embedder.healthy ?? real.isEmbedHealthy(...args),
+    isEmbedHealthy: async (...args: Parameters<typeof real.isEmbedHealthy>) => {
+      if (embedder.fails) throw new Error("the embedder's health check failed");
+      return embedder.healthy ?? real.isEmbedHealthy(...args);
+    },
     getEmbedProvisioningStatus: async (...args: Parameters<typeof real.getEmbedProvisioningStatus>) => {
       const status = await real.getEmbedProvisioningStatus(...args);
       return embedder.installed === null ? status : { ...status, installed: embedder.installed };
@@ -83,6 +86,7 @@ beforeEach(async () => {
   shard.enabled = true;
   embedder.healthy = null;
   embedder.installed = null;
+  embedder.fails = false;
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "clawkeep-memory-"));
   process.env.CLAWKEEP_DATA_DIR = tmpDir;
   // CLAWKEEP_DATA_DIR is read once at module load, so each test needs a fresh
@@ -1028,6 +1032,21 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     status = await invalidated();
     expect(probes()).toBe(1);
     expect(status.health).toBe("degraded");
+  });
+
+  it("keeps the gateway's verdict when the on-box embedder's own checks throw, over a not-ok it held", async () => {
+    const { gateway, probes, reload, invalidated } = await box({ baseUrl: PROXY });
+    embedder.installed = true;
+    embedder.healthy = true;
+    gateway.probe = FAILED;
+    expect((await reload()).health).toBe("degraded");
+    expect(probes()).toBe(1);
+    // The next reading cannot run the gate at all: no verdict is not what it has.
+    embedder.fails = true;
+    const status = await invalidated();
+    expect(probes()).toBe(1);
+    expect(status.health).toBe("degraded");
+    expect(status.errorCode).toBe("provider_degraded");
   });
 
   it("never wakes the embedder behind the loopback proxy whatever provider id the file names, or none", async () => {

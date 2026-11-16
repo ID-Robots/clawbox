@@ -783,7 +783,11 @@ async function memoryStatusFromGateway(agentId: string): Promise<unknown | null>
   const custom = asRecord(legacy.custom);
   const providerState = asRecord(custom.providerState);
   const message = cleanString(health.message);
-  const verdict = ready ? null : await embedderVerdictFor(agentId, legacy).catch(() => null);
+  // A gate that THREW (the on-box embedder's own checks) says nothing about
+  // the embedder, and it may have hidden a not-ok held for it: that reading
+  // keeps the gateway's verdict, never the pending-only one.
+  let gateFailed = false;
+  const verdict = ready ? null : await embedderVerdictFor(agentId, legacy).catch(() => { gateFailed = true; return null; });
   const provider = verdict?.provider || cleanString(legacy.provider);
   // Over a COMPLETE vector index only: the core says "pending" before it says
   // "incomplete", so a pending reading can sit over an index it has not
@@ -793,7 +797,7 @@ async function memoryStatusFromGateway(agentId: string): Promise<unknown | null>
     && cleanString(providerState.mode) === "pending"
     && cleanString(asRecord(vector.index).state) === "complete"
     && Boolean(provider) && provider !== "none";
-  const noVerdict = !verdict || (verdict.ok === null && !verdict.lapsed);
+  const noVerdict = !gateFailed && (!verdict || (verdict.ok === null && !verdict.lapsed));
   const onlyPending = !ready && noVerdict && embeddingsOnlyPending(legacy);
   const available = ready || promoted || onlyPending;
   const reason = verdict?.ok === false && verdict.error ? verdict.error : message;
