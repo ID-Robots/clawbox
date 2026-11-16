@@ -57,6 +57,9 @@ beforeEach(() => {
   execFileSync("git", ["init", "-q", "-b", "main", work]);
   git(work, "config", "user.email", "test@example.com");
   git(work, "config", "user.name", "Test");
+  // Fixture commits and tags never ask for the developer's signing key.
+  git(work, "config", "commit.gpgSign", "false");
+  git(work, "config", "tag.gpgSign", "false");
   const main1 = commit("main one");
   git(work, "checkout", "-qb", "beta");
   const beta1 = commit("beta one");
@@ -115,6 +118,18 @@ d("scripts/promote-workstation.sh", () => {
   it("a commit on main is accepted", () => {
     expect(run(c.main1, "--push").status).toBe(0);
     expect(remoteTip("workstation")).toBe(c.main1);
+  });
+
+  it("publishes no tag, even with push.followTags=true and an annotated tag on the commit", () => {
+    git(clone, "config", "commit.gpgSign", "false");
+    git(clone, "config", "tag.gpgSign", "false");
+    git(clone, "config", "push.followTags", "true");
+    git(clone, "fetch", "-q", "origin", "beta");
+    git(clone, "-c", "user.email=test@example.com", "-c", "user.name=Test", "tag", "-a", "-m", "local only", "v0.0.1-local", c.beta2);
+    const res = run(c.beta2, "--push");
+    expect(res.status).toBe(0);
+    expect(remoteTip("workstation")).toBe(c.beta2);
+    expect(git(origin, "for-each-ref", "--format=%(refname)", "refs/tags")).toBe("");
   });
 
   it("refuses a branch name or a short sha: only the exact tested commit", () => {

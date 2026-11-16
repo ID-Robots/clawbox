@@ -142,6 +142,8 @@ if [ "$push" -ne 1 ]; then
   exit 0
 fi
 
-git push --quiet --force-with-lease="$lease" "$remote" "$sha:refs/heads/$BRANCH" \
+# --no-follow-tags: a push.followTags=true in the operator's config would
+# otherwise publish local annotated tags reachable from the commit too.
+git push --quiet --no-follow-tags --force-with-lease="$lease" "$remote" "$sha:refs/heads/$BRANCH" \
   || die "the push was refused ($BRANCH may have moved on $remote while this ran; nothing was changed by this run)."
 echo "Promoted: $BRANCH on $remote is now $sha. Workstations offer it at their next update check."

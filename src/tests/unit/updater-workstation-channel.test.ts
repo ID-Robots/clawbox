@@ -64,6 +64,9 @@ function seedOrigin(): { main: string; beta: string } {
   execFileSync("git", ["init", "-q", "-b", "main", seedDir]);
   seed("config", "user.email", "test@example.com");
   seed("config", "user.name", "Test");
+  // Fixture commits never ask for the developer's signing key.
+  seed("config", "commit.gpgSign", "false");
+  seed("config", "tag.gpgSign", "false");
   fs.writeFileSync(path.join(seedDir, ".gitignore"), ".update-branch\n.env\n");
   fs.writeFileSync(path.join(seedDir, "package.json"), JSON.stringify({ name: "clawbox", version: "4.0.0" }));
   commit("README.md", "one\n", "one");
@@ -195,6 +198,15 @@ d("a ClawBox Workstation follows the workstation branch", () => {
 
     const fetched = await mod.fetchUpdateBranchAsOwner(device);
     expect(fetched.upstream).toBe("origin/workstation");
+    expect(dev("rev-parse", "refs/remotes/origin/workstation")).toBe(shas.main);
+  });
+
+  it("compares against origin/workstation even where remote.origin.fetch was narrowed to beta", async () => {
+    cloneDevice("beta", "beta");
+    dev("config", "remote.origin.fetch", "+refs/heads/beta:refs/remotes/origin/beta");
+    promote(shas.main);
+    const check = await mod.getPinnedBranchTarget(device);
+    expect(check.target).toEqual({ branch: "workstation", currentSha: shas.beta, targetSha: shas.main });
     expect(dev("rev-parse", "refs/remotes/origin/workstation")).toBe(shas.main);
   });
 

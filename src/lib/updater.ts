@@ -5542,7 +5542,15 @@ async function compareWithOrigin(
   branch: string,
   channel: UpdateChannel["kind"],
 ): Promise<PinnedBranchCheck> {
-  const fetched = await readFromOrigin(projectDir, ["fetch", "--quiet", "origin", branch], {
+  // The Workstation channel names the ref it compares against, as step 1's
+  // fetch does: a checkout whose `remote.origin.fetch` was narrowed (say, to
+  // beta) would otherwise never write `origin/workstation`, and the comparison
+  // below would read a missing or stale ref. The branch rules keep the fetch
+  // they always made.
+  const fetchArgs = channel === "workstation"
+    ? ["fetch", "--quiet", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]
+    : ["fetch", "--quiet", "origin", branch];
+  const fetched = await readFromOrigin(projectDir, fetchArgs, {
     timeout: 20_000,
     attempts: REMOTE_CHECK_ATTEMPTS,
     retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS,
@@ -5649,7 +5657,13 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   // this device, which is why the address is checked too. Any one of them
   // failing means this check did not see the releases, so the worst answer is
   // what the device reports.
-  const remote = [releaseRemote, pinnedRemote, lastTagRemote].find((r) => !r.reachable) ?? REMOTE_REACHABLE;
+  //
+  // The tag list is one of them only on the branch rules, the one channel that
+  // offers a tag (see taggedClawboxTarget below): a Workstation whose own
+  // branch was fetched and compared has its verdict, whatever the tag lookup
+  // met. A channel that could not be decided already says so in pinnedRemote.
+  const tagRemote = updateChannel === "branch" ? lastTagRemote : REMOTE_REACHABLE;
+  const remote = [releaseRemote, pinnedRemote, tagRemote].find((r) => !r.reachable) ?? REMOTE_REACHABLE;
 
   // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
   // so it compares cleanly against the target tag.
