@@ -138,10 +138,10 @@ describe("probeUpdateHost", () => {
   });
 
   it("a DGX Spark: no Tegra marker, arm64, the install-x64.sh record names this checkout", () => {
-    const host = probeUpdateHost("/home/owner/clawbox", {
+    const host = probeUpdateHost("/opt/clawbox-checkout", {
       tegraRelease: path.join(tmp(), "absent"),
       arch: "arm64",
-      hasX64Install: (dir) => dir === "/home/owner/clawbox",
+      hasX64Install: (dir) => dir === "/opt/clawbox-checkout",
       hasX64DesktopIntegration: () => false,
     });
     expect(host).toEqual({ jetson: false, arch: "arm64", x64Install: true, desktopIntegration: false });
