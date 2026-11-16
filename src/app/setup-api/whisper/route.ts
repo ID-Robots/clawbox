@@ -16,7 +16,7 @@ import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { syncChannelAudio } from "@/lib/stt-channel";
-import { getSttPrimary, setSttPrimary, sttEngineOrder } from "@/lib/stt-preference";
+import { getSttPrimary, readStoredSttPrimary, setSttPrimary, sttEngineOrder } from "@/lib/stt-preference";
 import {
   WHISPER_ENGINE_GROUP,
   whisperEngineInstallParts,
@@ -326,9 +326,14 @@ export async function DELETE(req: Request) {
 async function releaseLocalTranscription(): Promise<string | null> {
   let wrote = false;
   try {
-    if (!openclawIsAbsent()) wrote = await syncChannelAudio(sttEngineOrder("cloud"), false);
-    await setSttPrimary("cloud");
-    await clearOwnerChoice("stt");
+    // The owner's own speech server (TASK-2501 PR-D) is not what was removed:
+    // a box that picked it keeps it, and only the engine's row goes.
+    const keepsEndpoint = (await readStoredSttPrimary()) === "endpoint";
+    if (!openclawIsAbsent()) wrote = await syncChannelAudio(sttEngineOrder(keepsEndpoint ? "endpoint" : "cloud"), false);
+    if (!keepsEndpoint) {
+      await setSttPrimary("cloud");
+      await clearOwnerChoice("stt");
+    }
   } catch (err) {
     console.warn("[setup-api/whisper] could not release the removed engine from the transcription settings:", err);
     return "Removed, but the transcription settings could not be updated — channel voice notes still name the box's own engine until the engine is changed in Settings → Local AI.";

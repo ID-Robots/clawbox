@@ -52,6 +52,10 @@ vi.mock("@/lib/config-store", () => ({
   // The route records WHO chose the voice (src/lib/clawai-cloud-choice.ts), so
   // the automatic ClawBox AI cloud default never moves an owner's pin.
   set: (...a: unknown[]) => choiceSourceMock(...a),
+  // The local-only AI lock reads the store failing closed (`cloudAiLockOn`,
+  // `readCloudAiLock`): answered from the same preference the lock cases set,
+  // so every other case speaks about an unlocked box.
+  getKnown: async (...a: unknown[]) => ({ value: await preferenceMock(...a), known: true }),
 }));
 
 const wireMock = vi.fn();

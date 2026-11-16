@@ -342,3 +342,37 @@ describe("withoutClawboxCloudVoice — the voice a plan without it may still use
     expect(withoutClawboxCloudVoice(fresh, [PROXY])).toBe(fresh);
   });
 });
+
+// TASK-2501 PR-D: under the local-only AI lock the box speaks with its own
+// voice only — every cloud voice is left out of what the box may use.
+describe("withoutCloudVoices", () => {
+  it("keeps the box's own voice and drops ClawBox AI's and the owner's cloud voices, in both homes", async () => {
+    const { withoutCloudVoices, cloudSpeechTarget } = await import("@/lib/voice-output");
+    const config = {
+      tts: {
+        provider: "openai",
+        providers: {
+          "tts-local-cli": { command: "/x/clawbox-tts.sh" },
+          openai: { baseUrl: "https://clawbox.com/api/ai", apiKey: "claw_x", model: "gpt-4o-mini-tts", clawboxManaged: true },
+          elevenlabs: { apiKey: "el-key" },
+        },
+      },
+      messages: { tts: { providers: { openai: { apiKey: "sk-own" }, "kokoro-local": { command: "/y" } } } },
+      models: { providers: { openai: { apiKey: "sk-own" }, deepseek: { apiKey: "claw_x" } } },
+    };
+    const out = withoutCloudVoices(config);
+    expect(Object.keys(out.tts!.providers as object)).toEqual(["tts-local-cli"]);
+    expect(Object.keys(out.messages!.tts!.providers as object)).toEqual(["kokoro-local"]);
+    expect(out.models!.providers!.openai).toBeUndefined();
+    expect(out.models!.providers!.deepseek).toEqual({ apiKey: "claw_x" });
+    expect(cloudSpeechTarget(out)).toBeNull();
+    // Pure: the input is untouched, so lifting the lock gives the voices back.
+    expect(Object.keys(config.tts.providers)).toHaveLength(3);
+  });
+
+  it("answers the same object when there is no cloud voice", async () => {
+    const { withoutCloudVoices } = await import("@/lib/voice-output");
+    const config = { tts: { providers: { "tts-local-cli": { command: "/x" } } } };
+    expect(withoutCloudVoices(config)).toBe(config);
+  });
+});
