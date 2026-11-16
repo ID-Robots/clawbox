@@ -65,7 +65,7 @@ import { cachedWorkflowTelemetry, type WorkflowTelemetry } from "@/lib/coding-wo
  */
 
 import { execFile, spawn, type ChildProcess } from "child_process";
-import { CLOUD_AI_LOCKED_CODE, isCloudAiLocked, isCloudAiLockedSync } from "@/lib/ai-cloud-lock";
+import { CLOUD_AI_LOCKED_CODE, isCloudAiLocked, isCloudAiLockedError, isCloudAiLockedSync } from "@/lib/ai-cloud-lock";
 import { StringDecoder } from "string_decoder";
 import fs from "fs";
 import os from "os";
@@ -15300,6 +15300,13 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // lie. Narrowing works the same way: a rule removed before the resume is gone
     // from the resumed run too.
     if (!automatic) run.allowRules = await getAllowRules(allowRuleContext());
+    // Asked ONCE MORE here (TASK-2501 PR-E): the gate above was read before the
+    // tools, the worktree, the folder and the allow rules, and those take long
+    // enough for the owner to turn the lock on mid-resume. Nothing below has
+    // touched this record yet, so the gate's own refusal — same code, same
+    // words — leaves the run as paused as it was found, on the cleanup path a
+    // preparation failure already takes.
+    await assertCodingAgentUnlocked(run.provider);
     // Read BEFORE the flip below, which is what makes this a resume: the
     // continuation text and the pull-request step both depend on which of the two
     // resumable endings this run is coming back from.
@@ -15406,8 +15413,10 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   // itself, and the queue starts it here (startQueuedRun).
   const fromQueue = run.status === "queued" && run.queued?.start?.kind === "draft";
   if (run.status !== "draft" && !fromQueue) throw new CodingAgentError("invalid", "Only a drafted run can be started this way.");
-  // In order: a draft started while runs wait for a slot goes behind them.
-  if (!fromQueue && hasQueuedRuns()) return queueDraft(run);
+  // In order: a draft started while runs wait for a slot goes behind them —
+  // the ones that can start, anyway; a draft on the box's own engine is not
+  // held behind a cloud entry the lock refuses (TASK-2501 PR-E).
+  if (!fromQueue && (await hasQueuedRunsThatCanStart())) return queueDraft(run);
   // The account this draft named, not whatever the default is now. Checked
   // before the record is flipped to "running": a draft for an account whose
   // key the owner has since removed should be refused with a sentence, not
@@ -15482,8 +15491,17 @@ export const QUEUE_RETRY_MS = 60_000;
 /** Refusals that are the BOX's state, not the run's: the queue waits them out rather than failing the run. */
 const QUEUE_WAITS: ReadonlySet<CodingAgentErrorKind> = new Set(["disabled", "not_ready", "limited", "busy"]);
 
-function hasQueuedRuns(): boolean {
-  return loadRuns().some((r) => r.status === "queued");
+/**
+ * Is anything in the queue able to start as the box stands? A cloud entry the
+ * lock refuses is not (TASK-2501 PR-E): with the lock on, the owner asks for
+ * the box's own engine, and answering "you are behind a run that never starts"
+ * is a queue that refuses work the box can do.
+ */
+async function hasQueuedRunsThatCanStart(): Promise<boolean> {
+  const queued = queuedRuns();
+  if (queued.length === 0) return false;
+  if (!(await isCloudAiLocked())) return true;
+  return queued.some((r) => r.provider === undefined || providersUnderLock(true).includes(r.provider));
 }
 
 /** The queued runs in the order they start in: the order they were asked for. */
@@ -15523,7 +15541,7 @@ export async function startOrQueueRun(input: StartRunInput): Promise<{ run: Codi
   const asked: StartRunInput = announced ? { ...input, runId: announced } : input;
   let failed = false;
   try {
-    if (!hasQueuedRuns()) {
+    if (!(await hasQueuedRunsThatCanStart())) {
       try {
         return { run: await startRun(asked), queued: false };
       } catch (err) {
@@ -15696,8 +15714,14 @@ export function pumpRunQueue(): Promise<string[]> {
     const started: string[] = [];
     do {
       store.queuePumpAgain = false;
+      // The entries the LOCK refuses, passed over for the rest of this pass
+      // (TASK-2501 PR-E): a cloud run waiting on the lock cannot start however
+      // often it is asked, and while the lock is on it must not hold the box's
+      // own engine behind it. They keep their place in the queue, and the retry
+      // below gives them their turn again.
+      const lockBlocked = new Set<string>();
       for (;;) {
-        const next = queuedRuns()[0];
+        const next = queuedRuns().find((r) => !lockBlocked.has(r.id));
         if (!next) break;
         try {
           await startQueuedRun(next.id);
@@ -15711,6 +15735,12 @@ export function pumpRunQueue(): Promise<string[]> {
           if (settled?.status === "failed") announceEndingToChat(settled);
           // Every slot is taken: its turn comes when a run settles.
           if (err instanceof SlotsFullError) break;
+          // The lock's refusal is about WHERE this run's model lives, not about
+          // the box being busy: the entries behind it may be able to start.
+          if (isCloudAiLockedError(err)) {
+            lockBlocked.add(next.id);
+            continue;
+          }
           if (err instanceof CodingAgentError && QUEUE_WAITS.has(err.kind)) {
             armQueueRetry();
             break;
@@ -15718,6 +15748,7 @@ export function pumpRunQueue(): Promise<string[]> {
           failQueuedRun(next.id, err);
         }
       }
+      if (lockBlocked.size > 0) armQueueRetry();
     } while (store.queuePumpAgain);
     return started;
   })().finally(() => {
