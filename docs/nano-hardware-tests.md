@@ -578,6 +578,11 @@ soon, and gives it back when it ends or is cancelled. A second
 `run.sh` on that board exits 2 before any test and names the run that holds the
 claim. A claim left by a run that died lapses at its expiry.
 
+A load run — parallel chats, one long session, one tool-heavy session, with
+latency, memory, swap, temperature, runtime RSS and restarts per step — is not
+part of this suite: it is `scripts/nano-stress/run.sh`, run by hand
+([nano-stress-test.md](nano-stress-test.md)).
+
 ## Adding a test
 
 1. Create `scripts/nano-tests/tests/NN-what-it-checks.sh`. `NN` sets the order;
