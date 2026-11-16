@@ -40,6 +40,8 @@ const uninstalled = vi.fn(async () => ({ ok: true as boolean, freedBytes: 228 * 
 /** What the engine uninstall releases once the engine is gone. */
 const sync = vi.fn(async (..._a: unknown[]) => false);
 const primary = { value: "cloud" as string };
+/** What the store holds before the resolver has its say (TASK-2501 PR-D: the owner's own server). */
+const stored = { value: undefined as string | undefined };
 const setPrimary = vi.fn(async (..._a: unknown[]) => {});
 const cleared = vi.fn(async (..._a: unknown[]) => {});
 const gatewayRestart = vi.fn(async () => {});
@@ -52,6 +54,7 @@ vi.mock("@/lib/stt-channel", () => ({
 vi.mock("@/lib/stt-preference", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/stt-preference")>()),
   getSttPrimary: async () => primary.value,
+  readStoredSttPrimary: async () => stored.value,
   setSttPrimary: (...a: unknown[]) => setPrimary(...a),
 }));
 vi.mock("@/lib/clawai-cloud-choice", () => ({ clearOwnerChoice: (...a: unknown[]) => cleared(...a) }));
@@ -747,6 +750,23 @@ describe("DELETE /setup-api/whisper?scope=engine", () => {
     expect(gatewayRestart).toHaveBeenCalledTimes(1);
     expect(body.fallback).toEqual({ requested: "local", reason: "not_installed" });
     expect(body.warning).toBeUndefined();
+  });
+
+  it("keeps the owner's own speech server as the engine: only Whisper's row goes", async () => {
+    stored.value = "endpoint";
+    primary.value = "endpoint";
+    state.installed = false;
+    try {
+      const { DELETE } = await load();
+      const res = await DELETE(del());
+      expect(res.status).toBe(200);
+      expect(sync).toHaveBeenCalledWith(["endpoint", "local", "cloud"], false);
+      expect(setPrimary).not.toHaveBeenCalled();
+      expect(cleared).not.toHaveBeenCalled();
+    } finally {
+      stored.value = undefined;
+      primary.value = "cloud";
+    }
   });
 
   it("restarts nothing when the list named no local row, and claims no fallback over a cloud pick", async () => {

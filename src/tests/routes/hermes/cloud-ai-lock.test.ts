@@ -22,7 +22,7 @@ vi.mock("@/lib/hermes-clawai", async (importOriginal) => ({
 }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
 // What Hermes' config.yaml says `tts.provider` is, and the dashboard that speaks.
-const voice = vi.hoisted(() => ({ provider: "", localRegistered: true, command: "/opt/clawbox-tts.sh --text-file={input_path} -- {output_path}" }));
+const voice = vi.hoisted(() => ({ provider: "", localRegistered: true, command: "/opt/clawbox-tts.sh --text-file={input_path} -- {output_path}", pending: false }));
 vi.mock("@/lib/hermes-config-cache", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-config-cache")>()),
   hermesConfigGet: vi.fn(async () => ""),
@@ -31,7 +31,7 @@ vi.mock("@/lib/hermes-config-cache", async (importOriginal) => ({
       : k === "tts.providers.clawbox-local.type" ? (voice.localRegistered ? "command" : "")
         : k === "tts.providers.clawbox-local.command" ? (voice.localRegistered ? voice.command : "")
           : ""]))),
-  hermesConfigReadPending: () => false,
+  hermesConfigReadPending: (key: string) => voice.pending && key === "tts.provider",
   invalidateHermesConfigCache: vi.fn(),
 }));
 const dashboardFetch = vi.hoisted(() => vi.fn());
@@ -39,8 +39,9 @@ vi.mock("@/lib/hermes-dashboard-auth", () => ({ dashboardFetch }));
 const store = vi.hoisted(() => new Map<string, unknown>());
 vi.mock("@/lib/config-store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/config-store")>()),
-  get: async (key: string) => store.get(key),
-  getKnown: async (key: string) => ({ value: store.get(key), known: true }),
+  get: async (key: string) => (key === "ai_cloud_lock" && lockState.on ? true : store.get(key)),
+  // The lock reaches PR-D's voice path (`cloudAiLockOn`, feature-engine) through the store.
+  getKnown: async (key: string) => ({ value: key === "ai_cloud_lock" && lockState.on ? true : store.get(key), known: true }),
   set: async (key: string, value: unknown) => { store.set(key, value); },
   setMany: vi.fn(async () => undefined),
   resolveConfigRoot: () => "/tmp",
@@ -62,6 +63,7 @@ beforeEach(() => {
   runHermesCli.mockReset().mockResolvedValue({ code: 0, stdout: "", stderr: "" });
   applyClawaiToHermes.mockReset();
   voice.provider = "";
+  voice.pending = false;
   voice.localRegistered = true;
   voice.command = "/opt/clawbox-tts.sh --text-file={input_path} -- {output_path}";
   dashboardFetch.mockReset().mockResolvedValue(new Response("{}", { status: 500 }));
@@ -129,20 +131,28 @@ describe("Hermes' spoken replies", () => {
     expect(runHermesCli).not.toHaveBeenCalled();
   });
 
-  it("sends no reply to a cloud voice Hermes is still set to", async () => {
+  // With speech local-only (PR-D) a cloud voice is not refused but REPLACED by
+  // the box's own (Kokoro) first, and only then is Hermes asked; the move
+  // itself is pinned in src/tests/unit/hermes-tts-local-only.test.ts.
+  const movedToLocal = () => runHermesCli.mock.calls.some(([args]) => JSON.stringify(args) === JSON.stringify(["config", "set", "tts.provider", "clawbox-local"]));
+
+  it("sends no reply to a cloud voice Hermes is still set to: the box's own voice is set first", async () => {
     lockState.on = true;
     voice.provider = "openai";
     const { speakWithHermes } = await import("@/lib/hermes-tts");
-    expect(await speakWithHermes("Good morning.")).toMatchObject({ ok: false, code: "cloud_ai_locked", status: 409 });
-    expect(dashboardFetch).not.toHaveBeenCalled();
+    await speakWithHermes("Good morning.");
+    expect(movedToLocal()).toBe(true);
+    const moved = runHermesCli.mock.invocationCallOrder[runHermesCli.mock.calls.findIndex(([args]) => args[3] === "clawbox-local")];
+    expect(dashboardFetch.mock.invocationCallOrder.every((order) => order > moved)).toBe(true);
   });
 
   it("fails closed when Hermes' voice cannot be read", async () => {
     lockState.on = true;
-    voice.provider = "";
+    voice.pending = true;
     const { speakWithHermes } = await import("@/lib/hermes-tts");
     expect(await speakWithHermes("Good morning.")).toMatchObject({ ok: false, code: "cloud_ai_locked" });
     expect(dashboardFetch).not.toHaveBeenCalled();
+    expect(movedToLocal()).toBe(false);
   });
 
   it("still speaks with the box's own voice", async () => {
@@ -171,14 +181,15 @@ describe("Hermes' spoken replies", () => {
     expect(dashboardFetch).not.toHaveBeenCalled();
   });
 
-  it("does not take a name that merely looks local for the box's voice", async () => {
+  it("does not take a name that merely looks local for the box's voice: it is replaced first", async () => {
     lockState.on = true;
     for (const name of ["not-local", "piper-local", "kokoro"]) {
       voice.provider = name;
+      runHermesCli.mockClear();
       const { speakWithHermes } = await import("@/lib/hermes-tts");
-      expect(await speakWithHermes("Good morning."), name).toMatchObject({ ok: false, code: "cloud_ai_locked" });
+      await speakWithHermes("Good morning.");
+      expect(movedToLocal(), name).toBe(true);
     }
-    expect(dashboardFetch).not.toHaveBeenCalled();
   });
 
   it("asks Hermes as before once the lock is off", async () => {
