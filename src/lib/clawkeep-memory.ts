@@ -809,7 +809,13 @@ async function memoryStatusFromGateway(agentId: string): Promise<unknown | null>
       // The provider the probe started, when one named it: a fallback or none
       // is a verdict of its own (`provider_mismatch`, `embedder_unavailable`).
       ...(verdict?.provider ? { provider: verdict.provider } : {}),
-      vector: { ...vector, available: available && vector.enabled !== false },
+      // A not-ok from the probe is the answer about vector search: whatever
+      // the gateway's own flag says, it cannot run.
+      vector: {
+        ...vector,
+        available: available && vector.enabled !== false,
+        ...(verdict?.ok === false ? { semanticAvailable: false } : {}),
+      },
       custom: promoted
         ? { ...custom, providerState: { ...providerState, mode: "active" } }
         : !available && reason && !cleanString(custom.providerUnavailableReason) ? { ...custom, providerUnavailableReason: reason } : custom,

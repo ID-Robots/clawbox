@@ -1034,6 +1034,18 @@ describe("the status from the running gateway, and the embedder's own probe", ()
     expect(status.health).toBe("degraded");
   });
 
+  it("never counts vectors as searchable over a not-ok probe, even where the gateway says they are", async () => {
+    const { gateway, reload } = await box();
+    gateway.status = gatewayStatus((legacy) => {
+      (legacy.vector as Record<string, unknown>).semanticAvailable = true;
+    }, { message: null });
+    gateway.probe = { agentId: "main", provider: "openai-compatible", embedding: { ok: false } };
+    const status = await reload();
+    expect(status.semanticAvailable).toBe(false);
+    expect(status.vectors).toBe(0);
+    expect(status.health).toBe("degraded");
+  });
+
   it("keeps the gateway's verdict when the on-box embedder's own checks throw, over a not-ok it held", async () => {
     const { gateway, probes, reload, invalidated } = await box({ baseUrl: PROXY });
     embedder.installed = true;
