@@ -95,6 +95,14 @@ function runtimeSpecifiers(file: string): string[] {
       if (!typeOnly) out.push(node.moduleSpecifier.text);
     } else if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
       if (!node.isTypeOnly) out.push(node.moduleSpecifier.text);
+    } else if (
+      ts.isImportEqualsDeclaration(node)
+      && !node.isTypeOnly
+      && ts.isExternalModuleReference(node.moduleReference)
+      && ts.isStringLiteral(node.moduleReference.expression)
+    ) {
+      // `import x = require("pkg")`
+      out.push(node.moduleReference.expression.text);
     } else if (ts.isCallExpression(node) && node.arguments.length > 0 && ts.isStringLiteralLike(node.arguments[0])) {
       const callee = node.expression;
       if (callee.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(callee) && callee.text === "require")) {
@@ -174,6 +182,7 @@ function findBun(): string | null {
   for (const c of candidates) {
     if (!c) continue;
     try {
+      if (!fs.statSync(c).isFile()) continue;
       fs.accessSync(c, fs.constants.X_OK);
       return c;
     } catch {
@@ -223,23 +232,33 @@ interface Start {
 /**
  * Start the server the way the gateway does (`bun run <entry>` over stdio),
  * send `initialize` and `tools/list`, and return the tool names — or null with
- * the stderr when it never answered. The API base is a closed loopback port, so
- * the startup probes fail at once and nothing on this machine is asked.
+ * the stderr when it never answered. Hermetic: the API base is a closed
+ * loopback port, so the startup probes fail at once and nothing on this machine
+ * is asked, and every root the server would otherwise default to a ClawBox's
+ * live install for (the checkout, the home, the OpenClaw home, the edition
+ * lock) points into the temp dir — this file can run on a device too.
  */
 function startServer(root: string, deadlineMs = 30_000): Promise<Start> {
+  const home = path.join(root, "home");
   return new Promise((resolve) => {
     const child = spawn(BUN!, ["run", "--no-install", path.join(root, ENTRY)], {
       cwd: root,
       env: {
         PATH: process.env.PATH ?? "",
-        HOME: path.join(root, "home"),
+        HOME: home,
         BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+        CLAWBOX_ROOT: root,
+        OPENCLAW_HOME: path.join(home, ".openclaw"),
+        CLAWBOX_OPENCLAW_HOME: path.join(home, ".openclaw"),
         CLAWBOX_API_BASE: "http://127.0.0.1:9",
         CLAWBOX_MCP_TOKEN: "0".repeat(64),
-        CLAWBOX_EDITION_FILE: path.join(root, "home", "edition.env"),
+        CLAWBOX_EDITION_FILE: path.join(home, "edition.env"),
       },
       stdio: ["pipe", "pipe", "pipe"],
     });
+    // A child that dies before reading its stdin turns the writes below into
+    // EPIPE; the start has already failed by then, and `exit` reports it.
+    child.stdin.on("error", () => {});
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -287,6 +306,14 @@ function startServer(root: string, deadlineMs = 30_000): Promise<Start> {
     send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} });
   });
 }
+
+describe("a bun to start the server with", () => {
+  // The cases below skip on a machine without bun. On CI that skip would turn
+  // the one check that starts the server into a silent pass, so there it fails.
+  it.runIf(!!process.env.CI)("is found when CI runs the suite (setup-bun in pr-tests-coverage.yml)", () => {
+    expect(BUN, "no bun on $BUN_BIN, the PATH or ~/.bun/bin").not.toBeNull();
+  });
+});
 
 describe.skipIf(!BUN)("the ClawBox MCP server from a strict, declared-dependencies-only layout", () => {
   it("starts under bun and answers tools/list", async () => {
