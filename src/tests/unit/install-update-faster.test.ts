@@ -90,10 +90,10 @@ d("build_is_current_for_checkout: a rebuild only when one could change something
   let project: string;
   let head: string;
 
-  interface Stamp { commit?: string; dirty?: unknown; contentDirty?: unknown; untracked?: unknown; node?: string; buildId?: string }
+  interface Stamp { commit?: string; dirty?: unknown; contentDirty?: unknown; untracked?: unknown; node?: string; buildId?: string; envFiles?: unknown }
 
   function writeStamp(dir: string, over: Stamp = {}): void {
-    const stamp = { commit: head, dirty: false, untracked: 0, node: process.version, buildId: "build-1", ...over };
+    const stamp = { commit: head, dirty: false, untracked: 0, node: process.version, buildId: "build-1", envFiles: [], ...over };
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, "build-info.json"), JSON.stringify(stamp, null, 2));
     fs.writeFileSync(path.join(dir, "BUILD_ID"), "build-1");
@@ -289,9 +289,29 @@ d("build_is_current_for_checkout: a rebuild only when one could change something
     const r = ask();
     expect(r.status).toBe(1);
     expect(r.reason).toContain(".env changed after the build");
-    // …and does not, when the env file is older than the build.
+    // …and does not, when the env file is older than the build and was there for it.
     fs.utimesSync(env, built - 60, built - 60);
+    writeBuild({ envFiles: [".env"] });
     expect(ask().status).toBe(0);
+  });
+
+  it("rebuilds when an env file the build had is gone, and keeps the build while the same ones are there", () => {
+    fs.writeFileSync(path.join(project, ".env"), "GATEWAY_URL=http://example.invalid\n");
+    const past = new Date(Date.now() - 60_000);
+    fs.utimesSync(path.join(project, ".env"), past, past);
+    writeBuild({ envFiles: [".env"] });
+    expect(ask().status).toBe(0);
+    fs.rmSync(path.join(project, ".env"));
+    const r = ask();
+    expect(r.status).toBe(1);
+    expect(r.reason).toContain("was built with env files [.env], and [] are there now");
+  });
+
+  it("rebuilds over a stamp from before the env-file list", () => {
+    writeBuild({ envFiles: undefined });
+    const r = ask();
+    expect(r.status).toBe(1);
+    expect(r.reason).toContain("records no env-file list");
   });
 
   it("rebuilds when the identity script is not in the tree", () => {

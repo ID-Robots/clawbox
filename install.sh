@@ -3901,7 +3901,8 @@ build_type_check_proven_by_ci() {
 }
 
 # Why one build stamp could not stand for a rebuild of this checkout, or
-# nothing when it can. `build_stamp_refusal <build-info.json> <node version>`;
+# nothing when it can. `build_stamp_refusal <build-info.json> <node version>
+# [<env files there now, comma-separated>]`;
 # non-zero only when node itself could not run. Read with node as the tree's
 # owner, as scripts/verify-build-identity.sh reads the same file: a Jetson has
 # node, not necessarily jq, and the file is the tree's.
@@ -3919,10 +3920,16 @@ build_stamp_refusal() {
       why.push(`was built from a tree with changes (dirty=${s.dirty})`);
     }
     if (s.untracked !== 0) why.push(`was built with ${s.untracked} untracked file(s) in the tree`);
+    // The env files Next loaded for the build (write-build-info.mjs): one
+    // deleted since is invisible to the mtime check in the caller. A stamp from
+    // before the list cannot say, so it is not kept.
+    const envNow = (process.argv[3] || "").split(",").filter(Boolean).sort().join(",");
+    if (!Array.isArray(s.envFiles)) why.push("records no env-file list (a build from before it)");
+    else if ([...s.envFiles].sort().join(",") !== envNow) why.push(`was built with env files [${s.envFiles.join(", ")}], and [${envNow.split(",").filter(Boolean).join(", ")}] are there now`);
     const want = process.argv[2] || "";
     if (!want || s.node !== want) why.push(`was built on Node ${s.node || "(unrecorded)"}, and this build would run on ${want || "(no answer)"}`);
     process.stdout.write(why.join("; "));
-  ' "$1" "${2:-}" 2>/dev/null
+  ' "$1" "${2:-}" "${3:-}" 2>/dev/null
 }
 
 # The note that tells the update's second half the rebuild step KEPT the build
@@ -4013,7 +4020,7 @@ build_is_current_for_checkout() {
   local build_dir="$PROJECT_DIR/.next"
   local -a tree_git=(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
   local -a failed=()
-  local changes="" node_now="" refusal="" stamp served_entry="" served_stamp="" parked env_file line reason="" head="" whole=1
+  local changes="" node_now="" refusal="" stamp served_entry="" served_stamp="" env_now="" parked env_file line reason="" head="" whole=1
   if [ "${CLAWBOX_FORCE_REBUILD:-0}" = "1" ]; then failed+=("CLAWBOX_FORCE_REBUILD=1"); fi
   # `-f`, not build_entry_present: that one also accepts a dangling link, for
   # a parked build whose nested entry is elsewhere. A build kept as the one to
@@ -4056,8 +4063,12 @@ build_is_current_for_checkout() {
       served_entry="$(readlink -f "$build_dir/standalone/server.js" 2>/dev/null)" || served_entry=""
       served_stamp="$build_dir/standalone/.next/build-info.json"
       [ -n "$served_entry" ] && served_stamp="$(dirname "$served_entry")/.next/build-info.json"
+      env_now=""
+      for env_file in .env .env.local .env.production .env.production.local; do
+        [ -e "$PROJECT_DIR/$env_file" ] && env_now="${env_now:+$env_now,}$env_file"
+      done
       for stamp in "$build_dir/build-info.json" "$served_stamp"; do
-        if ! refusal="$(build_stamp_refusal "$stamp" "$node_now")"; then
+        if ! refusal="$(build_stamp_refusal "$stamp" "$node_now" "$env_now")"; then
           failed+=("${stamp#"$PROJECT_DIR"/} could not be read (node did not run)")
         elif [ -n "$refusal" ]; then
           failed+=("${stamp#"$PROJECT_DIR"/} $refusal")

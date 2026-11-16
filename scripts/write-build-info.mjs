@@ -108,6 +108,9 @@ const untracked = untrackedOut === null
   ? null
   : (untrackedOut ? untrackedOut.split("\n").filter(Boolean).length : 0);
 
+/** The env files `next build` loads, in the order Next reads them (lowest first). */
+const ENV_FILES = [".env", ".env.local", ".env.production", ".env.production.local"];
+
 const info = {
   commit,
   shortCommit: commit ? commit.slice(0, 7) : null,
@@ -131,6 +134,13 @@ const info = {
   })(),
   hermesPin: readHermesPin(),
   openclawPin: readFirstLine(path.join(projectDir, "config", "openclaw-target.txt")),
+  /**
+   * The env files Next loads that were there for this build (next.config.ts
+   * bakes values from them in). The rebuild step compares the list with the
+   * files there now (install.sh build_is_current_for_checkout): a file newer
+   * than the build is seen by its mtime, a DELETED one only by this list.
+   */
+  envFiles: ENV_FILES.filter((name) => fs.existsSync(path.join(projectDir, name))),
 };
 
 fs.mkdirSync(nextDir, { recursive: true });
