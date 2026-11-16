@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import Busboy from "busboy";
-import { cloudAiLockedBody, isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { Readable } from "stream";
 import { boundedBody } from "@/lib/bounded-body";
 import {
@@ -309,6 +308,12 @@ type Transcript = { text: string };
 /** The cloud engine: the recording goes to the ClawBox AI proxy. */
 async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transcript | Failure> {
   const token = await resolveClawaiToken();
+  // Under the lock `resolveClawaiToken` answers null for AI use (TASK-2501
+  // PR-A), so a lock that went on after the chain was read must be named here,
+  // before "not linked": nothing is uploaded either way.
+  if (!token && await cloudAiLockOn()) {
+    return { status: 409, error: LOCKED_NO_ENGINE, detail: "the local-only AI lock went on mid-request, nothing uploaded", locked: true };
+  }
   // The rule the channel row is written by (`cloudTranscribeProblem`), so the
   // microphone and a Telegram voice note agree on whether ClawBox AI can
   // transcribe here. Asked before anything is uploaded: a DeepSeek key of the
@@ -567,13 +572,6 @@ export async function POST(req: NextRequest) {
   // The cloud engine always answers, so the all-unavailable case is unreachable today;
   // it is spelled out rather than asserted away so a chain of optional
   // engines would still fail with a status instead of a crash.
-  if (locked && !firstFailure) {
-    // Fail closed with the reason, not a quiet fallback to the cloud.
-    return NextResponse.json(
-      cloudAiLockedBody("Local-only AI is on and this box has no on-box transcription engine. Install voice input (Whisper) in Settings → Voice."),
-      { status: 409 },
-    );
-  }
   const failure = firstFailure ?? { status: 503, error: "No transcription engine is available on this ClawBox." };
   return NextResponse.json({ error: failure.error }, { status: failure.status });
 }

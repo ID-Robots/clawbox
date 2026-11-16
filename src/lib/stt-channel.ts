@@ -13,7 +13,6 @@
  */
 
 import { isDeepStrictEqual } from "util";
-import { isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 import { hasChatgptOauthProfile } from "@/lib/chatgpt-subscription";
 import { isClawboxAiToken } from "@/lib/clawai-token";
