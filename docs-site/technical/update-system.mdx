@@ -12,7 +12,7 @@ ClawBox updates are **git-based**: the device tracks the [ID-Robots/clawbox](htt
 
 ## How the device decides an update exists
 
-1. **Resolve the branch it follows**: the branch recorded in `.update-branch`, else the branch the checkout is on, else `main` (see [Update channels](#update-channels)).
+1. **Resolve the branch it follows**: the branch recorded in `.update-branch`, else the branch the checkout is on, else `main` (see [Update channels](#update-channels)). A ClawBox Workstation follows `workstation` instead (see [ClawBox Workstation](#clawbox-workstation)).
 2. **Ask origin, twice and anonymously**: the release tags (`git ls-remote`, only `vX.Y.Z` counts) and a fetch of the followed branch. There is deliberately no `git fetch --tags`.
 3. **Offer what the box is behind.** On `main` the update is offered by its release name (`v4.3.0`) when a newer tag exists; on any other branch, or on a `main` that moved on with no newer tag, it is named by the commit it installs (`beta@1a2b3c4`). A box whose served build was made from a different commit than its checkout is offered a **Rebuild**.
 4. The "Installed" version is read from `package.json`; OpenClaw's target version comes from the pin file `config/openclaw-target.txt` (2026.11.3 on beta, 2026.10.9 on 4.3), Hermes Agent's from `install.sh` (v0.23.1 on beta, v0.22.5 on 4.3). On a Hermes box the OpenClaw half reports nothing to update.
@@ -90,6 +90,10 @@ The channel is a one-line file: `/home/clawbox/clawbox/.update-branch` (absent =
 Switch in **System Update → Advanced options** (Beta toggle / branch override), or over SSH: `echo beta > /home/clawbox/clawbox/.update-branch`. The pin survives updates **and** factory resets; clear it from the same UI or by deleting the file. All update mechanisms (UI, installer, recovery script) honor it.
 
 With no pin recorded (file absent or empty) the box follows the branch it is checked out on, and `main` otherwise, so it still sees new releases. **Advanced options** shows the branch updates actually follow and whether it was recorded. The one exception is a detached checkout that nothing on the box ties to a branch. The update check still compares it against `main`, but the update itself refuses to guess a channel and asks for a branch to be entered first.
+
+### ClawBox Workstation
+
+A [ClawBox Workstation](/hardware/clawbox-workstation) (DGX Spark) has a channel of its own: the **`workstation`** branch. It follows that branch whatever `.update-branch` says, and the Beta toggle and branch override do not apply to it. A version reaches `workstation` only after it has been tested on a Workstation. Nothing moves the branch automatically. Until a first version is released there, the update check says so and the Workstation stays on the version it has. It never follows `beta` or `main` instead. A Jetson ClawBox is not affected. Setting `CLAWBOX_UPDATE_CHANNEL=branch` in the checkout's `.env` (and restarting the web server) puts a Workstation back on the branch rules above, for testing.
 
 ## Going back to an older release
 

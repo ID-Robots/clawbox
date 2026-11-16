@@ -4642,6 +4642,7 @@ const table: Record<string, string> = {
   "update.effectiveBranchPinned": "更新は {branch}（この端末に記録されたブランチ）に従います。",
   "update.effectiveBranchRecovered": "更新は {branch}（この端末自身のビルドから判定）に従います。ブランチは記録されていません。",
   "update.effectiveBranchUnresolved": "リリースチャンネルの {branch} と比較しています。この端末はブランチ上になく、記録もないため、更新する前にここでブランチを入力してください。",
+  "update.effectiveBranchWorkstation": "更新は {branch}（ClawBox Workstation 用チャンネル）に従います。バージョンは Workstation でテストされた後にのみここに届きます。ベータの切り替えとここに記録されたブランチは、このコンピューターには適用されません。",
   "update.failedToCheck": "アップデート状態の確認に失敗しました。",
   "update.forceConfirmAction": "はい、完全更新を実行",
   "update.forceConfirmBody": "バージョンはすでに最新ですが、OpenClaw とシステムサービスのセットアップを含む完全更新をやり直し、その後 {reboot}。復旧を仕上げたいときや、更新後に調子の悪いサービスを直したいときに使ってください。",

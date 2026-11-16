@@ -4642,6 +4642,7 @@ const table: Record<string, string> = {
   "update.effectiveBranchPinned": "Updates volgen {branch}, de branch die op dit apparaat is vastgelegd.",
   "update.effectiveBranchRecovered": "Updates volgen {branch}, afgeleid uit de eigen build van dit apparaat. Er is geen branch vastgelegd.",
   "update.effectiveBranchUnresolved": "Er wordt vergeleken met {branch}, het releasekanaal. Dit apparaat staat op geen enkele branch en heeft er geen vastgelegd, dus vul hier een branch in voordat je bijwerkt.",
+  "update.effectiveBranchWorkstation": "Updates volgen {branch}, het ClawBox Workstation-kanaal: een versie komt er pas op nadat ze op een Workstation is getest. De bètaschakelaar en een hier vastgelegde branch gelden niet op deze computer.",
   "update.failedToCheck": "Kan de updatestatus niet controleren.",
   "update.forceConfirmAction": "Ja, volledige update uitvoeren",
   "update.forceConfirmBody": "Dit voert de volledige update opnieuw uit — inclusief de installatie van OpenClaw en de systeemdiensten — terwijl de versie al actueel is, en {reboot} daarna. Gebruik het om een herstel af te ronden of diensten te repareren die na een update raar doen.",

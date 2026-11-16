@@ -124,7 +124,7 @@ The area files under `docs/agents/` (moved verbatim out of this file on 2026-10-
 - [update-and-install.md](docs/agents/update-and-install.md) — read this when you touch `update/*`, `updater.ts`, `install.sh`, a root step, `config/*.service`, the AP or `production-server.js`.
 - [testing-and-ci.md](docs/agents/testing-and-ci.md) — read this when you touch a workflow, `e2e-install` or the triage and review bots.
 
-Elsewhere in the tree: `mcp/README.md` (the MCP tool list, kept in step with the code), `src/lib/prime-radiant/README.md`, `scripts/x64-migration/README.md`, `docs/nano-hardware-tests.md`, `docs/clawbox-bench.md`, `docs/root-exec-mirror.md`, `docs/update-launcher-transition.md`, `docs/updater-legacy-handover.md`, `docs/hermes-reasoning-levels.md`, `docs/clawkeep-backup-mgmt-spec.md`, `CONTRIBUTING.md` and `.env.example`.
+Elsewhere in the tree: `mcp/README.md` (the MCP tool list, kept in step with the code), `src/lib/prime-radiant/README.md`, `scripts/x64-migration/README.md`, `docs/nano-hardware-tests.md`, `docs/clawbox-bench.md`, `docs/root-exec-mirror.md`, `docs/update-launcher-transition.md`, `docs/updater-legacy-handover.md`, `docs/hermes-reasoning-levels.md`, `docs/clawkeep-backup-mgmt-spec.md`, `docs/workstation-update-channel.md`, `CONTRIBUTING.md` and `.env.example`.
 
 <!-- BEGIN:nextjs-agent-rules -->
 
