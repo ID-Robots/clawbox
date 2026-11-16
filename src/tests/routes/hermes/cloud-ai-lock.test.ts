@@ -36,6 +36,15 @@ vi.mock("@/lib/hermes-config-cache", async (importOriginal) => ({
 }));
 const dashboardFetch = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-dashboard-auth", () => ({ dashboardFetch }));
+// The move onto the box's voice remembers what it replaced next to Hermes'
+// config.yaml: held here, so no test writes into a real ~/.hermes and the
+// move does not depend on one existing.
+const markers = vi.hoisted(() => ({ standdown: vi.fn(async () => {}), lock: vi.fn(async () => {}) }));
+vi.mock("@/lib/hermes-voice-standdown", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hermes-voice-standdown")>()),
+  rememberHermesVoiceStanddown: (...a: unknown[]) => markers.standdown(...(a as [])),
+  rememberHermesVoiceLock: (...a: unknown[]) => markers.lock(...(a as [])),
+}));
 const store = vi.hoisted(() => new Map<string, unknown>());
 vi.mock("@/lib/config-store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/config-store")>()),
