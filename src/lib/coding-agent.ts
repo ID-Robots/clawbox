@@ -2741,18 +2741,21 @@ export class CodingAgentError extends Error {
   }
 }
 
-/** Why no coding run starts under the local-only AI lock (TASK-2501). */
+/** Why a cloud run does not go on under the local-only AI lock (TASK-2501). */
 const CODING_AGENT_CLOUD_LOCKED =
-  "Local-only AI is on: the coding agent runs on a cloud model (Anthropic, OpenAI or ClawBox AI), so it is off while the lock is on.";
+  "Local-only AI is on: this run's model is in the cloud (Anthropic, OpenAI or ClawBox AI), so it does not go on while the lock is on. Start a new run on the box's own engine (provider \"local\").";
 
 /**
- * Refuse a coding run under the local-only AI lock: every provider the coding
- * agent has is a cloud model. A `not_ready` CodingAgentError, like any other
- * missing piece, carrying the lock's `code` for the routes to pass on.
+ * Refuse a coding run on a cloud provider under the local-only AI lock: a
+ * `not_ready` CodingAgentError, like any other missing piece, carrying the
+ * lock's `code` for the routes to pass on. A run on the box's own engine
+ * (`local`, TASK-2501 PR-E) is not refused; with no provider named the box's
+ * default answers, and under the lock that is `local` (lockedDefaultProvider).
  */
-async function assertCodingAgentUnlocked(): Promise<void> {
+async function assertCodingAgentUnlocked(provider?: CodingProvider): Promise<void> {
+  if (provider === undefined || providersUnderLock(true).includes(provider)) return;
   if (await isCloudAiLocked()) {
-    throw Object.assign(new CodingAgentError("not_ready", CODING_AGENT_CLOUD_LOCKED), { code: CLOUD_AI_LOCKED_CODE });
+    throw Object.assign(new CodingAgentError("not_ready", lockedProviderRefusal(provider)), { code: CLOUD_AI_LOCKED_CODE });
   }
 }
 
@@ -4237,9 +4240,6 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
   const harnessHealthy = fault === null;
   const faultProblem = fault ? harnessFaultProblem(fault) : null;
   if (faultProblem) shared.push(faultProblem);
-  // The local-only AI lock (TASK-2501): every provider the coding agent has —
-  // Anthropic, OpenAI and ClawBox AI — is a cloud model, so none of them runs.
-  if (cloudLocked) shared.unshift(CODING_AGENT_CLOUD_LOCKED);
   const credentialProblem = (id: CodingProvider): string[] => {
     // Under the local-only AI lock a cloud provider cannot run at all, whatever
     // it holds: the lock's words, before any credential's.
@@ -4422,7 +4422,7 @@ async function assertProviderReady(provider: CodingProvider): Promise<void> {
   // The lock is checked here too, and last before anything spawns: whatever
   // route a cloud provider reached this far by, the run does not start.
   if (!providersUnderLock(await cloudAiLockOn()).includes(provider)) {
-    throw new CodingAgentError("not_ready", lockedProviderRefusal(provider));
+    throw Object.assign(new CodingAgentError("not_ready", lockedProviderRefusal(provider)), { code: CLOUD_AI_LOCKED_CODE });
   }
   if (runsOnLocalEngine(provider)) {
     const engine = await localCodingEngine();
@@ -12639,7 +12639,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // far below what the session holds — and goes on from the summary.
   // Not under the local-only AI lock (TASK-2501), which may have gone on while
   // this run worked: the carry-on would be a new process on a cloud model.
-  if (contextCarryOn && run.status === "failed" && run.sessionId && !isCloudAiLockedSync()) {
+  if (contextCarryOn && run.status === "failed" && run.sessionId && (runsOnLocalEngine(run.provider) || !isCloudAiLockedSync())) {
     const { overflow, maxReplyTokens, attempt } = contextCarryOn;
     run.contextRecoveries = attempt;
     run.status = "running";
@@ -12719,9 +12719,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     && run.filesTouched.length === 0
     && !state.sawWriteAttempt
     && !state.commandMayHaveSideEffects
-    // Nor under the local-only AI lock (TASK-2501): the retry is a new process
-    // on a cloud model. Asked last, so an ordinary exit reads no file for it.
-    && !isCloudAiLockedSync()
+    // Nor under the local-only AI lock (TASK-2501) for a cloud run: its retry
+    // is a new process on a cloud model. Asked last, so an ordinary exit reads
+    // no file for it. A run on the box's own engine (PR-E) retries as before.
+    && (runsOnLocalEngine(run.provider) || !isCloudAiLockedSync())
   ) {
     {
       run.retries = 1;
@@ -14146,10 +14147,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   const givenExperience = requireExperience(input.experience);
   const givenEffort = requireEffort(input.effort);
   const givenBase = requireBaseBranch(input.baseBranch);
-  // The local-only AI lock (TASK-2501), before anything of a run is touched:
-  // a resume would otherwise put its worktree back on disk first. The same
-  // check in `assertProviderReady` stays as the backstop for other callers.
-  await assertCodingAgentUnlocked();
+  // The local-only AI lock (TASK-2501) is asked by `assertCanSpawn` below, on
+  // the provider this run will use and before anything of a run is touched (a
+  // resume would otherwise put its worktree back on disk first); the check in
+  // `assertProviderReady` stays as the backstop for other callers.
 
   let resumeSessionId: string | null = null;
   let directory: string;
@@ -15842,8 +15843,9 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
     throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
   }
   // Before the readiness verdict, which also names the lock but as a plain
-  // sentence: a resume or a draft's start keeps the lock's code (TASK-2501).
-  await assertCodingAgentUnlocked();
+  // sentence: a resume or a draft's start on a cloud provider keeps the lock's
+  // code (TASK-2501); a run on the box's own engine goes on (PR-E).
+  await assertCodingAgentUnlocked(provider);
   const readiness = await checkReadiness();
   // The provider THIS run will use, when the caller knows it — not the owner's
   // default. `readiness.ready` is the default provider's verdict, and
