@@ -66,8 +66,10 @@ vi.mock("@/lib/coding-git-identity", async (importOriginal) => {
 });
 
 type Lib = typeof import("@/lib/coding-agent");
+type Secrets = typeof import("@/lib/project-secrets");
 
 let lib: Lib;
+let secrets: Secrets;
 let base: string;
 let home: string;
 let root: string;
@@ -120,6 +122,13 @@ function spawnCount(): number {
   }
 }
 
+/** The secrets audit, so "handed back" is read off the store's own record. */
+function audit(): Record<string, unknown>[] {
+  const file = path.join(root, "data", "secrets-audit.log");
+  if (!fs.existsSync(file)) return [];
+  return fs.readFileSync(file, "utf-8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
 /** A run the owner paused: live, with a session, which is what Resume comes back to. */
 async function pausedRun(provider: "clawbox-ai" | "local", name: string): Promise<string> {
   const run = await lib.startRun({ task: "Do the thing", directory: folder(name), source: "owner", provider });
@@ -154,6 +163,9 @@ beforeEach(async () => {
     coding_agent_enabled: true,
     coding_agent_default_directory: projects,
     coding_agent_max_parallel_runs: 2,
+    // On, so a resume's preparation pushes a feed line and CLAIMS one-run
+    // copies — the two things a refusal has to give back.
+    coding_agent_inject_secrets: true,
   });
   installWrapper();
   cloudLocked.mockReset().mockResolvedValue(false);
@@ -171,7 +183,13 @@ beforeEach(async () => {
     imageInput: false,
   });
   vi.resetModules();
+  secrets = await import("@/lib/project-secrets");
   lib = await import("@/lib/coding-agent");
+  // One box-wide key, and one copy limited to a single run: the two kinds a
+  // resume hands out, and the two kinds a refusal must treat differently.
+  await secrets.setSecret({ name: "DEPLOY_TOKEN", value: "vrc_live_9Q3k2Zx7pLmN4tR8sW1yB6dF0hJ5aC", scope: "@box", inject: true });
+  await secrets.importSecret({ name: "ONE_RUN_TOKEN", value: "one-run-value-000000", scope: "@box", source: "hermes", expiresAt: "run" });
+  await secrets.setSecretInject({ name: "ONE_RUN_TOKEN", scope: "@box", inject: true });
 });
 
 afterEach(async () => {
@@ -231,5 +249,54 @@ describe("a resume on a cloud provider with the lock turned on", () => {
 
     expect(resumed.status).toBe("running");
     await vi.waitFor(() => { expect(spawnCount()).toBe(spawnedBefore + 1); }, { timeout: 10_000 });
+  });
+});
+
+describe("what a refused resume gives back", () => {
+  it("keeps the one-run copies the paused run already held, and gives back only the ones this resume claimed", async () => {
+    const id = await pausedRun("clawbox-ai", "delta");
+    const before = lib.getRun(id)!;
+    expect([...before.secretNames].sort()).toEqual(["DEPLOY_TOKEN", "ONE_RUN_TOKEN"]);
+    // A second one-run copy appears between the pause and the Resume. The
+    // preparation claims it for this run; the refusal has to hand it back
+    // WITHOUT taking the copy the paused run was already holding.
+    await secrets.importSecret({ name: "LATE_TOKEN", value: "late-one-run-value-000", scope: "@box", source: "hermes", expiresAt: "run" });
+    await secrets.setSecretInject({ name: "LATE_TOKEN", scope: "@box", inject: true });
+    armLockDuringPreparation.armed = true;
+
+    await expect(lib.resumeRun(id)).rejects.toThrow(/local-only AI lock is on/);
+
+    // The record still says what the paused run holds — not what the refused
+    // attempt resolved, which included the copy it had to give back.
+    const after = lib.getRun(id)!;
+    expect([...after.secretNames].sort()).toEqual(["DEPLOY_TOKEN", "ONE_RUN_TOKEN"]);
+    // Exactly one delete, exactly the copy this resume claimed. The paused
+    // run's own ONE_RUN_TOKEN is not on it: it is still that run's to resume
+    // with. The give-back is tracked settle work, so waited for rather than
+    // assumed to have landed with the throw.
+    await vi.waitFor(() => {
+      expect(audit().filter((line) => line.reason === "resume_refused")).toEqual([
+        expect.objectContaining({ action: "delete", names: ["LATE_TOKEN"], scope: "@box", runId: id, reason: "resume_refused" }),
+      ]);
+    }, { timeout: 10_000 });
+    const taken = audit().filter((line) => line.action === "delete" && (line.names as string[] | undefined)?.includes("ONE_RUN_TOKEN"));
+    expect(taken).toEqual([]);
+  });
+
+  it("gives the whole feed back, not just its length, when the preparation trimmed it", async () => {
+    const id = await pausedRun("clawbox-ai", "epsilon");
+    // A feed already at its cap: the preparation's own line pushes the middle
+    // out, so a restored LENGTH leaves a gap marker and its count on the record
+    // with the lines it stands for missing — the step the owner never took.
+    for (let i = 0; i < 60; i += 1) lib.pushRunProgressForTests(id, `step ${i}`);
+    const before = lib.getRun(id)!;
+    expect(before.progress.length).toBe(60);
+    armLockDuringPreparation.armed = true;
+
+    await expect(lib.resumeRun(id)).rejects.toThrow(/local-only AI lock is on/);
+
+    const after = lib.getRun(id)!;
+    expect(after.progress).toEqual(before.progress);
+    expect(after.progressAt).toEqual(before.progressAt);
   });
 });

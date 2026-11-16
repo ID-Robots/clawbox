@@ -193,7 +193,7 @@ describe("what a run is given", () => {
 
   it("gives a run nothing at all while the owner's switch is off", async () => {
     switchOn(false);
-    expect(await store.resolveSecretsForRun({ project: "shop" })).toEqual({ env: {}, names: [], unreadable: [], scopes: {}, expiresAt: {} });
+    expect(await store.resolveSecretsForRun({ project: "shop" })).toEqual({ env: {}, names: [], unreadable: [], scopes: {}, expiresAt: {}, claimed: [] });
   });
 
   it("gives a run nothing while the switch has never been answered", async () => {
@@ -289,7 +289,7 @@ describe("what a run is given", () => {
     // tells the owner a credential did not arrive.
     fs.writeFileSync(secretsPath(), "{ not json");
     switchOn(true);
-    expect(await store.resolveSecretsForRun({ project: "shop" })).toEqual({ env: {}, names: [], unreadable: [], scopes: {}, expiresAt: {} });
+    expect(await store.resolveSecretsForRun({ project: "shop" })).toEqual({ env: {}, names: [], unreadable: [], scopes: {}, expiresAt: {}, claimed: [] });
   });
 
   it("re-checks the name on the way out, so an older build's row cannot reach a run", async () => {

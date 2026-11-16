@@ -235,6 +235,7 @@ import {
   isReservedSecretName,
   MAX_SECRETS,
   recordRunSecretsHanded,
+  releaseRunSecretNames,
   releaseRunSecrets,
   resolveSecretsForRun,
   SECRET_INJECT_CONFIG_KEY,
@@ -8449,6 +8450,12 @@ function trimProgress(run: { progress: string[]; progressAt: number[] }): void {
 /** Staging a 200-step run through the harness is not a unit test; the trim is. */
 export const trimProgressForTests = trimProgress;
 
+/** Push one feed line onto a run, for the tests that need a feed at its cap. */
+export function pushRunProgressForTests(runId: string, line: string): void {
+  const run = loadRuns().find((r) => r.id === runId);
+  if (run) pushProgress(run, line);
+}
+
 function relativeToRun(run: CodingRun, file: unknown): string | null {
   if (typeof file !== "string" || !file) return null;
   const abs = path.isAbsolute(file) ? file : path.join(run.directory, file);
@@ -15323,10 +15330,14 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // path — accounts, MCP servers, the project's secrets, git identity — and a
     // lock the owner turns on during it must still be able to stop the launch,
     // which it can only do while the record is untouched.
-    const progressBefore = run.progress.length;
-    const progressAtBefore = run.progressAt.length;
+    // Long enough that the feed itself has to be given back in full: the
+    // preparation's own lines are pushed onto the record, and a feed already at
+    // its cap loses its middle to the cap — which a restored LENGTH cannot put
+    // back (TASK-2501 PR-E, CodeRabbit's finding on #1511).
+    const progressBefore = [...run.progress];
+    const progressAtBefore = [...run.progressAt];
     const secretNamesBefore = run.secretNames;
-    await prepareRunSecrets(run);
+    const prepared = await prepareRunSecrets(run);
     // Asked ONCE MORE here (TASK-2501 PR-E): the gate above was read before the
     // tools, the worktree, the folder, the allow rules and the preparation, and
     // every one of those awaits is long enough for the owner to turn the lock on
@@ -15337,13 +15348,20 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     } catch (err) {
       // Nothing has been flipped, so the only thing to give back is what the
       // preparation just handed this run: the tables in memory, the one-run
-      // copies in the store, and the feed lines it wrote. A refused resume comes
-      // out as paused — or as given up — as it went in.
-      run.progress.length = progressBefore;
-      run.progressAt.length = progressAtBefore;
+      // copies it CLAIMED in the resolve above, and the feed lines it wrote. A
+      // refused resume comes out as paused — or as given up — as it went in:
+      // the copies the paused run already held stay its own, for its next try.
+      run.progress.length = 0;
+      run.progress.push(...progressBefore);
+      run.progressAt.length = 0;
+      run.progressAt.push(...progressAtBefore);
       run.secretNames = secretNamesBefore;
       dropRunSecrets(run.id);
-      endRunSecrets(run);
+      runSecretScopes.delete(run.id);
+      runSecretExpiry.delete(run.id);
+      // Only what THIS resolve claimed: `endRunSecrets` would take the paused
+      // run's own one-run copies with it, and they are still its to hold.
+      trackSettleWork(releaseRunSecretNames(run.id, prepared.claimed));
       throw err;
     }
     // Read BEFORE the flip below, which is what makes this a resume: the
