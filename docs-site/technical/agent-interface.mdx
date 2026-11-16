@@ -192,7 +192,7 @@ own signed-in browser session, so the agent points you at the button instead.
 </Note>
 
 ### Email — both editions
-`email_send` · `email_list` · `email_read` · `email_connect`
+`email_send` · `email_list` · `email_read` · `email_connect` · `email_draft_card`
 
 `email_connect` connects your mail account from the chat — only with an address and app
 password you typed yourself, never ones read from a page, file or email.
@@ -201,6 +201,13 @@ password you typed yourself, never ones read from a page, file or email.
 on, which is the default: it queues a draft that you approve in the chat or in
 **Settings → Channels → Email**. Turn that switch off and the same tool sends directly. See
 [Messaging channels](/guides/messaging-channels#email).
+
+`email_draft_card` is for a mail tool you granted that can only create **drafts**, for
+example a Microsoft 365 server. After the agent creates a draft with it, this tool puts a
+card in the chat showing the draft as your mailbox holds it, with **Send**, **Keep as
+draft** and **Tell me what to change**. Only your press on Send sends it, through the send
+service set in **Settings → Email → Send approved drafts**, which is off by default. The
+agent has no way to press it.
 
 ### Pictures and audio — both editions
 `generate_image` · `generate_audio` — and `image_generate`, registered only on a box that
