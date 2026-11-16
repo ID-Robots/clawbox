@@ -1968,7 +1968,9 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
         after: "gateway",
         run: async () => {
           try {
-            await d.call("cron.run", { id: job.id, mode: "force" });
+            // `if-enabled`, never `force`: a job the owner disabled since its
+            // failure was seen (the retry may come a minute later) is not run.
+            await d.call("cron.run", { id: job.id, mode: "if-enabled" });
             return true;
           } catch {
             return false;

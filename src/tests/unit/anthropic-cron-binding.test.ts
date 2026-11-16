@@ -277,6 +277,79 @@ describe("CodeRabbit review of bcba2b4 on #1526", () => {
   });
 });
 
+describe("a give-back with no account to move onto (review of a59262b on #1526)", () => {
+  function deps(job: Record<string, unknown>, records: CronBindingRecords) {
+    const updates: unknown[] = [];
+    let current = structuredClone(job);
+    let stored: CronBindingRecords = structuredClone(records);
+    let rev = 1;
+    const d: CronBindingDeps = {
+      call: async (method, params) => {
+        if (method === "cron.list") return { jobs: [structuredClone(current)] };
+        if (method === "cron.update") {
+          const model = (params.patch as { payload: { model: string | null } }).payload.model;
+          updates.push(model);
+          const payload = { ...(current.payload as Record<string, unknown>) };
+          if (model === null) delete payload.model;
+          else payload.model = model;
+          rev += 1;
+          current = { ...current, payload, configRevision: `r${rev}` };
+          return { ok: true, configRevision: `r${rev}` };
+        }
+        return { ok: true };
+      },
+      readRecords: async () => stored,
+      writeRecords: async (r) => {
+        stored = structuredClone(r);
+      },
+    };
+    return { d, updates, stored: () => stored, job: () => current };
+  }
+  const leave = (d: CronBindingDeps, defaultModel: string, account: string | null) =>
+    bindCronsToTarget(d, { target: null, defaultModel, isPoolProfile: isPool, onlyAdopted: true, accountFor: () => account, now: NOW });
+
+  it("keeps a model-less job the box's while no account its default runs on is held, and moves it once there is one", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const f = deps({ id: "j", sessionTarget: "isolated", configRevision: "r1", payload: { kind: "agentTurn" } },
+        { j: { profileId: POOL_A, authorization: "life-a", inherits: true, model: null, revision: "r1", at: NOW - 60_000 } });
+      // The pool's last account left while the chat is still on Claude: nothing to bind to.
+      expect(await leave(f.d, "anthropic/claude-opus-5-5", null)).toMatchObject({ released: 0, owed: 0 });
+      expect(await leave(f.d, "anthropic/claude-opus-5-5", null)).toMatchObject({ released: 0, owed: 0 });
+      expect(f.updates).toEqual([]);
+      expect(f.stored().j).toBeDefined();
+      // Said once, not on every pass.
+      expect(errors.mock.calls.filter((c) => String(c[0]).includes("still bound to the pool's removed account"))).toHaveLength(1);
+      // The owner moves the chat to another provider: the job follows its default there.
+      expect(await leave(f.d, "deepseek/deepseek-v4-flash", "deepseek:default")).toMatchObject({ released: 1 });
+      expect(f.updates).toEqual(["deepseek/deepseek-v4-flash@deepseek:default", null]);
+      expect(f.stored().j).toBeUndefined();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("gives a job its own model back at once, and its account once one is held", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const pinned = `anthropic/claude-sonnet-5-5@${POOL_A}`;
+      const f = deps({ id: "j", sessionTarget: "isolated", configRevision: "r1", payload: { kind: "agentTurn", model: pinned } },
+        { j: { profileId: POOL_A, authorization: "life-a", inherits: false, model: pinned, original: "anthropic/claude-sonnet-5-5", revision: "r1", at: NOW - 60_000 } });
+      await leave(f.d, "anthropic/claude-opus-5-5", null);
+      expect(f.updates).toEqual(["anthropic/claude-sonnet-5-5"]);
+      expect(f.stored().j).toMatchObject({ model: "anthropic/claude-sonnet-5-5" });
+      await leave(f.d, "anthropic/claude-opus-5-5", null);
+      expect(f.updates).toHaveLength(1);
+      // The owner signs in to Claude: the job is bound there and keeps its own model.
+      expect(await leave(f.d, "anthropic/claude-opus-5-5", "anthropic:default")).toMatchObject({ released: 1 });
+      expect(f.updates.slice(1)).toEqual(["anthropic/claude-sonnet-5-5@anthropic:default", "anthropic/claude-sonnet-5-5"]);
+      expect(f.stored().j).toBeUndefined();
+    } finally {
+      errors.mockRestore();
+    }
+  });
+});
+
 describe("applying the adoptions (CodeRabbit review on #1526)", () => {
   /** A cron.list with one job, and a cron.update that answers as the test says. */
   function fakeDeps(opts: { model?: string | null; records?: CronBindingRecords | Error; writeFails?: boolean; updateFails?: boolean; lastError?: string; lastRunAtMs?: number }) {

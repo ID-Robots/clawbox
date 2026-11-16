@@ -210,6 +210,12 @@ export interface CronBindingPlan {
   retry: boolean;
   /** The pool left: the job is given back, and its record dropped. */
   release?: boolean;
+  /**
+   * With `release`: no account its model runs on now, so its hidden binding
+   * still names the pool's removed profile (a plain model change keeps it).
+   * The record stays and a later pass finishes the give-back once there is one.
+   */
+  awaitAccount?: boolean;
 }
 
 const str = (v: unknown): string | null => (typeof v === "string" && v.trim() ? v.trim() : null);
@@ -339,7 +345,12 @@ export function planCronBindings(input: CronPlanInput): CronBindingPlan[] {
       const base = runsOn ? splitModelRef(runsOn).base : null;
       const account = base && input.accountFor ? input.accountFor(base) : null;
       const steps: (string | null)[] = account ? [`${base}@${account}`, back] : job.model === back ? [] : [back];
-      plans.push({ job, steps, inherits: record.inherits, original: back, retry: false, release: true });
+      // None to move it onto (the chat still on Claude with no Anthropic
+      // account left, a default on a provider core holds no account of): the
+      // job is still bound to the removed profile, so it stays the box's —
+      // given its own model back now, and moved once an account is there.
+      const awaitAccount = !account && base !== null;
+      plans.push({ job, steps, inherits: record.inherits, original: back, retry: false, release: true, ...(awaitAccount ? { awaitAccount } : {}) });
       continue;
     }
     let adopt: string;
@@ -422,6 +433,16 @@ const ownReports: CronLostRunReports = new Map();
 export function _resetCronBindingForTests(): void {
   ownRefusals.clear();
   ownReports.clear();
+  awaitingSaid.clear();
+}
+
+/** Jobs already said to be waiting for an account to be given back onto (once a process). */
+const awaitingSaid = new Set<string>();
+
+function noteAwaiting(id: string): void {
+  if (awaitingSaid.has(id)) return;
+  awaitingSaid.add(id);
+  console.error(`[anthropic-cron-binding] automation ${id} is still bound to the pool's removed account: no account its model runs on is held, so it is given back once there is one`);
 }
 
 /** What a refusal was for: the account and lifetime the job was being given, or a give-back. */
@@ -525,7 +546,9 @@ export async function bindCronsToTarget(
   reportLostRuns(listed, records, new Set(plans.map((plan) => plan.job.id)), skip, reported ?? ownReports);
   for (const plan of plans) {
     const { job } = plan;
+    if (plan.release && plan.awaitAccount) noteAwaiting(job.id);
     if (plan.release && plan.steps.length === 0) {
+      if (plan.awaitAccount) continue;
       delete records[job.id];
       dirty = true;
       result.released += 1;
@@ -599,7 +622,11 @@ export async function bindCronsToTarget(
         records[job.id] = { ...records[job.id], model, revision };
         dirty = true;
       }
-      if (landed === plan.steps.length) {
+      if (landed === plan.steps.length && plan.awaitAccount && records[job.id]) {
+        // Its own model is back; its account is still owed (awaitAccount).
+        records[job.id] = { ...records[job.id], model, revision };
+        dirty = true;
+      } else if (landed === plan.steps.length) {
         delete records[job.id];
         dirty = true;
         result.released += 1;
@@ -650,7 +677,8 @@ export async function bindCronsToTarget(
         continue;
       }
       try {
-        await deps.call("cron.run", { id: job.id, mode: "force" });
+        // `if-enabled`: core runs it now, and never a job disabled since the list.
+        await deps.call("cron.run", { id: job.id, mode: "if-enabled" });
         result.rerun += 1;
       } catch (err) {
         console.error(`[anthropic-cron-binding] could not run automation ${job.id} again after adopting its account:`, err instanceof Error ? err.message : err);

@@ -1327,7 +1327,7 @@ describe("failed gateway turns", () => {
     await swap.whenSwapsSettled();
     expect(await gw.scanGatewayCrons(now)).toBe(1);
 
-    expect(core.calls.filter((c) => c.method === "cron.run")).toEqual([{ method: "cron.run", params: { id: "heartbeat-main", mode: "force" } }]);
+    expect(core.calls.filter((c) => c.method === "cron.run")).toEqual([{ method: "cron.run", params: { id: "heartbeat-main", mode: "if-enabled" } }]);
     expect((await pool.readAccounts()).find((a) => a.id === work.id)).toMatchObject({ status: "limited" });
     expect((await pool.describePool()).lastSwap).toMatchObject({ toId: personal.id, consumers: { retries: { code: "retried", count: 1 } } });
     // Looked at once: the next pass does not report the same run again.
@@ -1637,7 +1637,7 @@ describe("automations follow the pool across a swap and a renewal (TASK-2533, Op
     // The run that failed before the box looked (the update to 2026.11.3).
     runCron(core, "inbox");
     await gw.keepGatewayMirror();
-    expect(core.calls.filter((c) => c.method === "cron.run")).toEqual([{ method: "cron.run", params: { id: "inbox", mode: "force" } }]);
+    expect(core.calls.filter((c) => c.method === "cron.run")).toEqual([{ method: "cron.run", params: { id: "inbox", mode: "if-enabled" } }]);
     expect(runCron(core, "inbox")).toBe(p(work.id));
     await gw.bindGatewayCrons();
     expect(core.calls.filter((c) => c.method === "cron.run").length).toBe(1);
@@ -3361,5 +3361,44 @@ describe("a pool renewal never breaks an automation bound to a pool profile (cor
     await gw.bindGatewayCrons();
     expect(off.payload.model).toBe(`anthropic/claude-sonnet-5-5@${p(personal.id)}`);
     expect(runCron(core, "off")).toBe(p(personal.id));
+  });
+});
+
+describe("the pool leaves with no account to give a job back onto (review of a59262b on #1526)", () => {
+  it("leaves no model-less job on the removed pool profile for good: once the chat moves to a provider core holds an account of, the job is bound there", async () => {
+    const core = fakeCore();
+    // No sign-in of the owner's: the pool's accounts are the only Anthropic ones.
+    core.profiles.delete("anthropic:default");
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    addCron(core, { id: "dreaming" });
+    await gw.keepGatewayMirror();
+    expect(runCron(core, "dreaming")).toBe(p(work.id));
+
+    // Every pool account goes while the chat is still on Claude.
+    await pool.removeAccount(work.id);
+    await pool.removeAccount(personal.id);
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+    expect([...core.profiles.keys()].filter((id) => id.startsWith("anthropic:clawbox-"))).toEqual([]);
+
+    // The owner moves the chat to DeepSeek, whose key core holds.
+    core.otherProfiles.set("deepseek:default", { provider: "deepseek", type: "api_key", secret: "sk-deepseek-placeholder" });
+    core.chatModel = "deepseek/deepseek-v4-flash";
+    core.chatOnClaude = false;
+    await gw.bindGatewayCrons();
+    const job = core.crons.get("dreaming") as FakeCron;
+    expect(job.binding?.profileId).toBe("deepseek:default");
+    expect(job.payload.model).toBeUndefined();
+    expect(runCron(core, "dreaming")).toBe("deepseek:default");
+  });
+
+  it("the box's own retries never force a run: a job disabled since is not run", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    addCron(core, { id: "inbox" });
+    runCron(core, "inbox");
+    await gw.keepGatewayMirror();
+    expect(core.calls.filter((c) => c.method === "cron.run").map((c) => c.params.mode)).toEqual(["if-enabled"]);
   });
 });
