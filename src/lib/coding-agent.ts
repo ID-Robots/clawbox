@@ -2760,6 +2760,21 @@ async function assertCodingAgentUnlocked(provider?: CodingProvider): Promise<voi
 }
 
 /**
+ * The same refusal, answered SYNCHRONOUSLY (TASK-2501 PR-E): the last question
+ * a spawn path asks, for the steps that must not await again before the child
+ * exists. `assertCodingAgentUnlocked` awaits its read, so a caller that asked
+ * it and then awaited anything else — secrets, a worktree, an account — was
+ * checking a lock that may have gone on in between; this is the check that
+ * holds no gap after it.
+ */
+function assertCodingAgentUnlockedSync(provider?: CodingProvider): void {
+  if (provider === undefined || providersUnderLock(true).includes(provider)) return;
+  if (isCloudAiLockedSync()) {
+    throw Object.assign(new CodingAgentError("not_ready", lockedProviderRefusal(provider)), { code: CLOUD_AI_LOCKED_CODE });
+  }
+}
+
+/**
  * Refused ONLY because the box is already running every run the owner allows
  * (`coding_agent_max_parallel_runs`): the one refusal the run queue turns into
  * a QUEUED run instead (`startOrQueueRun`). Still a `busy` CodingAgentError for
@@ -15300,13 +15315,37 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // lie. Narrowing works the same way: a rule removed before the resume is gone
     // from the resumed run too.
     if (!automatic) run.allowRules = await getAllowRules(allowRuleContext());
+    // RE-RESOLVED, like the permission rules just above and for the same reason:
+    // a resume is the owner's own deliberate act, so an entry they have un-ticked
+    // since the pause is not handed back, and one they have ticked is.
+    //
+    // Ahead of the flip below (TASK-2501 PR-E): this is the longest await on the
+    // path — accounts, MCP servers, the project's secrets, git identity — and a
+    // lock the owner turns on during it must still be able to stop the launch,
+    // which it can only do while the record is untouched.
+    const progressBefore = run.progress.length;
+    const progressAtBefore = run.progressAt.length;
+    const secretNamesBefore = run.secretNames;
+    await prepareRunSecrets(run);
     // Asked ONCE MORE here (TASK-2501 PR-E): the gate above was read before the
-    // tools, the worktree, the folder and the allow rules, and those take long
-    // enough for the owner to turn the lock on mid-resume. Nothing below has
-    // touched this record yet, so the gate's own refusal — same code, same
-    // words — leaves the run as paused as it was found, on the cleanup path a
-    // preparation failure already takes.
-    await assertCodingAgentUnlocked(run.provider);
+    // tools, the worktree, the folder, the allow rules and the preparation, and
+    // every one of those awaits is long enough for the owner to turn the lock on
+    // mid-resume. Asked synchronously, with nothing awaited between this answer
+    // and the spawn below, so there is no gap left to start a cloud process in.
+    try {
+      assertCodingAgentUnlockedSync(run.provider);
+    } catch (err) {
+      // Nothing has been flipped, so the only thing to give back is what the
+      // preparation just handed this run: the tables in memory, the one-run
+      // copies in the store, and the feed lines it wrote. A refused resume comes
+      // out as paused — or as given up — as it went in.
+      run.progress.length = progressBefore;
+      run.progressAt.length = progressAtBefore;
+      run.secretNames = secretNamesBefore;
+      dropRunSecrets(run.id);
+      endRunSecrets(run);
+      throw err;
+    }
     // Read BEFORE the flip below, which is what makes this a resume: the
     // continuation text and the pull-request step both depend on which of the two
     // resumable endings this run is coming back from.
@@ -15329,10 +15368,6 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     if (gaveUp) reopenPullRequestStep(run);
     if (!automatic) openAttempt(run);
     pushProgress(run, automatic ? RUNNER_STEP.resumedAfterLimit : RUNNER_STEP.resumedByOwner);
-    // RE-RESOLVED, like the permission rules just above and for the same reason:
-    // a resume is the owner's own deliberate act, so an entry they have un-ticked
-    // since the pause is not handed back, and one they have ticked is.
-    await prepareRunSecrets(run);
     persist(true);
     console.error(`[coding-agent] ${run.id} resumed from ${gaveUp ? "giving up" : automatic ? "waiting for an Anthropic limit to reset" : "pause"}`);
     startProjectIcon(run);
