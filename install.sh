@@ -3085,6 +3085,11 @@ case "$BUILD_GATEWAY_ROOM_MB" in ''|*[!0-9]*) BUILD_GATEWAY_ROOM_MB=6144 ;; esac
 # When pause_gateway_if_build_needs_room stopped the gateway, in epoch seconds;
 # empty otherwise. Only ever read by report_gateway_build_pause.
 GATEWAY_PAUSED_FOR_BUILD_AT=""
+# The systemd stamp of that same stop (InactiveEnterTimestampMonotonic), read
+# right after it; empty otherwise. Only ever read by hand_paused_gateway_to_update:
+# after the build the live stamp may be that of a start and stop someone else
+# made meanwhile, which the fallback must never take for the pause's.
+GATEWAY_PAUSED_STAMP=""
 
 # On a rebuild nothing reboots after, stop the assistant for `next build` only
 # if the build will not fit beside it (TASK-1197).
@@ -3131,6 +3136,7 @@ pause_gateway_if_build_needs_room() {
   # that never happened.
   if ! systemctl is-active --quiet clawbox-gateway.service 2>/dev/null; then
     GATEWAY_PAUSED_FOR_BUILD_AT=$(date +%s 2>/dev/null || echo "")
+    GATEWAY_PAUSED_STAMP=$(systemctl show clawbox-gateway.service -p InactiveEnterTimestampMonotonic --value 2>/dev/null || true)
   fi
   return 0
 }
@@ -3140,6 +3146,7 @@ pause_gateway_if_build_needs_room() {
 report_gateway_build_pause() {
   local at="$GATEWAY_PAUSED_FOR_BUILD_AT" now
   GATEWAY_PAUSED_FOR_BUILD_AT=""
+  GATEWAY_PAUSED_STAMP=""
   case "$at" in ''|*[!0-9]*) return 0 ;; esac
   now=$(date +%s 2>/dev/null || echo "")
   case "$now" in ''|*[!0-9]*) return 0 ;; esac
@@ -3223,9 +3230,12 @@ disarm_gateway_handback() {
 # each update step's daemon-reload pushed the deadline another 15 min out and
 # the timer never fired; an OnBootSec= deadline is the same after a reload, and
 # needs no wall clock. RemainAfterElapse=no unloads it once it has fired.
+#
+# $1 is the stamp the pause left (GATEWAY_PAUSED_STAMP), never one read now: a
+# gateway started and stopped again during the build carries a newer stamp,
+# and the timer then leaves it alone.
 arm_gateway_handback() {
-  local stamp up
-  stamp="$(systemctl show clawbox-gateway.service -p InactiveEnterTimestampMonotonic --value 2>/dev/null || true)"
+  local stamp="${1:-}" up
   case "$stamp" in ''|0|*[!0-9]*) return 1 ;; esac
   up="$(awk '{print int($1)}' /proc/uptime 2>/dev/null)" || up=""
   case "$up" in ''|*[!0-9]*) return 1 ;; esac
@@ -3244,12 +3254,13 @@ hand_paused_gateway_to_update() {
     if [ "$unit" = clawbox-gateway.service ]; then found=1; else kept+=("$unit"); fi
   done
   [ "$found" = 1 ] || return 0
-  if ! arm_gateway_handback; then
+  if ! arm_gateway_handback "${GATEWAY_PAUSED_STAMP:-}"; then
     echo "  Could not arm the gateway's fallback start; starting clawbox-gateway.service again here as before"
     return 0
   fi
   PAUSED_ENGINE_UNITS=(${kept[@]+"${kept[@]}"})
   GATEWAY_PAUSED_FOR_BUILD_AT=""
+  GATEWAY_PAUSED_STAMP=""
   echo "  Leaving clawbox-gateway.service stopped for the update's second half: post_update stops it before its fixups and gateway_verify starts it on the updated pre-start, so a start here would only be stopped again (if nothing has started it $((GATEWAY_HANDBACK_S / 60)) min from now, $GATEWAY_HANDBACK_UNIT.timer does)"
   return 0
 }
@@ -4002,7 +4013,7 @@ build_is_current_for_checkout() {
   local build_dir="$PROJECT_DIR/.next"
   local -a tree_git=(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
   local -a failed=()
-  local changes="" node_now="" refusal="" stamp parked env_file line reason="" head="" whole=1
+  local changes="" node_now="" refusal="" stamp served_entry="" served_stamp="" parked env_file line reason="" head="" whole=1
   if [ "${CLAWBOX_FORCE_REBUILD:-0}" = "1" ]; then failed+=("CLAWBOX_FORCE_REBUILD=1"); fi
   if ! build_entry_present "$build_dir" || [ ! -f "$build_dir/BUILD_ID" ]; then
     failed+=("there is no complete build in .next")
@@ -4036,7 +4047,13 @@ build_is_current_for_checkout() {
       if ! as_clawbox_login "cd $PROJECT_DIR && node -e \"require('node-pty')\"" >/dev/null 2>&1; then
         failed+=("node-pty does not load (the rebuild repairs it)")
       fi
-      for stamp in "$build_dir/build-info.json" "$build_dir/standalone/.next/build-info.json"; do
+      # The served stamp is beside the entry production-server.js loads, which
+      # for postbuild's nested layout is a link (as record_rebuild_kept_build
+      # resolves it); an entry that does not resolve keeps the flat path.
+      served_entry="$(readlink -f "$build_dir/standalone/server.js" 2>/dev/null)" || served_entry=""
+      served_stamp="$build_dir/standalone/.next/build-info.json"
+      [ -n "$served_entry" ] && served_stamp="$(dirname "$served_entry")/.next/build-info.json"
+      for stamp in "$build_dir/build-info.json" "$served_stamp"; do
         if ! refusal="$(build_stamp_refusal "$stamp" "$node_now")"; then
           failed+=("${stamp#"$PROJECT_DIR"/} could not be read (node did not run)")
         elif [ -n "$refusal" ]; then

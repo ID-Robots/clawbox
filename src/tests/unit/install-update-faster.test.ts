@@ -235,6 +235,26 @@ d("build_is_current_for_checkout: a rebuild only when one could change something
     expect(ask().status).toBe(0);
   });
 
+  it("reads the served stamp beside a nested standalone entry, through its link", () => {
+    // postbuild's nested layout: standalone/server.js links to the real entry,
+    // and build-info.json is copied beside that entry, not under standalone/.next.
+    const standalone = path.join(project, ".next", "standalone");
+    fs.rmSync(standalone, { recursive: true, force: true });
+    const nested = path.join(standalone, "apps", "box");
+    fs.mkdirSync(path.join(nested, ".next"), { recursive: true });
+    fs.writeFileSync(path.join(nested, "server.js"), "// entry\n");
+    writeStamp(path.join(nested, ".next"));
+    fs.symlinkSync(path.join(nested, "server.js"), path.join(standalone, "server.js"));
+    const kept = ask();
+    expect(kept.reason).not.toContain("standalone/.next/build-info.json");
+    expect(kept.status).toBe(0);
+    // The nested stamp is the one read: one built on another Node is named.
+    writeStamp(path.join(nested, ".next"), { node: "v1.0.0" });
+    const stale = ask();
+    expect(stale.status).toBe(1);
+    expect(stale.reason).toContain(".next/standalone/apps/box/.next/build-info.json was built on Node v1.0.0");
+  });
+
   it("rebuilds when there is no complete build to keep", () => {
     fs.rmSync(path.join(project, ".next", "standalone", "server.js"));
     const r = ask();
@@ -296,23 +316,26 @@ d("build_is_current_for_checkout: a rebuild only when one could change something
 // ── 2. The gateway the build paused, handed to the update's second half ────
 
 d("hand_paused_gateway_to_update: one start of the gateway, by gateway_verify", () => {
-  function hand(opts: { paused: string[]; stamp?: string; runFails?: boolean }): {
+  /** `stamp`: what the pause recorded; `liveStamp`: what systemd says after the build (the same unless set). */
+  function hand(opts: { paused: string[]; stamp?: string; liveStamp?: string; runFails?: boolean }): {
     status: number | null; out: string; paused: string; pausedAt: string; runs: string;
   } {
     const runs = path.join(tmp, "systemd-run.args");
     const script = [
       "set -euo pipefail",
       handbackSettings(),
-      `systemctl() { if [ "$1" = show ]; then printf '%s\\n' ${JSON.stringify(opts.stamp ?? "")}; fi; return 0; }`,
+      `systemctl() { if [ "$1" = show ]; then printf '%s\\n' ${JSON.stringify(opts.liveStamp ?? opts.stamp ?? "")}; fi; return 0; }`,
       `systemd-run() { printf '%s\\n' "$@" > ${JSON.stringify(runs)}; return ${opts.runFails ? 1 : 0}; }`,
       `PAUSED_ENGINE_UNITS=(${opts.paused.join(" ")})`,
       "GATEWAY_PAUSED_FOR_BUILD_AT=1700000000",
+      `GATEWAY_PAUSED_STAMP=${JSON.stringify(opts.stamp ?? "")}`,
       fn("disarm_gateway_handback"),
       fn("arm_gateway_handback"),
       fn("hand_paused_gateway_to_update"),
       "hand_paused_gateway_to_update",
       'echo "PAUSED=${PAUSED_ENGINE_UNITS[*]-}"',
       'echo "AT=$GATEWAY_PAUSED_FOR_BUILD_AT"',
+      'echo "STAMP=$GATEWAY_PAUSED_STAMP"',
     ].join("\n");
     const r = bash(script);
     const line = (k: string) => (r.out.split("\n").find((l) => l.startsWith(`${k}=`)) ?? "").slice(k.length + 1);
@@ -365,11 +388,29 @@ d("hand_paused_gateway_to_update: one start of the gateway, by gateway_verify", 
     expect(r.out).toContain("starting clawbox-gateway.service again here as before");
   });
 
+  it("arms the fallback with the stamp the pause recorded, never the one systemd shows after the build", () => {
+    // Started and stopped again during the build (an operator, a swap): the
+    // live stamp is newer, and the timer must not take it for the pause's.
+    const r = hand({ paused: ["clawbox-gateway.service"], stamp: "123456789", liveStamp: "987654321" });
+    expect(r.status).toBe(0);
+    const args = r.runs.split("\n");
+    expect(args[args.length - 4]).toBe("123456789");
+    expect(r.runs).not.toContain("987654321");
+    expect(r.out).toContain("STAMP=\n");
+  });
+
+  it("starts the gateway again as before when the pause recorded no stamp, whatever systemd shows now", () => {
+    const r = hand({ paused: ["clawbox-gateway.service"], stamp: "", liveStamp: "987654321" });
+    expect(r.runs).toBe("");
+    expect(r.paused).toBe("clawbox-gateway.service");
+    expect(r.out).toContain("starting clawbox-gateway.service again here as before");
+  });
+
   it("does nothing when the build did not pause the gateway", () => {
     const r = hand({ paused: ["ollama.service"], stamp: "123456789" });
     expect(r.paused).toBe("ollama.service");
     expect(r.runs).toBe("");
-    expect(r.out).toBe("PAUSED=ollama.service\nAT=1700000000\n");
+    expect(r.out).toBe("PAUSED=ollama.service\nAT=1700000000\nSTAMP=123456789\n");
   });
 
   it("does nothing with nothing paused", () => {
