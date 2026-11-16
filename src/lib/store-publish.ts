@@ -4,7 +4,7 @@
  *
  * The box packs the project folder into a tar.gz (`packProject`) and hands it
  * to the portal under the box's own portal token, the `claw_…` bearer the
- * ClawBox AI login stored (`resolveClawaiToken`). Up to 4 MB the package
+ * ClawBox AI login stored (`resolveClawaiEntitlementToken`). Up to 4 MB the package
  * travels inside the publish request itself (multipart: `metadata` JSON and
  * `package`); a larger one is uploaded to the Store's blob storage first with
  * a client token the portal issues for exactly that path, and the publish
@@ -42,7 +42,7 @@ import {
   type ClawboxManifest,
 } from "./clawbox-manifest";
 import { packTarGz, TarError, type TarEntry } from "./tar-gz";
-import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "./harness/credentials";
+import { CLAWBOX_AI_PROXY_URL, resolveClawaiEntitlementToken } from "./harness/credentials";
 import { isClawboxAiToken } from "./clawai-token";
 import { CURRENT_PORTAL_ORIGIN, migrateLegacyPortalUrl } from "./portal-legacy-domain";
 
@@ -480,7 +480,8 @@ async function readJson(res: Response): Promise<unknown> {
 
 /** The box's portal token, or null when it has none (or none that is a portal token). */
 async function portalToken(): Promise<string | null> {
-  const token = await resolveClawaiToken().catch(() => null);
+  // An upload to the Store, not AI content: the local-only AI lock does not stop it.
+  const token = await resolveClawaiEntitlementToken().catch(() => null);
   return token && isClawboxAiToken(token) ? token : null;
 }
 

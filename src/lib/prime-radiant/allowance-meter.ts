@@ -28,7 +28,7 @@
 import { isClawboxAiToken } from "@/lib/clawai-token";
 import type { ClawaiUsagePlan, ClawaiUsageWindow } from "@/lib/clawai-usage";
 import { fetchClawaiUsage, type ClawaiUsageAnswer, type ClawaiUsageUnavailable } from "@/lib/clawai-usage-portal";
-import { resolveClawaiToken } from "@/lib/harness/credentials";
+import { resolveClawaiEntitlementToken } from "@/lib/harness/credentials";
 import { LOCAL_ENGINE_REF_PREFIXES } from "@/lib/local-engine";
 import { flashEngine } from "./flash-client";
 import { readCostTotals, type CostTotals } from "./runs";
@@ -116,7 +116,8 @@ function boxTimeZone(): string | null {
 
 /** The account's pool, asked with the box's own `claw_*` sign-in (the portal's answer is cached for half a minute). */
 export async function readAllowanceAccount(): Promise<AllowanceAccount> {
-  const token = await resolveClawaiToken().catch(() => null);
+  // The account's meter, not AI content: read under the local-only AI lock too.
+  const token = await resolveClawaiEntitlementToken().catch(() => null);
   if (!token || !isClawboxAiToken(token)) return { available: false, reason: "not_connected" };
   const answer = await fetchClawaiUsage(token).catch((): ClawaiUsageAnswer => ({ available: false, reason: "unreachable" }));
   return allowanceAccountFrom(answer, boxTimeZone());

@@ -277,6 +277,17 @@ describe("the owner's switch", () => {
     expect(await lib.isCodingAgentEnabled()).toBe(true);
   });
 
+  it("refuses every run under the local-only AI lock, before anything of it is touched (TASK-2501)", async () => {
+    readyDevice();
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, ai_cloud_lock: true });
+    await expect(lib.startRun({ task: "do it", projectId: "no-such-project", source: "agent" }))
+      .rejects.toMatchObject({ kind: "not_ready", code: "cloud_ai_locked" });
+    expect(fs.existsSync(argvFile())).toBe(false);
+    const readiness = await lib.checkReadiness();
+    expect(readiness.ready).toBe(false);
+    expect(readiness.problems.join("\n")).toMatch(/Local-only AI is on/);
+  });
+
   it("refuses before spawning when the harness is not ready", async () => {
     writeConfig({ coding_agent_enabled: true });
     installFakeWrapper(HAPPY_BODY);
@@ -1054,6 +1065,17 @@ describe("a run", () => {
       expect(stdinText()).toContain("later please");
     });
 
+    it("keeps a draft under the local-only AI lock, but refuses to start it with the lock's code (TASK-2501)", async () => {
+      readyDevice();
+      makeProject("site");
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, ai_cloud_lock: true });
+      const draft = await lib.createDraftRun({ task: "later please", projectId: "site", source: "owner" });
+      expect(draft.status).toBe("draft");
+      await expect(lib.startDraftRun(draft.id)).rejects.toMatchObject({ kind: "not_ready", code: "cloud_ai_locked" });
+      expect(lib.getRun(draft.id)?.status).toBe("draft");
+      expect(fs.existsSync(argvFile())).toBe(false);
+    });
+
     it("starts a draft exactly once when two starts arrive together", async () => {
       readyDevice();
       installFakeWrapper(countingBody());
@@ -1334,6 +1356,19 @@ describe("retrying a transient upstream failure", () => {
     expect(run.progress.join("\n")).toContain("starting over in a fresh session");
     // A resume would have replayed the failure; the retry must not use one.
     expect(fs.readFileSync(argvFile(), "utf-8")).not.toContain("--resume");
+  });
+
+  it("does not start the retry once the local-only AI lock has gone on during the run (TASK-2501)", async () => {
+    // The first attempt turns the lock on before it fails: the box's exit
+    // handler must not start a second cloud process for it.
+    const locked = JSON.stringify({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, ai_cloud_lock: true });
+    flakyWrapper(`printf '%s' '${locked}' > "${path.join(root, "data", "config.json")}"`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(0);
+    expect(fs.readFileSync(counter(), "utf-8").trim()).toBe("1");
   });
 
   it("retries at most once — a second failure is reported, not looped", async () => {

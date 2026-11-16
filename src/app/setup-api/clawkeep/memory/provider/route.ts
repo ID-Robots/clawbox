@@ -177,6 +177,13 @@ export async function POST(request: Request) {
       if (picked instanceof NextResponse) return picked;
       selection = picked;
     }
+    // The local-only AI lock (TASK-2501) answers first, for the assistant too:
+    // its gate below would otherwise say "not available" about a box whose
+    // owner has simply switched the cloud off.
+    if (source === "cloud") {
+      const locked = await cloudLockedRefusal();
+      if (locked) return locked;
+    }
     if (writer.by === "assistant") {
       const refused = await assistantGate(source, change.confirm, selection);
       if (refused) return refused;
@@ -353,7 +360,24 @@ async function cloudModelForThisBox(cloud: typeof import("@/lib/clawai-cloud-emb
   return openclawIsAbsent() ? cloud.CLOUD_EMBEDDING_MODEL : cloud.OPENCLAW_CLOUD_EMBEDDING_MODEL;
 }
 
+/**
+ * The local-only AI lock (TASK-2501): the owner's documents are not sent to a
+ * cloud embedder, so the cloud is not a choice while it is on.
+ */
+async function cloudLockedRefusal(): Promise<NextResponse | null> {
+  const { isCloudAiLocked, cloudAiLockedBody } = await import("@/lib/ai-cloud-lock");
+  if (!(await isCloudAiLocked())) return null;
+  return NextResponse.json(
+    { ...cloudAiLockedBody("Local-only AI is on: Memory Shard embeds on this box only."), kind: "cloud_ai_locked" },
+    { status: 409 },
+  );
+}
+
 async function switchCloud(by: MemoryShardWriter): Promise<NextResponse> {
+  // Asked again here, where the switch is written: the lock can go on while
+  // the assistant's gate was weighing the move.
+  const locked = await cloudLockedRefusal();
+  if (locked) return locked;
   const [{ readCloudDefaultsFacts }, { resolveClawaiToken }, cloud, { switchToCloudEmbeddings }] = await Promise.all([
     import("@/lib/clawai-cloud-defaults"),
     import("@/lib/harness/credentials"),

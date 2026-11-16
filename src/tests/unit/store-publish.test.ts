@@ -17,8 +17,8 @@ import { saveEnv } from "@/tests/helpers/env";
 // spawning suite declares them (src/tests/unit/test-timeout-hygiene.test.ts).
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
-const resolveClawaiToken = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/harness/credentials", () => ({ resolveClawaiToken, CLAWBOX_AI_PROXY_URL: "https://clawbox.com/api/ai" }));
+const resolveClawaiEntitlementToken = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/harness/credentials", () => ({ resolveClawaiEntitlementToken, CLAWBOX_AI_PROXY_URL: "https://clawbox.com/api/ai" }));
 const put = vi.hoisted(() => vi.fn());
 vi.mock("@vercel/blob/client", () => ({ put }));
 
@@ -67,7 +67,7 @@ function jsonResponse(status: number, body: unknown): Response {
 beforeEach(() => {
   restoreEnv = saveEnv("PORTAL_WEB");
   process.env.PORTAL_WEB = BASE;
-  resolveClawaiToken.mockResolvedValue(TOKEN);
+  resolveClawaiEntitlementToken.mockResolvedValue(TOKEN);
   fetchMock.mockReset();
   vi.stubGlobal("fetch", fetchMock);
 });
@@ -337,7 +337,7 @@ describe("publishProject", () => {
   });
 
   it("is not_linked without a portal token, and asks nothing of the portal", async () => {
-    resolveClawaiToken.mockResolvedValue(null);
+    resolveClawaiEntitlementToken.mockResolvedValue(null);
     const p = project();
     expect(await publishProject(p.folder, { version: "1.0.0" }, async () => p)).toMatchObject({ ok: false, code: "not_linked", status: 409 });
     expect(fetchMock).not.toHaveBeenCalled();
@@ -354,7 +354,7 @@ describe("publishProject", () => {
 
 describe("storePublishStatus", () => {
   it("is not linked, and cannot publish, without a token", async () => {
-    resolveClawaiToken.mockResolvedValue(null);
+    resolveClawaiEntitlementToken.mockResolvedValue(null);
     expect(await storePublishStatus()).toMatchObject({ linked: false, canPublish: false, code: "not_linked" });
   });
 

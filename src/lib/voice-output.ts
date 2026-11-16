@@ -342,6 +342,46 @@ export function withoutClawboxCloudVoice(config: VoiceConfigView, proxyUrls: rea
   };
 }
 
+function homeWithoutCloudVoices<T extends { providers?: unknown } | undefined>(home: T): T {
+  const providers = home?.providers;
+  if (!providers || typeof providers !== "object" || Array.isArray(providers)) return home;
+  const kept = Object.entries(providers as Record<string, unknown>).filter(([id]) => {
+    const normalized = normalizeProviderId(id);
+    return normalized !== null && isLocalProviderId(normalized);
+  });
+  if (kept.length === Object.keys(providers).length) return home;
+  return { ...home, providers: Object.fromEntries(kept) };
+}
+
+/**
+ * The speech config as the box may use it under the local-only AI lock
+ * (TASK-2501): every cloud voice left out — ClawBox AI's and an owner's own
+ * OpenAI or ElevenLabs entry alike — and the model provider the cloud pick
+ * falls back to with them, so `cloudSpeechTarget` answers null, Auto resolves
+ * to the box's own voice and the Play button never reaches a cloud host. The
+ * file itself is not rewritten: unlocking gives the owner back the voices they
+ * had.
+ */
+export function withoutCloudVoices(config: VoiceConfigView): VoiceConfigView {
+  const tts = homeWithoutCloudVoices(config.tts);
+  const legacy = homeWithoutCloudVoices(config.messages?.tts);
+  const modelProviders = config.models?.providers;
+  const hasDefaultCloud = Boolean(modelProviders && modelProviders[DEFAULT_CLOUD_TTS_PROVIDER_ID]);
+  if (tts === config.tts && legacy === config.messages?.tts && !hasDefaultCloud) return config;
+  let models = config.models;
+  if (hasDefaultCloud && modelProviders) {
+    const rest = { ...modelProviders };
+    delete rest[DEFAULT_CLOUD_TTS_PROVIDER_ID];
+    models = { ...config.models, providers: rest };
+  }
+  return {
+    ...config,
+    ...(tts !== config.tts ? { tts } : {}),
+    ...(legacy !== config.messages?.tts ? { messages: { ...config.messages, tts: legacy } } : {}),
+    ...(models !== config.models ? { models } : {}),
+  };
+}
+
 function credentialFor(config: VoiceConfigView, providerId: string): string | null {
   const direct = ttsProviders(config)[providerId]?.apiKey;
   if (typeof direct === "string" && direct.trim()) return direct.trim();

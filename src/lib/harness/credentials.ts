@@ -2,6 +2,7 @@ import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 import { get } from "@/lib/config-store";
 import { readEdition } from "@/lib/edition-source";
 import { readConfig } from "@/lib/openclaw-config";
+import { isCloudAiLocked } from "@/lib/ai-cloud-lock";
 // The persisted half of the refusal below. Its own module, and a deliberately
 // thin one: `/setup-api/ai-models/status` writes the same fact from the portal
 // poll, and importing THIS file there would drag the whole Hermes adapter graph
@@ -46,7 +47,10 @@ function trimmedString(value: unknown): string | null {
 }
 
 /**
- * The device's ClawBox AI token, wherever this edition keeps it, or null.
+ * The device's ClawBox AI token, wherever this edition keeps it, or null —
+ * whatever the local-only AI lock says. For what proves the box is LINKED
+ * (the usage meter, the Store, sign-out, the edition swap), never for AI
+ * content: that is `resolveClawaiToken` below.
  *
  * Read per request rather than cached, for the reason the transcribe route
  * already documented before this moved: the gateway rewrites `openclaw.json`
@@ -72,7 +76,7 @@ function trimmedString(value: unknown): string | null {
  * need to know whether one EXISTS should send a boolean (see
  * `/setup-api/chat/capabilities`), not the value.
  */
-export async function resolveClawaiToken(): Promise<string | null> {
+export async function resolveClawaiEntitlementToken(): Promise<string | null> {
   let hermesEdition = false;
   try {
     hermesEdition = readEdition() === "hermes";
@@ -96,9 +100,33 @@ export async function resolveClawaiToken(): Promise<string | null> {
   }
 }
 
-/** Whether this box holds a ClawBox AI credential at all. */
+/**
+ * The device's ClawBox AI token FOR AI USE, or null — null as well while the
+ * local-only AI lock is on (src/lib/ai-cloud-lock.ts, TASK-2501).
+ *
+ * Every caller that would send AI content with the token — chat, pictures,
+ * speech, transcription, embeddings, Prime Radiant, the coding agent — reads
+ * THIS one, so the lock is one check here rather than one per feature: under
+ * the lock each of them takes the "no ClawBox AI credential" path it already
+ * has, which is the local engine or a clear refusal. What only proves the box
+ * is linked and carries no AI content (the usage meter, the Store, signing
+ * out, the edition swap) reads `resolveClawaiEntitlementToken` above; the
+ * portal heartbeat and the plan badge read the store themselves and are not
+ * touched by the lock either.
+ */
+export async function resolveClawaiToken(): Promise<string | null> {
+  if (await isCloudAiLocked()) return null;
+  return resolveClawaiEntitlementToken();
+}
+
+/** Whether this box may use a ClawBox AI credential for AI right now (false under the lock). */
 export async function hasClawaiToken(): Promise<boolean> {
   return (await resolveClawaiToken()) !== null;
+}
+
+/** Whether this box holds a ClawBox AI credential at all, lock or not: it is linked. */
+export async function hasClawaiEntitlementToken(): Promise<boolean> {
+  return (await resolveClawaiEntitlementToken()) !== null;
 }
 
 /* ---------------------------------------------------------------------------
