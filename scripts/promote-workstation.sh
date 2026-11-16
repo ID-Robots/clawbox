@@ -68,7 +68,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$sha" ] || usage
-[[ "$sha" =~ ^[0-9a-f]{40}$ ]] \
+{ [ "${#sha}" -eq 40 ] && [[ "$sha" =~ ^[0-9a-f]+$ ]]; } \
   || die "\"$sha\" is not a full 40-character commit sha. Promote the exact commit that was tested (git rev-parse <ref>), never a branch name."
 case "$remote" in
   -*|"") die "\"$remote\" is not a remote name or URL." ;;

@@ -168,12 +168,16 @@ d("scripts/promote-workstation.sh", () => {
     expect(remoteTip("workstation")).toBe(c.beta2);
   });
 
-  it("takes --remote as a URL (no configured refspec, so no ref is written into the checkout)", () => {
-    const before = git(clone, "for-each-ref", "--format=%(refname)");
+  it("takes --remote as a URL, and creates no local branch in the checkout it runs in", () => {
+    // Only local branches are compared: git may refresh refs/remotes/origin/*
+    // when the URL is the one a configured remote names (as here), and which
+    // git versions do so differs.
+    const localBranches = () => git(clone, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads");
+    const before = localBranches();
     const res = run(c.beta2, "--remote", origin, "--push");
     expect(res.status).toBe(0);
     expect(remoteTip("workstation")).toBe(c.beta2);
-    expect(git(clone, "for-each-ref", "--format=%(refname)")).toBe(before);
+    expect(localBranches()).toBe(before);
   });
 
   it("prints its usage on a missing or extra argument", () => {
