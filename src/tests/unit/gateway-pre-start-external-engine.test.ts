@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { sliceScript } from "../helpers/gateway-pre-start";
 
+vi.mock("@/lib/config-store", () => ({ get: vi.fn(async () => undefined), resolveConfigRoot: () => "/nonexistent" }));
+import { openclawExternalProviderDefinition } from "@/lib/external-engine";
+
 // Starts a real python3: the 5 s default is not enough on a loaded runner.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
@@ -90,6 +93,16 @@ const savedEntry = () => ({
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 131072,
     maxTokens: 8192,
+  }],
+});
+
+/** The same block for a reasoning engine (TASK-2497): Off sent as `none`. */
+const reasoningEntry = () => ({
+  ...savedEntry(),
+  models: [{
+    ...savedEntry().models[0],
+    reasoning: true,
+    compat: { supportedReasoningEfforts: ["none", "low", "medium", "high"], reasoningEffortMap: { off: "none" } },
   }],
 });
 
@@ -218,5 +231,47 @@ describe.skipIf(!hasPython3)("gateway-pre-start: the external AI engine (TASK-23
     // A leftover entry with no record is not ours to delete or rewrite.
     const leftover = run({ ...plain, models: { providers: { clawext: { baseUrl: "http://192.0.2.99/v1" } } } });
     expect(providersOf(leftover.cfg).clawext).toEqual({ baseUrl: "http://192.0.2.99/v1" });
+  });
+
+  describe("the reasoning switch (TASK-2497)", () => {
+    it("writes exactly what the Settings save writes, with the switch on and off", () => {
+      for (const reasoning of [true, false]) {
+        writeStore({ external_engine: record({ reasoning }) });
+        writeKey(KEY);
+        const out = run(selectedConfig({}));
+        const saved = openclawExternalProviderDefinition(
+          { baseUrl: BASE, modelId: MODEL, contextWindow: 131072, maxTokens: 8192, imageInput: false, reasoning },
+          KEY,
+        );
+        expect(providersOf(out.cfg).clawext, String(reasoning)).toEqual(JSON.parse(JSON.stringify(saved)));
+      }
+    });
+
+    it("keeps a saved reasoning entry exactly as it is on every start", () => {
+      writeStore({ external_engine: record({ reasoning: true }) });
+      writeKey(KEY);
+      const out = run(selectedConfig({ clawext: reasoningEntry() }));
+      expect(out.changed).toBe(false);
+      expect(providersOf(out.cfg).clawext).toEqual(reasoningEntry());
+      expect(out.log).not.toContain("clawext");
+    });
+
+    it("puts reasoning back when a doctor pass or an older backup wrote it off", () => {
+      writeStore({ external_engine: record({ reasoning: true }) });
+      writeKey(KEY);
+      const out = run(selectedConfig({ clawext: savedEntry() }));
+      expect(out.changed).toBe(true);
+      expect(providersOf(out.cfg).clawext).toEqual(reasoningEntry());
+      expect(out.log).toContain("Restored models.providers.clawext");
+    });
+
+    it("a record with the switch off, or from before it, writes reasoning: false and no effort contract", () => {
+      for (const extra of [{ reasoning: false }, {}, { reasoning: "true" }]) {
+        writeStore({ external_engine: record(extra) });
+        writeKey(KEY);
+        const out = run(selectedConfig({ clawext: reasoningEntry() }));
+        expect(providersOf(out.cfg).clawext, JSON.stringify(extra)).toEqual(savedEntry());
+      }
+    });
   });
 });

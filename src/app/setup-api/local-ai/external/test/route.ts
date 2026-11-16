@@ -3,7 +3,13 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { parseExternalApiKey, validateExternalEngineInput } from "@/lib/external-engine-shared";
-import { NO_KEY_PLACEHOLDER, probeExternalEngine, readExternalEngine, readExternalEngineKey } from "@/lib/external-engine";
+import {
+  NO_KEY_PLACEHOLDER,
+  probeExternalEngine,
+  probeExternalEngineReasoning,
+  readExternalEngine,
+  readExternalEngineKey,
+} from "@/lib/external-engine";
 
 /**
  * The Test button of Settings → Local AI → External engine (TASK-2376), owner
@@ -39,5 +45,15 @@ export async function POST(request: Request) {
     }
   }
   const probe = await probeExternalEngine({ baseUrl: valid.value.baseUrl, apiKey, modelId: valid.value.modelId });
+  // TASK-2497: asked for (`detectReasoning: true`, which the card sends while
+  // its reasoning switch is off) and only once the model is known to be there,
+  // one tiny completion tells whether the engine reasons, so Settings can
+  // suggest the switch. Absent when it could not be told.
+  if (probe.ok && body.detectReasoning === true) {
+    const reasoningDetected = await probeExternalEngineReasoning({ baseUrl: valid.value.baseUrl, apiKey, modelId: valid.value.modelId });
+    if (reasoningDetected !== null) {
+      return NextResponse.json({ ...probe, reasoningDetected }, { headers: { "Cache-Control": "no-store" } });
+    }
+  }
   return NextResponse.json(probe, { headers: { "Cache-Control": "no-store" } });
 }
