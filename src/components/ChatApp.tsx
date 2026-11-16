@@ -50,6 +50,8 @@ import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib
 // apart again.
 import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective, parseEmailUid, CONTROL_UI_EMAIL_PARAM } from '@/lib/chat-email-refs'
 import { EmailCard, EmailFullView } from '@/lib/chat-email'
+import { splitDraftRefs, streamingDraftRefsText } from '@/lib/chat-email-draft-refs'
+import { EmailDraftCard } from '@/lib/chat-email-draft'
 // Same reason, one convention over: a generated picture and a spoken reply are
 // named by a `MEDIA:` line inside the reply text rather than delivered as
 // attachments (see lib/chat-media.ts), and only the mascot chat had learned to
@@ -233,7 +235,9 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail,
   // A fact about the owner's account (no API quota right now), not a fault:
   // calm blue, never the red of an error.
   const isNotice = msg.role === 'system' && msg.variant === 'notice'
-  const bodyText = isStopped ? t("chat.stopped") : emailRefs ? emailRefs.text : msg.text
+  // Drafts waiting for the person's Send (`EMAIL_DRAFT:<id>`): same rule.
+  const draftRefs = emailRefs ? splitDraftRefs(emailRefs.text) : null
+  const bodyText = isStopped ? t("chat.stopped") : draftRefs ? draftRefs.text : msg.text
   const images = msg.images ?? []
   const audio = msg.audio ?? []
   const files = msg.files ?? []
@@ -313,6 +317,13 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail,
             ))}
           </div>
         )}
+        {draftRefs && draftRefs.draftIds.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {draftRefs.draftIds.map(id => (
+              <EmailDraftCard key={id} draftId={id} t={t} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -350,7 +361,7 @@ const ChatAppStreamingBubble = memo(function ChatAppStreamingBubble({ text, t }:
             still agree, which is the property that matters; there is no
             `dropUnfinishedDirective` equivalent for media, and the
             mascot chat accepts the same token. */}
-        {renderText(streamingEmailRefsText(splitMediaDirectives(text).text), t("chat.table"), t("chat.detailsSummary"))}
+        {renderText(streamingDraftRefsText(streamingEmailRefsText(splitMediaDirectives(text).text)), t("chat.table"), t("chat.detailsSummary"))}
         <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
       </div>
     </div>

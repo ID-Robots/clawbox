@@ -11,6 +11,7 @@ import AIProviderIcon from "./AIProviderIcon";
 import AiProviderList from "./AiProviderList";
 import { CloudProvidersSettings } from "./CloudProvidersPanel";
 import HarnessPicker from "./HarnessPicker";
+import MailDraftApprovalPanel from "./MailDraftApprovalPanel";
 import PetPicker from "./PetPicker";
 import SettingsDisclosureButton from "./SettingsDisclosureButton";
 import type { WifiNetwork } from "@/lib/wifi-utils";
@@ -5315,6 +5316,12 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 )}
               </div>
             )}
+
+            {/* Send approved drafts: the send service an e-mail draft the
+                assistant prepared goes out through, on a person's press in
+                the chat. Independent of the account above; the owner's
+                alone (the panel draws nothing for anyone else). */}
+            <MailDraftApprovalPanel />
 
             {/* Setup */}
             {(emailStatus === null || !emailStatus.configured || emailReconfigure) && (

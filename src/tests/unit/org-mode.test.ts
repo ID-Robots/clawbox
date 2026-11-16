@@ -191,6 +191,9 @@ describe("an organisation box narrows a user to Chat, Files and their own Settin
     ["GET", "/setup-api/hermes/models"],
     ["POST", "/setup-api/tts/speak"],
     ["GET", "/setup-api/ai-models/status"],
+    // The send-approval card under an e-mail draft their assistant prepared.
+    ["POST", "/setup-api/email/draft-approval/card"],
+    ["POST", "/setup-api/email/draft-approval/decide"],
     // Files.
     ["GET", "/setup-api/files"],
     ["PUT", "/setup-api/files"],
@@ -238,6 +241,10 @@ describe("an organisation box narrows a user to Chat, Files and their own Settin
     ["users", "POST", "/setup-api/users"],
     ["channels", "GET", "/setup-api/telegram/status"],
     ["channels", "GET", "/setup-api/email/pending"],
+    // Where approved drafts are sent from is the owner's; so is the agent's status read.
+    ["channels", "GET", "/setup-api/email/draft-approval"],
+    ["channels", "POST", "/setup-api/email/draft-approval"],
+    ["channels", "GET", "/setup-api/email/draft-approval/status"],
     ["the owner's switches", "POST", "/setup-api/settings/org-mode"],
     ["the owner's switches", "POST", "/setup-api/settings/openclaw-sharing"],
     // "Hide cloud AI providers" (TASK-2497): owner-only, and a member of
