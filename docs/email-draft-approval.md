@@ -27,7 +27,10 @@ The assistant never holds the right to send. Only a signed-in person pressing
    assistant's words. It answers with the recipients, subject and body, plus a
    one-time approval token.
 
-The line carries an id and nothing else. A reply that names a draft the person
+The line carries an id and nothing else. On Telegram, WhatsApp, Discord and
+Slack, which have no cards, both runtimes' reply plugins strip the line
+(`scripts/openclaw-plugins/clawbox-email-directives/`,
+`scripts/hermes-plugins/clawbox_email_directives/`). A reply that names a draft the person
 cannot see gets a card saying the draft is not in their mailbox.
 
 ## The approval token

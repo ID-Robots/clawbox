@@ -573,8 +573,11 @@ cookie and refuses this server's bearer. No tool here names that route, and
 `src/tests/unit/mcp-email-draft-card-tool.test.ts` fails if one ever does. So
 the tool is `readOnly` in the literal sense. The whole design, the one-time
 token and the backend's contract are in `docs/email-draft-approval.md`. The
-channel-stripping plugins above do not know the `EMAIL_DRAFT:` line yet. On a
-channel the tool's own instruction is the only guard.
+channel-stripping plugins above strip an `EMAIL_DRAFT:` line too, after the
+`EMAIL:` lines and by the same rules, so a channel never shows a bare draft id
+(`src/tests/unit/email-draft-directive-parity.test.ts` holds the three copies
+of that grammar to one answer). The spoken reply and the gateway's own Control
+UI do not strip it yet.
 
 **The same two plugins now carry an INBOUND hook, and it is what lets the owner
 approve a queued email from his own Telegram conversation.** The harness is the
