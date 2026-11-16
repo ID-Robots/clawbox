@@ -17,6 +17,13 @@ vi.mock("@/lib/harness/credentials", () => creds);
 type Engine = { kind: "clawbox-ai" } | { kind: "local"; engine: typeof LOCAL_ENGINE } | { kind: "none"; reason: "cloud_ai_locked" | "no_credential" };
 const feature = vi.hoisted(() => ({ resolveFeatureEngine: vi.fn() }));
 vi.mock("@/lib/feature-engine", () => feature);
+// The local-only AI lock, as the client reads it right before a cloud call:
+// unlocked unless a case turns it on part way.
+const lock = vi.hoisted(() => ({ on: false }));
+vi.mock("@/lib/ai-cloud-lock", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ai-cloud-lock")>()),
+  isCloudAiLocked: async () => lock.on,
+}));
 
 const LOCAL_ENGINE = {
   kind: "llamacpp" as const,
@@ -107,6 +114,52 @@ describe("the ClawBox AI client", () => {
     const empty = { ...okBody, choices: [{ message: { content: "" }, finish_reason: "length" }] };
     const none = createClawboxAiFlashClient({ fetchImpl: (async () => respond(200, empty)) as unknown as typeof fetch });
     await expect(none.complete(req)).rejects.toMatchObject({ kind: "bad_response", message: expect.stringMatching(/output cap/) });
+  });
+
+  it("answers no_engine, not no_credential, when the lock goes on between its check and the token read (TASK-2501)", async () => {
+    creds.resolveClawaiToken.mockImplementation(async () => {
+      lock.on = true;
+      return null;
+    });
+    const fetchImpl = vi.fn();
+    try {
+      await expect(createClawboxAiFlashClient({ fetchImpl: fetchImpl as unknown as typeof fetch }).complete(req)).rejects.toMatchObject({
+        kind: "no_engine",
+      });
+    } finally {
+      lock.on = false;
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing when the lock goes on while a valid token is being read (TASK-2501)", async () => {
+    creds.resolveClawaiToken.mockImplementation(async () => {
+      lock.on = true;
+      return "claw_test_token";
+    });
+    const fetchImpl = vi.fn();
+    try {
+      await expect(createClawboxAiFlashClient({ fetchImpl: fetchImpl as unknown as typeof fetch }).complete(req)).rejects.toMatchObject({
+        kind: "no_engine",
+      });
+    } finally {
+      lock.on = false;
+    }
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing once the lock is on, though the client was chosen before it (TASK-2501)", async () => {
+    const fetchImpl = vi.fn();
+    lock.on = true;
+    try {
+      await expect(createClawboxAiFlashClient({ fetchImpl: fetchImpl as unknown as typeof fetch }).complete(req)).rejects.toMatchObject({
+        kind: "no_engine",
+      });
+    } finally {
+      lock.on = false;
+    }
+    expect(creds.resolveClawaiToken).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("refuses to call without a credential", async () => {

@@ -7,6 +7,7 @@ import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
 import { activeRunDirectory, activeRunId, getRun } from "@/lib/coding-agent";
 import { artifactsDir, INLINE_IMAGE_MIME, safeRunId } from "@/lib/coding-agent-artifacts";
 import { describeImage, isVisionImageMime, type VisionImageMime } from "@/lib/vision-describe";
+import { CLOUD_AI_LOCKED_CODE, cloudAiLockedResponse } from "@/lib/ai-cloud-lock";
 
 export const dynamic = "force-dynamic";
 
@@ -170,5 +171,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "The file could not be read." }, { status: 400 });
   }
   const described = await describeImage(data.toString("base64"), prompt, mime);
+  // The local-only AI lock (TASK-2501) answers like every other lock refusal:
+  // a 409 with its code, not a 200 a caller would read as a flap to retry.
+  if (described.code === CLOUD_AI_LOCKED_CODE) return cloudAiLockedResponse(described.error ?? undefined);
   return NextResponse.json({ description: described.text, error: described.error, vision: described.vision });
 }

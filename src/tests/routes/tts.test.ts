@@ -887,3 +887,59 @@ describe("a ClawBox AI plan that moved while the box runs", () => {
   });
 });
 
+
+describe("POST /setup-api/tts — the local-only AI lock (TASK-2501)", () => {
+  function lock() {
+    preferenceMock.mockImplementation(async (key: unknown) => (key === "ai_cloud_lock" ? true : undefined));
+  }
+  /** A box that really has a cloud voice beside its own. */
+  const withCloudVoice = () => config({
+    tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { apiKey: "sk-live-abc", baseUrl: "https://api.openai.com/v1" } } },
+    models: { providers: { openai: { apiKey: "sk-live-abc" } } },
+  });
+
+  it("refuses the cloud voice the box really has, and changes nothing", async () => {
+    lock();
+    readConfigMock.mockResolvedValue(withCloudVoice());
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "cloud" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+    expect(configSetMock).not.toHaveBeenCalled();
+    expect(writeStateMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a cloud voice pick too", async () => {
+    lock();
+    readConfigMock.mockResolvedValue(withCloudVoice());
+    const { POST } = await route();
+    const res = await POST(post({ action: "voice", engine: "cloud", voice: "nova" }));
+    expect(res.status).toBe(409);
+    expect(configSetMock).not.toHaveBeenCalled();
+  });
+
+  it("settles Auto on the box's own voice, with the cloud voice still in the file", async () => {
+    lock();
+    readConfigMock.mockResolvedValue(withCloudVoice());
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "auto" }));
+    expect(res.status).toBe(200);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL]);
+  });
+
+  it("keeps the box's own voice a choice", async () => {
+    lock();
+    readConfigMock.mockResolvedValue(withCloudVoice());
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "local" }));
+    expect(res.status).toBe(200);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL]);
+  });
+
+  it("selects the same cloud voice once the lock is off", async () => {
+    readConfigMock.mockResolvedValue(withCloudVoice());
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "cloud" }));
+    expect(res.status).toBe(200);
+  });
+});

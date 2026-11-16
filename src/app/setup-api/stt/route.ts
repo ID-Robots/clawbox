@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { cloudAiLockedResponse, isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { getActiveHarness } from "@/lib/harness";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
 import { GatewayNotReadyError, openclawIsAbsent, readConfig, restartGateway } from "@/lib/openclaw-config";
@@ -141,6 +142,10 @@ export async function POST(req: Request) {
   const primary = (body as { primary?: unknown } | null)?.primary;
   if (!isSttEngine(primary)) {
     return NextResponse.json({ error: "Pick ClawBox cloud or this box." }, { status: 400 });
+  }
+  // The local-only AI lock (TASK-2501): the cloud engine is not a choice.
+  if (primary === "cloud" && (await isCloudAiLocked())) {
+    return cloudAiLockedResponse("Local-only AI is on: recordings are transcribed on this box only.");
   }
 
   try {

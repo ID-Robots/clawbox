@@ -1,5 +1,6 @@
 import { randomBytes } from "crypto";
 import { NextResponse } from "next/server";
+import { CLOUD_AI_LOCKED_CODE, isCloudAiLockedError } from "@/lib/ai-cloud-lock";
 import { CodingAgentError, httpStatusForCodingError, MAX_WAIT_MS, OwnerStoppedTeamError } from "@/lib/coding-agent";
 import { effortRefusal, isOfferedEffort } from "@/lib/coding-effort";
 import { slimTeam, teamCard } from "@/lib/coding-agent-slim";
@@ -143,7 +144,9 @@ export async function POST(request: Request) {
       console.error("[coding-agent/team] desktop notice failed:", noticeErr instanceof Error ? noticeErr.message : noticeErr);
     });
     if (err instanceof CodingAgentError) {
-      return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
+      // The local-only AI lock's refusal (TASK-2501) keeps its code.
+      const code = isCloudAiLockedError(err) ? { code: CLOUD_AI_LOCKED_CODE } : {};
+      return NextResponse.json({ error: err.message, kind: err.kind, ...code }, { status: httpStatusForCodingError(err.kind) });
     }
     return NextResponse.json({ error: err instanceof Error ? err.message : "Could not start the team" }, { status: 500 });
   }

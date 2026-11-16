@@ -71,8 +71,10 @@ describe("resolveClawaiToken", () => {
     readConfig.mockResolvedValue(openclawConfigWith(OPENCLAW_TOKEN));
     configStoreGet.mockResolvedValue(null);
     expect(await resolve()).toBe(OPENCLAW_TOKEN);
-    // The fallback is not consulted when the first store answers.
-    expect(configStoreGet).not.toHaveBeenCalled();
+    // The fallback is not consulted when the first store answers (the store is
+    // still asked one thing: the local-only AI lock, TASK-2501).
+    expect(configStoreGet).not.toHaveBeenCalledWith("clawai_token");
+    expect(configStoreGet).toHaveBeenCalledWith("ai_cloud_lock");
   });
 
   it("falls back to the Hermes store — the case that lit up voice input", async () => {

@@ -600,3 +600,41 @@ describe("POST /setup-api/stt — the write", () => {
     expect(store.get("stt_primary")).toBe("local");
   });
 });
+
+describe("POST /setup-api/stt — the local-only AI lock (TASK-2501)", () => {
+  it("refuses the cloud engine before anything is written", async () => {
+    store.set("ai_cloud_lock", true);
+    store.set("stt_primary", "local");
+    const { POST } = await route();
+    const res = await POST(post({ primary: "cloud" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+    expect(batchMock).not.toHaveBeenCalled();
+    expect(restartMock).not.toHaveBeenCalled();
+    expect(store.get("stt_primary")).toBe("local");
+  });
+
+  it("puts channel voice notes on the box alone — the cloud row and our endpoint come out", async () => {
+    store.set("ai_cloud_lock", true);
+    readConfigMock.mockResolvedValue({ ...LINKED_AUTH, tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD] } } });
+    const { POST } = await route();
+    const res = await POST(post({ primary: "local" }));
+    expect(res.status).toBe(200);
+    // The list alone: no endpoint write, since no row reads it any more.
+    expect(batchMock.mock.calls[0][0]).toEqual([["tools.media.models", expect.any(String), "--json"]]);
+    const models = JSON.parse(batchMock.mock.calls[0][0][0][1]) as Record<string, unknown>[];
+    expect(models.map((m) => m.type)).toEqual(["cli"]);
+    expect(unsetMock).toHaveBeenCalledWith("tools.media.audio.baseUrl");
+    const body = await res.json();
+    expect(body.channels).toEqual({ supportedOnEdition: true, chain: ["local"], cloudUnavailable: "cloud_ai_locked" });
+    expect(store.get("stt_primary")).toBe("local");
+  });
+
+  it("leaves the cloud a choice once the lock is off again", async () => {
+    store.set("ai_cloud_lock", false);
+    const { POST } = await route();
+    const res = await POST(post({ primary: "cloud" }));
+    expect(res.status).toBe(200);
+    expect(JSON.parse(batchMock.mock.calls[0][0][1][1])[0]).toEqual(CLOUD);
+  });
+});
