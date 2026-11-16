@@ -60,9 +60,9 @@ export interface UpdateHost {
   jetson: boolean;
   /** `os.arch()`: "arm64", "x64", … */
   arch: string;
-  /** install-x64.sh installed THIS checkout (`hasX64Install`). */
+  /** install-x64.sh installed THIS checkout (`hasX64Install`); read only where it decides the channel. */
   x64Install: boolean;
-  /** The x64 desktop integration package owns this checkout (`hasX64DesktopIntegration`). */
+  /** The x64 desktop integration package owns this checkout (`hasX64DesktopIntegration`); read likewise. */
   desktopIntegration: boolean;
 }
 
@@ -89,6 +89,11 @@ export class UpdateChannelError extends Error {
   }
 }
 
+/** CLAWBOX_UPDATE_CHANNEL as compared: trimmed, lower case, "" when unset. */
+function channelOverride(env: Record<string, string | undefined>): string {
+  return (env[UPDATE_CHANNEL_ENV] ?? "").trim().toLowerCase();
+}
+
 /** A ClawBox Workstation: arm64, not a Jetson, installed with install-x64.sh. */
 export function isWorkstationHost(host: UpdateHost): boolean {
   return host.arch === "arm64" && !host.jetson && host.x64Install && !host.desktopIntegration;
@@ -100,7 +105,7 @@ export function resolveUpdateChannel(
   env: Record<string, string | undefined> = process.env,
 ): UpdateChannel {
   const raw = env[UPDATE_CHANNEL_ENV];
-  const override = (raw ?? "").trim().toLowerCase();
+  const override = channelOverride(env);
 
   if (override === "branch") return { kind: "branch", source: "override" };
   if (override === "workstation") {
@@ -137,17 +142,28 @@ export interface ProbeOptions {
 }
 
 /**
- * Read the machine. A Jetson answers from the Tegra marker alone: its
- * x64 records are never opened, so nothing about a Jetson's update can start
- * failing here. On any other host an x64 record that is there and cannot be
- * trusted (`readRootOwnedProjectDir` refuses it) is an UpdateChannelError:
- * whether this is a Workstation is exactly what that record would have said,
- * and guessing "no" would put a Workstation on beta.
+ * Read the machine — only as far as the answer depends on it.
+ *
+ * A Jetson answers from the Tegra marker alone, and so does any host that is
+ * not arm64 unless CLAWBOX_UPDATE_CHANNEL asks for the Workstation channel:
+ * there the x64 records cannot change the channel, so they are never opened
+ * (`x64Install`/`desktopIntegration` then read false), and nothing about a
+ * Jetson's or an x86 PC's update can start failing here. Where they decide
+ * it, an x64 record that is there and cannot be trusted
+ * (`readRootOwnedProjectDir` refuses it) is an UpdateChannelError: whether
+ * this is a Workstation is exactly what that record would have said, and
+ * guessing "no" would put a Workstation on beta.
  */
-export function probeUpdateHost(projectDir: string, options: ProbeOptions = {}): UpdateHost {
+export function probeUpdateHost(
+  projectDir: string,
+  options: ProbeOptions = {},
+  env: Record<string, string | undefined> = process.env,
+): UpdateHost {
   const jetson = fs.existsSync(/* turbopackIgnore: true */ options.tegraRelease ?? TEGRA_RELEASE);
   const arch = options.arch ?? os.arch();
-  if (jetson) return { jetson, arch, x64Install: false, desktopIntegration: false };
+  if (jetson || (arch !== "arm64" && channelOverride(env) !== "workstation")) {
+    return { jetson, arch, x64Install: false, desktopIntegration: false };
+  }
   try {
     const desktopIntegration = (options.hasX64DesktopIntegration ?? hasX64DesktopIntegration)(projectDir);
     const x64Install = !desktopIntegration && (options.hasX64Install ?? hasX64Install)(projectDir);

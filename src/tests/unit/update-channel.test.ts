@@ -170,6 +170,35 @@ describe("probeUpdateHost", () => {
     })).toThrow(/Could not tell whether this computer is a ClawBox Workstation, so its update channel is unknown: .*root-owned/);
   });
 
+  it("an x86 PC never opens the x64 records, so a bad one cannot cost it its branch rules", () => {
+    const opened: string[] = [];
+    const host = probeUpdateHost("/p", {
+      tegraRelease: path.join(tmp(), "absent"),
+      arch: "x64",
+      hasX64Install: () => { opened.push("x64"); throw new Error("must be a small, root-owned file"); },
+      hasX64DesktopIntegration: () => { opened.push("integration"); throw new Error("must be a small, root-owned file"); },
+    }, {});
+    expect(host).toEqual({ jetson: false, arch: "x64", x64Install: false, desktopIntegration: false });
+    expect(opened).toEqual([]);
+    expect(resolveUpdateChannel(host, {})).toEqual({ kind: "branch", source: "hardware" });
+  });
+
+  it("…unless CLAWBOX_UPDATE_CHANNEL=workstation asks, which only those records can grant", () => {
+    const options = {
+      tegraRelease: path.join(tmp(), "absent"),
+      arch: "x64",
+      hasX64Install: () => true,
+      hasX64DesktopIntegration: () => false,
+    };
+    const host = probeUpdateHost("/p", options, env("workstation"));
+    expect(host.x64Install).toBe(true);
+    expect(resolveUpdateChannel(host, env("workstation")).kind).toBe("workstation");
+    expect(() => probeUpdateHost("/p", {
+      ...options,
+      hasX64Install: () => { throw new Error("must be a small, root-owned file"); },
+    }, env("workstation"))).toThrow(UpdateChannelError);
+  });
+
   it("on this test host (no Tegra marker, no x64 records) it names no Workstation", () => {
     const host = probeUpdateHost(path.join(tmp(), "checkout"));
     expect(host.x64Install).toBe(false);

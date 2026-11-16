@@ -2039,6 +2039,7 @@ export async function fetchUpdateBranchAsOwner(projectDir: string = PROJECT_DIR)
   );
   if (!fetched.remote.reachable) {
     if (source === "workstation-channel" && fetched.missingRef) {
+      await dropStaleChannelRef(projectDir, branch);
       throw new Error(workstationRefMissingUpdateError(branch));
     }
     throw new Error(fetched.remote.reason ?? `Could not fetch ${upstream}. Check the internet connection and try again.`);
@@ -5519,6 +5520,22 @@ export async function getPinnedBranchTarget(projectDir: string): Promise<PinnedB
   return compareWithOrigin(projectDir, branch, "branch");
 }
 
+/**
+ * origin answered that the channel's branch does not exist: forget the local
+ * copy of it, as `git fetch --prune` would. A copy left from before the branch
+ * was deleted is otherwise a version every local reader still sees — the
+ * What's new panel reads its package.json, the drift report its tip — while
+ * the check says nothing has been released. Best effort: a ref that cannot be
+ * removed changes no verdict here.
+ */
+async function dropStaleChannelRef(projectDir: string, branch: string): Promise<void> {
+  try {
+    await execGit(projectDir, ["update-ref", "-d", `refs/remotes/origin/${branch}`], { timeout: 10_000 });
+  } catch {
+    // No such ref, or a locked one: nothing to do.
+  }
+}
+
 /** Fetch `origin <branch>` and compare HEAD with it. */
 async function compareWithOrigin(
   projectDir: string,
@@ -5535,6 +5552,7 @@ async function compareWithOrigin(
   // Workstations. Said as such, and decided here — a stale local
   // `origin/workstation` left by a deleted branch is no target either.
   if (channel === "workstation" && fetched.missingRef) {
+    await dropStaleChannelRef(projectDir, branch);
     return {
       target: null,
       remote: { reachable: false, cause: "device", reason: workstationRefMissingReason(branch) },
@@ -7059,6 +7077,28 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // run writes its own after its backup — so no run can ever set data aside
   // on an override it was not given.
   const remainingSteps = steps.slice(startFrom);
+
+  // THE UPDATE CHANNEL (src/lib/update-channel.ts), asked before anything that
+  // moves the checkout. Step 0 on an appliance is install.sh, which reads the
+  // pin and never this channel: a CLAWBOX_UPDATE_CHANNEL it cannot honour
+  // would otherwise move the tree first and be refused only at the restart
+  // step's resolveUpdateBranch, over a box already half-moved. Refused here
+  // the way the internet check below refuses: the box is as it was. Every box
+  // whose channel is decided — every Jetson with no override — passes.
+  if (remainingSteps.some((s) => s.id === "bootstrap_updater" || s.id === RESTART_STEP_ID)) {
+    try {
+      currentUpdateChannel(PROJECT_DIR);
+    } catch (err) {
+      if (!(err instanceof UpdateChannelError)) throw err;
+      console.error(`[Updater] refusing the update before step 1: ${err.message}`);
+      runtime.state.phase = "failed";
+      runtime.state.error = err.message;
+      runtime.state.currentStepIndex = -1;
+      await clearUpdateLock();
+      return;
+    }
+  }
+
   let schemaCheckedPin: string | null = null;
   const syncAhead = remainingSteps.some((s) => s.id === "bootstrap_updater");
   const downgradeScope = {

@@ -168,7 +168,7 @@ d("scripts/promote-workstation.sh", () => {
     expect(remoteTip("workstation")).toBe(c.beta2);
   });
 
-  it("takes --remote as a URL and writes no ref into the checkout it runs in", () => {
+  it("takes --remote as a URL (no configured refspec, so no ref is written into the checkout)", () => {
     const before = git(clone, "for-each-ref", "--format=%(refname)");
     const res = run(c.beta2, "--remote", origin, "--push");
     expect(res.status).toBe(0);

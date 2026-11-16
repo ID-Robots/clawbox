@@ -35,7 +35,8 @@ the updater's auto-repin skips it.
 ### When there is nothing on the channel
 
 If GitHub has no `workstation` branch (nothing promoted yet, or the branch was
-deleted), the Workstation stays on the version it has, and says so:
+deleted), the Workstation stays on the version it has, and says so. A local
+copy of a deleted branch is dropped, as `git fetch --prune` would drop it:
 
 - **The update check** reports *"Couldn't check for updates"* with the reason
   *"No version has been released on the ClawBox Workstation update channel
@@ -60,8 +61,8 @@ It never falls back to the pin, to `beta` or to `main`.
 | `branch` | the branch rules, also on a Workstation. Use this to test a `beta` build (or a PR branch, through the branch override) on a Workstation before you promote it. |
 | `workstation` | the Workstation channel on a PC installed with `install-x64.sh` that is not a Workstation, such as a test PC |
 
-Any other value is refused. The update fails and the check reports the
-reason; neither one guesses a branch. `workstation` is also refused on a
+Any other value is refused. The update stops before step 1 with the box as
+it was, and the check reports the reason; neither one guesses a branch. `workstation` is also refused on a
 Jetson and on a desktop-integration PC. There, `install.sh` or the
 integration's root step fetches the recorded branch before the web server's
 updater runs, so the setting could only be half honoured.
@@ -94,9 +95,12 @@ Remove the line (and restart) when the test is done. Forgetting a
 
    Pass `--remote <name|url>` when your push remote is not `origin`.
 5. Take the test Workstation off the override (remove the `.env` line, restart
-   the web server) and confirm its update check now names `workstation`.
-   Workstations see the new version at their next check. The check result is
-   cached for up to 30 minutes, and **Check for updates** refreshes it.
+   the web server). **System Update → Advanced options** should now say
+   *"Updates follow `workstation`, the ClawBox Workstation channel…"*. The box
+   is already at the promoted commit, so its check offers nothing. A
+   Workstation behind it is offered `workstation@<sha>` at its next check. The
+   check result is cached for up to 30 minutes, and **Check for updates**
+   refreshes it.
 
 The script refuses, and pushes nothing, when:
 
@@ -126,8 +130,12 @@ usual fix for a bad promotion is to promote a fixed commit forward instead.
 
 - `src/lib/update-channel.ts`: the decision, the override and the sentences.
 - `src/lib/updater.ts`: `resolveUpdateBranch` (rule 0), `getPinnedBranchTarget`
-  (the check), `fetchUpdateBranchAsOwner` (step 1 on an `install-x64.sh` PC)
-  and `repinUpdateBranch` (never pins the channel).
+  (the check), `fetchUpdateBranchAsOwner` (step 1 on an `install-x64.sh` PC),
+  `repinUpdateBranch` (never pins the channel), and the run's pre-flight. The
+  pre-flight refuses a channel it cannot decide before step 0, so it applies
+  on a Jetson too, where step 0 is `install.sh`.
+- `src/lib/build-identity.ts`: the drift report compares a Workstation with
+  its channel's tip, not with the branch `install-x64.sh` recorded.
 - `scripts/promote-workstation.sh`: the promotion.
 - Tests: `src/tests/unit/update-channel.test.ts`,
   `src/tests/unit/updater-workstation-channel.test.ts` (real git repositories,

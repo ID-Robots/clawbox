@@ -85,8 +85,10 @@ tip_of() {
 }
 current="$(tip_of "$BRANCH")"
 
-# The objects, without writing a single ref into this checkout: an explicit
-# refspec with no destination only lands in FETCH_HEAD.
+# The objects. The refspecs name no destination, so nothing here depends on
+# what the fetch writes: the tips used below are the ones ls-remote read
+# (git may still refresh refs/remotes/<remote>/* through the remote's own
+# configured refspec, as any fetch does).
 fetch_refs=()
 for src in "${SOURCES[@]}" "$BRANCH"; do
   if [ -n "$(tip_of "$src")" ]; then fetch_refs+=("refs/heads/$src"); fi

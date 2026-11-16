@@ -159,6 +159,15 @@ d("a Jetson keeps the branch rules — beta stays beta", () => {
     expect(check.remote.reason).toMatch(/install\.sh updates from the recorded branch/);
   });
 
+  it("the drift report still compares it with its beta pin", async () => {
+    cloneDevice("beta", "beta");
+    dev("reset", "-q", "--hard", "HEAD~1");
+    const { collectBuildIdentity } = await import("@/lib/build-identity");
+    const identity = await collectBuildIdentity(device);
+    expect(identity.pin).toEqual({ branch: "beta", source: "pin-file", commit: shas.beta, pinned: true });
+    expect(identity.drift.codes).toContain("checkout-behind-pin");
+  });
+
   it("the auto-repin is untouched: an unpinned beta box is pinned to beta", async () => {
     cloneDevice("beta", null);
     const warnings = await mod.repinUpdateBranch("beta", device, "checkout-branch");
@@ -220,7 +229,7 @@ d("a ClawBox Workstation follows the workstation branch", () => {
     expect(fs.readFileSync(path.join(device, ".update-branch"), "utf-8")).toBe("beta\n");
   });
 
-  it("a workstation branch deleted on origin is no target, even with a stale local copy of it", async () => {
+  it("a workstation branch deleted on origin is no target, and the stale local copy is dropped", async () => {
     cloneDevice("beta", "beta");
     promote(shas.main);
     await mod.fetchUpdateBranchAsOwner(device); // origin/workstation is now on the device
@@ -228,6 +237,30 @@ d("a ClawBox Workstation follows the workstation branch", () => {
     const check = await mod.getPinnedBranchTarget(device);
     expect(check.target).toBeNull();
     expect(check.remote.reason).toMatch(/GitHub has no "workstation" branch/);
+    // Pruned, so What's new and the drift report no longer read a version from it.
+    expect(dev("for-each-ref", "refs/remotes/origin/workstation")).toBe("");
+  });
+
+  it("step 1 drops a stale local copy of a deleted workstation branch too", async () => {
+    cloneDevice("beta", "beta");
+    promote(shas.main);
+    await mod.fetchUpdateBranchAsOwner(device);
+    seed("push", "-q", "origin", ":refs/heads/workstation");
+    await expect(mod.fetchUpdateBranchAsOwner(device)).rejects.toThrow(/nothing to update to/);
+    expect(dev("for-each-ref", "refs/remotes/origin/workstation")).toBe("");
+  });
+
+  it("the drift report compares it with the channel's tip, not with the beta pin", async () => {
+    cloneDevice("beta", "beta");
+    promote(shas.main);
+    await mod.fetchUpdateBranchAsOwner(device);
+    dev("reset", "-q", "--hard", shas.main); // on the promoted commit, behind beta
+    const { collectBuildIdentity } = await import("@/lib/build-identity");
+    const identity = await collectBuildIdentity(device);
+    expect(identity.pin).toEqual({ branch: "workstation", source: "workstation-channel", commit: shas.main, pinned: true });
+    expect(identity.drift.checkoutVsPin).toBe("match");
+    expect(identity.drift.codes).not.toContain("checkout-behind-pin");
+    expect(identity.drift.codes).not.toContain("no-pin");
   });
 
   it("the channel is never written into .update-branch", async () => {
