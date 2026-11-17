@@ -566,9 +566,11 @@ function cleanupSessions(busy = () => false) {
 async function deleteSessions(busy) {
   const result = { sessions: opened.length, deleted: 0, left: [] };
   cleanup = result;
-  const kept = opened.filter(busy);
+  // Never deleted: a session of a step still running, and one whose last
+  // Stopped turn the route never confirmed ended (hermes-chat.mjs).
+  const kept = opened.filter((s) => busy(s) || s.blocked);
   for (const s of kept) result.left.push(s.key);
-  if (kept.length) log(`cleanup: ${kept.length} session(s) of the step still running are left alone`);
+  if (kept.length) log(`cleanup: left alone, a turn may still run there: ${kept.map((s) => s.key).join(" ")}`);
   const idle = opened.filter((s) => !kept.includes(s));
   if (RUNTIME === "openclaw") {
     let gw = null;
@@ -598,6 +600,12 @@ async function deleteSessions(busy) {
       for (const id of s.hermesIds) {
         if (!HERMES_SESSION_ID_RE.test(id)) continue;
         if (!(await deleteHermesSession(id))) ok = false;
+      }
+      // A turn that ended before the route named its Hermes session may have
+      // opened one that no id here reaches: not counted as deleted.
+      if (s.untracked) {
+        ok = false;
+        log(`cleanup: ${s.key}: ${s.untracked} turn(s) ended before Hermes named their session; a session such a turn opened cannot be deleted by id`);
       }
       if (ok) result.deleted++; else result.left.push(s.key);
     }
@@ -738,7 +746,7 @@ async function stepRamp(id, n) {
   try {
     for (let c = 0; c < n && !stopping; c++) chats.push(await openSession(`${id}-c${c + 1}`));
     await Promise.all(chats.map(async (sess) => {
-      for (let k = 1; k <= cfg.rampTurns && !stopping; k++) {
+      for (let k = 1; k <= cfg.rampTurns && !stopping && !sess.blocked; k++) {
         const tag = `STRESS-${token()}`;
         await checkedTurn(id, sess, k, "echo", `Reply with exactly this text and nothing else: ${tag}`, () => tag);
       }
@@ -762,7 +770,7 @@ async function stepLong(id) {
     // A stop while the session opened: no turn to record.
     if (stopping) return;
     await checkedTurn(id, sess, 1, "remember", `Remember this code word for later in our conversation: ${word}. Reply with only OK.`, () => "OK");
-    for (let k = 2; k <= cfg.longTurns && !stopping; k++) {
+    for (let k = 2; k <= cfg.longTurns && !stopping && !sess.blocked; k++) {
       if (k % 8 === 0 || k === cfg.longTurns) {
         await checkedTurn(id, sess, k, "recall", `What is the code word I asked you to remember at the start of our conversation? Reply with only the code word.`, () => word);
       } else {
@@ -809,7 +817,7 @@ async function stepTool(id) {
   try {
     let k = 0;
     for (const [kind, message, expect] of plan) {
-      if (stopping) break;
+      if (stopping || sess.blocked) break;
       await checkedTurn(id, sess, ++k, kind, message, expect);
     }
   } finally { closeSession(sess); }

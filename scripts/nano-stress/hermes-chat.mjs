@@ -32,9 +32,10 @@ export function takeSseFrames(buf) {
 
 /**
  * The Hermes driver for one run. `deps` are the host's own pieces: the
- * dashboard's base URL, the owner-signed headers, and the run's log line.
+ * dashboard's base URL, the owner-signed headers, and the run's log line;
+ * `settleMs` bounds the wait for a Stopped turn to settle (see `settled`).
  */
-export function createHermesDriver({ dash, headers, log = () => {} }) {
+export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 20_000 }) {
   async function stop(key, turnId) {
     const q = new URLSearchParams({ sessionKey: key, ...(turnId ? { turnId } : {}) });
     try {
@@ -49,11 +50,48 @@ export function createHermesDriver({ dash, headers, log = () => {} }) {
   }
 
   /**
+   * Whether no turn runs under `key` any more, as the route itself tells it:
+   * GET re-attaches to the key's newest live turn — a running one if there is
+   * one — replays its frames, and ends the stream only once that turn has
+   * ended (204: no turn on record). An end within `settleMs` is settled; a
+   * stream still open then, or no answer, is not.
+   */
+  async function settled(key) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), settleMs);
+    try {
+      const res = await fetch(`${dash}/setup-api/hermes/chat?${new URLSearchParams({ sessionKey: key })}`, {
+        headers: headers({ Accept: "text/event-stream" }),
+        signal: ac.signal,
+      });
+      if (res.status === 204) return true;
+      if (!res.ok || !res.body) { log(`settle ${key}: HTTP ${res.status}`); return false; }
+      const reader = res.body.getReader();
+      for (;;) {
+        const { done } = await reader.read();
+        if (done) return true;
+      }
+    } catch (e) {
+      if (!ac.signal.aborted) log(`settle ${key}: ${e.message}`);
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
    * One turn. `signal` (optional) is the run's stop: aborted, the turn ends
    * at once as `stopped`. Whatever way it ends without the route saying so —
    * the timeout, the stop, a read error, a stream that ends early — the turn
-   * is Stopped on the box (once) before this returns: a request going away
-   * does not end a Hermes turn, and the session's next turn must not overlap it.
+   * is Stopped on the box (once) and must then settle before this returns: a
+   * request going away does not end a Hermes turn, and the session's next
+   * turn must not overlap it. A turn whose end cannot be confirmed blocks its
+   * session (`sess.blocked`): no further turn is sent on it, and the run's
+   * cleanup leaves it alone.
+   *
+   * `sess.untracked` counts turns sent with no Hermes session yet that ended
+   * without naming one (the route names it only in its answer): a session
+   * such a turn may have opened cannot be deleted by id.
    */
   async function turn(sess, message, timeoutMs, signal) {
     const r = { ackMs: null, firstTokenMs: null, latencyMs: null, toolCalls: 0, text: "", error: null, model: null };
@@ -61,6 +99,12 @@ export function createHermesDriver({ dash, headers, log = () => {} }) {
       r.error = { kind: "stopped", message: "the run was stopped" };
       return r;
     }
+    if (sess.blocked) {
+      r.error = { kind: "blocked", message: "an earlier turn on this session was never confirmed stopped" };
+      return r;
+    }
+    const threadedBefore = Boolean(sess.sessionId);
+    let refused = false;
     const t0 = performance.now();
     const ms = () => Math.round(performance.now() - t0);
     const turnId = crypto.randomBytes(8).toString("hex");
@@ -87,7 +131,10 @@ export function createHermesDriver({ dash, headers, log = () => {} }) {
         ended = true;
         const json = await res.json().catch(() => null);
         if (res.ok && json && typeof json.text === "string") done = json;
-        else error = { kind: "http", message: `HTTP ${res.status}: ${String(json?.error || "").slice(0, 160)}` };
+        else {
+          refused = true;
+          error = { kind: "http", message: `HTTP ${res.status}: ${String(json?.error || "").slice(0, 160)}` };
+        }
       } else {
         const reader = res.body.getReader();
         const dec = new TextDecoder();
@@ -134,13 +181,20 @@ export function createHermesDriver({ dash, headers, log = () => {} }) {
       signal?.removeEventListener("abort", onStop);
     }
     // Not ended by the route: no latency to count, and the owner's Stop ends
-    // the turn on the box (the only Stop this turn sends).
+    // the turn on the box (the only Stop this turn sends). The route waits a
+    // bounded 5 s for it; whether it really ended is asked of the route.
     if (!ended) {
       r.latencyMs = null;
       await stop(sess.key, turnId);
+      if (!(await settled(sess.key))) {
+        sess.blocked = true;
+        r.error.message = `${r.error.message}; its Stop was not confirmed within ${Math.round(settleMs / 1000)} s, so no more turns go to this session`.slice(0, 300);
+        log(`${sess.key}: a Stopped turn did not settle within ${Math.round(settleMs / 1000)} s: no more turns on this session`);
+      }
     }
+    if (!threadedBefore && !sess.sessionId && !refused) sess.untracked = (sess.untracked || 0) + 1;
     return r;
   }
 
-  return { turn, stop };
+  return { turn, stop, settled };
 }

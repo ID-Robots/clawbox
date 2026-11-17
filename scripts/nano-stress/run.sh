@@ -125,6 +125,8 @@ NANO_SERIAL=$SERIAL
 source "$HERE/../nano-tests/lib.sh"
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+# This run's mark on the board folder it makes (not a secret).
+TOKEN="nano-stress-$STAMP-$$-$RANDOM$RANDOM"
 RESULTS=${RESULTS:-$PWD/nano-stress-$STAMP}
 mkdir -p "$RESULTS"
 # The board folder (and the progress poll) can be named for a test of this
@@ -204,8 +206,27 @@ collect() {
 summarize() {
   node "$HERE/report.mjs" --json "$RESULTS/stress-$RUNTIME.json" --md "$RESULTS/stress-$RUNTIME.md" "$RESULTS/raw-$RUNTIME.json"
 }
+# owns_board_dir — the board folder carries this run's token: the launch
+# made it. Prints mine, other (not made by this run: left alone) or nothing
+# (the board did not answer).
+owns_board_dir() {
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'if [ "$(cat "$1/.owner" 2>/dev/null)" = "$2" ]; then echo mine; else echo other; fi' "$BOARD_DIR" "$TOKEN" 2>/dev/null | tail -n 1
+}
 cleanup() {
   [ "$STARTED" = 1 ] || return 0
+  # Nothing is stopped, fetched or removed in a folder this run did not make:
+  # a launch whose answer was lost may have found it already there.
+  local owner
+  owner=$(owns_board_dir)
+  if [ "$owner" != mine ]; then
+    if [ "$owner" = other ]; then
+      say "$BOARD_DIR on the board is not this run's (no token of its own there): left alone"
+    else
+      say "the board did not answer: $BOARD_DIR, if this run made it, is left on the board"
+    fi
+    return 0
+  fi
   if [ "$ENDED" = 0 ]; then
     say "stopping the board side (it deletes its own chat sessions)"
     if stop_board_side; then ENDED=1; else STOPPED=0; fi
@@ -243,16 +264,19 @@ say "board side: $ENTRY and the modules it imports, ${#PAYLOAD} characters packe
 STARTED=1
 # shellcheck disable=SC2016  # expanded on the board
 started=$(board "$(declare -f unpack_payload)"'
-  dir=$1; payload=$2; entry=$3; shift 3
-  # A fresh folder only: the pid file and record of an earlier run there
-  # would pass for those of this one.
-  [ -e "$dir" ] && { echo "@@exists"; exit 1; }
+  dir=$1; payload=$2; entry=$3; token=$4; shift 4
+  # A fresh folder only, claimed at once (mkdir fails on one that exists) and
+  # marked with the token of this run: the pid file and record of an earlier run
+  # there would pass for those of this one, and the cleanup touches only a
+  # folder with the token.
+  mkdir "$dir" 2>/dev/null || { echo "@@exists"; exit 1; }
+  printf "%s\n" "$token" > "$dir/.owner" || { echo "could not mark $dir"; exit 1; }
   unpack_payload "$dir" "$payload" || { echo "could not unpack the run into $dir"; exit 1; }
   [ -f "$dir/$entry" ] || { echo "$entry is not in the unpacked run"; exit 1; }
   setsid -f node "$dir/$entry" --out "$dir/raw.json" "$@" </dev/null >"$dir/stress.log" 2>&1
   for _ in $(seq 1 20); do [ -s "$dir/raw.json.pid" ] && break; sleep 0.5; done
   [ -s "$dir/raw.json.pid" ] && echo started || { echo "did not start:"; tail -n 5 "$dir/stress.log"; }
-' "$BOARD_DIR" "$PAYLOAD" "$ENTRY" --runtime "$RUNTIME" "${STRESS_ARGS[@]}")
+' "$BOARD_DIR" "$PAYLOAD" "$ENTRY" "$TOKEN" --runtime "$RUNTIME" "${STRESS_ARGS[@]}")
 if [ "$(printf '%s\n' "$started" | tail -n 1)" = "@@exists" ]; then
   # Not this run's folder: nothing to stop, fetch or remove there.
   STARTED=0

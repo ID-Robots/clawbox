@@ -30,8 +30,11 @@ stopped: on OpenClaw `chat.abort` then `sessions.delete` through the gateway,
 on Hermes the owner's Stop, the chat route's transcript file and
 `hermes sessions delete` for every Hermes session its turns opened (tried up
 to five times, 3 s apart: right after a Stop the session can still be held for
-a few seconds, as seen on a lab board). The record
-says how many it deleted, and the summary lists any it could not.
+a few seconds, as seen on a lab board). The record says how many it deleted,
+and the summary lists any it could not. On Hermes that includes a session
+whose first turn was cut off before its answer: the route names the Hermes
+session only in the answer, so a session such a turn opened cannot be deleted
+by id, and it is listed rather than counted as deleted.
 
 | step | what it sends |
 |---|---|
@@ -48,7 +51,11 @@ A turn whose end the runtime never reported — no answer within the turn
 timeout, a send the gateway did not acknowledge in time, a stream or socket
 that broke off, the run being stopped — is stopped on the box (`chat.abort` on
 OpenClaw, the route's Stop on Hermes) before the session's next turn, and
-counts as an error with no latency. So does a runtime error (on Hermes a
+counts as an error with no latency. On Hermes the run then asks the route
+whether the turn really ended (`GET /setup-api/hermes/chat` re-attaches to the
+key's newest turn and ends once nothing runs under it); a turn not confirmed
+within 20 s blocks its session: no further turn goes to it and the cleanup
+leaves it alone. So does a runtime error (on Hermes a
 provider's refusal comes back as "Error: …" text); a wrong answer keeps its
 latency.
 
@@ -90,8 +97,12 @@ stopped, and only then are the sessions deleted and the partial record
 written, which `run.sh` brings back. On a lab board the board side was gone
 3–7 s after the stop. A step that has not wound down within 240 s keeps its
 sessions (the record lists them as left) rather than have them deleted under a
-running turn; `run.sh` waits up to 330 s for the board side to go. A record that will not come back keeps
-the folder on the board, and `run.sh` names it.
+running turn; `run.sh` waits up to 330 s for the board side to go. A record
+that will not come back keeps the folder on the board, and `run.sh` names it.
+The launch claims the folder (`mkdir`, so an existing one is refused) and
+writes a token of the run into it; the cleanup stops, collects or removes
+nothing in a folder without that token, so a launch whose answer was lost
+never touches a folder another run made.
 
 The board side may import Node's own modules and local files only: the board
 folder has no `node_modules`, so a package import, an absolute path or an

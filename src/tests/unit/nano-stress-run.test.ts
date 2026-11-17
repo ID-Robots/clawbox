@@ -43,6 +43,9 @@ class Dashboard {
   stops: Array<{ sessionKey: string | null; turnId: string | null }> = [];
   hanging = new Set<http.ServerResponse>();
   heldStops = new Set<http.ServerResponse>();
+  // GET re-attach: 204 (no turn on record) unless a turn is held running.
+  liveHeld = false;
+  attaches = 0;
   onPost: (() => void) | null = null;
 
   async start() {
@@ -54,6 +57,8 @@ class Dashboard {
     this.posts = [];
     this.stops = [];
     this.onPost = null;
+    this.liveHeld = false;
+    this.attaches = 0;
     for (const res of this.hanging) res.end();
     this.hanging.clear();
     for (const res of this.heldStops) res.destroy();
@@ -77,6 +82,14 @@ class Dashboard {
       if (req.method === "GET" && url.pathname === "/setup-api/harness/status") return this.json(res, 200, { harnesses: [{ id: "hermes", healthy: true }] });
       if (req.method === "GET" && url.pathname === "/setup-api/gateway/ws-config") return this.json(res, 200, { token: "stub-gateway-token" });
       if (url.pathname !== "/setup-api/hermes/chat") return this.json(res, 404, { error: "not here" });
+      if (req.method === "GET") {
+        this.attaches++;
+        if (!this.liveHeld) { res.writeHead(204); res.end(); return; }
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.write(`event: delta\ndata: ${JSON.stringify({ text: "…" })}\n\n`);
+        this.heldStops.add(res);
+        return;
+      }
       if (req.method === "DELETE") {
         this.stops.push({ sessionKey: url.searchParams.get("sessionKey"), turnId: url.searchParams.get("turnId") });
         // A Stop that never answers: the turn sending it cannot end.
@@ -243,6 +256,27 @@ describe("the Hermes turn", () => {
     expect(dash.stops).toEqual([{ sessionKey: s.key, turnId: dash.posts[0].turnId }]);
   });
 
+  it("asks the route whether a Stopped turn settled, and blocks the session when it did not", async () => {
+    dash.reset("hang");
+    const s = sess();
+    const r = await live().turn(s, ask, 300);
+    expect(r.error?.kind).toBe("timeout");
+    expect(dash.attaches).toBe(1);
+    expect(s).not.toHaveProperty("blocked");
+
+    dash.reset("hang");
+    dash.liveHeld = true; // the route still holds a running turn under the key
+    const held = sess();
+    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleMs: 400 });
+    const r2 = await driver.turn(held, ask, 300);
+    expect(r2.error?.kind).toBe("timeout");
+    expect(r2.error?.message).toContain("its Stop was not confirmed within 0 s, so no more turns go to this session");
+    expect(held).toMatchObject({ blocked: true, untracked: 1 });
+    const next = await driver.turn(held, ask, 300);
+    expect(next.error?.kind).toBe("blocked");
+    expect(dash.posts).toHaveLength(1);
+  });
+
   it("ends at once, Stopped, when the run stops; starts nothing once it has", async () => {
     dash.reset("hang");
     const s = sess();
@@ -285,6 +319,11 @@ if [ -n "\${FAKE_FETCH_FAIL_ONCE:-}" ] && [ ! -e "$FAKE_FETCH_FAIL_ONCE" ] && [[
   : > "$FAKE_FETCH_FAIL_ONCE"
   printf '@@nano-ci-output@@\\n%s\\n' 'not-a-record'
   exit 0
+fi
+# The launch ran (or was refused) on the board, but its reply never came back.
+if [ -n "\${FAKE_LOSE_START:-}" ] && [[ $script == *'echo "@@exists"'* ]]; then
+  bash -c "$script" >/dev/null 2>&1
+  exit 255
 fi
 if [ -n "\${FAKE_FETCH_FAIL:-}" ] && [[ $script == *'gzip -c "$f"'* ]]; then
   printf '@@nano-ci-output@@\\n%s\\n' 'not-a-record'
@@ -435,7 +474,10 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     expect(raw.steps[0]).toMatchObject({ id: "ramp-1", failure: "the run was stopped (SIGTERM) during the step", endedAt: expect.any(Number) });
     expect(raw.turns).toHaveLength(1);
     expect(raw.turns[0].error.kind).toBe("stopped");
-    expect(raw.cleanup).toMatchObject({ sessions: 1, deleted: 1 });
+    // The cut turn was the session's first: Hermes never named its session,
+    // so the cleanup cannot claim to have deleted it.
+    expect(raw.cleanup).toEqual({ sessions: 1, deleted: 0, left: [dash.posts[0].sessionKey] });
+    expect(fs.readFileSync(path.join(results, "board-hermes.log"), "utf8")).toContain("1 turn(s) ended before Hermes named their session");
     expect(fs.readFileSync(path.join(results, "stress-hermes.md"), "utf8")).toContain("## Hermes (incomplete)");
     expect(fs.existsSync(boardDir)).toBe(false);
   });
@@ -516,5 +558,37 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     expect(raw.cleanup).toEqual({ sessions: 1, deleted: 0, left: [key] });
     expect(fs.readFileSync(path.join(results, "board-hermes.log"), "utf8")).toContain("the step in flight (ramp-1) did not end within 2 s: its sessions are left alone");
     expect(fs.readFileSync(path.join(results, "stress-hermes.md"), "utf8")).toContain("cleanup: 1 of 1 sessions could not be deleted");
+  });
+
+  it("a launch whose reply is lost never touches a board folder this run did not make", async () => {
+    dash.runtime = "hermes";
+    dash.reset("answer");
+    const { results, env } = fixture();
+    // Someone else's run in the folder: its record, and a live process by its pid.
+    const other = spawn("sleep", ["60"], { stdio: "ignore" });
+    try {
+      fs.mkdirSync(boardDir);
+      fs.writeFileSync(path.join(boardDir, "raw.json"), '{"tool":"clawbox-nano-stress","from":"another run"}');
+      fs.writeFileSync(path.join(boardDir, "raw.json.pid"), String(other.pid));
+      const { code, out } = await runSh({ ...env, FAKE_LOSE_START: "1" }, ["--results", results, "stand-in", ...STRESS]);
+      expect(code, out).toBe(1);
+      expect(out).toContain(`${boardDir} on the board is not this run's (no token of its own there): left alone`);
+      expect(() => process.kill(other.pid!, 0)).not.toThrow();
+      expect(fs.readdirSync(boardDir).sort()).toEqual(["raw.json", "raw.json.pid"]);
+      expect(dash.posts).toHaveLength(0);
+    } finally {
+      other.kill();
+    }
+  });
+
+  it("a launch whose reply is lost still stops, collects and removes the folder it made", async () => {
+    dash.runtime = "hermes";
+    dash.reset("answer");
+    const { results, env } = fixture();
+    const { code, out } = await runSh({ ...env, FAKE_LOSE_START: "1" }, ["--results", results, "stand-in", ...STRESS]);
+    expect(code, out).toBe(1);
+    expect(out).toContain("the stress run did not start on the board");
+    expect(readRaw(results, "hermes").tool).toBe("clawbox-nano-stress");
+    expect(fs.existsSync(boardDir)).toBe(false);
   });
 });
