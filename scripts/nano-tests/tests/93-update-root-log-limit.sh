@@ -121,7 +121,12 @@ settle_and_restore() {
       while [ "$grace" -gt 0 ]; do
         sleep 10
         grace=$((grace - 10))
-        [ "$(update_phase)" = running ] && { phase=running; break; }
+        case "$(update_phase)" in
+          running) phase=running; break ;;
+          # No answer: whether an update started is unknown, so the earlier
+          # word ends nothing — waited out like a running update below.
+          "") phase=""; break ;;
+        esac
       done
       ;;
   esac
@@ -160,11 +165,16 @@ settle_and_restore() {
 # build half installed).
 back_on_test_build() {
   if [ "${UPDATE_PHASE:-}" != completed ] || [ "$(board_head)" != "$NANO_SHA" ]; then
+    # Until the board is seen back on the commit under test, no test after this
+    # one may start (run.sh reads NANO_STOP_FILE): a restore that fails, or that
+    # the runner's deadline cuts short, leaves a build nobody checked.
+    printf '%s\n' "$NANO_TEST_NAME could not confirm the board is back on ${NANO_SHA:0:12} after its older-release fixture" > "${NANO_STOP_FILE:-/dev/null}"
     # shellcheck disable=SC2016  # expanded on the board
     board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$NANO_SHA" >/dev/null
     "$NANO_CI" rebuild "$NANO_SERIAL" "$NANO_BRANCH" 2>&1 | grep -E '^\[nano-ci\]|rc=|FAILED' | while IFS= read -r l; do note "restore: $l"; done
     if [ "$(board_head)" = "$NANO_SHA" ]; then
       note "the board is back on ${NANO_SHA:0:12}"
+      [ -n "${NANO_STOP_FILE:-}" ] && rm -f "$NANO_STOP_FILE"
     else
       not_ok "[$RUNTIME] could not put the board back on ${NANO_SHA:0:12} (it is at $(board_head | cut -c1-12)): the tests after this one would judge the wrong build"
     fi
