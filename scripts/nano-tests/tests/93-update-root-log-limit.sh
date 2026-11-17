@@ -12,15 +12,21 @@
 # when the unit starts, so rebuild_reboot runs under whatever was loaded before
 # it.
 #
-#   1. The board is put on the current RELEASE (the head of main) through
-#      `nano-ci rebuild` — what an owner's box runs, and older than the change
-#      under test until a release carries it. (TASK-2638: it was the head of
-#      beta, which already carried the limit, so the "older build" was never
-#      older and the stale state could not be found.) That it IS the stale
-#      state is asserted: the root update unit has journald's default limit and
-#      no drop-in. A drop-in is a leftover and ends the test as a failure; a
-#      release that already carries the limit leaves no stale path to prove,
-#      and the test says so and skips.
+#   1. The board is put on the newest RELEASE whose root update unit sets no
+#      limit of its own (the newest commit on main's first-parent line whose
+#      config/clawbox-root-update@.service has no LogRateLimit line) through
+#      `nano-ci rebuild` — what an owner's box that has not updated since runs.
+#      Today that is the head of main; once a release carries the limit it is
+#      still the last one that did not, so the stale path keeps being proven.
+#      (TASK-2638: it was the head of beta, which already carried the limit, so
+#      the "older build" was never older and the stale state could not be
+#      found; the head of main alone would stop being one at the next
+#      release.) `nano-ci rebuild` takes a branch, never a commit, so the
+#      release is handed to it as a branch of the board's own clone
+#      (refs/remotes/origin/nano-tests-93-older-release, which force-update's
+#      `git fetch origin` leaves alone; removed at the end). That the board IS
+#      in the stale state is asserted: the root update unit has journald's
+#      default limit and no drop-in; anything else ends the test as a failure.
 #   2. Settings > Update to NANO_BRANCH. While rebuild_reboot runs, systemd has
 #      handed journald a limit no step reaches for it (the bridge drop-in the
 #      new install.sh's step_apt_update installs before the rebuild).
@@ -48,7 +54,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/../update-raw-log-runs.sh"
 
 RUNTIME=$(board_runtime)
 note "agent runtime: $RUNTIME"
-BASE_BRANCH=main
+# The branch of the board's clone the older release is rebuilt from (step 1).
+FIXTURE=nano-tests-93-older-release
 UNIT_SHOW='systemctl show -p LogRateLimitIntervalUSec -p LogRateLimitBurst -p NeedDaemonReload -p FragmentPath -p DropInPaths clawbox-root-update@rebuild_reboot.service'
 
 # show_unit WHEN — `systemctl show` and the `systemctl cat` lines that set a
@@ -63,42 +70,85 @@ show_unit() {
 }
 drop_ins() { printf '%s\n' "$SHOWN" | sed -n 's/^DropInPaths=//p'; }
 
-# back_on_test_build — the board is on the release by now; the tests after this
-# one (99-) judge the commit under test, so put it back before leaving early.
-back_on_test_build() {
+# drop_fixture — remove the board-local branch the older release was rebuilt
+# from (step 1), unless it is still checked out.
+drop_fixture() {
   # shellcheck disable=SC2016  # expanded on the board
-  board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$NANO_SHA" >/dev/null
-  "$NANO_CI" rebuild "$NANO_SERIAL" "$NANO_BRANCH" 2>&1 | grep -E '^\[nano-ci\]|rc=|FAILED' | while IFS= read -r l; do note "restore: $l"; done
-  if [ "$(board_head)" = "$NANO_SHA" ]; then
-    note "the board is back on ${NANO_SHA:0:12}"
-  else
-    not_ok "[$RUNTIME] could not put the board back on ${NANO_SHA:0:12} (it is at $(board_head | cut -c1-12)): the tests after this one would judge the wrong build"
-  fi
-  # shellcheck disable=SC2016  # expanded on the board
-  if [ -n "${SAVED_WANT:-}" ]; then board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$SAVED_WANT" >/dev/null; else board 'rm -f /tmp/nano-ci-want-sha' >/dev/null; fi
+  board '
+    [ "$(git -C "$REPO" symbolic-ref -q --short HEAD)" = "$1" ] && exit 0
+    git -C "$REPO" branch -q -D "$1" 2>/dev/null
+    git -C "$REPO" update-ref -d "refs/remotes/origin/$1" 2>/dev/null
+    true
+  ' "$FIXTURE" >/dev/null
 }
 
-# 1. The older build an owner's box is on.
+# back_on_test_build — the tests after this one (99-) judge the commit under
+# test: when the board is not on it (an early exit on the older release, or an
+# update that did not land), it is rebuilt to it before leaving.
+back_on_test_build() {
+  if [ "$(board_head)" != "$NANO_SHA" ]; then
+    # shellcheck disable=SC2016  # expanded on the board
+    board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$NANO_SHA" >/dev/null
+    "$NANO_CI" rebuild "$NANO_SERIAL" "$NANO_BRANCH" 2>&1 | grep -E '^\[nano-ci\]|rc=|FAILED' | while IFS= read -r l; do note "restore: $l"; done
+    if [ "$(board_head)" = "$NANO_SHA" ]; then
+      note "the board is back on ${NANO_SHA:0:12}"
+    else
+      not_ok "[$RUNTIME] could not put the board back on ${NANO_SHA:0:12} (it is at $(board_head | cut -c1-12)): the tests after this one would judge the wrong build"
+    fi
+    # shellcheck disable=SC2016  # expanded on the board
+    if [ -n "${SAVED_WANT:-}" ]; then board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$SAVED_WANT" >/dev/null; else board 'rm -f /tmp/nano-ci-want-sha' >/dev/null; fi
+  fi
+  drop_fixture
+}
+
+# 1. The older build an owner's box is on: the newest release (main's
+# first-parent line) whose root update unit file has no LogRateLimit line.
 # shellcheck disable=SC2016  # expanded on the board
-BASE_SHA=$(board 'git -C "$REPO" ls-remote origin "refs/heads/$1" 2>/dev/null | cut -f1' "$BASE_BRANCH" | tail -n 1 | tr -d '[:space:]')
+FOUND=$(board '
+  git -C "$REPO" fetch -q origin main 2>/dev/null
+  main=$(git -C "$REPO" rev-parse -q --verify refs/remotes/origin/main) || { echo "nomain"; exit 0; }
+  echo "main $main"
+  n=0
+  for c in $(git -C "$REPO" rev-list --first-parent -n 500 "$main"); do
+    n=$((n + 1))
+    u=$(git -C "$REPO" show "$c:config/clawbox-root-update@.service" 2>/dev/null) || continue
+    if ! printf "%s\n" "$u" | grep -q "^LogRateLimit"; then
+      echo "stale $c $n $(git -C "$REPO" describe --tags --exact-match "$c" 2>/dev/null)"
+      git -C "$REPO" merge-base --is-ancestor "$1" "$c" 2>/dev/null && echo "contains"
+      break
+    fi
+  done
+' "$NANO_SHA")
+MAIN_SHA=$(printf '%s\n' "$FOUND" | sed -n 's/^main //p' | tr -d '[:space:]')
+read -r BASE_SHA BASE_NTH BASE_TAG <<<"$(printf '%s\n' "$FOUND" | sed -n 's/^stale //p')"
+if [ ${#MAIN_SHA} -ne 40 ]; then
+  not_ok "[$RUNTIME] could not read the head of main in the board's clone"
+  finish
+fi
 if [ ${#BASE_SHA} -ne 40 ] || ! [[ $BASE_SHA =~ ^[0-9a-f]+$ ]]; then
-  not_ok "[$RUNTIME] could not read the head of $BASE_BRANCH on the board's origin"
+  # Every release of the last 500 carries the limit: the stale path has been
+  # gone from owners' boxes for that long, and the bridge with it.
+  skip "[$RUNTIME] no release on main's last 500 first-parent commits has a root update unit without a limit: no older build is left to update from"
   finish
 fi
-# Whether the release already contains the commit under test: the board's clone
-# may never have fetched the release's head (ls-remote only names it), so it is
-# fetched first.
-# shellcheck disable=SC2016  # expanded on the board
-CONTAINED=$(board 'git -C "$REPO" fetch -q origin "$3" 2>/dev/null; git -C "$REPO" merge-base --is-ancestor "$1" "$2" 2>/dev/null && echo yes' "$NANO_SHA" "$BASE_SHA" "$BASE_BRANCH" 2>/dev/null | tail -n 1 | tr -d '[:space:]')
-if [ "$BASE_SHA" = "$NANO_SHA" ] || [ "$CONTAINED" = yes ]; then
-  skip "[$RUNTIME] the head of $BASE_BRANCH (${BASE_SHA:0:12}) is the commit under test or already contains it: there is no older build to update from"
+BASE_NAME="release ${BASE_TAG:-${BASE_SHA:0:12}}"
+if [ "$BASE_SHA" = "$MAIN_SHA" ]; then
+  note "older build: the head of main ${BASE_SHA:0:12}${BASE_TAG:+ ($BASE_TAG)}, whose root update unit sets no limit"
+else
+  note "older build: ${BASE_SHA:0:12}${BASE_TAG:+ ($BASE_TAG)}, $(( BASE_NTH - 1 )) release(s) behind the head of main ${MAIN_SHA:0:12}: the last whose root update unit sets no limit"
+fi
+if [ "$BASE_SHA" = "$NANO_SHA" ] || printf '%s\n' "$FOUND" | grep -qx contains; then
+  skip "[$RUNTIME] the $BASE_NAME is the commit under test or already contains it: there is no older build to update from"
   finish
 fi
-note "board at $(board_head | cut -c1-12): rebuilding it to $BASE_BRANCH ${BASE_SHA:0:12} first (several minutes)"
+note "board at $(board_head | cut -c1-12): rebuilding it to the $BASE_NAME first, as branch $FIXTURE of its clone (several minutes)"
 SAVED_WANT=$(board 'cat /tmp/nano-ci-want-sha 2>/dev/null' | tr -d '[:space:]')
 # shellcheck disable=SC2016  # expanded on the board
-board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$BASE_SHA" >/dev/null
-"$NANO_CI" rebuild "$NANO_SERIAL" "$BASE_BRANCH" 2>&1 | grep -E '^\[nano-ci\]|rc=|FAILED' | while IFS= read -r l; do note "rebuild: $l"; done
+board '
+  [ "$(git -C "$REPO" symbolic-ref -q --short HEAD)" = "$1" ] || git -C "$REPO" branch -q -D "$1" 2>/dev/null
+  git -C "$REPO" update-ref "refs/remotes/origin/$1" "$2" && printf "%s\n" "$2" > /tmp/nano-ci-want-sha
+' "$FIXTURE" "$BASE_SHA" >/dev/null
+"$NANO_CI" rebuild "$NANO_SERIAL" "$FIXTURE" 2>&1 | grep -E '^\[nano-ci\]|rc=|FAILED' | while IFS= read -r l; do note "rebuild: $l"; done
 if [ -n "$SAVED_WANT" ]; then
   # shellcheck disable=SC2016  # expanded on the board
   board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$SAVED_WANT" >/dev/null
@@ -106,10 +156,11 @@ else
   board 'rm -f /tmp/nano-ci-want-sha' >/dev/null
 fi
 if [ "$(board_head)" != "$BASE_SHA" ]; then
-  not_ok "[$RUNTIME] could not put the board on $BASE_BRANCH ${BASE_SHA:0:12} (it is at $(board_head | cut -c1-12))"
+  not_ok "[$RUNTIME] could not put the board on the $BASE_NAME (it is at $(board_head | cut -c1-12))"
+  back_on_test_build
   finish
 fi
-ok "[$RUNTIME] board rebuilt to $BASE_BRANCH ${BASE_SHA:0:12}"
+ok "[$RUNTIME] board rebuilt to the $BASE_NAME"
 if wait_runtime_settled 300; then
   ok "[$RUNTIME] older build up and settled"
 else
@@ -125,9 +176,8 @@ if [ -n "$(drop_ins)" ]; then
   finish
 fi
 if why=$(printf '%s\n' "$SHOWN" | log_limit_ok); then
-  # The release itself carries the limit: nothing older exists to update from,
-  # and the rest would prove nothing. Said as a skip, not a pass.
-  skip "[$RUNTIME] the release $BASE_BRANCH ${BASE_SHA:0:12} already has a root update limit no step reaches ($why): there is no stale path to prove"
+  # The release's unit file sets no limit, so the rebuild did not install it.
+  not_ok "[$RUNTIME] the $BASE_NAME's root update unit file sets no limit, yet the installed one has a limit no step reaches ($why): the rebuild left a newer unit, not an owner's box — nothing below would prove the stale path"
   back_on_test_build
   finish
 fi
@@ -139,6 +189,7 @@ if start_app_update "$NANO_BRANCH"; then
   ok "[$RUNTIME] the owner's update to $NANO_BRANCH started"
 else
   not_ok "[$RUNTIME] the update did not start: $API_STATUS $(printf '%s' "$API_BODY" | head -c 300)"
+  back_on_test_build
   finish
 fi
 REBUILD_SEEN=0
@@ -159,8 +210,8 @@ rebuild_tick() {
 wait_app_update 3600 rebuild_tick
 note "update took $(( $(date +%s) - START ))s and ended: $UPDATE_PHASE${UPDATE_ERROR:+ ($UPDATE_ERROR)}"
 case "$UPDATE_PHASE" in
-  completed) ok "[$RUNTIME] the update from $BASE_BRANCH completed" ;;
-  failed) not_ok "[$RUNTIME] the update from $BASE_BRANCH failed: $UPDATE_ERROR" ;;
+  completed) ok "[$RUNTIME] the update from the $BASE_NAME completed" ;;
+  failed) not_ok "[$RUNTIME] the update from the $BASE_NAME failed: $UPDATE_ERROR" ;;
   *) not_ok "[$RUNTIME] the update did not end within 60 minutes"; finish ;;
 esac
 [ "$REBUILD_SEEN" = 1 ] || not_ok "[$RUNTIME] rebuild_reboot was never seen running, so its journald limit went unchecked"
@@ -194,4 +245,6 @@ if [ -z "$SUPPRESSED" ]; then
 else
   not_ok "[$RUNTIME] journald dropped lines of rebuild_reboot: $(printf '%s' "$SUPPRESSED" | tr '\n' ';')"
 fi
+# An update that did not land leaves the board on the older release.
+back_on_test_build
 finish
