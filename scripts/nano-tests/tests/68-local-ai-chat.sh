@@ -237,7 +237,7 @@ SWITCHED=0 CONFIGURED_HERE=0 RESTORED=0 NEW_APPS=""
 restore() {
   [ "$RESTORED" = 1 ] && return 0
   RESTORED=1
-  local id body after back unusable=""
+  local id body after back disabled_warning unusable=""
   for id in $NEW_APPS; do
     board_api POST /setup-api/apps/uninstall "{\"appId\":\"$id\"}"
     if [ "$API_STATUS" = 200 ]; then
@@ -288,8 +288,14 @@ restore() {
   fi
   if [ "$CONFIGURED_HERE" = 1 ]; then
     board_api POST /setup-api/local-ai '{"action":"disable"}'
-    if [ "$API_STATUS" = 200 ]; then
+    # A 200 can carry a warning: Local AI stopped, but a step after the stop
+    # did not land (local-ai/route.ts) — most of all a chat left on the
+    # stopped local model when the model before the test was not put back.
+    disabled_warning=$(api_json '.warning // empty')
+    if [ "$API_STATUS" = 200 ] && [ -z "$disabled_warning" ]; then
       note "Local AI turned off again (this test turned it on)"
+    elif [ "$API_STATUS" = 200 ]; then
+      not_ok "Local AI turned off again, but the box is not as it was: $disabled_warning"
     else
       not_ok "could not turn Local AI off again: $(api_error)"
     fi
