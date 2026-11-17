@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  answeredTurn,
   findingsOf,
   percentile,
   renderMarkdown,
@@ -228,5 +229,59 @@ describe("parseOptions", () => {
     expect(() => parseOptions(["--out", "/tmp/r.json", "--ramp", "x"])).toThrow(/--ramp/);
     expect(() => parseOptions(["--out", "/tmp/r.json", "--runtime", "other"])).toThrow(/--runtime/);
     expect(() => parseOptions(["--out", "/tmp/r.json", "--settle", "-1"])).toThrow(/settleS/);
+  });
+  it("refuses a step selection that would run nothing or names no step", () => {
+    expect(() => parseOptions(["--out", "/tmp/r.json", "--steps", "ramps"])).toThrow(/no step called ramps; the steps are idle,ramp,long,tool/);
+    expect(() => parseOptions(["--out", "/tmp/r.json", "--steps", "idle,lng"])).toThrow(/no step called lng/);
+    expect(() => parseOptions(["--out", "/tmp/r.json", "--steps", ""])).toThrow(/--steps wants one or more/);
+    expect(() => parseOptions(["--out", "/tmp/r.json", "--steps", " , "])).toThrow(/--steps wants one or more/);
+    expect(parseOptions(["--out", "/tmp/r.json", "--steps", "tool, idle"]).cfg.steps).toEqual(["tool", "idle"]);
+  });
+});
+
+describe("answeredTurn", () => {
+  it("counts a passed turn and a wrong answer with text, never a failure with no reply", () => {
+    expect(answeredTurn(turn("s", 1, 900))).toBe(true);
+    expect(answeredTurn(turn("s", 1, 900, { ok: false, error: { kind: "wrong-answer", message: "" } }))).toBe(true);
+    expect(answeredTurn(turn("s", 1, 150, { ok: false, replyChars: 0, error: { kind: "agent-error", message: "429" } }))).toBe(false);
+    expect(answeredTurn(turn("s", 1, 150, { ok: false, replyChars: 40, error: { kind: "agent-error", message: "Error: …" } }))).toBe(true);
+    for (const kind of ["timeout", "connection", "rpc", "http", "stopped"]) {
+      expect(answeredTurn(turn("s", 1, 150, { ok: false, error: { kind, message: "" } }))).toBe(false);
+    }
+  });
+
+  it("keeps a fast provider error with no answer out of a step's latency", () => {
+    const r = raw();
+    r.turns = [
+      turn("ramp-1", 1, 4000),
+      turn("ramp-1", 2, 6000),
+      turn("ramp-1", 3, 120, { ok: false, replyChars: 0, error: { kind: "agent-error", message: "rate limited" } }),
+      turn("ramp-1", 4, 110, { ok: false, replyChars: 0, error: { kind: "aborted", message: "aborted" } }),
+    ];
+    const step = summarizeRaw(r).steps.find((s) => s.id === "ramp-1")!;
+    expect(step.turns).toEqual({ total: 4, ok: 2, failed: 2 });
+    expect(step.latencyMs).toMatchObject({ p50: 4000, min: 4000, max: 6000 });
+  });
+});
+
+describe("a step a stop cut short", () => {
+  it("is summarised up to its last sample and reported as stopped", () => {
+    const r = raw();
+    r.final = false;
+    r.steps = [{ id: "ramp-8", kind: "ramp", concurrency: 8, startedAt: 30_000, endedAt: null, unitsBefore: units(10, 0), oomKillsBefore: 0, failure: "the run was stopped (SIGTERM) during the step" } as never];
+    r.turns = [turn("ramp-8", 1, 10_000), turn("ramp-8", 2, null, { ok: false, error: { kind: "stopped", message: "the run was stopped (SIGTERM)" } })];
+    const report = summarizeRaw(r);
+    const step = report.steps[0];
+    expect(step.wallS).toBe(120);
+    expect(step.resources.memAvailableMb.min).toBe(250);
+    expect(step.oomKills).toBeNull();
+    expect(step.latencyMs.p50).toBe(10_000);
+    expect(report.findings).toEqual([
+      "ramp-8: 1/2 turns failed (stopped 1)",
+      "ramp-8: MemAvailable fell to 250 MB",
+      "ramp-8: step stopped early: the run was stopped (SIGTERM) during the step",
+      "cleanup: 1 of 3 sessions could not be deleted",
+    ]);
+    expect(renderMarkdown([report])).toContain("## OpenClaw (incomplete)");
   });
 });

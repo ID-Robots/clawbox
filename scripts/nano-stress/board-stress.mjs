@@ -53,6 +53,8 @@ const VERSION = 1;
 // ---- options ----------------------------------------------------------------
 const RUN_ID = crypto.randomBytes(4).toString("hex");
 const intList = (v) => String(v).split(",").map((x) => Number(x.trim())).filter((n) => Number.isInteger(n) && n > 0);
+/** The steps a run can take, in the order the doc names them. */
+export const STEP_NAMES = ["idle", "ramp", "long", "tool"];
 
 /** The run's options; throws on a missing or bad one. */
 export function parseOptions(argv) {
@@ -88,6 +90,10 @@ export function parseOptions(argv) {
     if (!Number.isFinite(c[k]) || c[k] < 0) throw new Error(`${k} must be 0 or more`);
   }
   if (c.ramp.length === 0) throw new Error("--ramp wants a list like 1,2,4,8");
+  // A misspelt step must not leave a run of no steps that reports no findings.
+  if (c.steps.length === 0) throw new Error(`--steps wants one or more of ${STEP_NAMES.join(",")}`);
+  const unknown = c.steps.filter((s) => !STEP_NAMES.includes(s));
+  if (unknown.length) throw new Error(`--steps: no step called ${unknown.join(",")}; the steps are ${STEP_NAMES.join(",")}`);
   return { out, cfg: c };
 }
 let OUT = "";
@@ -97,6 +103,17 @@ const rel = () => Date.now() - T0;
 // One line per call: a reply or an error text carrying a newline must not
 // forge a line of its own in the run's log.
 const log = (...a) => console.error(`[${new Date().toISOString().slice(11, 19)}] ${a.join(" ").replace(/[\r\n]+/g, " ")}`);
+
+// ---- stopping ---------------------------------------------------------------------
+// SIGTERM/SIGINT (run.sh's stop, the budget running out) set `stopping` and
+// abort this signal: the turn in flight ends early (and is stopped on the
+// runtime), and no workload starts another turn.
+let stopping = false;
+let stopReason = null;
+const stopCtl = new AbortController();
+/** A wait that a stopping run cuts short. */
+const pause = (ms) => sleep(ms, undefined, { signal: stopCtl.signal }).catch(() => {});
+const stoppedError = () => ({ kind: "stopped", message: `the run was stopped (${stopReason || "signal"})` });
 
 // ---- the owner's session, signed here (as scripts/nano-tests/lib.sh) ---------
 function ownerCookie() {
@@ -357,8 +374,31 @@ function messageText(m) {
   return String(m.text || (typeof c === "string" ? c : "") || "");
 }
 
-async function openclawTurn(sess, message, timeoutMs) {
+/**
+ * Stop a turn of `sess` on the gateway (`chat.abort`), through the session's
+ * own socket while it is open, else through a short-lived one: a send or turn
+ * whose end the gateway never reported may still be running there.
+ */
+async function abortTurn(sess, runId) {
+  const params = { sessionKey: sess.key, ...(runId ? { runId } : {}) };
+  if (sess.gw && sess.gw.ws.readyState === 1) {
+    await sess.gw.req("chat.abort", params, 10_000).catch((e) => log(`chat.abort ${sess.key}: ${e.message}`));
+    return;
+  }
+  let gw = null;
+  try {
+    gw = await Gateway.open(GW_TOKEN);
+    await gw.req("chat.abort", params, 10_000);
+  } catch (e) {
+    log(`chat.abort ${sess.key}: ${e.message}`);
+  } finally {
+    gw?.close();
+  }
+}
+
+async function openclawTurn(sess, message, timeoutMs, stopSignal) {
   const r = { ackMs: null, firstTokenMs: null, latencyMs: null, toolCalls: 0, text: "", error: null, model: null };
+  if (stopSignal?.aborted) { r.error = stoppedError(); return r; }
   // A socket the gateway closed (a restart, a dropped connection) is opened
   // again for the next turn, and counted, rather than failing every turn after.
   if (!sess.gw || sess.gw.ws.readyState !== 1) {
@@ -375,8 +415,16 @@ async function openclawTurn(sess, message, timeoutMs) {
   const ms = () => Math.round(performance.now() - t0);
   let runId = null;
   let settled = false;
+  // The gateway reported this turn's end (final, error or aborted).
+  let ended = false;
   let resolveFinal;
   const final = new Promise((res) => { resolveFinal = res; });
+  const STOPPED = Symbol("stopped");
+  let onStop = null;
+  const stopped = new Promise((res) => {
+    onStop = () => res(STOPPED);
+    stopSignal?.addEventListener("abort", onStop, { once: true });
+  });
   const toolIds = new Set();
   const l = (f) => {
     // A turn given up on stays given up on: the abort's own "aborted" event
@@ -389,6 +437,7 @@ async function openclawTurn(sess, message, timeoutMs) {
       if (runId && p.runId && p.runId !== runId) return;
       if (p.state === "delta") { if (r.firstTokenMs === null) r.firstTokenMs = ms(); }
       else if (p.state === "final" || p.state === "error" || p.state === "aborted") {
+        ended = true;
         r.latencyMs = ms();
         r.text = messageText(p.message);
         r.model = typeof p.message?.model === "string" ? p.message.model : null;
@@ -405,27 +454,41 @@ async function openclawTurn(sess, message, timeoutMs) {
   sess.gw.listeners.add(l);
   let timer;
   try {
-    const ack = await sess.gw.req("chat.send", { sessionKey: sess.key, message, deliver: false, idempotencyKey: crypto.randomUUID() }, 60_000);
-    r.ackMs = ms();
-    runId = ack?.runId || null;
-    const timedOut = await Promise.race([
-      final.then(() => false),
-      new Promise((res) => { timer = setTimeout(() => res(true), timeoutMs); }),
+    const ack = await Promise.race([
+      sess.gw.req("chat.send", { sessionKey: sess.key, message, deliver: false, idempotencyKey: crypto.randomUUID() }, 60_000),
+      stopped,
     ]);
-    if (timedOut) {
-      settled = true;
-      sess.gw.listeners.delete(l);
-      r.latencyMs = null;
-      r.error = { kind: "timeout", message: `no final within ${Math.round(timeoutMs / 1000)} s` };
-      await sess.gw.req("chat.abort", { sessionKey: sess.key, ...(runId ? { runId } : {}) }, 10_000).catch(() => {});
+    if (ack === STOPPED) {
+      r.error = stoppedError();
+    } else {
+      r.ackMs = ms();
+      runId = ack?.runId || null;
+      const end = await Promise.race([
+        final.then(() => "final"),
+        stopped,
+        new Promise((res) => { timer = setTimeout(() => res("timeout"), timeoutMs); }),
+      ]);
+      if (end !== "final") {
+        r.latencyMs = null;
+        r.error = end === STOPPED ? stoppedError() : { kind: "timeout", message: `no final within ${Math.round(timeoutMs / 1000)} s` };
+      }
     }
   } catch (e) {
-    r.error = r.error || { kind: /timeout/.test(e.message) ? "timeout" : "rpc", message: e.message.slice(0, 200) };
+    // "timeout chat.send": sent, never acknowledged; "gateway closed": the
+    // socket went with the send in flight. Either may have started a turn.
+    const kind = /timeout/.test(e.message) ? "timeout" : /gateway closed/.test(e.message) ? "connection" : "rpc";
+    r.error = r.error || { kind, message: e.message.slice(0, 200) };
   } finally {
     settled = true;
     clearTimeout(timer);
     sess.gw?.listeners.delete(l);
+    stopSignal?.removeEventListener("abort", onStop);
   }
+  // No end reported for a send that may have started a turn (a send not
+  // acknowledged in time, no final in time, the socket gone, the run
+  // stopping): stop it before the session's next turn, or its deletion, can
+  // overlap it. A send the gateway refused ("rpc") started nothing.
+  if (!ended && r.error && r.error.kind !== "rpc") await abortTurn(sess, runId);
   r.toolCalls = toolIds.size;
   return r;
 }
@@ -454,9 +517,15 @@ function closeSession(sess) {
 }
 // Hermes' own session ids, as its chat route and CLI write them.
 const HERMES_SESSION_ID_RE = /^(?:[0-9]{8}_[0-9]{6}_[0-9a-f]{6}|local-[0-9a-f]{64})$/;
+// What the cleanup did, for the record (filled in as it goes)...
 let cleanup = null;
-async function cleanupSessions() {
-  if (cleanup) return cleanup;
+// ...and the cleanup itself: main() and shutdown() both await this one.
+let cleanupRun = null;
+function cleanupSessions() {
+  if (!cleanupRun) cleanupRun = deleteSessions();
+  return cleanupRun;
+}
+async function deleteSessions() {
   const result = { sessions: opened.length, deleted: 0, left: [] };
   cleanup = result;
   if (RUNTIME === "openclaw") {
@@ -499,7 +568,9 @@ async function cleanupSessions() {
   log(`cleanup: ${result.deleted}/${result.sessions} sessions deleted${result.left.length ? `, left: ${result.left.join(" ")}` : ""}`);
   return result;
 }
-const turn = (sess, message, timeoutMs) => (RUNTIME === "openclaw" ? openclawTurn(sess, message, timeoutMs) : hermes.turn(sess, message, timeoutMs));
+const turn = (sess, message, timeoutMs) => (RUNTIME === "openclaw"
+  ? openclawTurn(sess, message, timeoutMs, stopCtl.signal)
+  : hermes.turn(sess, message, timeoutMs, stopCtl.signal));
 
 // ---- the steps ------------------------------------------------------------------------
 const turns = [];
@@ -548,12 +619,15 @@ async function healthy() {
     return r.status === 200 && h?.healthy === true;
   } catch { return false; }
 }
+/** true once healthy, false when the budget ran out, null when the run is
+ *  stopping (it looks once, then moves on: not known, not a finding). */
 async function waitHealthy(budgetS) {
   const until = Date.now() + budgetS * 1000;
   for (;;) {
     if (await healthy()) return true;
+    if (stopping) return null;
     if (Date.now() > until) return false;
-    await sleep(3000);
+    await pause(3000);
   }
 }
 
@@ -583,38 +657,47 @@ function slowChatSends(fromMs, toMs) {
   return { count, maxMs, maxPreparationMs };
 }
 
-async function runStep(id, kind, concurrency, body) {
+// The step running now (runStep's promise): shutdown() waits for it, so its
+// turns have ended before their sessions are deleted.
+let currentStep = null;
+const runStep = (id, kind, concurrency, body) => (currentStep = stepRecorded(id, kind, concurrency, body));
+
+async function stepRecorded(id, kind, concurrency, body) {
   log(`step ${id}: start`);
   const unitsBefore = await refreshUnits();
   const oomBefore = oomKills();
-  const startedAt = rel();
-  let failure = null;
-  try { await body(id); } catch (e) { failure = String(e.message || e).slice(0, 200); log(`step ${id} aborted: ${failure}`); }
-  const endedAt = rel();
+  // In the record before its body starts: a run stopped mid-step still
+  // reports the step, its turns and its samples (updated in place below).
+  const rec = { id, kind, concurrency, startedAt: rel(), endedAt: null, unitsBefore, oomKillsBefore: oomBefore };
+  steps.push(rec);
+  try { await body(id); } catch (e) { rec.failure = String(e.message || e).slice(0, 200); log(`step ${id} aborted: ${rec.failure}`); }
+  rec.endedAt = rel();
+  if (stopping && !rec.failure) rec.failure = `the run was stopped (${stopReason}) during the step`;
   // Restarts and OOM kills are read after the recovery wait and the settle, so
-  // a crash at the tail of the load is this step's, not nobody's.
-  const healthyAfter = await waitHealthy(120);
-  if (cfg.settleS > 0 && !stopping) await sleep(cfg.settleS * 1000);
-  const unitsAfter = await refreshUnits();
-  const oomAfter = oomKills();
-  const slow = slowChatSends(T0 + startedAt, Date.now());
-  const reconnects = opened.reduce((n, x) => n + (x.label.startsWith(id) ? x.reconnects || 0 : 0), 0);
-  steps.push({ id, kind, concurrency, startedAt, endedAt, unitsBefore, unitsAfter, oomKillsBefore: oomBefore, oomKillsAfter: oomAfter, healthyAfter, reconnects, ...(slow ? { slowChatSends: slow } : {}), ...(failure ? { failure } : {}) });
-  log(`step ${id}: done in ${Math.round((endedAt - startedAt) / 1000)} s, healthy after: ${healthyAfter}`);
+  // a crash at the tail of the load is this step's, not nobody's. A stopping
+  // run skips both waits.
+  rec.healthyAfter = await waitHealthy(120);
+  if (cfg.settleS > 0) await pause(cfg.settleS * 1000);
+  rec.unitsAfter = await refreshUnits();
+  rec.oomKillsAfter = oomKills();
+  rec.reconnects = opened.reduce((n, x) => n + (x.label === id || x.label.startsWith(`${id}-`) ? x.reconnects || 0 : 0), 0);
+  const slow = slowChatSends(T0 + rec.startedAt, Date.now());
+  if (slow) rec.slowChatSends = slow;
+  log(`step ${id}: done in ${Math.round((rec.endedAt - rec.startedAt) / 1000)} s, healthy after: ${rec.healthyAfter}`);
   writeOut(false);
 }
 
 async function stepIdle(id) {
-  await sleep(cfg.idleS * 1000);
+  await pause(cfg.idleS * 1000);
   return id;
 }
 
 async function stepRamp(id, n) {
   const chats = [];
   try {
-    for (let c = 0; c < n; c++) chats.push(await openSession(`${id}-c${c + 1}`));
+    for (let c = 0; c < n && !stopping; c++) chats.push(await openSession(`${id}-c${c + 1}`));
     await Promise.all(chats.map(async (sess) => {
-      for (let k = 1; k <= cfg.rampTurns; k++) {
+      for (let k = 1; k <= cfg.rampTurns && !stopping; k++) {
         const tag = `STRESS-${token()}`;
         await checkedTurn(id, sess, k, "echo", `Reply with exactly this text and nothing else: ${tag}`, () => tag);
       }
@@ -636,7 +719,7 @@ async function stepLong(id) {
   const word = `ORCHID-${token()}`;
   try {
     await checkedTurn(id, sess, 1, "remember", `Remember this code word for later in our conversation: ${word}. Reply with only OK.`, () => "OK");
-    for (let k = 2; k <= cfg.longTurns; k++) {
+    for (let k = 2; k <= cfg.longTurns && !stopping; k++) {
       if (k % 8 === 0 || k === cfg.longTurns) {
         await checkedTurn(id, sess, k, "recall", `What is the code word I asked you to remember at the start of our conversation? Reply with only the code word.`, () => word);
       } else {
@@ -682,7 +765,10 @@ async function stepTool(id) {
   ].slice(0, cfg.toolTurns);
   try {
     let k = 0;
-    for (const [kind, message, expect] of plan) await checkedTurn(id, sess, ++k, kind, message, expect);
+    for (const [kind, message, expect] of plan) {
+      if (stopping) break;
+      await checkedTurn(id, sess, ++k, kind, message, expect);
+    }
   } finally { closeSession(sess); }
 }
 
@@ -719,16 +805,45 @@ function writeOut(final) {
   fs.renameSync(tmp, final ? OUT : `${OUT}.partial`);
 }
 
-let stopping = false;
-async function shutdown(signal) {
-  if (stopping) return;
+// How long a stop waits for the step in flight to end its turns (each one
+// stops its own turn on the runtime first) and close its record; run.sh
+// waits 150 s for the whole stop, session deletion included.
+const STEP_WIND_DOWN_MS = 60_000;
+let shutdownRun = null;
+/** The one stop: a second signal waits for the first. */
+function shutdown(signal) {
+  if (!shutdownRun) shutdownRun = stopRun(signal);
+  return shutdownRun;
+}
+async function stopRun(signal) {
   stopping = true;
-  log(`stopping on ${signal}: cleaning up`);
-  stopSampler();
-  await cleanupSessions().catch(() => {});
-  try { fs.rmSync(cfg.workDir, { recursive: true, force: true }); } catch { /* kept */ }
-  writeOut(false);
-  process.exit(130);
+  stopReason = signal;
+  log(`stopping on ${signal}: ending the turns in flight, then cleaning up`);
+  stopCtl.abort();
+  try {
+    if (currentStep) {
+      let timer;
+      const wound = await Promise.race([
+        currentStep.then(() => true, () => true),
+        new Promise((res) => { timer = setTimeout(() => res(false), STEP_WIND_DOWN_MS); }),
+      ]);
+      clearTimeout(timer);
+      if (!wound) log(`the step in flight did not end within ${STEP_WIND_DOWN_MS / 1000} s: deleting its sessions anyway`);
+    }
+    stopSampler();
+    const open = steps.at(-1);
+    if (open && open.endedAt === null) {
+      open.endedAt = rel();
+      open.failure = open.failure || `the run was stopped (${signal}) during the step`;
+    }
+    await cleanupSessions().catch(() => {});
+    try { fs.rmSync(cfg.workDir, { recursive: true, force: true }); } catch { /* kept */ }
+    writeOut(false);
+  } catch (e) {
+    log(`stop: ${e.message}`);
+  } finally {
+    process.exit(130);
+  }
 }
 
 async function main() {
@@ -747,18 +862,24 @@ async function main() {
   startSampler();
   try {
     for (const s of cfg.steps) {
-      if (s === "idle" && !stopping) await runStep("idle", "idle", 0, stepIdle);
+      if (stopping) break;
+      if (s === "idle") await runStep("idle", "idle", 0, stepIdle);
       else if (s === "ramp") {
         for (const n of cfg.ramp) if (!stopping) await runStep(`ramp-${n}`, "ramp", n, (id) => stepRamp(id, n));
-      } else if (s === "long" && !stopping) await runStep("long", "long", 1, stepLong);
-      else if (s === "tool" && !stopping) await runStep("tool", "tool", 1, stepTool);
-      else if (!["idle", "ramp", "long", "tool"].includes(s)) log(`unknown step ${s}: skipped`);
+      } else if (s === "long") await runStep("long", "long", 1, stepLong);
+      else if (s === "tool") await runStep("tool", "tool", 1, stepTool);
     }
   } finally {
-    stopSampler();
-    await cleanupSessions();
-    try { fs.rmSync(cfg.workDir, { recursive: true, force: true }); } catch { /* kept */ }
+    // A stopping run is shutdown()'s to clean up and record.
+    if (!stopping) {
+      stopSampler();
+      await cleanupSessions();
+      try { fs.rmSync(cfg.workDir, { recursive: true, force: true }); } catch { /* kept */ }
+    }
   }
+  // Stopped (now or during the cleanup): shutdown() writes the partial record
+  // and exits; this never writes a final one.
+  if (stopping) return shutdownRun;
   writeOut(true);
   try { fs.rmSync(`${OUT}.partial`, { force: true }); } catch { /* none */ }
   log(`done: ${turns.filter((t) => t.ok).length}/${turns.length} turns ok`);
@@ -775,6 +896,8 @@ if (isMain) {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
   process.on("SIGINT", () => void shutdown("SIGINT"));
   main().then(() => process.exit(0), (e) => {
+    // A failure of a stopping run is shutdown()'s to record and exit on.
+    if (stopping) { log(`stopping: ${e.message}`); return; }
     log(`failed: ${e.message}`);
     try {
       stopSampler();

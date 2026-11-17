@@ -42,8 +42,12 @@ Every reply is checked against what the board itself knows (the marker sent,
 the file's real hash, `wc -l`, `boot_id`, the files the agent was asked to
 write), as a whole token and with any echo of the prompt taken out first, so a
 turn that answered but answered wrong counts as a failed turn, not a fast one.
-A turn with no answer within the turn timeout is stopped (`chat.abort` on
-OpenClaw, the route's Stop on Hermes) and counts as an error with no latency.
+A turn whose end the runtime never reported — no answer within the turn
+timeout, a send the gateway did not acknowledge in time, a stream or socket
+that broke off, the run being stopped — is stopped on the box (`chat.abort` on
+OpenClaw, the route's Stop on Hermes) before the session's next turn, and
+counts as an error with no latency. So does a runtime error that brought no
+reply text back; a wrong answer keeps its latency.
 
 Every 2 s the run samples: MemAvailable, swap used, CPU busy % and load, the
 hottest thermal zone, the memory of the runtime's unit (`clawbox-gateway` on
@@ -75,9 +79,13 @@ split out later ships without being listed anywhere), checks on the host that
 the packed entry loads on its own, and unpacks it into a fresh
 `/tmp/clawbox-stress-<stamp>` folder on the board. It starts the run there
 detached (a dropped ssh does not end it), prints its progress every 30 s,
-brings back the raw record and the board-side log, and removes the folder.
-Interrupted, it stops the board side first, which deletes its sessions before
-it exits.
+brings back the raw record and the board-side log, and removes the folder
+only once the record has come back and parses. Interrupted (or out of
+budget), it stops the board side first: no workload starts another turn, the
+turns in flight are stopped on the box, the step they were in is recorded as
+stopped, and only then are the sessions deleted and the partial record
+written, which `run.sh` brings back. A record that will not come back keeps
+the folder on the board, and `run.sh` names it.
 
 The board side may import Node's own modules and local files only: the board
 folder has no `node_modules`, so a package import, an absolute path or an
@@ -95,6 +103,9 @@ NANO_CI=nano-board scripts/nano-stress/run.sh <serial> -- \
   --ramp 1,2,4,8 --ramp-turns 3 --long-turns 32 --tool-turns 8 \
   --steps idle,ramp,long,tool --turn-timeout 240 --settle 20
 ```
+
+`--steps` takes one or more of `idle`, `ramp`, `long` and `tool`; an empty or
+unknown name stops the run before it starts.
 
 `--budget-min N` (default 150) caps the whole run; `--strict` exits 3 when the
 summary lists any finding. `run.sh` exits 0 when the run finished and was

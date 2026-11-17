@@ -1,0 +1,396 @@
+import { spawn } from "node:child_process";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { WebSocketServer, type WebSocket } from "ws";
+import { createHermesDriver } from "../../../scripts/nano-stress/hermes-chat.mjs";
+
+// The stress run end to end, on a stand-in board (TASK-2500): run.sh packs the
+// board side, "ships" it through a stand-in for `nano-ci ssh` that runs the
+// board scripts on this machine, starts it, polls it, stops it, and brings its
+// record back. The board side talks to stub routes instead of a box: the
+// desktop chat's Hermes route, and the OpenClaw gateway's socket.
+//
+// What it holds: the packed board side starts (a run once died at start on a
+// board with ERR_MODULE_NOT_FOUND); a stop ends the turn in flight on the
+// runtime (once), starts no further turn, records the step it cut short, and
+// brings the partial record back; the board folder goes only once the record
+// is safely back.
+
+// Real bash, curl, jq and node processes per case, and run.sh's own settle
+// polls (5 s on Hermes): a loaded CI runner needs more than vitest's 5 s
+// (test-timeout-hygiene.test.ts).
+vi.setConfig({ testTimeout: 120_000, hookTimeout: 30_000 });
+
+const REPO = process.cwd();
+const RUN_SH = path.join(REPO, "scripts/nano-stress/run.sh");
+const HERMES_SESSION = "20261117_120000_abcdef";
+const tagOf = (message: string) => /STRESS-[0-9A-F]+/.exec(message)?.[0] ?? "none";
+
+type Mode = "answer" | "hang" | "eof" | "destroy" | "refuse" | "error";
+
+/** The box's web server, as far as the stress run uses it. */
+class Dashboard {
+  server = http.createServer((req, res) => this.handle(req, res));
+  url = "";
+  runtime: "hermes" | "openclaw" = "hermes";
+  mode: Mode = "answer";
+  posts: Array<{ sessionKey: string; turnId: string; message: string }> = [];
+  stops: Array<{ sessionKey: string | null; turnId: string | null }> = [];
+  hanging = new Set<http.ServerResponse>();
+  onPost: (() => void) | null = null;
+
+  async start() {
+    await new Promise<void>((resolve) => this.server.listen(0, "127.0.0.1", resolve));
+    this.url = `http://127.0.0.1:${(this.server.address() as AddressInfo).port}`;
+  }
+  reset(mode: Mode = "answer") {
+    this.mode = mode;
+    this.posts = [];
+    this.stops = [];
+    this.onPost = null;
+    for (const res of this.hanging) res.end();
+    this.hanging.clear();
+  }
+  close() {
+    for (const res of this.hanging) res.destroy();
+    return new Promise<void>((resolve) => this.server.close(() => resolve()));
+  }
+  private json(res: http.ServerResponse, status: number, body: unknown) {
+    res.writeHead(status, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(body));
+  }
+  private handle(req: http.IncomingMessage, res: http.ServerResponse) {
+    const url = new URL(req.url || "/", "http://x");
+    let body = "";
+    req.on("data", (c) => { body += c; });
+    req.on("end", () => {
+      if (req.method === "GET" && url.pathname === "/setup-api/harness/active") return this.json(res, 200, { active: this.runtime });
+      if (req.method === "GET" && url.pathname === "/setup-api/harness/status") return this.json(res, 200, { harnesses: [{ id: "hermes", healthy: true }] });
+      if (req.method === "GET" && url.pathname === "/setup-api/gateway/ws-config") return this.json(res, 200, { token: "stub-gateway-token" });
+      if (url.pathname !== "/setup-api/hermes/chat") return this.json(res, 404, { error: "not here" });
+      if (req.method === "DELETE") {
+        this.stops.push({ sessionKey: url.searchParams.get("sessionKey"), turnId: url.searchParams.get("turnId") });
+        for (const h of this.hanging) h.end();
+        this.hanging.clear();
+        return this.json(res, 200, { stopped: 1 });
+      }
+      const turn = JSON.parse(body || "{}");
+      this.posts.push({ sessionKey: turn.sessionKey, turnId: turn.turnId, message: turn.message });
+      this.onPost?.();
+      if (this.mode === "refuse") return this.json(res, 409, { error: "a turn is already running" });
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write(`event: delta\ndata: ${JSON.stringify({ text: "…" })}\n\n`);
+      if (this.mode === "answer") {
+        res.end(`event: done\ndata: ${JSON.stringify({ text: tagOf(turn.message), sessionId: HERMES_SESSION, model: "stub-model" })}\n\n`);
+      } else if (this.mode === "error") {
+        res.end(`event: error\ndata: ${JSON.stringify({ error: "provider said no" })}\n\n`);
+      } else if (this.mode === "eof") {
+        res.end();
+      } else if (this.mode === "destroy") {
+        setTimeout(() => res.destroy(), 20);
+      } else {
+        this.hanging.add(res);
+        res.on("close", () => this.hanging.delete(res));
+      }
+    });
+  }
+}
+
+/** The OpenClaw gateway: its health probes and the operator socket. */
+class Gateway {
+  server = http.createServer((req, res) => {
+    if (req.url === "/startupz" || req.url === "/healthz") { res.writeHead(200); res.end("ok"); return; }
+    if (req.url === "/readyz") { res.writeHead(200, { "Content-Type": "application/json" }); res.end("{}"); return; }
+    res.writeHead(404); res.end();
+  });
+  wss = new WebSocketServer({ server: this.server });
+  port = 0;
+  mode: "answer" | "silent" = "answer";
+  calls: Array<{ conn: number; method: string; params: Record<string, unknown> }> = [];
+  onSend: (() => void) | null = null;
+  private conns = 0;
+
+  constructor() {
+    this.wss.on("connection", (ws: WebSocket) => {
+      const conn = ++this.conns;
+      ws.on("message", (data) => {
+        const f = JSON.parse(String(data));
+        if (f.type !== "req") return;
+        const ok = (payload: unknown) => ws.send(JSON.stringify({ type: "res", id: f.id, ok: true, payload }));
+        if (f.method === "connect") return ok({});
+        this.calls.push({ conn, method: f.method, params: f.params || {} });
+        if (f.method === "chat.send") {
+          this.onSend?.();
+          if (this.mode === "silent") return; // sent, never acknowledged
+          const runId = crypto.randomUUID();
+          ok({ runId });
+          const event = (payload: unknown) => ws.send(JSON.stringify({ type: "event", event: "chat", payload }));
+          const sessionKey = f.params.sessionKey;
+          event({ sessionKey, runId, state: "delta" });
+          event({ sessionKey, runId, state: "final", message: { content: [{ type: "text", text: tagOf(f.params.message) }], model: "stub-model" } });
+          return;
+        }
+        ok({});
+      });
+    });
+  }
+  async start() {
+    await new Promise<void>((resolve) => this.server.listen(0, "127.0.0.1", resolve));
+    this.port = (this.server.address() as AddressInfo).port;
+  }
+  reset(mode: "answer" | "silent" = "answer") {
+    this.mode = mode;
+    this.calls = [];
+    this.onSend = null;
+  }
+  close() {
+    for (const c of this.wss.clients) c.terminate();
+    this.wss.close();
+    return new Promise<void>((resolve) => this.server.close(() => resolve()));
+  }
+}
+
+const dash = new Dashboard();
+const gateway = new Gateway();
+beforeAll(async () => {
+  await dash.start();
+  await gateway.start();
+});
+afterAll(async () => {
+  await dash.close();
+  await gateway.close();
+});
+
+// ---- the Hermes driver alone ------------------------------------------------------
+describe("the Hermes turn", () => {
+  const live = () => createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra });
+  const sess = () => ({ key: `stress-test-${crypto.randomBytes(3).toString("hex")}`, sessionId: null as string | null, hermesIds: new Set<string>() });
+  const ask = "Reply with exactly this text and nothing else: STRESS-0A1B2C";
+
+  it("is not Stopped when the route ended it", async () => {
+    for (const mode of ["answer", "error", "refuse"] as const) {
+      dash.reset(mode);
+      const s = sess();
+      const r = await live().turn(s, ask, 5000);
+      expect(dash.stops).toEqual([]);
+      if (mode === "answer") {
+        expect(r.error).toBeNull();
+        expect(r.text).toBe("STRESS-0A1B2C");
+        expect(r.latencyMs).toEqual(expect.any(Number));
+        expect(s.sessionId).toBe(HERMES_SESSION);
+      } else {
+        expect(r.error?.kind).toBe(mode === "error" ? "agent-error" : "http");
+      }
+    }
+  });
+
+  it("Stops, once, a turn whose stream broke off or ended early", async () => {
+    for (const mode of ["eof", "destroy"] as const) {
+      dash.reset(mode);
+      const s = sess();
+      const r = await live().turn(s, ask, 5000);
+      expect(r.error?.kind).toBe("connection");
+      expect(r.latencyMs).toBeNull();
+      expect(dash.stops).toEqual([{ sessionKey: s.key, turnId: dash.posts[0].turnId }]);
+    }
+  });
+
+  it("Stops, once, a turn that timed out", async () => {
+    dash.reset("hang");
+    const s = sess();
+    const r = await live().turn(s, ask, 300);
+    expect(r.error?.kind).toBe("timeout");
+    expect(r.latencyMs).toBeNull();
+    expect(dash.stops).toEqual([{ sessionKey: s.key, turnId: dash.posts[0].turnId }]);
+  });
+
+  it("ends at once, Stopped, when the run stops; starts nothing once it has", async () => {
+    dash.reset("hang");
+    const s = sess();
+    const stop = new AbortController();
+    dash.onPost = () => setTimeout(() => stop.abort(), 50);
+    const r = await live().turn(s, ask, 60_000, stop.signal);
+    expect(r.error?.kind).toBe("stopped");
+    expect(dash.stops).toEqual([{ sessionKey: s.key, turnId: dash.posts[0].turnId }]);
+    const again = await live().turn(s, ask, 60_000, stop.signal);
+    expect(again.error?.kind).toBe("stopped");
+    expect(dash.posts).toHaveLength(1);
+  });
+});
+
+// ---- run.sh on a stand-in board ------------------------------------------------------
+const hasTools = ["bash", "curl", "jq", "setsid", "gzip", "base64", "tar"].every((t) =>
+  (process.env.PATH || "").split(":").some((d) => d && fs.existsSync(path.join(d, t))),
+);
+
+// `nano-ci ssh <serial> <command>`, where the board is this machine: the board
+// script is decoded and the board's own paths and ports are pointed at the
+// fixture and the stubs before it runs.
+const FAKE_NANO_CI = `#!/usr/bin/env bash
+set -u
+[ "\${1:-}" = ssh ] || { echo "stand-in nano-ci: ssh only" >&2; exit 2; }
+cmd=\${3:-}
+b64=\${cmd#*echo }
+b64=\${b64%% | base64 -d*}
+script=$(printf '%s' "$b64" | base64 -d) || exit 255
+script=\${script//REPO=\\/home\\/clawbox\\/clawbox/REPO=$FAKE_REPO}
+script=\${script//DASHBOARD=http:\\/\\/127.0.0.1/DASHBOARD=$FAKE_DASH}
+script=\${script//export HOME=\\/home\\/clawbox/export HOME=$FAKE_HOME}
+script=\${script//http:\\/\\/127.0.0.1:18789/$FAKE_GATEWAY}
+if [ -n "\${FAKE_FETCH_FAIL:-}" ] && [[ $script == *'gzip -c "$f"'* ]]; then
+  printf '@@nano-ci-output@@\\n%s\\n' 'not-a-record'
+  exit 0
+fi
+exec bash -c "$script"
+`;
+
+describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
+  let root = "";
+  let boardDir = "";
+
+  afterEach(() => {
+    if (root) fs.rmSync(root, { recursive: true, force: true });
+    if (boardDir) fs.rmSync(boardDir, { recursive: true, force: true });
+    root = "";
+    boardDir = "";
+  });
+
+  function fixture() {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "nano-stress-run-"));
+    boardDir = `/tmp/clawbox-stress-vitest-${crypto.randomBytes(4).toString("hex")}`;
+    const repo = path.join(root, "repo");
+    fs.mkdirSync(path.join(repo, "data/chat-transcripts"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "data/.session-secret"), "stub-session-secret\n");
+    fs.writeFileSync(path.join(repo, "data/.mcp-token"), "stub-mcp-token\n");
+    fs.mkdirSync(path.join(root, "home"));
+    const nanoCi = path.join(root, "nano-ci");
+    fs.writeFileSync(nanoCi, FAKE_NANO_CI, { mode: 0o755 });
+    const hermes = path.join(root, "hermes");
+    fs.writeFileSync(hermes, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(path.join(root, "hermes-calls"))}\n`, { mode: 0o755 });
+    return {
+      results: path.join(root, "results"),
+      env: {
+        ...process.env,
+        NANO_CI: nanoCi,
+        NANO_STRESS_BOARD_DIR: boardDir,
+        NANO_STRESS_POLL_S: "1",
+        FAKE_REPO: repo,
+        FAKE_HOME: path.join(root, "home"),
+        FAKE_DASH: dash.url,
+        FAKE_GATEWAY: `http://127.0.0.1:${gateway.port}`,
+        // read by board-stress.mjs on the "board"
+        CLAWBOX_REPO: repo,
+        CLAWBOX_DASHBOARD: dash.url,
+        GATEWAY_PORT: String(gateway.port),
+        HERMES_BIN: hermes,
+      } as NodeJS.ProcessEnv,
+    };
+  }
+
+  /** run.sh, asynchronously (the stubs answer from this process). */
+  function runSh(env: NodeJS.ProcessEnv, args: string[], onStart?: (stop: () => void) => void) {
+    return new Promise<{ code: number | null; out: string }>((resolve) => {
+      const child = spawn("bash", [RUN_SH, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+      let out = "";
+      child.stdout.on("data", (c) => { out += c; });
+      child.stderr.on("data", (c) => { out += c; });
+      onStart?.(() => child.kill("SIGTERM"));
+      child.on("close", (code) => resolve({ code, out }));
+    });
+  }
+  const STRESS = ["--", "--steps", "ramp", "--ramp", "1", "--ramp-turns", "2", "--settle", "0", "--idle", "0", "--turn-timeout", "30", "--sample-ms", "250"];
+  const readRaw = (results: string, runtime: string) => JSON.parse(fs.readFileSync(path.join(results, `raw-${runtime}.json`), "utf8"));
+
+  it("ships the board side, runs it on Hermes, brings the record back and removes the board folder", async () => {
+    dash.runtime = "hermes";
+    dash.reset("answer");
+    const { results, env } = fixture();
+    const { code, out } = await runSh(env, ["--results", results, "stand-in", ...STRESS]);
+    expect(out).not.toMatch(/ERR_MODULE_NOT_FOUND|Cannot find module/);
+    expect(code, out).toBe(0);
+    const raw = readRaw(results, "hermes");
+    expect(raw).toMatchObject({ final: true, runtime: "hermes", cleanup: { sessions: 1, deleted: 1, left: [] } });
+    expect(raw.steps.map((s: { id: string }) => s.id)).toEqual(["ramp-1"]);
+    expect(raw.turns.map((t: { ok: boolean }) => t.ok)).toEqual([true, true]);
+    expect(dash.posts).toHaveLength(2);
+    expect(fs.readFileSync(path.join(results, "stress-hermes.md"), "utf8")).toContain("| ramp-1 | 1 | 2/2 |");
+    expect(fs.readFileSync(path.join(root, "hermes-calls"), "utf8")).toBe(`sessions delete --yes ${HERMES_SESSION}\n`);
+    expect(fs.existsSync(boardDir)).toBe(false);
+  });
+
+  it("keeps the board folder, record and all, when the record does not come back", async () => {
+    dash.runtime = "hermes";
+    dash.reset("answer");
+    const { results, env } = fixture();
+    const { code, out } = await runSh({ ...env, FAKE_FETCH_FAIL: "1" }, ["--results", results, "stand-in", ...STRESS]);
+    expect(code, out).toBe(1);
+    expect(out).toContain("no readable record came back");
+    expect(out).toContain(`${boardDir} is kept on the board`);
+    expect(JSON.parse(fs.readFileSync(path.join(boardDir, "raw.json"), "utf8")).final).toBe(true);
+    expect(fs.existsSync(path.join(results, "board-hermes.log"))).toBe(true);
+  });
+
+  it("stopped mid-turn on Hermes: Stops that turn once, starts no other, records the step and brings the partial record back", async () => {
+    dash.runtime = "hermes";
+    dash.reset("hang");
+    const { results, env } = fixture();
+    const { code, out } = await runSh(env, ["--results", results, "stand-in", ...STRESS], (stop) => {
+      dash.onPost = () => setTimeout(stop, 200);
+    });
+    expect(code, out).toBe(130);
+    expect(out).toContain("stopping the board side");
+    expect(dash.posts).toHaveLength(1);
+    const turnId = dash.posts[0].turnId;
+    expect(dash.stops.filter((s) => s.turnId === turnId)).toHaveLength(1);
+    const raw = readRaw(results, "hermes");
+    expect(raw.final).toBe(false);
+    expect(raw.steps).toHaveLength(1);
+    expect(raw.steps[0]).toMatchObject({ id: "ramp-1", failure: "the run was stopped (SIGTERM) during the step", endedAt: expect.any(Number) });
+    expect(raw.turns).toHaveLength(1);
+    expect(raw.turns[0].error.kind).toBe("stopped");
+    expect(raw.cleanup).toMatchObject({ sessions: 1, deleted: 1 });
+    expect(fs.existsSync(boardDir)).toBe(false);
+  });
+
+  it("runs on OpenClaw through the gateway socket and deletes its sessions", async () => {
+    dash.runtime = "openclaw";
+    gateway.reset("answer");
+    const { results, env } = fixture();
+    const { code, out } = await runSh(env, ["--results", results, "stand-in", ...STRESS]);
+    expect(code, out).toBe(0);
+    const raw = readRaw(results, "openclaw");
+    expect(raw).toMatchObject({ final: true, runtime: "openclaw", cleanup: { sessions: 1, deleted: 1, left: [] } });
+    expect(raw.turns.map((t: { ok: boolean }) => t.ok)).toEqual([true, true]);
+    const sends = gateway.calls.filter((c) => c.method === "chat.send");
+    expect(sends).toHaveLength(2);
+    expect(gateway.calls.filter((c) => c.method === "sessions.delete").map((c) => c.params.key)).toEqual([sends[0].params.sessionKey]);
+    expect(fs.readFileSync(path.join(results, "stress-openclaw.md"), "utf8")).toContain("## OpenClaw");
+    expect(fs.existsSync(boardDir)).toBe(false);
+  });
+
+  it("stopped with a chat.send not yet acknowledged on OpenClaw: aborts that turn over its own socket before the session goes", async () => {
+    dash.runtime = "openclaw";
+    gateway.reset("silent");
+    const { results, env } = fixture();
+    const { code, out } = await runSh(env, ["--results", results, "stand-in", ...STRESS], (stop) => {
+      gateway.onSend = () => setTimeout(stop, 200);
+    });
+    expect(code, out).toBe(130);
+    const sends = gateway.calls.filter((c) => c.method === "chat.send");
+    expect(sends).toHaveLength(1);
+    const key = sends[0].params.sessionKey;
+    const own = gateway.calls.filter((c) => c.conn === sends[0].conn && c.method === "chat.abort");
+    expect(own.map((c) => c.params)).toEqual([{ sessionKey: key }]);
+    const order = gateway.calls.map((c) => c.method);
+    expect(order.indexOf("chat.abort")).toBeLessThan(order.indexOf("sessions.delete"));
+    const raw = readRaw(results, "openclaw");
+    expect(raw.final).toBe(false);
+    expect(raw.turns.map((t: { error?: { kind: string } }) => t.error?.kind)).toEqual(["stopped"]);
+    expect(raw.cleanup).toMatchObject({ sessions: 1, deleted: 1 });
+  });
+});

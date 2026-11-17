@@ -17,8 +17,10 @@
 #   3. polls it, printing its progress lines, until it writes its record;
 #   4. brings the raw record and the board-side log back into DIR and runs
 #      report.mjs: DIR/stress-<runtime>.json and DIR/stress-<runtime>.md;
-#   5. removes its folder on the board. Interrupted, it stops the board side
-#      first, which deletes its chat sessions before it exits.
+#   5. removes its folder on the board once the record is safely here.
+#      Interrupted, it stops the board side first (which ends its turns and
+#      deletes its chat sessions before it exits) and brings back the partial
+#      record; a record that will not come back keeps the folder on the board.
 #
 # STRESS_OPTIONs go to board-stress.mjs unchanged, e.g.
 #   -- --ramp 1,2,4,8 --ramp-turns 3 --long-turns 32 --tool-turns 8 --steps idle,ramp,long,tool
@@ -125,7 +127,15 @@ source "$HERE/../nano-tests/lib.sh"
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 RESULTS=${RESULTS:-$PWD/nano-stress-$STAMP}
 mkdir -p "$RESULTS"
-BOARD_DIR=/tmp/clawbox-stress-$STAMP
+# The board folder (and the progress poll) can be named for a test of this
+# script; the folder must stay a /tmp/clawbox-stress-* one, the only kind the
+# cleanup removes.
+BOARD_DIR=${NANO_STRESS_BOARD_DIR:-/tmp/clawbox-stress-$STAMP}
+BOARD_DIR_OK=0
+case "$BOARD_DIR" in *..*) ;; /tmp/clawbox-stress-?*) BOARD_DIR_OK=1 ;; esac
+[ "$BOARD_DIR_OK" = 1 ] || { echo "NANO_STRESS_BOARD_DIR must be a /tmp/clawbox-stress-* folder" >&2; exit 2; }
+POLL_S=${NANO_STRESS_POLL_S:-30}
+case "$POLL_S" in ''|*[!0-9]*|0) echo "NANO_STRESS_POLL_S wants whole seconds above 0" >&2; exit 2 ;; esac
 
 say() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
@@ -140,8 +150,9 @@ fi
 say "board build: $(board_head | cut -c1-12)"
 
 STARTED=0
-FETCHED=0
-STOPPED=1
+ENDED=0      # the board side is no longer running: nothing to stop
+STOPPED=1    # 0: it would not stop, so its folder stays
+COLLECTED=0  # its record came back and parses: only then may its folder go
 # stop_board_side — SIGTERM the board script and wait (up to 150 s: it aborts
 # and deletes every session it opened first) until it is gone. Prints "gone"
 # or "alive <pid>"; returns non-zero while it still runs.
@@ -159,17 +170,50 @@ stop_board_side() {
   say "board side: ${out:-no answer}"
   [ "$out" = gone ]
 }
+# fetch — the record (raw.json, or raw.json.partial from a stopped run) comes
+# back gzipped and base64-encoded over the same ssh hop. Fails when nothing
+# came back or a stage of the transfer failed.
+fetch() {
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'for f in "$1/raw.json" "$1/raw.json.partial"; do [ -s "$f" ] && { gzip -c "$f" | base64 -w0; exit 0; }; done; exit 1' "$BOARD_DIR" \
+    | tail -n 1 | base64 -d 2>/dev/null | gunzip -c > "$RESULTS/raw-$RUNTIME.json" 2>/dev/null \
+    && [ -s "$RESULTS/raw-$RUNTIME.json" ]
+}
+# collect — the record, checked to parse, and the board-side log, into
+# $RESULTS. Only a collect that succeeded lets the board folder go: until then
+# it holds the only copy of the run.
+collect() {
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'cat "$1/stress.log" 2>/dev/null; [ -s "$1/raw.json.error" ] && { echo "error:"; cat "$1/raw.json.error"; }; true' "$BOARD_DIR" > "$RESULTS/board-$RUNTIME.log" || return 1
+  fetch || return 1
+  node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$RESULTS/raw-$RUNTIME.json" 2>/dev/null || return 1
+  COLLECTED=1
+}
 cleanup() {
-  if [ "$STARTED" = 1 ] && [ "$FETCHED" = 0 ]; then
+  [ "$STARTED" = 1 ] || return 0
+  if [ "$ENDED" = 0 ]; then
     say "stopping the board side (it deletes its own chat sessions)"
-    stop_board_side || STOPPED=0
+    if stop_board_side; then ENDED=1; else STOPPED=0; fi
   fi
-  if [ "$STARTED" = 1 ] && [ "$STOPPED" = 1 ]; then
-    # shellcheck disable=SC2016  # expanded on the board
-    board 'case "$1" in /tmp/clawbox-stress-*) rm -rf -- "$1" ;; esac' "$BOARD_DIR" >/dev/null 2>&1
-  elif [ "$STARTED" = 1 ]; then
+  if [ "$STOPPED" = 0 ]; then
     say "the board side still runs: $BOARD_DIR is kept on the board; stop it by the pid above"
+    return 0
   fi
+  # Interrupted, or the transfer failed once: one more try to bring the
+  # record back before anything on the board is removed. A record that still
+  # will not come back keeps the folder (as does a board that does not
+  # answer); a run that never wrote one has nothing to keep.
+  if [ "$COLLECTED" = 0 ] && ! collect; then
+    local held
+    # shellcheck disable=SC2016  # expanded on the board
+    held=$(board 'if [ -s "$1/raw.json" ] || [ -s "$1/raw.json.partial" ]; then echo record; else echo none; fi' "$BOARD_DIR" 2>/dev/null | tail -n 1)
+    if [ "$held" != none ]; then
+      say "the record did not come back: $BOARD_DIR is kept on the board (raw.json or raw.json.partial, stress.log)"
+      return 0
+    fi
+  fi
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'case "$1" in /tmp/clawbox-stress-*) rm -rf -- "$1" ;; esac' "$BOARD_DIR" >/dev/null 2>&1
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -197,7 +241,7 @@ SHOWN=0
 STATE=running
 deadline=$(( $(date +%s) + BUDGET_MIN * 60 ))
 while :; do
-  sleep 30
+  sleep "$POLL_S"
   # shellcheck disable=SC2016  # expanded on the board
   out=$(board '
     dir=$1; shown=$2
@@ -226,24 +270,15 @@ if [ "$STATE" = budget ]; then
   # it is gone is that file final.
   if ! stop_board_side; then
     STOPPED=0
-    FETCHED=1
+    ENDED=1
     say "the board side did not stop; nothing fetched"
     exit 1
   fi
 fi
+ENDED=1
 
-# The record comes back gzipped and base64-encoded over the same ssh hop.
-fetch() {
-  # shellcheck disable=SC2016  # expanded on the board
-  board 'for f in "$1/raw.json" "$1/raw.json.partial"; do [ -s "$f" ] && { gzip -c "$f" | base64 -w0; exit 0; }; done; exit 1' "$BOARD_DIR" \
-    | tail -n 1 | base64 -d 2>/dev/null | gunzip -c > "$RESULTS/raw-$RUNTIME.json" 2>/dev/null
-}
-fetch
-# shellcheck disable=SC2016  # expanded on the board
-board 'cat "$1/stress.log" 2>/dev/null; [ -s "$1/raw.json.error" ] && { echo "error:"; cat "$1/raw.json.error"; }; true' "$BOARD_DIR" > "$RESULTS/board-$RUNTIME.log"
-FETCHED=1
-
-if ! node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$RESULTS/raw-$RUNTIME.json" 2>/dev/null; then
+if ! collect; then
+  # The EXIT trap tries once more, and keeps the board folder if that fails too.
   say "no readable record came back (state: $STATE); the board-side log is $RESULTS/board-$RUNTIME.log"
   exit 1
 fi

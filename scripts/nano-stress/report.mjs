@@ -9,7 +9,8 @@
 // the findings (errors, OOM kills, restarts, low memory) under it.
 //
 // Latency counts every turn that got an answer, right or wrong; a turn that
-// timed out or lost its connection has no latency and counts as an error.
+// timed out, lost its connection, was stopped, or failed with no reply text
+// has no latency and counts as an error.
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -41,8 +42,13 @@ export function samplesFor(samples, startedAt, endedAt) {
 }
 
 /** Error kinds that mean no answer came back at all: no latency to count. */
-const NO_ANSWER = new Set(["timeout", "connection", "rpc", "http"]);
-const answeredTurn = (t) => !t.error || !NO_ANSWER.has(t.error.kind);
+const NO_ANSWER = new Set(["timeout", "connection", "rpc", "http", "stopped"]);
+/**
+ * A turn whose latency counts: every passed turn, and a failed one that still
+ * brought reply text back (a wrong answer). A runtime error with no text — a
+ * provider refusing in 200 ms — is not an answer and must not pull p50 down.
+ */
+export const answeredTurn = (t) => !t.error || (!NO_ANSWER.has(t.error.kind) && (t.replyChars || 0) > 0);
 
 function latencyStats(turns) {
   const answered = turns.filter(answeredTurn);
@@ -81,9 +87,11 @@ export function summarizeStep(step, raw) {
     const line = `${k}: ${t.error?.message || ""}`.trim();
     if (!messages.includes(line) && messages.length < 5) messages.push(line);
   }
-  const { inside, start, end } = samplesFor(raw.samples || [], step.startedAt, step.endedAt);
+  // A step still open when the record was written ends at its last sample.
+  const endedAt = typeof step.endedAt === "number" ? step.endedAt : (raw.samples || []).at(-1)?.t ?? step.startedAt;
+  const { inside, start, end } = samplesFor(raw.samples || [], step.startedAt, endedAt);
   const all = start && !inside.includes(start) ? [start, ...inside] : inside;
-  const wallS = (step.endedAt - step.startedAt) / 1000;
+  const wallS = (endedAt - step.startedAt) / 1000;
   const out = {
     id: step.id,
     kind: step.kind,

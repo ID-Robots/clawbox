@@ -48,14 +48,31 @@ export function createHermesDriver({ dash, headers, log = () => {} }) {
     }
   }
 
-  async function turn(sess, message, timeoutMs) {
+  /**
+   * One turn. `signal` (optional) is the run's stop: aborted, the turn ends
+   * at once as `stopped`. Whatever way it ends without the route saying so —
+   * the timeout, the stop, a read error, a stream that ends early — the turn
+   * is Stopped on the box (once) before this returns: a request going away
+   * does not end a Hermes turn, and the session's next turn must not overlap it.
+   */
+  async function turn(sess, message, timeoutMs, signal) {
     const r = { ackMs: null, firstTokenMs: null, latencyMs: null, toolCalls: 0, text: "", error: null, model: null };
+    if (signal?.aborted) {
+      r.error = { kind: "stopped", message: "the run was stopped" };
+      return r;
+    }
     const t0 = performance.now();
     const ms = () => Math.round(performance.now() - t0);
     const turnId = crypto.randomBytes(8).toString("hex");
     const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    let why = null;
+    const timer = setTimeout(() => { why = why || "timeout"; ac.abort(); }, timeoutMs);
+    const onStop = () => { why = why || "stopped"; ac.abort(); };
+    signal?.addEventListener("abort", onStop, { once: true });
     let toolEvents = 0;
+    // The route told us how the turn ended: a done/error/stopped frame, or a
+    // plain JSON answer (an answer or a refusal; nothing left running).
+    let ended = false;
     try {
       const res = await fetch(`${dash}/setup-api/hermes/chat`, {
         method: "POST",
@@ -67,6 +84,7 @@ export function createHermesDriver({ dash, headers, log = () => {} }) {
       const type = res.headers.get("content-type") || "";
       let done = null, error = null;
       if (!type.includes("text/event-stream")) {
+        ended = true;
         const json = await res.json().catch(() => null);
         if (res.ok && json && typeof json.text === "string") done = json;
         else error = { kind: "http", message: `HTTP ${res.status}: ${String(json?.error || "").slice(0, 160)}` };
@@ -82,8 +100,9 @@ export function createHermesDriver({ dash, headers, log = () => {} }) {
           for (const { event, data: payload } of taken.frames) {
             if (event === "delta" && r.firstTokenMs === null) r.firstTokenMs = ms();
             if (event === "tool") toolEvents++;
-            if (event === "done") { done = payload || {}; break outer; }
+            if (event === "done") { ended = true; done = payload || {}; break outer; }
             if (event === "error" || event === "stopped") {
+              ended = true;
               error = { kind: event === "error" ? "agent-error" : "aborted", message: String(payload?.error || payload?.message || event).slice(0, 200) };
               break outer;
             }
@@ -107,12 +126,18 @@ export function createHermesDriver({ dash, headers, log = () => {} }) {
       if (error) r.error = error;
     } catch (e) {
       r.latencyMs = ms();
-      const aborted = ac.signal.aborted;
-      r.error = { kind: aborted ? "timeout" : "connection", message: aborted ? `no answer within ${Math.round(timeoutMs / 1000)} s` : String(e.message || e).slice(0, 200) };
-      // A request going away does not end a Hermes turn; the owner's Stop does.
-      if (aborted) await stop(sess.key, turnId);
+      if (why === "timeout") r.error = { kind: "timeout", message: `no answer within ${Math.round(timeoutMs / 1000)} s` };
+      else if (why === "stopped") r.error = { kind: "stopped", message: "the run was stopped" };
+      else r.error = { kind: "connection", message: String(e.message || e).slice(0, 200) };
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onStop);
+    }
+    // Not ended by the route: no latency to count, and the owner's Stop ends
+    // the turn on the box (the only Stop this turn sends).
+    if (!ended) {
+      r.latencyMs = null;
+      await stop(sess.key, turnId);
     }
     return r;
   }
