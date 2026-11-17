@@ -252,6 +252,47 @@ describe("/setup-api/chat/attachments", () => {
     expect(fs.readFileSync(body.path)).toEqual(PNG);
   });
 
+  // SUP-1026: browsers send the multipart filename as raw UTF-8. busboy decoded
+  // it as latin1 by default, so a Cyrillic name came back as mojibake in the
+  // chat chip and on disk.
+  it("keeps a Cyrillic file name intact, in the answer and on disk", async () => {
+    const name = "Отчет за месец ноември.png";
+    const res = await POST(request(multipart(name, PNG)));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect(body.name).toBe(name);
+    expect(path.basename(body.path)).toMatch(/^[0-9a-f-]{36}-/);
+    expect(path.basename(body.path).slice(37)).toBe(name);
+    expect(fs.readdirSync(stagingDir()).map((f) => f.slice(37))).toEqual([name]);
+    expect(fs.readFileSync(body.path)).toEqual(PNG);
+  });
+
+  it("decodes an RFC 5987 filename* parameter as well", async () => {
+    const name = "Договор.png";
+    const head = Buffer.from(
+      `--${BOUNDARY}\r\n`
+        + `Content-Disposition: form-data; name="file"; filename*=UTF-8''${encodeURIComponent(name)}\r\n`
+        + "Content-Type: application/octet-stream\r\n\r\n",
+    );
+    const body = Buffer.concat([head, PNG, Buffer.from(`\r\n--${BOUNDARY}--\r\n`)]);
+    const res = await POST(request(body));
+    expect(res.status).toBe(200);
+    expect((await res.json()).name).toBe(name);
+  });
+
+  it("stores a very long Cyrillic name without tripping the filesystem name limit", async () => {
+    const name = `${"д".repeat(150)}.png`;
+    const res = await POST(request(multipart(name, PNG)));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(Buffer.byteLength(path.basename(body.path))).toBeLessThanOrEqual(255);
+    // Cut on a character boundary: no replacement character from a split letter.
+    expect(body.name).not.toContain("�");
+    expect(body.name).toMatch(/^д+$/);
+    expect(fs.existsSync(body.path)).toBe(true);
+  });
+
   it("creates the staging directory on a box that has never used it", async () => {
     expect(fs.existsSync(stagingDir())).toBe(false);
     const res = await POST(request(multipart("first.png", PNG)));

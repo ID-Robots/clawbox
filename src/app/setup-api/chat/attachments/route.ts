@@ -250,6 +250,25 @@ async function readHead(file: string): Promise<Buffer> {
 /** One message for both halves of the gate: the customer's fix is the same. */
 const IMAGE_ONLY_MESSAGE = "This device can only attach images";
 
+// A file name is capped at 255 BYTES on the common filesystems, not characters.
+// The staged name is `<uuid>-<leaf>` (37 bytes of prefix), and a Cyrillic letter
+// is two bytes, so 120 Cyrillic characters would not fit.
+const MAX_LEAF_BYTES = 200;
+
+/** `text` cut to at most `maxBytes` of UTF-8, never in the middle of a character. */
+function capUtf8Bytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  let out = "";
+  let bytes = 0;
+  for (const ch of text) {
+    const size = Buffer.byteLength(ch);
+    if (bytes + size > maxBytes) break;
+    out += ch;
+    bytes += size;
+  }
+  return out;
+}
+
 /**
  * A filesystem-safe leaf name for an uploaded file.
  *
@@ -266,11 +285,13 @@ const IMAGE_ONLY_MESSAGE = "This device can only attach images";
  */
 function safeLeafName(raw: string): string | null {
   const base = path.basename(String(raw ?? "").trim());
-  const cleaned = base
-    .replace(/[\u0000-\u001f\u007f/\\]/g, "")
-    .replace(/^\.+/, "")
-    .slice(0, 120)
-    .trim();
+  const cleaned = capUtf8Bytes(
+    base
+      .replace(/[\u0000-\u001f\u007f/\\]/g, "")
+      .replace(/^\.+/, "")
+      .slice(0, 120),
+    MAX_LEAF_BYTES,
+  ).trim();
   if (!cleaned || cleaned === "." || cleaned === "..") return null;
   return cleaned;
 }
@@ -378,6 +399,10 @@ export async function POST(req: NextRequest) {
     const result = await new Promise<{ name: string; path: string; root: string | null }>((resolve, reject) => {
       const busboy = Busboy({
         headers: { "content-type": contentType },
+        // Browsers send a multipart `filename` as raw UTF-8; busboy's default
+        // `defParamCharset` is latin1, which turns a Cyrillic name into mojibake
+        // (SUP-1026). RFC 5987 `filename*` values still carry their own charset.
+        defParamCharset: "utf8",
         limits: {
           files: 1,
           fileSize: MAX_BYTES,
