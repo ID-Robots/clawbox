@@ -61,15 +61,17 @@ const mockExecFile = vi.mocked(childProcess.execFile);
 
 let openclawConfig: typeof import("@/lib/openclaw-config");
 
-/** A child that writes `stderr` and exits 1, like the blocked doctor. */
-function failingChild(stderrText: string): ChildProcess {
+/** A child that writes `stderr` (and, when given, `stdout`) and exits 1, like the blocked doctor. */
+function failingChild(stderrText: string, stdoutText = ""): ChildProcess {
   const child = new EventEmitter() as ChildProcess;
   const stderr = new EventEmitter();
-  child.stdout = new EventEmitter() as unknown as ChildProcess["stdout"];
+  const stdout = new EventEmitter();
+  child.stdout = stdout as unknown as ChildProcess["stdout"];
   child.stderr = stderr as unknown as ChildProcess["stderr"];
   child.kill = vi.fn(() => true) as unknown as ChildProcess["kill"];
   queueMicrotask(() => {
     stderr.emit("data", Buffer.from(stderrText));
+    if (stdoutText) stdout.emit("data", Buffer.from(stdoutText));
     child.emit("close", 1);
   });
   return child;
@@ -108,6 +110,30 @@ describe("runOpenclawDoctorFix and the legacy exec-approvals blocker", () => {
     ));
 
     await expect(openclawConfig.runOpenclawDoctorFix()).resolves.toBe("blocked-by-legacy-exec-approvals");
+  });
+
+  it("says what doctor said on STDOUT as well — its verdict is mostly there (SUP-1023)", async () => {
+    // Doctor's stderr is mostly Node's deprecation warnings; "Doctor finished,
+    // but config fixes were not applied." is the last line of its STDOUT. The
+    // default failure message (stderr when there is any) was the warnings, so
+    // a rolled-back sign-in left nothing that said why. Measured on 2026.11.3.
+    mockSpawn.mockImplementation(() => failingChild(
+      "(node:1) [DEP_PLUGIN_SDK] DeprecationWarning: Plugin SDK: createOpenClawCodingTools is deprecated.\n",
+      "Migrated auth profile JSON into SQLite.\nThe config changed after Doctor prepared these repairs.\n"
+      + "Doctor finished, but config fixes were not applied.\n",
+    ));
+
+    const failure = await openclawConfig.runOpenclawDoctorFix().catch((err: Error) => err);
+
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain("DeprecationWarning");
+    expect(message).toContain("Doctor finished, but config fixes were not applied.");
+    // …after the warnings, so the END of the message is the verdict.
+    expect(message.trimEnd().endsWith("config fixes were not applied.")).toBe(true);
+    // stdout was piped for it: with "ignore" there is nothing to read.
+    const stdio = (mockSpawn.mock.calls.at(-1)?.[2] as { stdio?: unknown[] } | undefined)?.stdio;
+    expect(stdio?.[1]).toBe("pipe");
   });
 
   it("still throws every other doctor failure", async () => {
