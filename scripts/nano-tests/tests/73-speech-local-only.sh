@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # timeout: 900
-# covers: src/lib/stt-endpoint.ts src/lib/stt-preference.ts src/lib/stt-channel.ts src/app/setup-api/chat/transcribe/route.ts src/app/setup-api/stt/endpoint/route.ts scripts/stt-endpoint-client.py src/lib/hermes-tts.ts src/lib/voice-box.ts scripts/gateway-pre-start.sh
+# covers: src/lib/stt-endpoint.ts src/lib/stt-preference.ts src/lib/stt-channel.ts src/app/setup-api/chat/transcribe/route.ts src/app/setup-api/stt/endpoint/route.ts scripts/stt-endpoint-client.py src/lib/hermes-tts.ts src/lib/voice-box.ts src/lib/voice-speak.ts scripts/gateway-pre-start.sh
 #
 # Speech local-only (TASK-2501 PR-D), on the runtime the board runs.
 #
@@ -21,7 +21,10 @@
 #      ClawBox AI cloud voice entry is left in openclaw.json. Local engines
 #      earlier tests left loaded are put on standby first when Kokoro's cold
 #      start would not have its 3000 MB; a 502 local_memory that remains is
-#      the product's guard, and the leg is skipped with the numbers;
+#      the product's guard, and the leg is skipped with the numbers. Hermes'
+#      reply route answers that refusal with its speech transport's code
+#      (cloud_refused), so there the box's own voice is asked the same in-process
+#      (speakLocally), and its local_memory is the guard's reason;
 #   4. the server stopped: the recording is refused with `cloud_ai_locked`,
 #      through the running server and in-process with every fetch recorded,
 #      and not one request goes anywhere but the stopped server.
@@ -65,11 +68,44 @@ INPROC='
 })();
 '
 
+# On Hermes the reply is spoken through Hermes' own speech route, which answers
+# a refusal of the box's voice with its transport's code (cloud_refused) and
+# not the guard's reason. The box's own voice, asked the same thing in-process
+# the way speakReply asks it under the lock (speakLocally), gives the reason.
+# One JSON line, the last line of the answer.
+# shellcheck disable=SC2016  # JavaScript, not shell
+SPEAK_LOCAL='
+(async () => {
+  const R = process.cwd();
+  const out = {};
+  try {
+    const { speakLocally, boxVoiceFromHermes } = await import(R + "/src/lib/voice-speak.ts");
+    const { readVoiceConfig } = await import(R + "/src/lib/voice-box.ts");
+    const res = await speakLocally(boxVoiceFromHermes(await readVoiceConfig("hermes")), undefined, "Spoken by this box alone.");
+    out.status = res.status;
+    const type = res.headers.get("content-type") || "";
+    if (type.includes("json")) {
+      const body = await res.json().catch(() => null);
+      out.code = (body && body.code) || null;
+      out.available = body ? body.available : null;
+      out.needed = body ? body.needed : null;
+    } else {
+      out.bytes = (await res.arrayBuffer()).byteLength;
+    }
+  } catch (err) {
+    out.crash = String((err && err.stack) || err).split("\n").slice(0, 4).join(" | ");
+  }
+  console.log("LOCALPROBE " + JSON.stringify(out));
+  process.exit(0);
+})();
+'
+
 # shellcheck disable=SC2016  # expanded on the board
 RAW=$(board '
 cd "$REPO" || exit 1
 RUNTIME=$1
 INPROC_JS=$2
+SPEAK_LOCAL_JS=$3
 WORK=$(mktemp -d)
 PORT=18931
 MOCK_PID=
@@ -313,6 +349,10 @@ ENGINE=$(grep -i "^x-clawbox-voice-engine:" "$HDR" | tr -d "\r" | awk "{print \$
 CTYPE=$(grep -i "^content-type:" "$HDR" | tr -d "\r" | awk "{print \$2}")
 say "{\"speak\":{\"status\":\"${SPK:-000}\",\"engine\":$(printf "%s" "$ENGINE" | njs),\"type\":$(printf "%s" "$CTYPE" | njs),\"bytes\":$(stat -c %s "$WORK/reply.bin" 2>/dev/null || echo 0),\"error\":$(head -c 300 "$WORK/reply.bin" | tr -cd "[:print:]" | njs),\"refusal\":$(head -c 4000 "$WORK/reply.bin" | nj "v && typeof v === \"object\" ? {code: v.code, available: v.available, needed: v.needed} : null")}}"
 rm -f "$HDR"
+if [ "$RUNTIME" = hermes ] && [ "${SPK:-000}" = 502 ] && [ "$KOKORO_RESIDENT" = false ] && [ "${MEM_AFTER:-0}" -lt "$TTS_NEED_MB" ]; then
+  LOCALP=$(timeout 200 bun -e "$SPEAK_LOCAL_JS" 2>&1 | sed -n "s/^LOCALPROBE //p" | tail -n 1)
+  say "{\"speakLocal\":${LOCALP:-null}}"
+fi
 # Whether the box has its own voice installed at all: no_voice under the lock means "none",
 # and only then is the spoken-reply leg skipped.
 LOCALV=$(printf "header = \"Cookie: clawbox_session=%s\"\n" "$(cookie)" | curl -sS --max-time 30 -K - "$DASHBOARD/setup-api/tts" 2>/dev/null | nj "v && Array.isArray(v.engines) ? v.engines.filter((e) => e.id === \"local\").map((e) => e.configured === true)[0] : null")
@@ -344,7 +384,7 @@ fi
 # always had, so a box holding a ClawBox AI credential shows its cloud leg here.
 node -e "const fs=require(\"fs\");const p=\"data/config.json\";const c=JSON.parse(fs.readFileSync(p,\"utf8\"));c.ai_cloud_lock=false;const t=p+\".nano-tmp\";fs.writeFileSync(t,JSON.stringify(c,null,2),{mode:0o600});fs.renameSync(t,p);"
 timeout 200 bun -e "$INPROC_JS" "$WORK/voice.wav" 2>&1 | sed -n "s/^INPROC /R {\"control\":/p" | sed "s/\$/}/" | tail -n 1
-' "$RUNTIME" "$INPROC")
+' "$RUNTIME" "$INPROC" "$SPEAK_LOCAL")
 
 note "raw: $(printf '%s' "$RAW" | tail -n 30 | head -c 6000)"
 if printf '%s\n' "$RAW" | grep -q 'CONFIG_UNREADABLE'; then
@@ -412,6 +452,7 @@ SPEAK_NEED_MB=$(r '.speakMemory.need')
 SPEAK_AFTER_MB=$(r '.speakMemory.after')
 SPEAK_FREED=$(r '.speakMemory.stoodDown')
 SPEAK_LLAMA_MB=$(r '.speakMemory.llamaChatRssMb')
+SPEAK_SHORT="the spoken reply leg: Kokoro's cold start needs ${SPEAK_NEED_MB:-3000} MB free (clawbox-tts.sh CLAWBOX_TTS_MIN_FREE_MB) and this board had ${SPEAK_AFTER_MB:-?} MB after the test put local engines on standby (${SPEAK_FREED:-nothing to stand down}; llama.cpp chat server ${SPEAK_LLAMA_MB:-0} MB resident)"
 note "before the voice: MemAvailable $(r '.speakMemory.before') MB, $SPEAK_AFTER_MB MB after standing down [${SPEAK_FREED}], Kokoro cold start needs $SPEAK_NEED_MB MB, kokoro-server resident: $(r '.speakMemory.kokoroResident'), llama.cpp chat server RSS ${SPEAK_LLAMA_MB:-0} MB"
 if [ "$KOKORO" != true ] && [ "$KOKORO" != false ]; then
   not_ok "whether Kokoro is installed on this board could not be read (kokoroInstalled: $KOKORO): the voice reply cannot be judged"
@@ -425,9 +466,15 @@ elif [ "$(r '.speak.status')" = 502 ] && [ "$(r '.speak.refusal.code')" = local_
   # The product's guard, saying with its own numbers that the box was short:
   # the reason is right, and the leg cannot run on this board right now.
   ok "the voice refused with the memory guard's reason, not a crash: HTTP 502 local_memory ($(r '.speak.refusal.available') GB free, needs $(r '.speak.refusal.needed') GB)"
-  skip "the spoken reply leg: Kokoro's cold start needs ${SPEAK_NEED_MB:-3000} MB free (clawbox-tts.sh CLAWBOX_TTS_MIN_FREE_MB) and this board had ${SPEAK_AFTER_MB:-?} MB after the test put local engines on standby (${SPEAK_FREED:-nothing to stand down}; llama.cpp chat server ${SPEAK_LLAMA_MB:-0} MB resident)"
+  skip "$SPEAK_SHORT"
+elif [ "$RUNTIME" = hermes ] && [ "$(r '.speak.status')" = 502 ] && [ "$(r '.speakLocal.status')" = 502 ] && [ "$(r '.speakLocal.code')" = local_memory ]; then
+  # The same guard on Hermes, whose reply route only passes on its speech
+  # transport's code: the box's own voice, asked in-process, gives the reason.
+  ok "the box's own voice refused with the memory guard's reason, not a crash: in-process speakLocally answers HTTP 502 local_memory ($(r '.speakLocal.available') GB free, needs $(r '.speakLocal.needed') GB)"
+  note "Hermes' reply route answered that refusal as HTTP 502 $(r '.speak.refusal.code'): the code of Hermes' speech transport, not the guard's reason (voice-speak.ts speakReply; tts/sample maps the transport's codes to local ones)"
+  skip "$SPEAK_SHORT"
 else
-  not_ok "the voice reply under the lock: $(r '.speak | tojson')"
+  not_ok "the voice reply under the lock: $(r '.speak | tojson')$([ -n "$(r '.speakLocal // empty')" ] && printf '; in-process speakLocally: %s' "$(r '.speakLocal | tojson')")"
 fi
 if [ "$RUNTIME" = hermes ]; then
   if [ "$(r '.kokoroInstalled')" = false ]; then
