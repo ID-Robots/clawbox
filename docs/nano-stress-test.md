@@ -54,9 +54,12 @@ OpenClaw, the route's Stop on Hermes) before the session's next turn, and
 counts as an error with no latency. On Hermes the run then asks the route
 whether the turn really ended: `GET /setup-api/hermes/chat` re-attaches to the
 key's newest turn, and a 204 (no turn on record) or a replay carrying the
-turn's end (done, error, stopped) followed by the stream closing counts (the
-route closes a re-attach only once the turn has ended, and a `done` can go
-out before that); a stream that just closes is asked again. The same check
+turn's end (done, error, stopped) with the stream closing at once (within
+2 s) counts. The route builds the whole replay of an ended turn, close
+included, when the stream starts; a re-attach that stays open (a `done` can go
+out before the turn ends) or closes later (when the turn ends then, or when
+the route's 5 s owner-session recheck closes it) is dropped and asked again,
+as is a stream with no end in it. The same check
 runs before every next turn on a Hermes session, outside the measured
 latency, so a Stop can only ever find the current turn. A turn whose Stop failed, whose Stop found no turn running (the POST may
 still be in its setup, the Stop held for it expires, and a replay does not say

@@ -38,7 +38,7 @@ export function takeSseFrames(buf) {
  * dashboard's base URL, the owner-signed headers, and the run's log line;
  * `settleMs` bounds the wait for a Stopped turn to settle (see `settled`).
  */
-export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 20_000 }) {
+export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 20_000, replayCloseMs = 2_000 }) {
   async function stop(key, turnId) {
     const q = new URLSearchParams({ sessionKey: key, ...(turnId ? { turnId } : {}) });
     try {
@@ -56,12 +56,15 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
    * Whether no turn runs under `key` any more, as the route itself tells it:
    * GET re-attaches to the key's newest live turn — a running one if there is
    * one — and replays its frames (204: no turn on record). Settled means a
-   * 204, or a replayed end of that turn (a done, error or stopped frame)
-   * followed by the stream closing: the route closes a re-attach only once
-   * the turn has ended, and a `done` can go out before that. A stream that
-   * closes with no end in it proves nothing (a dropped connection, a session
-   * that expired): it is asked again. Not settled by `settleMs`, or no answer
-   * by then, is not.
+   * 204, or a replayed end of that turn (a done, error or stopped frame) with
+   * the stream closing at once (within `replayCloseMs`): the route builds the
+   * whole replay of an ENDED turn, close included, when the stream starts. A
+   * re-attach that stays open (a `done` can go out before the turn ends) or
+   * closes later — when the turn ends then, or when the route's 5 s owner
+   * session recheck closes it while the turn runs on — is not trusted: it is
+   * dropped and asked again, and the next re-attach of an ended turn closes
+   * at once. A stream with no end in it proves nothing either. Not settled
+   * by `settleMs`, or no answer by then, is not.
    *
    * Asked before each turn on a session that had one (the previous turn has
    * ended), and after a Stop that did stop a registered turn: with every
@@ -86,15 +89,21 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
             const dec = new TextDecoder();
             let buf = "";
             let sawEnd = false;
-            for (;;) {
-              const { value, done } = await reader.read();
-              if (done) {
-                if (sawEnd) return true;
-                break;
+            let late = false;
+            const quit = setTimeout(() => { late = true; reader.cancel().catch(() => {}); }, replayCloseMs);
+            try {
+              for (;;) {
+                const { value, done } = await reader.read();
+                if (done) {
+                  if (sawEnd && !late) return true;
+                  break;
+                }
+                const taken = takeSseFrames(buf + dec.decode(value, { stream: true }));
+                buf = taken.rest;
+                if (taken.frames.some((f) => TERMINAL_EVENTS.has(f.event))) sawEnd = true;
               }
-              const taken = takeSseFrames(buf + dec.decode(value, { stream: true }));
-              buf = taken.rest;
-              if (taken.frames.some((f) => TERMINAL_EVENTS.has(f.event))) sawEnd = true;
+            } finally {
+              clearTimeout(quit);
             }
           }
         } catch (e) {

@@ -46,8 +46,10 @@ class Dashboard {
   // GET re-attach: "none" 204 (no turn on record); "held" a running turn (the
   // stream stays open); "eof" a stream that closes with no end of the turn in
   // it; "replay" an ended turn (its frames, then its "stopped" frame);
-  // "answered" a turn that sent its `done` but has not ended yet (open).
-  attach: "none" | "held" | "eof" | "replay" | "answered" = "none";
+  // "answered" a turn that sent its `done` but has not ended yet (open);
+  // "answered-cut" the same, closed 600 ms later while the turn runs on (the
+  // route's owner-session recheck closing the listener).
+  attach: "none" | "held" | "eof" | "replay" | "answered" | "answered-cut" = "none";
   attaches = 0;
   // The Stop request itself fails (HTTP 500).
   failStop = false;
@@ -102,7 +104,8 @@ class Dashboard {
         res.write(`event: delta\ndata: ${JSON.stringify({ text: "…" })}\n\n`);
         if (this.attach === "eof") { res.end(); return; }
         if (this.attach === "replay") { res.end("event: stopped\ndata: {}\n\n"); return; }
-        if (this.attach === "answered") res.write(`event: done\ndata: ${JSON.stringify({ text: "x" })}\n\n`);
+        if (this.attach === "answered" || this.attach === "answered-cut") res.write(`event: done\ndata: ${JSON.stringify({ text: "x" })}\n\n`);
+        if (this.attach === "answered-cut") { setTimeout(() => res.end(), 600); return; }
         this.heldStops.add(res);
         return;
       }
@@ -331,6 +334,18 @@ describe("the Hermes turn", () => {
     dash.attach = "replay"; // ended: its end replayed, then the stream closes
     expect((await driver.turn(t, ask, 5000)).error).toBeNull();
     expect(dash.posts).toHaveLength(2);
+  });
+
+  it("does not take a re-attach closed after `done` while the turn runs on as the turn's end", async () => {
+    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleMs: 2500, replayCloseMs: 300 });
+    dash.reset("answer");
+    const s = sess();
+    await driver.turn(s, ask, 5000);
+    dash.attach = "answered-cut";
+    const r = await driver.turn(s, ask, 5000);
+    expect(r.error).toEqual({ kind: "blocked", message: "the previous turn on this session was not confirmed ended" });
+    expect(dash.attaches).toBeGreaterThan(1); // dropped and asked again
+    expect(dash.posts).toHaveLength(1);
   });
 
   it("blocks the session when the Stop itself failed, even if the route shows no turn", async () => {
