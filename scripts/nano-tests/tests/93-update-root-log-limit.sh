@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# timeout: 4200
+# timeout: 4500
 # tier: long
 # covers: config/clawbox-root-update*.service
 # covers: scripts/nano-tests/update-raw-log-runs.sh
@@ -52,8 +52,17 @@ fi
 # shellcheck source=scripts/nano-tests/update-raw-log-runs.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../update-raw-log-runs.sh"
 
-RUNTIME=$(board_runtime)
+# Read in this shell, so the answer of the build under test is kept for the
+# whole test (board_runtime caches it; a $(…) would throw the cache away and
+# the older build would be asked again).
+board_runtime >/dev/null
+RUNTIME=$BOARD_RUNTIME
 note "agent runtime: $RUNTIME"
+# This test's time, on the runner's clock: run.sh stops it at NANO_TEST_TIMEOUT
+# (the header above, the most a long-tier test may ask for). Every wait below
+# leaves RESTORE_RESERVE for the rebuild back to the commit under test.
+TEST_DEADLINE=$(( $(date +%s) + ${NANO_TEST_TIMEOUT:-4500} - 60 ))
+RESTORE_RESERVE=600
 # The branch of the board's clone the older release is rebuilt from (step 1).
 FIXTURE=nano-tests-93-older-release
 UNIT_SHOW='systemctl show -p LogRateLimitIntervalUSec -p LogRateLimitBurst -p NeedDaemonReload -p FragmentPath -p DropInPaths clawbox-root-update@rebuild_reboot.service'
@@ -70,16 +79,58 @@ show_unit() {
 }
 drop_ins() { printf '%s\n' "$SHOWN" | sed -n 's/^DropInPaths=//p'; }
 
-# drop_fixture — remove the board-local branch the older release was rebuilt
-# from (step 1), unless it is still checked out.
+# drop_fixture — remove the remote-tracking ref the older release was rebuilt
+# from (step 1), and its local branch unless that is still checked out.
 drop_fixture() {
   # shellcheck disable=SC2016  # expanded on the board
   board '
-    [ "$(git -C "$REPO" symbolic-ref -q --short HEAD)" = "$1" ] && exit 0
-    git -C "$REPO" branch -q -D "$1" 2>/dev/null
     git -C "$REPO" update-ref -d "refs/remotes/origin/$1" 2>/dev/null
+    [ "$(git -C "$REPO" symbolic-ref -q --short HEAD)" = "$1" ] || git -C "$REPO" branch -q -D "$1" 2>/dev/null
     true
   ' "$FIXTURE" >/dev/null
+}
+
+# update_phase — the owner's update as /setup-api/update/status says it now
+# (running | completed | failed | idle), or "" when the box does not answer.
+update_phase() {
+  API_MAX_TIME=20 board_api GET /setup-api/update/status
+  [ "$API_STATUS" = 200 ] && api_json '.phase // empty'
+}
+
+# settle_and_restore — the way out once the owner's update may have started
+# but its end was not seen (an update/run whose answer was lost, or a wait that
+# ran out). A rebuild beside a running update would race it, so the update is
+# waited out first, for as long as this test's own time leaves room for the
+# rebuild back; then the build under test is put back. An update that has
+# still not ended is left alone, and that is said: the tests after this one
+# would run on a box in the middle of an update.
+settle_and_restore() {
+  local phase room
+  phase=$(update_phase)
+  case "$phase" in
+    completed|failed|idle) ;;
+    *)
+      room=$(( TEST_DEADLINE - RESTORE_RESERVE - $(date +%s) ))
+      if [ "$room" -gt 0 ]; then
+        note "the update is ${phase:-not answering}: waiting up to ${room}s for it to end before the build under test is put back"
+        wait_app_update "$room"
+        phase=$UPDATE_PHASE
+        # Ended while the box rebooted, so never seen running by this wait.
+        [ "$phase" = timeout ] && phase=$(update_phase)
+      fi
+      ;;
+  esac
+  case "$phase" in
+    completed|failed|idle)
+      note "the update is $phase"
+      UPDATE_PHASE=$phase
+      back_on_test_build
+      ;;
+    *)
+      not_ok "[$RUNTIME] the owner's update has not ended (${phase:-no answer}) and this test's time is up: the board is left as it is, since a rebuild would race the update — the tests after this one run on a box in the middle of an update"
+      drop_fixture
+      ;;
+  esac
 }
 
 # back_on_test_build — the tests after this one (99-) judge the commit under
@@ -107,7 +158,7 @@ back_on_test_build() {
 # first-parent line) whose root update unit file has no LogRateLimit line.
 # shellcheck disable=SC2016  # expanded on the board
 FOUND=$(board '
-  git -C "$REPO" fetch -q origin main 2>/dev/null
+  git -C "$REPO" fetch -q origin main 2>/dev/null || { echo "nofetch"; exit 0; }
   main=$(git -C "$REPO" rev-parse -q --verify refs/remotes/origin/main) || { echo "nomain"; exit 0; }
   echo "main $main"
   n=0
@@ -122,6 +173,12 @@ FOUND=$(board '
   done
 ' "$NANO_SHA")
 MAIN_SHA=$(printf '%s\n' "$FOUND" | sed -n 's/^main //p' | tr -d '[:space:]')
+if printf '%s\n' "$FOUND" | grep -qx nofetch; then
+  # A clone that cannot fetch main may hold an old copy of it, and the newest
+  # release would be missed; the board has not been touched yet.
+  not_ok "[$RUNTIME] the board could not fetch main from its origin: the newest release without the limit cannot be known"
+  finish
+fi
 read -r BASE_SHA BASE_NTH BASE_TAG <<<"$(printf '%s\n' "$FOUND" | sed -n 's/^stale //p')"
 if [ ${#MAIN_SHA} -ne 40 ]; then
   not_ok "[$RUNTIME] could not read the head of main in the board's clone"
@@ -185,13 +242,18 @@ if why=$(printf '%s\n' "$SHOWN" | log_limit_ok); then
 fi
 ok "[$RUNTIME] on the older build the root update unit has no drop-in and journald's default limit, as an owner's box does ($why)"
 
-# 2. The owner's update, and the limit while the rebuild runs.
-START=$(date +%s)
+# 2. The owner's update, and the limit while the rebuild runs. Its journals
+# are read --since the BOARD's clock: the runner's may differ.
+# shellcheck disable=SC2016  # expanded on the board
+START=$(board 'date +%s' | tail -n 1 | tr -dc '0-9')
+[ -n "$START" ] || START=$(date +%s)
+T_UPDATE=$(date +%s)
 if start_app_update "$NANO_BRANCH"; then
   ok "[$RUNTIME] the owner's update to $NANO_BRANCH started"
 else
   not_ok "[$RUNTIME] the update did not start: $API_STATUS $(printf '%s' "$API_BODY" | head -c 300)"
-  back_on_test_build
+  # The answer can be lost after the update did start (a curl timeout).
+  settle_and_restore
   finish
 fi
 REBUILD_SEEN=0
@@ -209,35 +271,18 @@ rebuild_tick() {
     not_ok "[$RUNTIME] while rebuild_reboot runs, it would lose lines: $why"
   fi
 }
-wait_app_update 3600 rebuild_tick
-note "update took $(( $(date +%s) - START ))s and ended: $UPDATE_PHASE${UPDATE_ERROR:+ ($UPDATE_ERROR)}"
+# Up to what the test's time leaves after the checks below (~4 min) and the
+# rebuild back: about 55 minutes (an update that rebuilds llama.cpp took 40).
+UPDATE_WAIT=$(( TEST_DEADLINE - RESTORE_RESERVE - 240 - $(date +%s) ))
+[ "$UPDATE_WAIT" -ge 60 ] || UPDATE_WAIT=60
+wait_app_update "$UPDATE_WAIT" rebuild_tick
+note "update took $(( $(date +%s) - T_UPDATE ))s and ended: $UPDATE_PHASE${UPDATE_ERROR:+ ($UPDATE_ERROR)}"
 case "$UPDATE_PHASE" in
   completed) ok "[$RUNTIME] the update from the $BASE_NAME completed" ;;
   failed) not_ok "[$RUNTIME] the update from the $BASE_NAME failed: $UPDATE_ERROR" ;;
   *)
-    not_ok "[$RUNTIME] the update did not end within 60 minutes"
-    # Bounded recovery: a rebuild beside a running update would race it, so a
-    # surviving update gets 15 more minutes to end first; then the build under
-    # test is put back and the fixture removed. Still running after that, the
-    # board is left as it is (and said so) — only the fixture ref goes.
-    API_MAX_TIME=20 board_api GET /setup-api/update/status
-    case "$(api_json '.phase // empty' 2>/dev/null)" in
-      completed|failed) UPDATE_PHASE=$(api_json '.phase') ;;
-      *)
-        wait_app_update 900
-        if [ "$UPDATE_PHASE" = timeout ]; then
-          API_MAX_TIME=20 board_api GET /setup-api/update/status
-          case "$(api_json '.phase // empty' 2>/dev/null)" in completed|failed) UPDATE_PHASE=$(api_json '.phase') ;; esac
-        fi
-        ;;
-    esac
-    note "15 minutes later the update is: $UPDATE_PHASE"
-    if [ "$UPDATE_PHASE" = timeout ]; then
-      not_ok "[$RUNTIME] the update was still running 75 minutes in: the board is left as it is, a rebuild would race it"
-      drop_fixture
-    else
-      back_on_test_build
-    fi
+    not_ok "[$RUNTIME] the update did not end within ${UPDATE_WAIT}s"
+    settle_and_restore
     finish
     ;;
 esac
@@ -264,10 +309,14 @@ else
   not_ok "[$RUNTIME] the bridge drop-in is still there after the update: $(drop_ins)"
 fi
 # shellcheck disable=SC2016  # expanded on the board
-JOURNAL=$(board 'j=$(journalctl -u clawbox-root-update@rebuild_reboot.service --since "@$1" -o cat 2>/dev/null); printf "LINES %s\n" "$(printf "%s\n" "$j" | wc -l)"; printf "%s\n" "$j" | grep -E "^Suppressed [0-9]+ messages" | head -n 3' "$START")
-note "rebuild_reboot's journal since the update began: $(printf '%s\n' "$JOURNAL" | sed -n 's/^LINES //p') lines"
+JOURNAL=$(board 'j=$(journalctl -u clawbox-root-update@rebuild_reboot.service --since "@$1" -o cat 2>/dev/null); n=0; [ -n "$j" ] && n=$(printf "%s\n" "$j" | wc -l); printf "LINES %s\n" "$n"; printf "%s\n" "$j" | grep -E "^Suppressed [0-9]+ messages" | head -n 3' "$START")
+LINES=$(printf '%s\n' "$JOURNAL" | sed -n 's/^LINES //p' | tr -dc '0-9')
+note "rebuild_reboot's journal since the update began: ${LINES:-?} lines"
 SUPPRESSED=$(printf '%s\n' "$JOURNAL" | grep -E '^Suppressed ' || true)
-if [ -z "$SUPPRESSED" ]; then
+if [ "${LINES:-0}" -eq 0 ]; then
+  # An empty journal holds no "Suppressed" line either: nothing was judged.
+  not_ok "[$RUNTIME] rebuild_reboot's journal since the update began is empty: whether journald dropped lines cannot be told"
+elif [ -z "$SUPPRESSED" ]; then
   ok "[$RUNTIME] journald dropped none of rebuild_reboot's lines (no \"Suppressed … messages\" in its journal since the update began)"
 else
   not_ok "[$RUNTIME] journald dropped lines of rebuild_reboot: $(printf '%s' "$SUPPRESSED" | tr '\n' ';')"
