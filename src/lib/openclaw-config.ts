@@ -1247,11 +1247,26 @@ async function withConfigMutationRetry(
  */
 export type ToolModelSlot = string | { primary?: string; fallbacks?: string[] };
 
+/** How much of a child's stdout `failureDetail: "both"` holds on to. */
+const FAILURE_OUTPUT_KEEP_CHARS = 64 * 1024;
+
 export interface SpawnOpenclawOptions {
   /** Per-call timeout in ms. Default {@link DEFAULT_SPAWN_TIMEOUT_MS}. */
   timeoutMs?: number;
   /** Capture and resolve stdout (needed to read `--json` output). Default false. */
   captureStdout?: boolean;
+  /**
+   * What a non-zero exit's error message carries. `"stderr"` (the default) is
+   * stderr, or stdout when stderr is empty. `"both"` is stderr THEN stdout, and
+   * implies capturing stdout.
+   *
+   * For a command whose verdict is on stdout while stderr holds only Node's
+   * deprecation warnings, which is how `doctor --fix` reports most of what it
+   * refuses (SUP-1023: "Doctor finished, but config fixes were not applied." is
+   * the last line of its STDOUT). With the default the message was the
+   * warnings, and the journal could not say why a sign-in was rolled back.
+   */
+  failureDetail?: "stderr" | "both";
   /**
    * Write this to the child's stdin and close it. The one way to hand the CLI
    * a secret without putting it in argv (`models auth paste-api-key` reads the
@@ -1307,7 +1322,10 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
 
 function spawnOpenclawOnce(args: string[], options: SpawnOpenclawOptions = {}): Promise<string> {
   const bin = findOpenclawBin();
-  const { uid, gid, captureStdout = false, stdinData } = options;
+  const { uid, gid, stdinData } = options;
+  const failureDetail = options.failureDetail ?? "stderr";
+  // "both" has to read stdout to put it in the message, so it is piped too.
+  const captureStdout = (options.captureStdout ?? false) || failureDetail === "both";
   const timeoutMs = options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
   const cwd = options.cwd ?? process.env.HOME ?? "/home/clawbox";
   // A `config` child reads and writes THE FILE THIS MODULE READS BACK. The
@@ -1343,6 +1361,12 @@ function spawnOpenclawOnce(args: string[], options: SpawnOpenclawOptions = {}): 
     let stderr = "";
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
+      // `failureDetail: "both"` keeps stdout for a failure message only: the
+      // END of it, which is where a verdict is, and bounded — doctor's can
+      // run to megabytes and is read for as long as its 180 s budget.
+      if (failureDetail === "both" && stdout.length > FAILURE_OUTPUT_KEEP_CHARS) {
+        stdout = stdout.slice(stdout.length - FAILURE_OUTPUT_KEEP_CHARS);
+      }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
@@ -1390,7 +1414,12 @@ function spawnOpenclawOnce(args: string[], options: SpawnOpenclawOptions = {}): 
         settled = true;
         clearTimeout(timer);
         if (code === 0) resolve(stdout);
-        else reject(new Error(stderr.trim() || stdout.trim() || `${label} exited with code ${code}`));
+        else {
+          const said = failureDetail === "both"
+            ? [stderr.trim(), stdout.trim()].filter(Boolean).join("\n")
+            : stderr.trim() || stdout.trim();
+          reject(new Error(said || `${label} exited with code ${code}`));
+        }
       }
     });
   });
@@ -4199,14 +4228,22 @@ export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> 
     // The bound grows with the agent databases, as the update's does: doctor
     // reads every one of them, a flat 180 s stopped it half-way on a box with
     // a few GB of them, and a stopped doctor here is a rolled-back sign-in.
+    //
+    // `failureDetail: "both"`: doctor's verdict is mostly on STDOUT and its
+    // stderr is mostly Node's deprecation warnings, so the default message
+    // (stderr when there is any) said nothing about why it exited 1 — the
+    // journal of a rolled-back sign-in read "(node:…) DeprecationWarning" and
+    // no one could tell a refused config write from a locked store (SUP-1023).
     await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], {
       timeoutMs: doctorFixBudgetMs(await openclawDatabaseBytes(OPENCLAW_HOME).catch(() => 0), 180_000),
       env: withExternalGatewaySupervisor(),
+      failureDetail: "both",
     });
   } catch (err) {
-    // `spawnOpenclaw` rejects with `stderr.trim()` when there is any, which is
-    // where the core prints this. A timeout or a spawn error carries neither
-    // the sentence nor a verdict and is rethrown.
+    // `spawnOpenclaw` rejects with what doctor said on stderr, then on stdout
+    // (`failureDetail` above), which is where the core prints these. A timeout
+    // or a spawn error carries neither the sentence nor a verdict and is
+    // rethrown.
     if (err instanceof Error && LEGACY_EXEC_APPROVALS_RE.test(err.message)) {
       return "blocked-by-legacy-exec-approvals";
     }

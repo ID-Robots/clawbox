@@ -248,7 +248,9 @@ describe("Settings → Providers and a Claude sign-in the gateway cannot use", (
 
   it("does not open the store on a box with no Claude sign-in", async () => {
     readConfig.mockResolvedValue({
-      auth: { profiles: { "openai:default": { provider: "openai", mode: "oauth" } } },
+      // An API key, not a ChatGPT sign-in: the ChatGPT row asks the store about
+      // its own OAuth profiles (provider-status-chatgpt-fenced-sign-in.test.ts).
+      auth: { profiles: { "openai:default": { provider: "openai", mode: "api_key" } } },
       agents: { defaults: { model: { primary: "openai/gpt-5.5" } } },
     });
 
