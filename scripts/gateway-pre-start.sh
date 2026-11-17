@@ -7595,6 +7595,18 @@ flipped = []
 # core's own version, above): there is nothing at the opt-out literal to take
 # back, and a `config unset` of it would be refused. The monitor is an
 # automation job there, and the Settings switch drives that job.
+#
+# WHAT THIS GIVES UP, on purpose: a box still holding a generation-1 record
+# (seeded off by a build from before the 2026-09-15 ruling and never booted
+# since) that reaches a 2026.11.5 core keeps its monitor as Doctor converted it,
+# disabled. By the time this plan runs, Doctor has already turned the monitor
+# into a job and removed the key (the update's own `openclaw doctor --fix`,
+# which install.sh runs right after installing the core, and this script's
+# start-guard for a config the core still refuses at boot; measured on a lab
+# board), so the `0m` this row looks for is gone with or without this skip, and
+# once converted a seeded-off job cannot be told from one the owner switched
+# off: enabling it here would undo a choice that may be theirs. Settings ->
+# Harness switches it on.
 HEARTBEAT_RETIRED = os.environ.get("CLAWBOX_OPENCLAW_2026_11_5") == "1"
 for path, literal, default in WANTED:
     if default is None and HEARTBEAT_RETIRED:

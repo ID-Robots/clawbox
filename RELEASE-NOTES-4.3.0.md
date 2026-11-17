@@ -712,6 +712,12 @@ setup and switching between Anthropic accounts get a long list of fixes.
 - On the OpenClaw edition, the update moves OpenClaw's data to the newer format
   OpenClaw 2026.10.6 and later use; 2026.11.5 moves it once more. The move is
   one-way, so the box cannot go back to an earlier release afterwards.
+- On the OpenClaw edition, OpenClaw 2026.11.5 runs the assistant's periodic
+  check-in as an ordinary automation job. The update converts the check-in the
+  box had, on or off as you had it, and **Settings → Harness** switches that
+  job. ClawBox does not create the job itself, so a box set up fresh on this
+  release has none until one is created, and the row says so instead of showing
+  a switch.
 - The update moves the box to Node.js 24.22.1 or newer, the October 2026
   Node.js security release, on every edition.
 - Sites the assistant was signed in to in its old, separate browser need one
