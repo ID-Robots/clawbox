@@ -1315,6 +1315,8 @@ import json, os, re, sys, tempfile, secrets, shutil, time
 CLAWBOX_OPENCLAW_V2 = os.environ.get("CLAWBOX_OPENCLAW_V2") == "1"
 # OpenClaw 2026.10+: the keys the agent-database work writes (see the bash block).
 CLAWBOX_OPENCLAW_2026_10 = os.environ.get("CLAWBOX_OPENCLAW_2026_10") == "1"
+# OpenClaw 2026.11.5+: the retired heartbeat key, the on-device model's tool list.
+CLAWBOX_OPENCLAW_2026_11_5 = os.environ.get("CLAWBOX_OPENCLAW_2026_11_5") == "1"
 
 # Gateway auth token gates LAN access to the agent's privileged tools
 # (run_command / file_write / system_power). Earlier builds wrote the public
@@ -5495,6 +5497,55 @@ if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
     if _memory_index_changes:
         changed = True
 # --- end memory index defaults ---
+
+# The on-device model's six tools, by config (OpenClaw 2026.11.5+).
+#
+# clawbox-local-lean narrows a turn on the llamacpp model to six tools with the
+# `before_prompt_build` hook's `toolsAllow`. Up to 2026.11.3 that took the other
+# tools off the turn. 2026.11.5 keeps every tool of the agent's catalog active,
+# narrows only which ones may be called, and sizes the turn (its pre-prompt
+# context check and the compaction budget) from that whole catalog. With Tool
+# Search off, as the ~2B model needs it (below), that is ~84k estimated tokens
+# against Gemma's 32768-token window: every turn on the on-device model ended
+# "Context overflow: the system prompt, injected context, or tool definitions
+# exceed the model's context window" before the model was asked (measured on a
+# lab board, 68-local-ai-chat). HARNESS FIRST: the core's own per-provider tool
+# policy, `tools.byProvider.<provider>.allow`, applies when the tools are built,
+# before anything is sized; with it the same turn is a ~1.4k-token prompt and
+# answers. It narrows only the llamacpp provider's turns, so it does not follow
+# the primary. ClawBox writes exactly {"allow": [the six]} where the provider has
+# no entry and removes only that exact value (on an older core, which narrows
+# through the hook alone); an owner's own entry is never touched. Keep the list
+# in step with LEAN_TOOLS in scripts/openclaw-plugins/clawbox-local-lean/local-lean.mjs.
+_LOCAL_LEAN_TOOLS = ["read", "write", "clawbox__webapp_create", "web_fetch", "web_search", "clawbox__browser_open"]
+_lt_tools = cfg.get("tools")
+_lt_by = _lt_tools.get("byProvider") if isinstance(_lt_tools, dict) else None
+_lt_value = _lt_by.get("llamacpp") if isinstance(_lt_by, dict) else None
+_lt_ours = (
+    isinstance(_lt_value, dict)
+    and list(_lt_value.keys()) == ["allow"]
+    and _lt_value["allow"] == _LOCAL_LEAN_TOOLS
+)
+if bool(globals().get("CLAWBOX_OPENCLAW_2026_11_5", False)):
+    if (
+        (_lt_tools is None or isinstance(_lt_tools, dict))
+        and (_lt_by is None or (isinstance(_lt_by, dict) and "llamacpp" not in _lt_by))
+    ):
+        if _lt_tools is None:
+            _lt_tools = {}
+            cfg["tools"] = _lt_tools
+        if _lt_by is None:
+            _lt_by = {}
+            _lt_tools["byProvider"] = _lt_by
+        _lt_by["llamacpp"] = {"allow": list(_LOCAL_LEAN_TOOLS)}
+        changed = True
+        print("  Narrowed the on-device model's tools to its six by config (tools.byProvider.llamacpp): OpenClaw 2026.11.5 sizes a turn from every active tool")
+elif _lt_ours:
+    del _lt_by["llamacpp"]
+    if not _lt_by:
+        del _lt_tools["byProvider"]
+    changed = True
+    print("  Removed the on-device model's config tool list: this core narrows its turns through the lean hook alone")
 
 # Reconciliation: OpenClaw's Tool Search vs a primary on the on-device model.
 #

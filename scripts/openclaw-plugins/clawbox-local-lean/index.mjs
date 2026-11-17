@@ -15,7 +15,11 @@
 // attempt's own provider (`modelProviderId`) — the same hook the user-language
 // and Prime Radiant core plugins ride. `tools.byProvider` could narrow the tools
 // alone, but the prompt names the exact tools it teaches, so both come from one
-// place. OpenClaw's Tool Search stays as it is: it is global, and turning it off
+// place. From OpenClaw 2026.11.5 the hook's `toolsAllow` only narrows which
+// tools may be CALLED (the core still sizes the turn from its whole catalog, and
+// a 32k-window turn overflowed before the model was asked), so
+// gateway-pre-start.sh also writes LEAN_TOOLS as `tools.byProvider.llamacpp`.
+// OpenClaw's Tool Search stays as it is: it is global, and turning it off
 // for the local model would turn it off for every cloud model too.
 //
 // A non-bundled plugin's `before_prompt_build` needs
