@@ -5,7 +5,7 @@ import {
   CLI_STDERR_OUTCOMES_REVERSED,
   CLI_STDOUT,
   GATEWAY_ANSWER,
-} from "../fixtures/openclaw-models-list-2026.11.3";
+} from "../fixtures/openclaw-models-list-2026.11.5";
 
 /**
  * The gateway's `models.list` answer, projected to exactly what the pinned
