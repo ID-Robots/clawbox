@@ -175,15 +175,14 @@ const hookTableFiles = holding("const PLUGIN_HOOK_METADATA = ");
 if (hookSetFiles.length === 1 && hookTableFiles.length === 0) {
   hooks = stringsIn(literalAfter(hookSetFiles[0], "const pluginHookNameSet = ", "]);"));
 } else if (hookTableFiles.length === 1 && hookSetFiles.length === 0) {
+  // Read as text, never evaluated: this is a bundle of a package that was
+  // installed with --ignore-scripts precisely so that nothing in it runs. The
+  // table's own keys are the lines indented by exactly one tab (a hook's
+  // settings sit one level deeper); a bundle that formats it differently yields
+  // no names, and the check then says it cannot vouch for the hooks.
   const literal = literalAfter(hookTableFiles[0], "const PLUGIN_HOOK_METADATA = ", "\n}");
-  try {
-    // A plain object literal of literals (`15e3`, `true`, nested `{}`): evaluated
-    // with nothing in scope, so a name it cannot resolve throws instead of running.
-    const table = literal ? vm.runInNewContext(`(${literal})`, Object.create(null)) : null;
-    hooks = table && typeof table === "object" ? Object.keys(table) : null;
-  } catch {
-    hooks = null;
-  }
+  const names = literal ? [...literal.matchAll(/^\t([A-Za-z_][A-Za-z0-9_]*): /gm)].map((m) => m[1]) : [];
+  hooks = names.length > 0 ? names : null;
 }
 
 const version = await cli(["--version"]);
