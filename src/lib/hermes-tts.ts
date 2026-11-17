@@ -511,7 +511,14 @@ const MAX_REFUSAL_BYTES = 64 * 1024;
  * detail rather than reported as the transport's failure.
  */
 async function memoryShortfallIn(res: Response): Promise<KokoroMemoryShortfall | null> {
-  const raw = await readBounded(res, MAX_REFUSAL_BYTES);
+  let raw: string | null;
+  try {
+    raw = await readBounded(res, MAX_REFUSAL_BYTES);
+  } catch {
+    // A body that cannot be read (already read, or locked) says nothing, and
+    // the refusal stays the transport's.
+    return null;
+  }
   if (raw === null) return null;
   let detail: unknown = raw;
   try {

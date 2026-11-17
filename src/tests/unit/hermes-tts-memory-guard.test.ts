@@ -89,6 +89,17 @@ describe("speakWithHermes on a refusal from Hermes' speech route", () => {
     expect(await lib.speakWithHermes("hello")).toEqual({ ok: false, code: "cannot_change", status: 502 });
   });
 
+  it("keeps cloud_refused, without throwing, when the refusal's body cannot be read", async () => {
+    const used = answer(400, JSON.stringify({ detail: GUARD_DETAIL }));
+    await used.text();
+    dashboardFetch.mockResolvedValue(used);
+    expect(await lib.speakWithHermes("hello")).toEqual({ ok: false, code: "cloud_refused", status: 502 });
+    const locked = answer(400, JSON.stringify({ detail: GUARD_DETAIL }));
+    locked.body?.getReader();
+    dashboardFetch.mockResolvedValue(locked);
+    expect(await lib.speakWithHermes("hello")).toEqual({ ok: false, code: "cloud_refused", status: 502 });
+  });
+
   it("does not read a refusal body past its bound", async () => {
     dashboardFetch.mockResolvedValue(answer(400, `${"x".repeat(70 * 1024)}${GUARD_DETAIL}`));
     expect(await lib.speakWithHermes("hello")).toEqual({ ok: false, code: "cloud_refused", status: 502 });
