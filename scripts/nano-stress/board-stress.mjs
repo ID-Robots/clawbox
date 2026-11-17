@@ -94,7 +94,9 @@ let OUT = "";
 let cfg = null;
 const T0 = Date.now();
 const rel = () => Date.now() - T0;
-const log = (...a) => console.error(`[${new Date().toISOString().slice(11, 19)}] ${a.join(" ")}`);
+// One line per call: a reply or an error text carrying a newline must not
+// forge a line of its own in the run's log.
+const log = (...a) => console.error(`[${new Date().toISOString().slice(11, 19)}] ${a.join(" ").replace(/[\r\n]+/g, " ")}`);
 
 // ---- the owner's session, signed here (as scripts/nano-tests/lib.sh) ---------
 function ownerCookie() {
@@ -645,9 +647,11 @@ async function stepLong(id) {
   } finally { closeSession(sess); }
 }
 
-function sh(cmd) {
-  return execFileSync("bash", ["-c", cmd], { encoding: "utf8", timeout: 15_000 }).trim();
-}
+// What the tool turns' commands print, worked out here without a shell.
+/** `wc -l < file`: the number of newline characters in it. */
+const lineCount = (file) => String((fs.readFileSync(file, "utf8").match(/\n/g) || []).length);
+/** `ls -1 dir | wc -l`: the entries `ls` lists, dot-files left out. */
+const visibleEntries = (dir) => String(fs.readdirSync(dir).filter((name) => !name.startsWith(".")).length);
 async function stepTool(id) {
   const dir = path.join(cfg.workDir, `tool-${RUN_ID}`);
   fs.mkdirSync(dir, { recursive: true });
@@ -666,8 +670,8 @@ async function stepTool(id) {
       () => new RegExp(`(?:^|[^0-9a-f])${crypto.createHash("sha256").update(fs.readFileSync(notes)).digest("hex").slice(0, 16)}`)],
     ["read", `Read the file ${notes} with a tool and reply with only its contents.`, () => t2],
     ["append", `Append a new line containing ${t5} to ${notes} with a shell command, then run \`wc -l < ${notes}\` and reply with only that number.`,
-      () => { const miss = fileHas(t5)(); return miss || sh(`wc -l < ${JSON.stringify(notes)}`); }],
-    ["count", "Run `ls -1 /usr/bin | wc -l` and reply with only the number it prints.", () => sh("ls -1 /usr/bin | wc -l")],
+      () => { const miss = fileHas(t5)(); return miss || lineCount(notes); }],
+    ["count", "Run `ls -1 /usr/bin | wc -l` and reply with only the number it prints.", () => visibleEntries("/usr/bin")],
     ["stat", `Run \`stat -c %s ${notes}\` and reply with only the number it prints.`, () => String(fs.statSync(notes).size)],
     ["multi", `Create the directory ${dir}/sub, write the text ${t8} into the file ${dir}/sub/a.txt, then run \`grep -rl ${t8} ${dir}\` and reply with only the path(s) it printed.`,
       () => {
@@ -696,7 +700,7 @@ function boardFacts() {
     model: read("/proc/device-tree/model"),
     l4t,
     kernel: read("/proc/sys/kernel/osrelease"),
-    cpus: Number(sh("nproc")) || null,
+    cpus: os.availableParallelism?.() ?? os.cpus().length,
     memTotalMb: mi.MemTotal ? Math.round(mi.MemTotal / 1024) : null,
     swapTotalMb: mi.SwapTotal != null ? Math.round(mi.SwapTotal / 1024) : null,
     node: process.version,

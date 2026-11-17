@@ -2,6 +2,7 @@
 # ClawBox stress run on a nano-lab board (TASK-2500). See docs/nano-stress-test.md.
 #
 #   scripts/nano-stress/run.sh [--results DIR] [--budget-min N] [--strict] <serial> [-- STRESS_OPTION ...]
+#   scripts/nano-stress/run.sh --unpack-to DIR
 #
 # Runs on the lab RUNNER HOST, like scripts/nano-tests: every board command goes
 # through `$NANO_CI ssh <serial>` (scripts/nano-tests/lib.sh), so set
@@ -9,8 +10,10 @@
 #
 #   1. reads which agent runtime the board runs (OpenClaw or Hermes) and waits
 #      for it to be settled;
-#   2. copies board-stress.mjs to a fresh /tmp folder on the board and starts
-#      it DETACHED there (an ssh hiccup during a 30–60 min run must not end it);
+#   2. packs board-stress.mjs and every local module it imports, followed
+#      through their own imports (board-modules.mjs), unpacks them in a fresh
+#      /tmp folder on the board and starts the run DETACHED there (an ssh
+#      hiccup during a 30–60 min run must not end it);
 #   3. polls it, printing its progress lines, until it writes its record;
 #   4. brings the raw record and the board-side log back into DIR and runs
 #      report.mjs: DIR/stress-<runtime>.json and DIR/stress-<runtime>.md;
@@ -19,6 +22,10 @@
 #
 # STRESS_OPTIONs go to board-stress.mjs unchanged, e.g.
 #   -- --ramp 1,2,4,8 --ramp-turns 3 --long-turns 32 --tool-turns 8 --steps idle,ramp,long,tool
+#
+# --unpack-to DIR packs the board side and unpacks it into DIR here, the same
+# way the board does, prints the entry's path inside DIR and exits: the check
+# that what the board gets is complete (src/tests/unit/nano-stress-ship.test.ts).
 #
 # Exit status: 0 when the run finished and its record was summarised; 1 when
 # it did not finish (the budget ran out, it died, it would not start) or its
@@ -32,21 +39,83 @@ RESULTS=
 BUDGET_MIN=150
 STRICT=0
 SERIAL=
+UNPACK_TO=
 while [ $# -gt 0 ]; do
   case "$1" in
     --results) RESULTS=$2; shift 2 ;;
+    --unpack-to) UNPACK_TO=$2; shift 2 ;;
     --budget-min) BUDGET_MIN=$2; shift 2 ;;
     --strict) STRICT=1; shift ;;
     --) shift; break ;;
-    -h|--help) sed -n '2,27p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,35p' "${BASH_SOURCE[0]}"; exit 0 ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
     *) SERIAL=$1; shift ;;
   esac
 done
+# ---- the board side, packed ----------------------------------------------------
+#
+# Everything the board runs travels as ONE base64 argument inside the ONE
+# command string the ssh hop carries (lib.sh `board`), base64-encoded again
+# there. Linux caps a single argument at 128 KiB (MAX_ARG_STRLEN), so the
+# payload — the gzipped tar of every module, base64 — must stay under
+# NANO_STRESS_MAX_PAYLOAD characters: 80000 is ~107 KiB after the second
+# encoding, prelude included, and about 200 KB of source.
+MAX_PAYLOAD=${NANO_STRESS_MAX_PAYLOAD:-80000}
+PAYLOAD=
+ENTRY=
+pack_board_side() {
+  local tgz rc
+  tgz=$(mktemp) || return 1
+  ENTRY=$(node "$HERE/board-modules.mjs" pack "$HERE/board-stress.mjs" "$tgz")
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$ENTRY" ]; then
+    rm -f "$tgz"
+    echo "could not pack the board side (board-modules.mjs exit $rc)" >&2
+    return 1
+  fi
+  PAYLOAD=$(base64 -w0 "$tgz")
+  rm -f "$tgz"
+  if [ -z "$PAYLOAD" ]; then
+    echo "the packed board side is empty" >&2
+    return 1
+  fi
+  if [ "${#PAYLOAD}" -gt "$MAX_PAYLOAD" ]; then
+    echo "the packed board side is ${#PAYLOAD} characters of base64, over the $MAX_PAYLOAD that fit one ssh argument" >&2
+    return 1
+  fi
+  # Pre-flight: unpacked on its own, the entry loads — every module it
+  # imports came along. Loaded, not run: it starts only as the main module, and
+  # the path reaches node in the environment so no argv[1] names it main.
+  local probe
+  probe=$(mktemp -d) || return 1
+  if ! unpack_payload "$probe" "$PAYLOAD" \
+    || ! PROBE_ENTRY="$probe/$ENTRY" node -e 'import(require("node:url").pathToFileURL(process.env.PROBE_ENTRY).href).catch((e) => { console.error(e.message); process.exit(1); })'; then
+    rm -rf -- "$probe"
+    echo "the packed board side does not load on its own (a module it imports was not packed?)" >&2
+    return 1
+  fi
+  rm -rf -- "$probe"
+}
+# unpack_payload DIR PAYLOAD — open the payload into DIR. The ONE way it is
+# opened: run here for --unpack-to, and sent to the board verbatim
+# (`declare -f`) for the real run.
+unpack_payload() {
+  mkdir -p "$1" && printf '%s' "$2" | base64 -d | tar -xzmf - -C "$1"
+}
+
+if [ -n "$UNPACK_TO" ]; then
+  pack_board_side || exit 1
+  unpack_payload "$UNPACK_TO" "$PAYLOAD" || { echo "could not unpack into $UNPACK_TO" >&2; exit 1; }
+  printf '%s\n' "$ENTRY"
+  exit 0
+fi
+
 if [ -z "$SERIAL" ]; then
   echo "usage: $0 [--results DIR] [--budget-min N] [--strict] <serial> [-- STRESS_OPTION ...]" >&2
   exit 2
 fi
+# Packed before the board is touched: a module that cannot ship fails here.
+pack_board_side || exit 1
 case "$BUDGET_MIN" in ''|*[!0-9]*) echo "--budget-min wants whole minutes" >&2; exit 2 ;; esac
 STRESS_ARGS=("$@")
 NANO_SERIAL=$SERIAL
@@ -105,22 +174,18 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-# The script travels inside the ONE command string the ssh hop carries
-# (lib.sh `board`), base64 twice over; Linux caps one argument at 128 KiB.
-if [ "$(wc -c < "$HERE/board-stress.mjs")" -gt 60000 ]; then
-  say "board-stress.mjs is over 60 KB: too big for one ssh argument; copy it with \`\$NANO_CI scp\` instead"
-  exit 1
-fi
+say "board side: $ENTRY and the modules it imports, ${#PAYLOAD} characters packed"
+# From here on the board folder may exist: the EXIT trap cleans it up.
+STARTED=1
 # shellcheck disable=SC2016  # expanded on the board
-started=$(board '
-  dir=$1; shift
-  b64=$1; shift
-  mkdir -p "$dir" && printf "%s" "$b64" | base64 -d > "$dir/stress.mjs" || { echo "could not write $dir"; exit 1; }
-  setsid -f node "$dir/stress.mjs" --out "$dir/raw.json" "$@" </dev/null >"$dir/stress.log" 2>&1
+started=$(board "$(declare -f unpack_payload)"'
+  dir=$1; payload=$2; entry=$3; shift 3
+  unpack_payload "$dir" "$payload" || { echo "could not unpack the run into $dir"; exit 1; }
+  [ -f "$dir/$entry" ] || { echo "$entry is not in the unpacked run"; exit 1; }
+  setsid -f node "$dir/$entry" --out "$dir/raw.json" "$@" </dev/null >"$dir/stress.log" 2>&1
   for _ in $(seq 1 20); do [ -s "$dir/raw.json.pid" ] && break; sleep 0.5; done
   [ -s "$dir/raw.json.pid" ] && echo started || { echo "did not start:"; tail -n 5 "$dir/stress.log"; }
- ' "$BOARD_DIR" "$(base64 -w0 "$HERE/board-stress.mjs")" --runtime "$RUNTIME" "${STRESS_ARGS[@]}")
-STARTED=1
+' "$BOARD_DIR" "$PAYLOAD" "$ENTRY" --runtime "$RUNTIME" "${STRESS_ARGS[@]}")
 if [ "$(printf '%s\n' "$started" | tail -n 1)" != started ]; then
   say "the stress run did not start on the board:"
   printf '%s\n' "$started" | sed 's/^/  /'

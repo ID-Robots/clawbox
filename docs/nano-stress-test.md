@@ -14,8 +14,9 @@ board) with one run on each side.
 
 ## What it does
 
-`scripts/nano-stress/board-stress.mjs` runs ON the board, as the box user, and
-talks to the box the way its desktop chat does:
+`scripts/nano-stress/board-stress.mjs` runs ON the board, as the box user,
+together with the local modules it imports (the Hermes half lives in
+`hermes-chat.mjs`), and talks to the box the way its desktop chat does:
 
 - OpenClaw: the gateway's WebSocket on loopback (`chat.send`, then the `chat`
   and `agent` events of that session), with the token `/setup-api/gateway/ws-config`
@@ -68,11 +69,24 @@ NANO_CI=nano-board scripts/nano-stress/run.sh --results out/ <serial>
 nano-lease release <serial>        # always, also when the run fails
 ```
 
-`run.sh` copies the board script to a fresh `/tmp/clawbox-stress-<stamp>`
-folder on the board, starts it detached (a dropped ssh does not end it), prints
-its progress every 30 s, brings back the raw record and the board-side log, and
-removes the folder. Interrupted, it stops the board side first, which deletes
-its sessions before it exits.
+`run.sh` packs `board-stress.mjs` and every local module it imports, followed
+through their own imports (`scripts/nano-stress/board-modules.mjs`, so a module
+split out later ships without being listed anywhere), checks on the host that
+the packed entry loads on its own, and unpacks it into a fresh
+`/tmp/clawbox-stress-<stamp>` folder on the board. It starts the run there
+detached (a dropped ssh does not end it), prints its progress every 30 s,
+brings back the raw record and the board-side log, and removes the folder.
+Interrupted, it stops the board side first, which deletes its sessions before
+it exits.
+
+The board side may import Node's own modules and local files only: the board
+folder has no `node_modules`, so a package import, an absolute path or an
+`import()` of a computed value is refused on the host before the board is
+touched. The packed modules travel as one argument of the ssh command, so the
+pack (gzipped tar, base64) must stay under 80000 characters
+(`NANO_STRESS_MAX_PAYLOAD`), about 200 KB of source. To see what a board gets
+without one: `scripts/nano-stress/run.sh --unpack-to DIR` packs and unpacks it
+into DIR the same way and prints the entry's path there.
 
 Options after `--` go to the board script unchanged:
 
