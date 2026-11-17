@@ -27,7 +27,11 @@ const DRAFT = {
   attachments: [{ name: "offer.pdf", size: 20480 }],
 };
 
-type Answer = { status: number; body: Record<string, unknown> };
+/**
+ * `lost`: the request fails with no answer at all, as when the connection
+ * drops. `wait`: the answer is held until it settles.
+ */
+type Answer = { status: number; body: Record<string, unknown>; lost?: true; wait?: Promise<void> };
 let cardAnswers: Answer[];
 let decideAnswers: Answer[];
 let calls: { url: string; body: Record<string, unknown> }[];
@@ -44,6 +48,8 @@ beforeEach(() => {
       calls.push({ url, body });
       const queue = url === CARD_ROUTE ? cardAnswers : url === DECIDE_ROUTE ? decideAnswers : [];
       const next = queue.length > 1 ? queue.shift()! : queue[0] ?? { status: 404, body: {} };
+      if (next.wait) await next.wait;
+      if (next.lost) throw new TypeError("Failed to fetch");
       return new Response(JSON.stringify(next.body), { status: next.status, headers: { "content-type": "application/json" } });
     }),
   );
@@ -161,10 +167,164 @@ describe("EmailDraftCard", () => {
       await waitFor(() => expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.error.unavailable"));
       expect(sent).toEqual([]);
       expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).not.toBe("revised");
+      // Still on the card, read-only, with nothing to press until it reopens.
+      const kept = screen.getByTestId("chat-email-draft-change") as HTMLInputElement;
+      expect(kept.value).toBe("shorter");
+      expect(kept.readOnly).toBe(true);
+      expect(screen.queryByTestId("chat-email-draft-change-submit")).toBeNull();
+      fireEvent.change(kept, { target: { value: "longer" } });
+      fireEvent.submit(kept.closest("form")!);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(calls.filter((c) => c.url === DECIDE_ROUTE)).toHaveLength(1);
+      // A look that finds the card open gives the words back to edit and send.
+      cardAnswers = [{ status: 200, body: { state: "open", token: "tok-2", expiresAt: 1, draft: DRAFT } }];
+      fireEvent.click(screen.getByTestId("chat-email-draft-reload"));
+      await screen.findByTestId("chat-email-draft-send");
+      const reopened = screen.getByTestId("chat-email-draft-change") as HTMLInputElement;
+      expect(reopened.value).toBe("shorter");
+      expect(reopened.readOnly).toBe(false);
+      expect(sent).toEqual([]);
     } finally {
       window.removeEventListener(CHAT_MESSAGE_EVENT, listener);
     }
   });
+
+  it("keeps the change request on a card the server refused for good, read-only", async () => {
+    decideAnswers = [{ status: 409, body: { kind: "reused", state: "kept" } }];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    fireEvent.change(await screen.findByTestId("chat-email-draft-change"), { target: { value: "add the price list" } });
+    fireEvent.click(screen.getByTestId("chat-email-draft-change-submit"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.error.reused"));
+    const kept = screen.getByTestId("chat-email-draft-change") as HTMLInputElement;
+    expect(kept.value).toBe("add the price list");
+    expect(kept.readOnly).toBe(true);
+  });
+
+  it("a change request whose answer was lost goes to the assistant once a look finds the card closed as revised", async () => {
+    const sent: string[] = [];
+    const listener = (e: Event) => sent.push((e as CustomEvent<ChatMessageDetail>).detail.text);
+    window.addEventListener(CHAT_MESSAGE_EVENT, listener);
+    try {
+      decideAnswers = [{ status: 0, body: {}, lost: true }];
+      render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+      fireEvent.change(await screen.findByTestId("chat-email-draft-change"), { target: { value: "shorter" } });
+      fireEvent.click(screen.getByTestId("chat-email-draft-change-submit"));
+      await waitFor(() => expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.error.network"));
+      expect(sent).toEqual([]);
+      expect((screen.getByTestId("chat-email-draft-change") as HTMLInputElement).value).toBe("shorter");
+      cardAnswers = [{ status: 200, body: { state: "revised", decidedAt: 1, draft: DRAFT } }];
+      fireEvent.click(screen.getByTestId("chat-email-draft-reload"));
+      await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("revised"));
+      expect(sent).toEqual(["chat.emailDraft.reviseMessage subject=Offer for Acme id=AAMk-1= text=shorter"]);
+      expect(screen.queryByTestId("chat-email-draft-change")).toBeNull();
+    } finally {
+      window.removeEventListener(CHAT_MESSAGE_EVENT, listener);
+    }
+  });
+
+  it("never says nothing was sent when a Send's answer was lost: unknown, then what ClawBox recorded", async () => {
+    let answerLook!: () => void;
+    decideAnswers = [{ status: 0, body: {}, lost: true }];
+    cardAnswers = [
+      { status: 200, body: { state: "open", token: "tok-1", expiresAt: 1, draft: DRAFT } },
+      { status: 200, body: { state: "sent", decidedAt: 1 }, wait: new Promise<void>((resolve) => { answerLook = resolve; }) },
+    ];
+    const statuses: string[] = [];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    const status = await screen.findByTestId("chat-email-draft-status");
+    const observer = new MutationObserver(() => statuses.push(status.textContent ?? ""));
+    observer.observe(status, { childList: true, characterData: true, subtree: true });
+    fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
+    // While ClawBox is asked: unknown, never "nothing was sent".
+    await waitFor(() => expect(status.textContent).toBe("chat.emailDraft.sendUnknownChecking"));
+    expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("send_unknown_checking");
+    expect(screen.queryByTestId("chat-email-draft-reload")).toBeNull();
+    answerLook();
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("sent"));
+    observer.disconnect();
+    expect(statuses.some((text) => /nothing|network|unavailable/i.test(text))).toBe(false);
+    // The check is a plain look, never a reopen.
+    expect(calls.at(-1)).toEqual({ url: CARD_ROUTE, body: { draftId: "AAMk-1=" } });
+    expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.sent");
+  });
+
+  it("reads a Send answered by something other than ClawBox (a proxy's error page) as unknown too", async () => {
+    decideAnswers = [{ status: 502, body: {} }];
+    cardAnswers = [
+      { status: 200, body: { state: "open", token: "tok-1", expiresAt: 1, draft: DRAFT } },
+      { status: 200, body: { state: "uncertain", decidedAt: 1 } },
+    ];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("uncertain"));
+    expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.error.sendUncertain");
+    expect(screen.getByTestId("chat-email-draft-reload").textContent).toBe("chat.emailDraft.reviewAgain");
+  });
+
+  it("stays unknown while ClawBox cannot be asked, and Check again asks it", async () => {
+    decideAnswers = [{ status: 0, body: {}, lost: true }];
+    cardAnswers = [
+      { status: 200, body: { state: "open", token: "tok-1", expiresAt: 1, draft: DRAFT } },
+      { status: 0, body: {}, lost: true },
+      { status: 200, body: { state: "open", token: "tok-1", expiresAt: 1, draft: DRAFT } },
+    ];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("send_unknown"));
+    expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.sendUnknown");
+    expect(screen.queryByTestId("chat-email-draft-send")).toBeNull();
+    // The draft is still shown while its fate is unknown.
+    expect(screen.getByTestId("chat-email-draft-body").textContent).toBe(DRAFT.body);
+    const check = screen.getByTestId("chat-email-draft-reload");
+    expect(check.textContent).toBe("chat.emailDraft.checkAgain");
+    fireEvent.click(check);
+    // ClawBox never claimed that Send: the card is offered again, and says why.
+    await screen.findByTestId("chat-email-draft-send");
+    expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.sendNotRecorded");
+    expect(calls.filter((c) => c.url === CARD_ROUTE).map((c) => c.body)).toEqual([
+      { draftId: "AAMk-1=" }, { draftId: "AAMk-1=" }, { draftId: "AAMk-1=" },
+    ]);
+  });
+
+  it("a lost Send for a draft that is no longer in the mailbox says it was sent or deleted", async () => {
+    decideAnswers = [{ status: 0, body: {}, lost: true }];
+    cardAnswers = [
+      { status: 200, body: { state: "open", token: "tok-1", expiresAt: 1, draft: DRAFT } },
+      { status: 404, body: { kind: "gone" } },
+    ];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.error.gone"));
+    expect(screen.queryByTestId("chat-email-draft-send")).toBeNull();
+  });
+
+  it("a Send the server answered as uncertain settles as uncertain, with Review again", async () => {
+    decideAnswers = [{ status: 502, body: { kind: "send_uncertain" } }];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("uncertain"));
+    expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.error.sendUncertain");
+    cardAnswers = [{ status: 200, body: { state: "open", token: "tok-3", expiresAt: 1, draft: DRAFT } }];
+    fireEvent.click(screen.getByTestId("chat-email-draft-reload"));
+    await screen.findByTestId("chat-email-draft-send");
+    expect(calls.at(-1)).toEqual({ url: CARD_ROUTE, body: { draftId: "AAMk-1=", reopen: true } });
+  });
+
+  for (const [state, shown, button] of [
+    ["sending", "chat.emailDraft.sending", "chat.emailDraft.reload"],
+    ["uncertain", "chat.emailDraft.error.sendUncertain", "chat.emailDraft.reviewAgain"],
+    ["sent", "chat.emailDraft.error.alreadySent", null],
+  ] as const) {
+    it(`shows another card's Send of the same draft as the server reports it: ${state}`, async () => {
+      decideAnswers = [{ status: 409, body: { kind: "reused", state } }];
+      render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+      fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
+      await waitFor(() => expect(screen.getByTestId("chat-email-draft-status").textContent).toBe(shown));
+      expect(screen.queryByTestId("chat-email-draft-send")).toBeNull();
+      if (button) expect(screen.getByTestId("chat-email-draft-reload").textContent).toBe(button);
+      else expect(screen.queryByTestId("chat-email-draft-reload")).toBeNull();
+    });
+  }
 
   it("shows the sender, where replies go, and a warning for hidden characters", async () => {
     cardAnswers = [{ status: 200, body: { state: "open", token: "t", expiresAt: 1, draft: {

@@ -78,10 +78,39 @@ const SETTLED: readonly string[] = ['sent', 'kept', 'revised', 'sending', 'uncer
 
 type Phase =
   | { kind: 'loading' }
-  | { kind: 'open'; draft: EmailDraftView; token: string; busy: Action | null }
+  // `notice`: a sentence shown instead of the usual "nothing is sent until…",
+  // e.g. why a card whose Send got no answer is offered again.
+  | { kind: 'open'; draft: EmailDraftView; token: string; busy: Action | null; notice?: string }
   | { kind: 'settled'; state: Settled; draft: EmailDraftView | null }
   | { kind: 'refused'; reason: string; draft: EmailDraftView | null }
   | { kind: 'failed'; reason: string }
+  // A Send whose answer never arrived: it may have gone. `checking` while the
+  // card asks ClawBox what it recorded.
+  | { kind: 'unknown'; draft: EmailDraftView | null; checking: boolean }
+
+type Answer = { status: number; json: Record<string, unknown> }
+
+/** The card route's answer as a phase, when it is one: an open card or a settled state. */
+function cardPhase({ status, json }: Answer): Extract<Phase, { kind: 'open' | 'settled' }> | null {
+  const draft = isDraftView(json.draft) ? json.draft : null
+  if (status === 200 && json.state === 'open' && typeof json.token === 'string' && draft) {
+    return { kind: 'open', draft, token: json.token, busy: null }
+  }
+  if (status === 200 && typeof json.state === 'string' && SETTLED.includes(json.state)) {
+    return { kind: 'settled', state: json.state as Settled, draft }
+  }
+  return null
+}
+
+/**
+ * True when a decide answer is not ClawBox's own word on the card: no answer
+ * at all (the connection dropped), or one without a refusal kind (a proxy's
+ * error page, a request that crashed). For a Send that says nothing about the
+ * mail — it may have gone.
+ */
+function answerLost(answer: Answer | null): boolean {
+  return answer === null || (answer.status !== 200 && typeof answer.json.kind !== 'string')
+}
 
 /** The sentence for a refusal kind the server (or the network) answered. */
 export function refusalKey(kind: string, state?: unknown): string {
@@ -168,9 +197,19 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
     return () => { alive.current = false }
   }, [])
 
+  // The words of a "Tell me what to change" whose answer never arrived. The
+  // server may have closed the card as revised all the same; if a later look
+  // says so, the words go to the assistant then, once — never before the
+  // server has closed the card.
+  const lostRevision = useRef<string | null>(null)
+  // Read through a ref: `load` runs on mount from an effect keyed on it, and
+  // a parent's `t` that is a new function each render must not reload the card.
+  const tRef = useRef(t)
+  useEffect(() => { tRef.current = t }, [t])
+
   const load = useCallback(async (reopen: boolean) => {
     setPhase({ kind: 'loading' })
-    let answer: { status: number; json: Record<string, unknown> }
+    let answer: Answer
     try {
       answer = await post(CARD_ROUTE, reopen ? { draftId, reopen: true } : { draftId })
     } catch {
@@ -178,32 +217,67 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
       return
     }
     if (!alive.current) return
-    const { status, json } = answer
-    const draft = isDraftView(json.draft) ? json.draft : null
-    if (status === 200 && json.state === 'open' && typeof json.token === 'string' && draft) {
-      setPhase({ kind: 'open', draft, token: json.token, busy: null })
-    } else if (status === 200 && typeof json.state === 'string' && SETTLED.includes(json.state)) {
-      setPhase({ kind: 'settled', state: json.state as Settled, draft })
-    } else {
-      setPhase({ kind: 'failed', reason: typeof json.kind === 'string' ? json.kind : 'unavailable' })
+    const next = cardPhase(answer)
+    if (next?.kind === 'settled' && next.state === 'revised' && next.draft && lostRevision.current !== null) {
+      dispatchChatMessage(revisionMessage(tRef.current, next.draft, lostRevision.current))
+      setChange('')
     }
+    if (next) lostRevision.current = null
+    setPhase(next ?? { kind: 'failed', reason: typeof answer.json.kind === 'string' ? answer.json.kind : 'unavailable' })
   }, [draftId])
 
   useEffect(() => { void load(false) }, [load])
+
+  /**
+   * After a Send whose answer never arrived: what ClawBox RECORDED for the
+   * draft, by a plain look. The card never says "nothing was sent" here — until
+   * a look answers, the outcome is unknown, and the person is told to check
+   * the Sent folder. A look that finds the card still open means ClawBox never
+   * claimed that Send: offering it again is safe, since a second Send of one
+   * draft is refused while another is running or has gone
+   * (mail-draft-approval.ts `sendBlocker`).
+   */
+  const recheck = useCallback(async (draft: EmailDraftView | null) => {
+    setPhase({ kind: 'unknown', draft, checking: true })
+    let answer: Answer | null = null
+    try {
+      answer = await post(CARD_ROUTE, { draftId })
+    } catch {
+      answer = null
+    }
+    if (!alive.current) return
+    const next = answer && cardPhase(answer)
+    if (next?.kind === 'open') {
+      setPhase({ ...next, notice: 'chat.emailDraft.sendNotRecorded' })
+    } else if (next) {
+      setPhase(next)
+    } else if (answer?.json.kind === 'gone') {
+      // No longer in the mailbox: sent or deleted, and the card says exactly that.
+      setPhase({ kind: 'refused', reason: 'gone', draft })
+    } else {
+      setPhase({ kind: 'unknown', draft, checking: false })
+    }
+  }, [draftId])
 
   const decide = useCallback(async (action: Action) => {
     if (phase.kind !== 'open' || phase.busy) return
     const { draft, token } = phase
     const changeText = change.trim()
     if (action === 'revise' && !changeText) return
-    setPhase({ ...phase, busy: action })
-    let answer: { status: number; json: Record<string, unknown> } | null = null
+    setPhase({ kind: 'open', draft, token, busy: action })
+    let answer: Answer | null = null
     try {
       answer = await post(DECIDE_ROUTE, { token, action })
     } catch {
       answer = null
     }
     if (!alive.current) return
+
+    if (action === 'send' && answerLost(answer)) {
+      void recheck(draft)
+      return
+    }
+    lostRevision.current = action === 'revise' && answerLost(answer) ? changeText : null
     const kind = answer === null ? 'network' : answer.status === 200 ? null : (typeof answer.json.kind === 'string' ? answer.json.kind : 'unavailable')
 
     if (kind === null) {
@@ -217,14 +291,29 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
       setPhase({ kind: 'settled', state: action === 'send' ? 'sent' : action === 'keep' ? 'kept' : 'revised', draft })
       return
     }
-    const reason = kind ?? 'unavailable'
-    setPhase({ kind: 'refused', reason: reason === 'reused' && answer?.json.state === 'sent' ? 'already_sent' : reason, draft })
-  }, [phase, change, t])
+    // What the server says became of this draft's Send — this card's or
+    // another card's for the same draft — shown as that state, with its own
+    // way on: a Send in flight can be looked at again, and one whose answer
+    // was lost offers "Review again" once the person has checked Sent.
+    const state = answer?.json.state
+    if (kind === 'send_uncertain' || (kind === 'reused' && state === 'uncertain')) {
+      setPhase({ kind: 'settled', state: 'uncertain', draft })
+      return
+    }
+    if (kind === 'reused' && state === 'sending') {
+      setPhase({ kind: 'settled', state: 'sending', draft })
+      return
+    }
+    setPhase({ kind: 'refused', reason: kind === 'reused' && state === 'sent' ? 'already_sent' : kind, draft })
+  }, [phase, change, t, recheck])
 
-  const draft = phase.kind === 'open' || phase.kind === 'settled' || phase.kind === 'refused' ? phase.draft : null
+  const draft = phase.kind === 'open' || phase.kind === 'settled' || phase.kind === 'refused' || phase.kind === 'unknown' ? phase.draft : null
   const busy = phase.kind === 'open' ? phase.busy : null
   const open = phase.kind === 'open'
-  const settledLook = phase.kind === 'settled' || phase.kind === 'refused' || phase.kind === 'failed'
+  const settledLook = phase.kind === 'settled' || phase.kind === 'refused' || phase.kind === 'failed' || phase.kind === 'unknown'
+  // The change request stays on the card, read-only, when the card could not
+  // be closed — so the person sees it and can ask again once the card reopens.
+  const keptChange = (phase.kind === 'refused' || phase.kind === 'failed') && change.trim() !== ''
 
   const longBody = draft !== null && draft.body.length > BODY_CLAMP_CHARS
   const shownBody = draft === null ? '' : longBody && !expanded ? `${draft.body.slice(0, BODY_CLAMP_CHARS).trimEnd()}…` : draft.body
@@ -232,22 +321,27 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
   const statusText = (() => {
     switch (phase.kind) {
       case 'loading': return t('chat.emailDraft.loading')
-      case 'open': return busy === 'send' ? t('chat.emailDraft.sending') : busy ? t('chat.emailDraft.saving') : t('chat.emailDraft.onlyYou')
+      case 'open': return busy === 'send' ? t('chat.emailDraft.sending') : busy ? t('chat.emailDraft.saving') : t(phase.notice ?? 'chat.emailDraft.onlyYou')
       case 'settled':
         return phase.state === 'uncertain' ? t('chat.emailDraft.error.sendUncertain')
           : phase.state === 'sending' ? t('chat.emailDraft.sending')
           : t(`chat.emailDraft.${phase.state}`)
       case 'refused': return phase.reason === 'already_sent' ? t('chat.emailDraft.error.alreadySent') : t(refusalKey(phase.reason))
       case 'failed': return t(refusalKey(phase.reason))
+      case 'unknown': return phase.checking ? t('chat.emailDraft.sendUnknownChecking') : t('chat.emailDraft.sendUnknown')
     }
   })()
-  const isError = phase.kind === 'refused' || phase.kind === 'failed' || (phase.kind === 'settled' && phase.state === 'uncertain')
+  const isError = phase.kind === 'refused' || phase.kind === 'failed' || phase.kind === 'unknown'
+    || (phase.kind === 'settled' && phase.state === 'uncertain')
+    || (phase.kind === 'open' && phase.notice !== undefined && busy === null)
   // A body the server could not show whole is not offered for Send: the person
   // would approve a tail they never saw.
   const tooLong = draft?.bodyTruncated === true
   const reloadable = (phase.kind === 'refused' || phase.kind === 'failed') && RELOADABLE.has(phase.reason)
   const reviewable = phase.kind === 'settled' && phase.state !== 'sent'
   const reviewLabel = phase.kind === 'settled' && phase.state === 'sending' ? t('chat.emailDraft.reload') : t('chat.emailDraft.reviewAgain')
+  // A Send with no answer: ask ClawBox again what it recorded (a plain look).
+  const checkable = phase.kind === 'unknown' && !phase.checking
 
   const button = (primary: boolean, disabled: boolean): React.CSSProperties => ({
     padding: '6px 14px',
@@ -273,7 +367,12 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
     <section
       data-testid="chat-email-draft"
       data-draft-id={draftId}
-      data-state={phase.kind === 'settled' ? phase.state : phase.kind === 'refused' || phase.kind === 'failed' ? phase.reason : phase.kind}
+      data-state={
+        phase.kind === 'settled' ? phase.state
+          : phase.kind === 'refused' || phase.kind === 'failed' ? phase.reason
+            : phase.kind === 'unknown' ? (phase.checking ? 'send_unknown_checking' : 'send_unknown')
+              : phase.kind
+      }
       aria-labelledby={`${idPrefix}-title`}
       style={{
         alignSelf: 'flex-start',
@@ -371,55 +470,61 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
       )}
 
       {open && (
-        <>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            <button
-              type="button"
-              data-testid="chat-email-draft-send"
-              aria-disabled={busy !== null || tooLong}
-              onClick={() => { if (!tooLong) void decide('send') }}
-              style={button(true, busy !== null || tooLong)}
-            >
-              {busy === 'send' ? t('chat.emailDraft.sending') : t('chat.emailDraft.send')}
-            </button>
-            <button
-              type="button"
-              data-testid="chat-email-draft-keep"
-              aria-disabled={busy !== null}
-              onClick={() => { void decide('keep') }}
-              style={button(false, busy !== null)}
-            >
-              {t('chat.emailDraft.keep')}
-            </button>
-          </div>
-          <form
-            onSubmit={(e) => { e.preventDefault(); void decide('revise') }}
-            style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <button
+            type="button"
+            data-testid="chat-email-draft-send"
+            aria-disabled={busy !== null || tooLong}
+            onClick={() => { if (!tooLong) void decide('send') }}
+            style={button(true, busy !== null || tooLong)}
           >
-            <label htmlFor={`${idPrefix}-change`} style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>
-              {t('chat.emailDraft.changePlaceholder')}
-            </label>
-            <input
-              id={`${idPrefix}-change`}
-              data-testid="chat-email-draft-change"
-              type="text"
-              value={change}
-              maxLength={MAX_CHANGE_CHARS}
-              placeholder={t('chat.emailDraft.changePlaceholder')}
-              onChange={(e) => setChange(e.target.value)}
-              disabled={busy !== null}
-              style={{
-                flex: '1 1 200px',
-                minWidth: 0,
-                padding: '6px 10px',
-                borderRadius: 8,
-                background: INPUT_BG,
-                border: CHOICE_BORDER,
-                color: 'rgba(255,255,255,0.92)',
-                fontSize: 12.5,
-                fontFamily: 'inherit',
-              }}
-            />
+            {busy === 'send' ? t('chat.emailDraft.sending') : t('chat.emailDraft.send')}
+          </button>
+          <button
+            type="button"
+            data-testid="chat-email-draft-keep"
+            aria-disabled={busy !== null}
+            onClick={() => { void decide('keep') }}
+            style={button(false, busy !== null)}
+          >
+            {t('chat.emailDraft.keep')}
+          </button>
+        </div>
+      )}
+      {(open || keptChange) && (
+        <form
+          // decide() answers only an OPEN card: a kept change request is
+          // shown, never sent, until a look reopens the card.
+          onSubmit={(e) => { e.preventDefault(); if (open) void decide('revise') }}
+          style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}
+        >
+          <label htmlFor={`${idPrefix}-change`} style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>
+            {t('chat.emailDraft.changePlaceholder')}
+          </label>
+          <input
+            id={`${idPrefix}-change`}
+            data-testid="chat-email-draft-change"
+            type="text"
+            value={change}
+            maxLength={MAX_CHANGE_CHARS}
+            placeholder={t('chat.emailDraft.changePlaceholder')}
+            onChange={(e) => { if (open) setChange(e.target.value) }}
+            disabled={busy !== null}
+            readOnly={!open}
+            aria-readonly={!open}
+            style={{
+              flex: '1 1 200px',
+              minWidth: 0,
+              padding: '6px 10px',
+              borderRadius: 8,
+              background: INPUT_BG,
+              border: CHOICE_BORDER,
+              color: 'rgba(255,255,255,0.92)',
+              fontSize: 12.5,
+              fontFamily: 'inherit',
+            }}
+          />
+          {open && (
             <button
               type="submit"
               data-testid="chat-email-draft-change-submit"
@@ -428,8 +533,8 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
             >
               {t('chat.emailDraft.changeSubmit')}
             </button>
-          </form>
-        </>
+          )}
+        </form>
       )}
 
       <div
@@ -441,19 +546,25 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
         {statusText}
       </div>
 
-      {(reloadable || reviewable) && (
+      {(reloadable || reviewable || checkable) && (
         <div>
           <button
             type="button"
             data-testid="chat-email-draft-reload"
             // Asking again about an ANSWERED draft is the explicit reopen; a
-            // refusal's "current version" and a retry are a plain look.
-            onClick={() => { void load(reviewable && !(phase.kind === 'settled' && phase.state === 'sending')) }}
+            // refusal's "current version", a retry and a check after a Send
+            // with no answer are a plain look.
+            onClick={() => {
+              if (phase.kind === 'unknown') void recheck(phase.draft)
+              else void load(reviewable && !(phase.kind === 'settled' && phase.state === 'sending'))
+            }}
             style={button(false, false)}
           >
-            {reviewable
-              ? reviewLabel
-              : phase.kind === 'failed' ? t('chat.emailDraft.retry') : t('chat.emailDraft.reload')}
+            {checkable
+              ? t('chat.emailDraft.checkAgain')
+              : reviewable
+                ? reviewLabel
+                : phase.kind === 'failed' ? t('chat.emailDraft.retry') : t('chat.emailDraft.reload')}
           </button>
         </div>
       )}
