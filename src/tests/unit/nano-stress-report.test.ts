@@ -289,4 +289,18 @@ describe("a step a stop cut short", () => {
     ]);
     expect(renderMarkdown([report])).toContain("## OpenClaw (incomplete)");
   });
+
+  it("does not count a recall question the stop cut off as a missed recall", () => {
+    const r = raw();
+    r.final = false;
+    r.steps = [{ ...r.steps[2], healthyAfter: true, failure: "the run was stopped (SIGTERM) during the step" }];
+    r.turns = [
+      turn("long", 1, 1000, { kind: "remember" }),
+      turn("long", 8, 2000, { kind: "recall" }),
+      turn("long", 16, null, { kind: "recall", ok: false, error: { kind: "stopped", message: "the run was stopped" } }),
+    ];
+    const report = summarizeRaw(r);
+    expect(report.steps[0].long?.recall).toEqual({ asked: 1, ok: 1 });
+    expect(report.findings.filter((f) => f.includes("recalled"))).toEqual([]);
+  });
 });

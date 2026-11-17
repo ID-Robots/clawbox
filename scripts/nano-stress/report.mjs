@@ -132,7 +132,9 @@ export function summarizeStep(step, raw) {
   };
   if (step.kind === "long") {
     const chat = turns.filter((t) => t.kind === "chat" && answeredTurn(t));
-    const recall = turns.filter((t) => t.kind === "recall");
+    // A recall question a stop cut off was never answered either way: it is
+    // not a missed recall.
+    const recall = turns.filter((t) => t.kind === "recall" && t.error?.kind !== "stopped");
     out.long = {
       firstFiveP50Ms: percentile(chat.slice(0, 5).map((t) => t.latencyMs), 50),
       lastFiveP50Ms: percentile(chat.slice(-5).map((t) => t.latencyMs), 50),
