@@ -1247,6 +1247,9 @@ async function withConfigMutationRetry(
  */
 export type ToolModelSlot = string | { primary?: string; fallbacks?: string[] };
 
+/** How much of a child's stdout `failureDetail: "both"` holds on to. */
+const FAILURE_OUTPUT_KEEP_CHARS = 64 * 1024;
+
 export interface SpawnOpenclawOptions {
   /** Per-call timeout in ms. Default {@link DEFAULT_SPAWN_TIMEOUT_MS}. */
   timeoutMs?: number;
@@ -1358,6 +1361,12 @@ function spawnOpenclawOnce(args: string[], options: SpawnOpenclawOptions = {}): 
     let stderr = "";
     child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
+      // `failureDetail: "both"` keeps stdout for a failure message only: the
+      // END of it, which is where a verdict is, and bounded — doctor's can
+      // run to megabytes and is read for as long as its 180 s budget.
+      if (failureDetail === "both" && stdout.length > FAILURE_OUTPUT_KEEP_CHARS) {
+        stdout = stdout.slice(stdout.length - FAILURE_OUTPUT_KEEP_CHARS);
+      }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();

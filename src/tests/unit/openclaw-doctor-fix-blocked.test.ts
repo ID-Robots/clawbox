@@ -136,6 +136,18 @@ describe("runOpenclawDoctorFix and the legacy exec-approvals blocker", () => {
     expect(stdio?.[1]).toBe("pipe");
   });
 
+  it("keeps only the END of a very long stdout, so a doctor's output cannot grow without bound", async () => {
+    const verdict = "Doctor finished, but config fixes were not applied.";
+    mockSpawn.mockImplementation(() => failingChild("", `${"banner line\n".repeat(60_000)}${verdict}\n`));
+
+    const failure = await openclawConfig.runOpenclawDoctorFix().catch((err: Error) => err);
+
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message.length).toBeLessThanOrEqual(64 * 1024 + 1);
+    expect(message.trimEnd().endsWith(verdict)).toBe(true);
+  });
+
   it("still throws every other doctor failure", async () => {
     // The invariant the change must not remove: a doctor that genuinely could
     // not migrate leaves a credential store OpenClaw 2 refuses to hydrate, and

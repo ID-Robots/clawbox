@@ -5558,6 +5558,69 @@ describe("POST /setup-api/ai-models/configure", () => {
           expect(body.code).toBe("credential_not_stored");
         });
 
+        it("goes on when the second run answers with a refusal it names — the first run's import still stands", async () => {
+          mockDoctor.mockReset();
+          mockDoctor
+            .mockRejectedValueOnce(new Error("Doctor finished, but config fixes were not applied."))
+            .mockResolvedValueOnce("blocked-by-service-ownership");
+          mockRead.mockImplementation(() => holding());
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(200);
+          expect(mockDoctor).toHaveBeenCalledTimes(2);
+          expect(rolledBack()).toBe(false);
+          expect(primaryWasWritten()).toBe(true);
+        });
+
+        it("reads the store and writes nothing when the second run found the gateway running", async () => {
+          // The reviewer's case: a second run that finds the gateway up (another
+          // surface restarted it) is the collision this fix is about. A store
+          // that already holds the sign-in passes…
+          mockDoctor.mockReset();
+          mockDoctor
+            .mockRejectedValueOnce(new Error("Doctor finished, but config fixes were not applied."))
+            .mockResolvedValueOnce("gateway-not-stopped");
+          mockRead.mockImplementation(() => holding());
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(200);
+          expect(mockPut).not.toHaveBeenCalled();
+          expect(rolledBack()).toBe(false);
+        });
+
+        it("…and rolls back WITHOUT writing when it does not, because nothing may be written beside a running gateway", async () => {
+          mockDoctor.mockReset();
+          mockDoctor
+            .mockRejectedValueOnce(new Error("Doctor finished, but config fixes were not applied."))
+            .mockResolvedValueOnce("gateway-not-stopped");
+          mockRead.mockImplementation(() => holding(FENCE));
+          mockPut.mockReturnValue({ ok: true, store: "shared" });
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          const body = await res.json();
+          const said = lines(error);
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(502);
+          expect(body.error).toMatch(/busy restarting/i);
+          expect(mockPut).not.toHaveBeenCalled();
+          expect(rolledBack()).toBe(true);
+          expect(said.some((line) => line.includes("the gateway is not stopped: rolling the sign-in back"))).toBe(true);
+        });
+
         it("still rolls back for a lane whose store this gate has not been measured on (Google's)", async () => {
           const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
           const error = vi.spyOn(console, "error").mockImplementation(() => {});

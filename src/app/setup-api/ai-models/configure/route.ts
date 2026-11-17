@@ -3711,6 +3711,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // gone) and a second run did not change that: the gate below is then the
       // judge of whether the sign-in landed, and "I could not look" is a no.
       let doctorFailedAfterImport = false;
+      const doctorStartedAt = Date.now();
       // The rollback, once, for every way into it: the doctor's own failure
       // below, and the gate after it when doctor failed and the store cannot
       // vouch for the sign-in. It archives the legacy file this request wrote
@@ -3802,7 +3803,10 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         //      sign-in is in it, and replace what is there when it is not.
         //   3. Neither: roll back, as before.
         let failure: unknown = doctorErr;
-        if (doctorBlockedBy === null && doctorFailureIsRetryable(doctorErr)) {
+        // A first run that was REFUSED (a named outcome) never imported anything,
+        // so a missing file is no sign of one; a first run that THREW may have.
+        const firstRunRefused = doctorBlockedBy !== null;
+        if (doctorBlockedBy === null && doctorFailureIsRetryable(doctorErr, Date.now() - doctorStartedAt)) {
           console.warn("[configure] running doctor --fix once more after its first run failed");
           await pauseBeforeDoctorRetry();
           try {
@@ -3825,7 +3829,10 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             );
           }
         }
-        if (failure !== null && doctorBlockedBy === null && storeChecked) {
+        if (failure !== null && storeChecked && !firstRunRefused) {
+          // Whatever the SECOND run answered, even a refusal it named: the file
+          // is gone because the FIRST run imported it, and the credential is
+          // then in the store whatever that run exited with.
           // ENOENT only: a file that cannot be asked about (EACCES) is no proof of anything.
           let legacyFileGone = false;
           try {
@@ -3945,6 +3952,17 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         let cannotLook: "no-store" | "unreadable" | null = null;
         if (stored.kind === "no-store" || stored.kind === "unreadable") {
           cannotLook = stored.kind;
+        } else if (!landed(stored) && doctorFailedAfterImport && gateway.gatewayBusy) {
+          // The second doctor run found the gateway up or still stopping, so a
+          // write to its store now races the flush the module's own rule 1
+          // warns of ("THE GATEWAY MUST BE STOPPED when the write runs"). Read
+          // only: the store does not hold the sign-in, and nothing is written
+          // beside a running gateway.
+          console.error(
+            `[configure] the ${config.profileKey} sign-in is not in the gateway's auth store`
+            + ` (${held(stored)}), doctor --fix had failed and the gateway is not stopped: rolling the sign-in back`,
+          );
+          return rollBackSignIn();
         } else if (!landed(stored)) {
           // What the migration itself stores for this profile: no `id` (the
           // id_token), which it drops. Claude's bundle never had one.

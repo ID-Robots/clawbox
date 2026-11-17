@@ -69,26 +69,39 @@ const DETERMINISTIC_DOCTOR_FAILURE_RE =
   /is not parseable and cannot be repaired automatically/i;
 
 /**
+ * A first run that took longer than this before it failed was not a quick
+ * collision, and a second one would double a wait the owner is already past: the
+ * answer is meant to reach the page inside the tunnel's ~100 s (see
+ * `runOpenclawDoctorFix`), and a run that long has used that. The gate on the
+ * gateway's store still decides what the failure meant.
+ */
+export const DOCTOR_RETRY_MAX_FIRST_RUN_MS = 100_000;
+
+/**
  * Is a second `doctor --fix` worth its cost (a CLI cold start and whatever
  * doctor then does, a minute or more on a Jetson)?
  *
  * Yes for anything that is plausibly a collision or a leftover: a refused
  * config write, a locked store, a half-finished earlier run whose receipts the
  * next run finalises. No when:
- *   - the run was KILLED at its budget — a second one would double a wait that
- *     already ended in failure, and the next sign-in's doctor finalises what
- *     the first left; and
+ *   - the run was KILLED at its budget, or waited out the core's maintenance
+ *     window, or took longer than {@link DOCTOR_RETRY_MAX_FIRST_RUN_MS} to fail
+ *     — a second one would double a wait that already ended in failure, and the
+ *     next sign-in's doctor finalises what the first left; and
  *   - the CLI could not be run at all (ENOENT/EACCES on the binary), or doctor
  *     read a config that cannot be parsed — the same thing happens again.
  * The named refusals (legacy exec approvals, service ownership, a gateway that
  * is not down) never get here: they are outcomes, not errors, and the route
  * does not retry those either.
  */
-export function doctorFailureIsRetryable(err: unknown): boolean {
+export function doctorFailureIsRetryable(err: unknown, firstRunMs = 0): boolean {
+  if (firstRunMs > DOCTOR_RETRY_MAX_FIRST_RUN_MS) return false;
   if (!(err instanceof Error)) return true;
   // By name, not `instanceof`: dozens of suites replace `@/lib/openclaw-config`
-  // with a factory that carries no such class.
-  if (err.name === "OpenclawSpawnTimeoutError") return false;
+  // with a factory that carries no such class. The second name is the spawn
+  // wrapper's own 25 s wait for the core's maintenance window: it ran out once,
+  // and a second doctor would only wait it out again.
+  if (err.name === "OpenclawSpawnTimeoutError" || err.name === "OpenclawStateMaintenanceError") return false;
   const code = (err as NodeJS.ErrnoException).code;
   if (code === "ENOENT" || code === "EACCES") return false;
   return !DETERMINISTIC_DOCTOR_FAILURE_RE.test(err.message);

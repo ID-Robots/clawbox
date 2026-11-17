@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  DOCTOR_RETRY_MAX_FIRST_RUN_MS,
   DOCTOR_RETRY_PAUSE_ENV,
   DOCTOR_TAIL_CHARS,
   doctorFailureIsRetryable,
@@ -73,6 +74,20 @@ describe("doctorFailureIsRetryable", () => {
   it("does not run again after a run killed at its budget — that would double a wait that already failed", () => {
     const killed = Object.assign(new Error("openclaw doctor timed out after 180000ms"), { name: "OpenclawSpawnTimeoutError" });
     expect(doctorFailureIsRetryable(killed)).toBe(false);
+  });
+
+  it("does not run again after the core's maintenance window ran out — a second doctor would only wait it out again", () => {
+    const refused = Object.assign(new Error("OpenClaw is finishing maintenance on its data"), { name: "OpenclawStateMaintenanceError" });
+    expect(doctorFailureIsRetryable(refused)).toBe(false);
+  });
+
+  it("runs again only after a first run that failed quickly: a long one was not a collision, and a second would double the wait", () => {
+    const failure = new Error("Doctor finished, but config fixes were not applied.");
+    expect(doctorFailureIsRetryable(failure, 0)).toBe(true);
+    expect(doctorFailureIsRetryable(failure, DOCTOR_RETRY_MAX_FIRST_RUN_MS)).toBe(true);
+    expect(doctorFailureIsRetryable(failure, DOCTOR_RETRY_MAX_FIRST_RUN_MS + 1)).toBe(false);
+    // …whatever the failure was.
+    expect(doctorFailureIsRetryable("boom", DOCTOR_RETRY_MAX_FIRST_RUN_MS + 1)).toBe(false);
   });
 
   it.each(["ENOENT", "EACCES"])("does not run again when the CLI cannot be run (%s)", (code) => {
