@@ -533,6 +533,26 @@ function closeSession(sess) {
 }
 // Hermes' own session ids, as its chat route and CLI write them.
 const HERMES_SESSION_ID_RE = /^(?:[0-9]{8}_[0-9]{6}_[0-9a-f]{6}|local-[0-9a-f]{64})$/;
+// A Hermes session whose turn was just Stopped can still be held for a few
+// seconds: on a lab board `hermes sessions delete` failed right after a stop
+// and worked moments later. A few tries, a few seconds apart, each logged
+// with the CLI's own last line.
+const HERMES_DELETE_TRIES = 5;
+async function deleteHermesSession(id) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      execFileSync(HERMES_BIN, ["sessions", "delete", "--yes", id], { stdio: ["ignore", "ignore", "pipe"], encoding: "utf8", timeout: 30_000 });
+      if (attempt > 1) log(`hermes sessions delete ${id}: deleted on try ${attempt}`);
+      return true;
+    } catch (e) {
+      const why = String(e.stderr || "").trim().split("\n").filter(Boolean).at(-1) || String(e.message || e).split("\n")[0];
+      log(`hermes sessions delete ${id} (try ${attempt}/${HERMES_DELETE_TRIES}): ${why.slice(0, 200)}`);
+      if (attempt >= HERMES_DELETE_TRIES) return false;
+      await sleep(3000);
+    }
+  }
+}
+
 // What the cleanup did, for the record (filled in as it goes)...
 let cleanup = null;
 // ...and the cleanup itself: main() and shutdown() both await this one.
@@ -571,12 +591,7 @@ async function deleteSessions() {
       try { fs.rmSync(path.join(REPO, "data/chat-transcripts", `${s.key}.jsonl`), { force: true }); } catch { ok = false; }
       for (const id of s.hermesIds) {
         if (!HERMES_SESSION_ID_RE.test(id)) continue;
-        try {
-          execFileSync(HERMES_BIN, ["sessions", "delete", "--yes", id], { stdio: "ignore", timeout: 60_000 });
-        } catch (e) {
-          ok = false;
-          log(`hermes sessions delete ${id}: ${String(e.message).split("\n")[0]}`);
-        }
+        if (!(await deleteHermesSession(id))) ok = false;
       }
       if (ok) result.deleted++; else result.left.push(s.key);
     }

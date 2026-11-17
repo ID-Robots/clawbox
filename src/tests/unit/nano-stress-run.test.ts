@@ -283,7 +283,14 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     const nanoCi = path.join(root, "nano-ci");
     fs.writeFileSync(nanoCi, FAKE_NANO_CI, { mode: 0o755 });
     const hermes = path.join(root, "hermes");
-    fs.writeFileSync(hermes, `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(path.join(root, "hermes-calls"))}\n`, { mode: 0o755 });
+    // The Hermes CLI: records its calls; with FAKE_HERMES_FAIL_ONCE it fails
+    // the first one, as `hermes sessions delete` did on a board right after a Stop.
+    fs.writeFileSync(hermes, [
+      "#!/usr/bin/env bash",
+      `printf '%s\\n' "$*" >> ${JSON.stringify(path.join(root, "hermes-calls"))}`,
+      'if [ -n "${FAKE_HERMES_FAIL_ONCE:-}" ] && [ ! -e "$FAKE_HERMES_FAIL_ONCE" ]; then : > "$FAKE_HERMES_FAIL_ONCE"; echo "session is busy" >&2; exit 1; fi',
+      "",
+    ].join("\n"), { mode: 0o755 });
     return {
       results: path.join(root, "results"),
       env: {
@@ -322,7 +329,8 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     dash.runtime = "hermes";
     dash.reset("answer");
     const { results, env } = fixture();
-    const { code, out } = await runSh(env, ["--results", results, "stand-in", ...STRESS]);
+    // The first `hermes sessions delete` fails: the cleanup tries again.
+    const { code, out } = await runSh({ ...env, FAKE_HERMES_FAIL_ONCE: path.join(root, "hermes-failed") }, ["--results", results, "stand-in", ...STRESS]);
     expect(out).not.toMatch(/ERR_MODULE_NOT_FOUND|Cannot find module/);
     expect(code, out).toBe(0);
     const raw = readRaw(results, "hermes");
@@ -331,7 +339,10 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     expect(raw.turns.map((t: { ok: boolean }) => t.ok)).toEqual([true, true]);
     expect(dash.posts).toHaveLength(2);
     expect(fs.readFileSync(path.join(results, "stress-hermes.md"), "utf8")).toContain("| ramp-1 | 1 | 2/2 |");
-    expect(fs.readFileSync(path.join(root, "hermes-calls"), "utf8")).toBe(`sessions delete --yes ${HERMES_SESSION}\n`);
+    expect(fs.readFileSync(path.join(root, "hermes-calls"), "utf8")).toBe(`sessions delete --yes ${HERMES_SESSION}\n`.repeat(2));
+    const log = fs.readFileSync(path.join(results, "board-hermes.log"), "utf8");
+    expect(log).toContain(`hermes sessions delete ${HERMES_SESSION} (try 1/5): session is busy`);
+    expect(log).toContain(`hermes sessions delete ${HERMES_SESSION}: deleted on try 2`);
     expect(fs.existsSync(boardDir)).toBe(false);
   });
 

@@ -28,7 +28,9 @@ Each run uses sessions of its own (`clawbox-stress-<run>-…` on OpenClaw,
 `stress-<run>-…` on Hermes) and deletes them at the end, also when it is
 stopped: on OpenClaw `chat.abort` then `sessions.delete` through the gateway,
 on Hermes the owner's Stop, the chat route's transcript file and
-`hermes sessions delete` for every Hermes session its turns opened. The record
+`hermes sessions delete` for every Hermes session its turns opened (tried up
+to five times, 3 s apart: right after a Stop the session can still be held for
+a few seconds, as seen on a lab board). The record
 says how many it deleted, and the summary lists any it could not.
 
 | step | what it sends |
