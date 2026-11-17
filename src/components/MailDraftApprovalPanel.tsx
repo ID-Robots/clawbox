@@ -120,8 +120,11 @@ export default function MailDraftApprovalPanel() {
 
   if (!snapshot) return null;
 
+  // Locked while a request is on its way: the answer to a save or a remove
+  // replaces these fields with what the server holds, so a word typed
+  // meanwhile (a new credential above all) would be thrown away unsaved.
   const inputClass =
-    "w-full px-4 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] text-sm text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50";
+    "w-full px-4 py-2.5 rounded-xl bg-white/[0.03] border border-white/[0.06] text-sm text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50 disabled:opacity-60 disabled:cursor-not-allowed";
 
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-draft-approval">
@@ -153,6 +156,7 @@ export default function MailDraftApprovalPanel() {
             data-testid="settings-email-draft-approval-endpoint"
             value={endpoint}
             onChange={(e) => setEndpoint(e.target.value)}
+            disabled={busy}
             placeholder="http://127.0.0.1:8790"
             autoComplete="off"
             spellCheck={false}
@@ -169,6 +173,7 @@ export default function MailDraftApprovalPanel() {
               data-testid="settings-email-draft-approval-auth-header"
               value={authHeader}
               onChange={(e) => setAuthHeader(e.target.value)}
+              disabled={busy}
               placeholder={AUTH_HEADER_EXAMPLE}
               autoComplete="off"
               spellCheck={false}
@@ -182,6 +187,7 @@ export default function MailDraftApprovalPanel() {
               data-testid="settings-email-draft-approval-auth-value"
               value={authValue}
               onChange={(e) => setAuthValue(e.target.value)}
+              disabled={busy}
               placeholder={snapshot.hasAuth ? SAVED_VALUE_MASK : AUTH_VALUE_EXAMPLE}
               autoComplete="off"
               className={inputClass}
