@@ -27,6 +27,7 @@ const configValues = new Map<string, unknown>();
 vi.mock("@/lib/config-store", () => ({
   get DATA_DIR() { return dataDir; },
   get: vi.fn(async (key: string) => configValues.get(key)),
+  getKnown: vi.fn(async (key: string) => ({ value: configValues.get(key), known: true })),
   set: vi.fn(async (key: string, value: unknown) => { configValues.set(key, value); }),
 }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "openclaw") }));
@@ -292,9 +293,11 @@ describe("checkScheduledJobs", () => {
       "⚠️ Scheduled job “Daily report” failed 2 times in a row.",
       { open: "settings", section: "harness", focus: "jobAlerts" },
     );
+    // No pick saved: the default fan-out, as before there was one.
     expect(notifyOwnerTelegram).toHaveBeenCalledWith(
       "⚠️ Scheduled job “Daily report” failed 2 times in a row. Details: Settings → Harness.",
       "job-alerts",
+      { recipients: null },
     );
 
     // The state is on disk: a second check — a restarted server's included — sends nothing.
