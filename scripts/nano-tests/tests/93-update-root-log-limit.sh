@@ -39,6 +39,14 @@
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
+# This test's time, on the runner's clock and taken first: run.sh stops it at
+# NANO_TEST_TIMEOUT (the header above, the most a long-tier test may ask for).
+# Every wait below leaves RESTORE_RESERVE for the rebuild back to the commit
+# under test (one rebuild takes 2-5 minutes; the deadline still bounds a slower
+# one, which nano-ci retries once).
+TEST_DEADLINE=$(( $(date +%s) + ${NANO_TEST_TIMEOUT:-4500} - 60 ))
+RESTORE_RESERVE=600
+
 if [ -z "${NANO_BRANCH:-}" ]; then
   skip "NANO_BRANCH is not set: the updater needs the branch the commit under test is on"
   finish
@@ -58,11 +66,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/../update-raw-log-runs.sh"
 board_runtime >/dev/null
 RUNTIME=$BOARD_RUNTIME
 note "agent runtime: $RUNTIME"
-# This test's time, on the runner's clock: run.sh stops it at NANO_TEST_TIMEOUT
-# (the header above, the most a long-tier test may ask for). Every wait below
-# leaves RESTORE_RESERVE for the rebuild back to the commit under test.
-TEST_DEADLINE=$(( $(date +%s) + ${NANO_TEST_TIMEOUT:-4500} - 60 ))
-RESTORE_RESERVE=600
 # The branch of the board's clone the older release is rebuilt from (step 1).
 FIXTURE=nano-tests-93-older-release
 UNIT_SHOW='systemctl show -p LogRateLimitIntervalUSec -p LogRateLimitBurst -p NeedDaemonReload -p FragmentPath -p DropInPaths clawbox-root-update@rebuild_reboot.service'
@@ -105,8 +108,23 @@ update_phase() {
 # still not ended is left alone, and that is said: the tests after this one
 # would run on a box in the middle of an update.
 settle_and_restore() {
-  local phase room
+  local phase room grace
   phase=$(update_phase)
+  # `completed` or `idle` may be the last run's word, read in the moment before
+  # this update shows `running` (the updater resets its state, then awaits,
+  # then says running): it ends nothing until two minutes have shown no update
+  # running. `failed` is this run's or the last one's verdict either way.
+  case "$phase" in
+    completed|idle)
+      grace=$(( TEST_DEADLINE - RESTORE_RESERVE - $(date +%s) ))
+      [ "$grace" -gt 120 ] && grace=120
+      while [ "$grace" -gt 0 ]; do
+        sleep 10
+        grace=$((grace - 10))
+        [ "$(update_phase)" = running ] && { phase=running; break; }
+      done
+      ;;
+  esac
   case "$phase" in
     completed|failed|idle) ;;
     *)
@@ -127,7 +145,9 @@ settle_and_restore() {
       back_on_test_build
       ;;
     *)
-      not_ok "[$RUNTIME] the owner's update has not ended (${phase:-no answer}) and this test's time is up: the board is left as it is, since a rebuild would race the update — the tests after this one run on a box in the middle of an update"
+      not_ok "[$RUNTIME] the owner's update has not ended (${phase:-no answer}) and this test's time is up: the board is left as it is, since a rebuild would race the update, and the tests after this one are not run"
+      # run.sh reports every test still to start as "not run" with this line.
+      printf '%s\n' "$NANO_TEST_NAME left the board in the middle of an owner's update it could not wait out (${phase:-no answer})" > "${NANO_STOP_FILE:-/dev/null}"
       drop_fixture
       ;;
   esac
@@ -248,6 +268,13 @@ ok "[$RUNTIME] on the older build the root update unit has no drop-in and journa
 START=$(board 'date +%s' | tail -n 1 | tr -dc '0-9')
 [ -n "$START" ] || START=$(date +%s)
 T_UPDATE=$(date +%s)
+# An update needs ~10 minutes, 40 when it rebuilds llama.cpp: with less than
+# 20 left after the checks and the rebuild back, none is started.
+if [ $(( TEST_DEADLINE - RESTORE_RESERVE - 240 - T_UPDATE )) -lt 1200 ]; then
+  not_ok "[$RUNTIME] the older build took too long to come up: too little of this test's time is left to update from it"
+  back_on_test_build
+  finish
+fi
 if start_app_update "$NANO_BRANCH"; then
   ok "[$RUNTIME] the owner's update to $NANO_BRANCH started"
 else
@@ -274,7 +301,6 @@ rebuild_tick() {
 # Up to what the test's time leaves after the checks below (~4 min) and the
 # rebuild back: about 55 minutes (an update that rebuilds llama.cpp took 40).
 UPDATE_WAIT=$(( TEST_DEADLINE - RESTORE_RESERVE - 240 - $(date +%s) ))
-[ "$UPDATE_WAIT" -ge 60 ] || UPDATE_WAIT=60
 wait_app_update "$UPDATE_WAIT" rebuild_tick
 note "update took $(( $(date +%s) - T_UPDATE ))s and ended: $UPDATE_PHASE${UPDATE_ERROR:+ ($UPDATE_ERROR)}"
 case "$UPDATE_PHASE" in

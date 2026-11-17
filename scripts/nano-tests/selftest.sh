@@ -188,6 +188,17 @@ NANO_CI=$WORK/bin/no-such-helper NANO_TESTS_DIR=$B bash "$RUN" --results "$WORK/
 check "a missing nano-ci is an error (2)" test $? -eq 2
 check "...that names what is missing" contains "$WORK/out-nohelper.txt" "no-such-helper"
 
+# ---- a test that leaves the box unfit for the rest -------------------------
+STOP=$WORK/tests-stop
+fixture "$STOP" 10-first.sh 'echo "ok - fine"'
+fixture "$STOP" 20-stopper.sh 'echo "20-stopper left the box mid-update" > "$NANO_STOP_FILE"; echo "not ok - left the box mid-update"'
+fixture "$STOP" 30-after.sh 'touch "$NANO_RESULTS_DIR/../after-ran"; echo "ok - must not run after a stop"'
+NANO_TESTS_DIR=$STOP bash "$RUN" --results "$WORK/res-stop" SERIAL-20 > "$WORK/out-stop.txt" 2>&1
+check "a test that stops the suite still fails the run (1)" test $? -eq 1
+check "...the test after it does not run" test ! -e "$WORK/after-ran"
+check "...and is a skip that carries the stop's reason" line_matches "$WORK/out-stop.txt" '^ok 3 - 30-after \(0s\) # SKIP not run: 20-stopper left the box mid-update$'
+check "...while the one before it ran" line_matches "$WORK/out-stop.txt" '^ok 1 - 10-first '
+
 # ---- an interrupted run -----------------------------------------------------
 C=$WORK/tests-cancel
 fixture "$C" 10-pass.sh 'echo "ok - fine"'
