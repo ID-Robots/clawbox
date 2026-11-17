@@ -12,8 +12,8 @@
  * app never serves it (src/lib/file-guard.ts keeps data/ to itself).
  *
  * Bounded, because a box's disk is small and a password guesser is patient:
- * past AUDIT_LOG_MAX_BYTES the file is renamed to `<name>.1` (the one older
- * generation kept, replacing the previous) and a new one begins. A refusal at
+ * past AUDIT_LOG_MAX_BYTES the file is copied to `<name>.1` (the one older
+ * generation kept, replacing the previous) and begins again. A refusal at
  * the lockout gate (`/login-api` answering 429 before a password is looked
  * at) is not written at all — each of those is a request that was never
  * tried, and logging them would let anyone fill the log by asking.
@@ -198,15 +198,18 @@ export async function recordAudit(
     let handle: fs.promises.FileHandle | null = null;
     try {
       await fs.promises.mkdir(path.dirname(file), { recursive: true });
-      // Opened first and measured by its descriptor: the size checked is the
+      // Opened ONCE and measured by its descriptor: the size checked is the
       // size of the file written, with nothing between the two to swap it.
-      handle = await fs.promises.open(file, "a", 0o600);
+      // Rotation goes through the same descriptor too — the full log is
+      // copied out to `<name>.1` (the one older generation) and this one
+      // truncated — rather than renamed and opened again by its path.
+      handle = await fs.promises.open(file, "a+", 0o600);
       const { size } = await handle.stat();
       if (size > 0 && size + Buffer.byteLength(text) > AUDIT_LOG_MAX_BYTES) {
-        await handle.close();
-        handle = null;
-        await fs.promises.rename(file, `${file}.1`);
-        handle = await fs.promises.open(file, "a", 0o600);
+        const old = Buffer.alloc(size);
+        const { bytesRead } = await handle.read(old, 0, size, 0);
+        await fs.promises.writeFile(`${file}.1`, old.subarray(0, bytesRead), { mode: 0o600 });
+        await handle.truncate(0);
       }
       await handle.write(text);
     } catch (err) {
