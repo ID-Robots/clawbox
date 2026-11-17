@@ -1,0 +1,78 @@
+---
+title: "Users & Staff"
+icon: "user-group"
+summary: "Add people to your ClawBox, turn on organisation mode for a team, and choose which tools their assistants may use."
+---
+
+**Settings → System → Users** is where the owner of a ClawBox adds other people. Only the
+owner sees this tab. Each person signs in with their own name and password and gets their own
+chat.
+
+## Adding a user
+
+Under **Add a user**, type a username and a password and press **Create user**. The person signs
+in with that name on the ClawBox login page. **Reset password** sets a new password for them and
+signs them out everywhere. **Remove** deletes their account, their home folder and their files.
+
+## Organisation mode
+
+Turn on **Organisation mode** when your ClawBox serves a company's staff. Every user other
+than you becomes a **member of staff**:
+
+- They see **Chat**, **Files** and their own settings (language, password, look), nothing else.
+- Their chat runs on an assistant of their own, with its own memory. It answers questions, reads
+  the files they attach and writes files into their own folder. It cannot browse the web, send
+  messages, run commands or change the box.
+- Files shows them their own home folder and one **Shared** folder.
+
+You keep everything else, including the AI providers and the system settings.
+
+## Tools for members of staff
+
+Under **Tools for members of staff** you choose which of your assistant's MCP servers your
+staff may use. The list shows every MCP server your assistant has, on OpenClaw and on Hermes
+alike. A server you do not tick is never offered to anyone on your staff.
+
+For each server you tick:
+
+- **Who may use it.** Choose **Every member of staff**, or **Only these members of staff** and tick
+  the people who should have it.
+- **Each member uses their own credential.** Leave this on for a service where every person
+  signs in as themselves, such as a document search or a Microsoft 365 gateway. Then set each
+  person's credential in the list below. Someone without a credential gets no tools from that
+  server. Turn it off for a tool on your ClawBox that needs no sign-in, such as a local
+  "create a Word document" tool. Your own credentials for the server are never sent on a
+  member's behalf.
+- **Also allow its tools that create or edit.** Members of staff get read and search tools
+  only, unless you tick this. Then they also get tools that create or edit, for example
+  writing a document. Tools that send, publish, pay, delete or run something stay blocked
+  either way.
+
+Press **Save**. The change applies to each member's assistant straight away.
+
+<Note>
+Only MCP servers that use the **Streamable HTTP** transport can be offered to staff. On
+OpenClaw, an entry that has a `url` but no `transport` counts as SSE: add
+`"transport": "streamable-http"` to it in `openclaw.json`. A plain-HTTP address works only for
+a server on the ClawBox itself (`127.0.0.1`). Anything else needs HTTPS.
+</Note>
+
+## Files the assistant makes for a member of staff
+
+When a member's assistant uses a granted tool to write a file, the reply shows it as a
+download card. Only that member can open it. Another member who asks for it by its exact path
+gets "not found". As the owner, you can still open every file in the chat media folder, as before.
+
+A file counts as the member's when:
+
+- a tool their own assistant called created it in the assistant's chat media folder during that
+  call, and the tool's answer named it (a file that already existed before the call never counts);
+  or
+- their assistant wrote it into their own assistant folder during their conversation turn.
+
+A file in the shared chat media folder never becomes a member's just because their assistant's
+reply mentions it. A path anywhere else on the box, a link that points elsewhere, or a file that
+already belongs to another member is never handed out this way.
+
+Grants are kept per assistant. If your ClawBox can switch between OpenClaw and Hermes, a grant
+you made on one does not carry over to a server with the same name on the other.

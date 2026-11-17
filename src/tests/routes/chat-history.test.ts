@@ -80,6 +80,7 @@ describe("/setup-api/chat/history", () => {
         timestamp: 1,
         media: ["/setup-api/chat/media?path=%2Fa.png"],
         audio: ["/setup-api/chat/media?path=%2Fb.wav"],
+        files: ["/setup-api/chat/media?path=%2Fc.docx&download=1"],
         turnId: "run-1",
       },
     ]);
@@ -87,6 +88,7 @@ describe("/setup-api/chat/history", () => {
     const [row] = (await (await GET(request())).json()).messages;
     expect(row.images).toEqual(["/setup-api/chat/media?path=%2Fa.png"]);
     expect(row.audio).toEqual(["/setup-api/chat/media?path=%2Fb.wav"]);
+    expect(row.files).toEqual(["/setup-api/chat/media?path=%2Fc.docx&download=1"]);
     expect(row.idempotencyKey).toBe("run-1");
   });
 

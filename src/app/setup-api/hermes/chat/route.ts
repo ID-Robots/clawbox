@@ -58,12 +58,13 @@ import { chatKeyUser } from "@/lib/chat-scope";
 import { isMediaOwnedBy, recordMediaOwner } from "@/lib/chat-media-owners";
 import { orgMemberStrictOf, readOrgMode } from "@/lib/org-mode-server";
 import { staffCommandRefusal, staffMessageVerdict } from "@/lib/org-staff-policy";
-import { ensureStaffHermesProfile, staffGuardLoaded, type StaffHermesProfile } from "@/lib/hermes-staff-profile";
+import { ensureStaffHermesProfile, staffGuardLoaded, staffHermesProfilePaths, type StaffHermesProfile } from "@/lib/hermes-staff-profile";
+import { recordMemberReplyMedia } from "@/lib/chat-reply-media";
 import { personSession } from "@/lib/owner-session";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
 import { chatMediaRoot, resolveInMediaRoot } from "@/lib/harness/media-root";
 import { hermesDocumentPrompt } from "@/lib/harness/hermes-document-prompt";
-import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
+import { boundedFiles, mediaUrl, splitAssistantMedia, splitMediaDirectives } from "@/lib/chat-media";
 import { splitEmailRefs } from "@/lib/chat-email-refs";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
 import {
@@ -376,6 +377,52 @@ interface TurnPayload {
 /** A page's turn id: its own uuid, and nothing that could be a path or a flag. */
 const TURN_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
+/**
+ * Is a `MEDIA:` payload something the chat media route
+ * (src/app/setup-api/chat/media/route.ts) serves `username`? A local file only
+ * when it resolves inside one of `roots` and is recorded as theirs; a remote
+ * URL is not a file of this box and is always let through; a relative path
+ * never is.
+ */
+async function servedToMember(username: string, roots: ReadonlyArray<string | null>): Promise<(payload: string) => Promise<boolean>> {
+  const realRoots = (await Promise.all(
+    roots.map((root) => (root ? fsp.realpath(/* turbopackIgnore: true */ root).catch(() => null) : null)),
+  )).filter((root): root is string => root !== null);
+  return async (payload) => {
+    const local = payload.toLowerCase().startsWith("file://") ? payload.slice("file://".length) : payload;
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(local)) return true;
+    if (!path.isAbsolute(local)) return false;
+    const real = await fsp.realpath(/* turbopackIgnore: true */ local).catch(() => null);
+    if (!real) return false;
+    return realRoots.some((root) => {
+      const rel = path.relative(root, real);
+      return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel) && isMediaOwnedBy(username, real, root);
+    });
+  };
+}
+
+/**
+ * A member's caption with every `MEDIA:` line dropped that `served` refuses:
+ * such a line would only become a card that answers 404. Fenced code is never
+ * touched.
+ */
+async function memberServableCaption(caption: string, served: (payload: string) => Promise<boolean>): Promise<string> {
+  if (!/media:/i.test(caption)) return caption;
+  const kept: string[] = [];
+  let inFence = false;
+  let dropped = false;
+  for (const line of caption.split("\n")) {
+    if (/^(?:```|~~~)/.test(line.trim())) inFence = !inFence;
+    const payload = inFence ? undefined : splitMediaDirectives(line).media[0];
+    if (payload !== undefined && !(await served(payload))) {
+      dropped = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  return dropped ? kept.join("\n").replace(/\n{3,}/g, "\n\n").trim() : caption;
+}
+
 /** Did the caller ask to be streamed to, rather than handed a finished turn? */
 function wantsStream(request: Request): boolean {
   return (request.headers.get("accept") || "").includes("text/event-stream");
@@ -414,6 +461,8 @@ async function settleTurn(
   consoleText: string,
   streamedReasoning: string,
   served: { model?: string; provider?: string } = {},
+  /** When this turn began (`LiveTurn.startedAt`): the files its reply names are a member's only if written since. */
+  turnStartedAt: number | null = null,
 ): Promise<TurnPayload> {
   // Which person's conversation this Hermes session now carries, so only
   // they may resume it (src/lib/chat-scope-server.ts).
@@ -521,8 +570,46 @@ async function settleTurn(
   // owner is theirs: served back to them on an organisation box, and to no
   // other member (src/lib/chat-media-owners.ts).
   if (chatUser) recordMediaOwner(chatUser, [...drawn, spokenClip]);
+  // A file the member's own turn produced — a document an owner-granted MCP
+  // tool wrote — named on a `MEDIA:` line of the reply is theirs too
+  // (TASK-2516): only a fresh regular file in the media tree or their own
+  // profile folder, never through a link, never one already someone else's.
+  // A picture of theirs that the reclaiming above took out of the caption
+  // (an image a tool wrote into their own folder), said again once recorded.
+  const claimedImages: string[] = [];
+  let shownCaption = caption;
+  if (memberTurn && chatUser) {
+    const ownFolder = staffHermesProfilePaths(chatUser)?.folder ?? null;
+    // Their own profile folder only: a file in the shared media tree is made
+    // theirs by the relay that ran their tool call, never by a reply naming
+    // it (scripts/chat-reply-media.js). Synchronous and never throws. Read
+    // from the reply AS WRITTEN: the caption has lost its image lines to the
+    // reclaiming above, and a member's image is never adopted.
+    const { recorded, refused } = recordMemberReplyMedia({
+      username: chatUser,
+      text: spoken,
+      ownFolder,
+      since: turnStartedAt,
+    });
+    if (recorded.length > 0 || refused.length > 0) {
+      console.log(`[hermes chat] a member's reply named files: ${recorded.length} recorded as theirs, ${refused.length} not (${[...new Set(refused.map((r) => r.reason))].join(", ") || "-"})`);
+    }
+    // A card only for a file the member is served — recorded as theirs now or
+    // on an earlier turn, in the chat media tree or their own folder. One they
+    // are not would be a 404 (src/app/setup-api/chat/media/route.ts).
+    const served = await servedToMember(chatUser, [await chatMediaRoot().catch(() => null), ownFolder]);
+    for (const source of mentioned) {
+      // Said by its real path, the one its ownership is recorded under.
+      const real = path.isAbsolute(source) ? await fsp.realpath(/* turbopackIgnore: true */ source).catch(() => null) : null;
+      if (real && !claimedImages.includes(real) && !drawn.includes(real) && (await served(real))) claimedImages.push(real);
+    }
+    // The same rule for every other file the caption still names (a document,
+    // a picture in the shared tree).
+    shownCaption = await memberServableCaption(caption, served);
+  }
   const answer = [
-    caption,
+    shownCaption,
+    ...claimedImages.map((file) => `MEDIA:${file}`),
     ...drawn.map((file) => `MEDIA:${file}`),
     ...(spokenClip ? [`MEDIA:${spokenClip}`] : []),
   ]
@@ -551,6 +638,8 @@ async function settleTurn(
     timestamp: Date.now(),
     ...(reply.images.length ? { media: reply.images } : {}),
     ...(reply.audio.length ? { audio: reply.audio } : {}),
+    // A document the reply named (a tool's .docx): its download card survives a refresh.
+    ...(reply.files.length ? { files: boundedFiles(reply.files) } : {}),
     // Persisted beside the answer, never inside it: replay has to be able to
     // collapse the monologue the same way the live turn did.
     ...(settledReasoning ? { reasoning: settledReasoning } : {}),
@@ -956,6 +1045,7 @@ async function runStreamedTurn(
           final.text,
           final.reasoning,
           await servedPair(final, turn, threaded, usageBefore),
+          live.startedAt,
         ),
       );
     }
@@ -1017,6 +1107,7 @@ async function runStreamedTurn(
             recovered.text,
             "",
             await servedPair(null, turn, threaded, usageBefore),
+            live.startedAt,
           ),
         );
         return;
@@ -1884,7 +1975,7 @@ export async function POST(request: Request) {
       // config.yaml's pairing, which is the same read the validation above makes
       // when it has a reason to: recorded too, because a blank under a reply the
       // box knows the model of is a false unknown, not modesty.
-      const answered = await withHermesStateHome(staff?.home, () => settleTurn(threaded, sessionKey, text, "", cliServed));
+      const answered = await withHermesStateHome(staff?.home, () => settleTurn(threaded, sessionKey, text, "", cliServed, live.startedAt));
       live.emit("done", answered);
       // The one-shot answer is held to the same rule as the stream: a session
       // that ran out while the CLI was answering is signed out rather than

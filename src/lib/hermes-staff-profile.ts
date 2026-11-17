@@ -48,6 +48,7 @@ import yaml from "js-yaml";
 import path from "@/lib/runtime-path";
 import { hermesHome } from "@/lib/hermes-env";
 import { STAFF_HERMES_TOOLS, staffAgentId } from "@/lib/org-staff-policy";
+import { createSerialLock } from "@/lib/serial-lock";
 
 export interface StaffHermesProfile {
   /** The profile name the dashboard is handed (`profile` on session.create / resume / slash.exec). */
@@ -56,6 +57,8 @@ export interface StaffHermesProfile {
   home: string;
   /** Their own folder: the session's working directory. */
   folder: string;
+  /** False when the member's staff MCP grants could not be applied (they then get none: fail closed). */
+  mcpApplied?: boolean;
 }
 
 type Json = Record<string, unknown>;
@@ -92,14 +95,18 @@ function pluginNames(value: unknown): string[] {
  * The staff profile's config.yaml: the owner's, with the staff keys laid over
  * it. Pure.
  */
-export function staffHermesConfig(ownerConfig: unknown, folder: string): Json {
+export function staffHermesConfig(ownerConfig: unknown, folder: string, mcpServers: Record<string, unknown> = {}): Json {
   const cfg: Json = isRecord(ownerConfig) ? structuredClone(ownerConfig) : {};
   // Tools: exactly the staff toolsets, the rest switched off last.
   cfg.platform_toolsets = { cli: [...STAFF_HERMES_TOOLS.toolsets] };
   cfg.agent = { ...(isRecord(cfg.agent) ? cfg.agent : {}), disabled_toolsets: [...STAFF_HERMES_TOOLS.disabledToolsets] };
   delete cfg.toolsets;
-  // None of the device's MCP tools (or any other MCP server the owner added).
+  // None of the device's MCP tools (or any other MCP server the owner added)
+  // — only the relay entries of the servers the owner granted THIS member
+  // (TASK-2516, src/lib/staff-mcp.ts `hermesStaffMcpServers`), each carrying
+  // their own relay token.
   delete cfg.mcp_servers;
+  if (Object.keys(mcpServers).length > 0) cfg.mcp_servers = structuredClone(mcpServers);
   // Their own built-in memory, written without asking anyone: an external
   // provider could be a store the owner's memory shares.
   const memory = isRecord(cfg.memory) ? cfg.memory : {};
@@ -145,14 +152,14 @@ async function linkTo(link: string, target: string): Promise<void> {
   if (exists) await fsp.symlink(target, link);
 }
 
-async function writeIfChanged(file: string, content: string): Promise<void> {
+async function writeIfChanged(file: string, content: string): Promise<boolean> {
   let current: string | null = null;
   try {
     current = await fsp.readFile(file, "utf-8");
   } catch {
     current = null;
   }
-  if (current === content) return;
+  if (current === content) return false;
   // A temp file of its own per write: two writers never share one.
   const temp = `${file}.tmp-${process.pid}-${randomUUID()}`;
   try {
@@ -161,6 +168,95 @@ async function writeIfChanged(file: string, content: string): Promise<void> {
   } finally {
     await fsp.rm(temp, { force: true }).catch(() => undefined);
   }
+  return true;
+}
+
+/** One writer of the guard's grants file at a time: two members' preparations each change their own line of it. */
+const grantsLock = createSerialLock();
+
+/**
+ * Set (or, with none, remove) one staff profile's line in the guard's grants
+ * file beside the installed plugin, and drop the lines of profiles not in
+ * `keep` when it is given. 0600, written whole by rename. Throws when it
+ * cannot: the caller then grants nothing.
+ */
+async function writeHermesStaffGrants(root: string, change: { agentId?: string; entries?: readonly string[]; keep?: ReadonlySet<string> }): Promise<void> {
+  const { STAFF_MCP_GRANTS_FILE } = await import("@/lib/staff-mcp");
+  const dir = path.join(root, "plugins", STAFF_GUARD_HERMES_PLUGIN);
+  await grantsLock(async () => {
+    const file = path.join(dir, STAFF_MCP_GRANTS_FILE);
+    let agents: Record<string, string[]> = {};
+    try {
+      const parsed = JSON.parse(await fsp.readFile(file, "utf-8")) as unknown;
+      if (isRecord(parsed) && isRecord(parsed.agents)) {
+        for (const [id, list] of Object.entries(parsed.agents)) {
+          if (Array.isArray(list)) agents[id] = list.filter((n): n is string => typeof n === "string");
+        }
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT" && !(err instanceof SyntaxError)) throw err;
+    }
+    if (change.keep) agents = Object.fromEntries(Object.entries(agents).filter(([id]) => change.keep!.has(id)));
+    if (change.agentId) {
+      if (change.entries && change.entries.length > 0) agents[change.agentId] = [...change.entries].sort();
+      else delete agents[change.agentId];
+    }
+    await writeIfChanged(file, `${JSON.stringify({ agents }, null, 2)}\n`);
+  });
+}
+
+/**
+ * The relay entries of the servers the owner granted `username`, as their
+ * profile's `mcp_servers` (TASK-2516): the owner's Hermes servers from the
+ * owner's config.yaml, the grants in data/staff-mcp.json, this member's relay
+ * token. The guard's grants file is written FIRST; a store or a grants file
+ * that cannot be read or written grants nothing (fail closed).
+ */
+async function staffHermesMcpServers(username: string, root: string, owner: unknown): Promise<{ servers: Record<string, unknown>; ok: boolean }> {
+  const agentId = staffAgentId(username);
+  if (!agentId) return { servers: {}, ok: true };
+  try {
+    const [{ ensureRelayTokens, planStaffMcpEntries, hermesStaffMcpServers }, { hermesServerEntries }, { getLocalAiProxyRootUrl }] = await Promise.all([
+      import("@/lib/staff-mcp"),
+      import("@/lib/project-mcp-servers"),
+      import("@/lib/local-ai-proxy-url"),
+    ]);
+    const store = await ensureRelayTokens([username]);
+    const servers = hermesServerEntries(isRecord(owner) ? owner.mcp_servers : undefined);
+    const entries = planStaffMcpEntries({ staff: [username], store, servers, relayBase: getLocalAiProxyRootUrl(), harness: "hermes" }).get(username) ?? [];
+    await writeHermesStaffGrants(root, { agentId, entries: entries.map((e) => e.name) });
+    return { servers: hermesStaffMcpServers(entries), ok: true };
+  } catch (err) {
+    console.error(`[org-staff] the staff MCP grants for ${username} could not be applied; none are given:`, err instanceof Error ? err.message : err);
+    await writeHermesStaffGrants(root, { agentId }).catch(() => undefined);
+    return { servers: {}, ok: false };
+  }
+}
+
+/**
+ * The owner changed the staff MCP grants (or the roster) on a Hermes box:
+ * every existing member profile is rewritten with its entries now, the
+ * guard's grants file keeps only the members named, and the dashboard reloads
+ * its MCP servers when any profile's changed. A member with no profile yet
+ * gets theirs on their first turn. Answers whether every profile was written.
+ */
+export async function syncHermesStaffMcp(staff: readonly string[], root: string = hermesHome()): Promise<boolean> {
+  let ok = true;
+  const keep = new Set(staff.map((u) => staffAgentId(u)).filter((id): id is string => Boolean(id)));
+  try {
+    // No guard installed: no grant can be honoured, and nothing to record.
+    if (fs.existsSync(path.join(root, "plugins", STAFF_GUARD_HERMES_PLUGIN))) await writeHermesStaffGrants(root, { keep });
+  } catch (err) {
+    ok = false;
+    console.error("[org-staff] could not update the Hermes staff guard's grants:", err instanceof Error ? err.message : err);
+  }
+  for (const username of staff) {
+    const paths = staffHermesProfilePaths(username, root);
+    if (!paths || !fs.existsSync(paths.home)) continue;
+    const made = await ensureStaffHermesProfile(username, root);
+    if (!made || made.mcpApplied === false) ok = false;
+  }
+  return ok;
 }
 
 /**
@@ -216,11 +312,25 @@ async function prepareStaffHermesProfile(username: string, root: string): Promis
     // the dashboard could serve: a link, so register-mcp.sh's reinstall of the
     // owner's copy is the member's too.
     await linkTo(path.join(paths.home, "plugins", STAFF_GUARD_HERMES_PLUGIN), path.join(root, "plugins", STAFF_GUARD_HERMES_PLUGIN));
-    const config = staffHermesConfig(owner, paths.folder);
+    const mcp = await staffHermesMcpServers(username, root, owner);
+    const config = staffHermesConfig(owner, paths.folder, mcp.servers);
+    const configPath = path.join(paths.home, "config.yaml");
+    const mcpBefore = await readMcpServersOf(configPath);
     await writeIfChanged(
-      path.join(paths.home, "config.yaml"),
+      configPath,
       `# Written by ClawBox for an organisation's member of staff (src/lib/hermes-staff-profile.ts).\n# The owner's config with the staff tools and memory laid over it; rewritten from it.\n${yaml.dump(config, { noRefs: true, lineWidth: -1 })}`,
     );
+    if (JSON.stringify(mcpBefore) !== JSON.stringify(config.mcp_servers ?? null)) {
+      // Hermes connects a profile's MCP servers when it discovers them: a
+      // changed grant reaches a session already open at its next turn only
+      // once the dashboard reloads (src/lib/hermes-mcp-reload.ts).
+      const { reloadMcpServers } = await import("@/lib/hermes-mcp-reload");
+      void reloadMcpServers()
+        .then((reloaded) => {
+          if (!reloaded) console.error(`[org-staff] Hermes did not reload its MCP servers after ${username}'s staff grants changed; an open session keeps its old tools until the dashboard reloads`);
+        })
+        .catch(() => undefined);
+    }
     await linkTo(path.join(paths.home, ".env"), path.join(root, ".env"));
     await linkTo(path.join(paths.home, "auth.json"), path.join(root, "auth.json"));
     try {
@@ -228,9 +338,19 @@ async function prepareStaffHermesProfile(username: string, root: string): Promis
     } catch {
       // No persona on the owner's side yet: Hermes uses its own default.
     }
-    return paths;
+    return { ...paths, mcpApplied: mcp.ok };
   } catch (err) {
     console.error(`[org-staff] could not prepare ${username}'s Hermes profile:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/** A profile config's `mcp_servers` as written, or null (none, or unreadable). */
+async function readMcpServersOf(file: string): Promise<unknown> {
+  try {
+    const doc = yaml.load(await fsp.readFile(file, "utf-8"), { schema: yaml.JSON_SCHEMA });
+    return isRecord(doc) && doc.mcp_servers !== undefined ? doc.mcp_servers : null;
+  } catch {
     return null;
   }
 }
