@@ -155,21 +155,31 @@ if [ "$A_SINGLE" = true ]; then
     note "single run: the team ended $A_STATUS ($(team_json '.team.error // "no error"')), so where its work landed was not checked"
   else
     # shellcheck disable=SC2016  # expanded on the board
+    # Exit 0 and where both changes are, 1 and nothing when they are nowhere
+    # it looks; anything else is an inspection that did not happen.
     WHERE=$(board '
-      cd "$1" || exit 1
+      cd "$1" || { echo "no project folder at $1"; exit 2; }
       shift
-      both() { case "$1" in *"up = 1"*) case "$2" in *"down = -1"*) return 0 ;; esac ;; esac; return 1; }
-      if both "$(cat src/up.js 2>/dev/null)" "$(cat src/down.js 2>/dev/null)"; then echo "the project checkout"; exit 0; fi
+      # The whole declaration on a line of its own, spacing aside: up = 10 is not up = 1.
+      has() { printf "%s\n" "$1" | tr -d " \t\r" | grep -qxE "$2"; }
+      both() { has "$1" "exportconstup=1;?" && has "$2" "exportconstdown=-1;?"; }
+      # The checkout counts unless it is on the worker'"'"'s own branch: work
+      # that is only there is what this check is about.
+      CUR=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+      if [ "$CUR" != fix/arrow-up-own ] && both "$(cat src/up.js 2>/dev/null)" "$(cat src/down.js 2>/dev/null)"; then echo "the project checkout (on $CUR)"; exit 0; fi
       for ref in develop "$@"; do
         [ -n "$ref" ] && git rev-parse -q --verify "refs/heads/$ref" >/dev/null || continue
         if both "$(git show "$ref:src/up.js" 2>/dev/null)" "$(git show "$ref:src/down.js" 2>/dev/null)"; then echo "branch $ref"; exit 0; fi
       done
       exit 1
     ' "$PROJECT_DIR" "$RUN_BRANCH" "$PR_BRANCH")
-    if [ -n "$WHERE" ]; then
+    WHERE_RC=$?
+    if [ "$WHERE_RC" = 0 ] && [ -n "$WHERE" ]; then
       ok "single run: the team ended done and both changes (up = 1, down = -1) are in $WHERE, with no NO CHANGE"
+    elif [ "$WHERE_RC" = 1 ] && [ -z "$WHERE" ]; then
+      not_ok "single run: the team ended done, but up = 1 and down = -1 are not both in the project (off fix/arrow-up-own) or on the run's branch (${RUN_BRANCH:-none}${PR_BRANCH:+, $PR_BRANCH})"
     else
-      not_ok "single run: the team ended done, but up = 1 and down = -1 are not both in the project or on the run's branch (${RUN_BRANCH:-none}${PR_BRANCH:+, $PR_BRANCH})"
+      not_ok "single run: where the work landed could not be inspected (exit $WHERE_RC): $(printf '%s' "$WHERE" | head -c 200)"
     fi
   fi
   note "own branch, reviewer, publish, base: a single run has no team branch or reviewer runs, so this run did not test them (the second team is not started)"
