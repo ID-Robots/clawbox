@@ -62,20 +62,46 @@ CHECKS='
     const provisioning = await getEmbedProvisioningStatus().catch(() => null);
     if (provisioning && provisioning.installed) {
       const mil = await import(R + "/src/lib/memory-index-local.ts");
-      const { vectors } = await mil.embedDocumentsWithShardEmbedder(["Acme Widgets Ltd ships blue widgets to Globex."]);
-      out.embedded = { width: vectors[0] ? vectors[0].length : 0 };
+      // The embedding server of the box starts after the gateway and answers
+      // 502 until its model is loaded (TASK-2638: HTTP 502 on a Hermes board
+      // right after the swap, the same build embedded 1024 dimensions on an
+      // OpenClaw one). A refusal that says "not now" is waited out, bounded —
+      // 12 tries 10 s apart — and every refusal is kept to be read in the log.
+      const refusals = [];
+      let width = 0;
+      for (let attempt = 1; attempt <= 12; attempt++) {
+        try {
+          const { vectors } = await mil.embedDocumentsWithShardEmbedder(["Acme Widgets Ltd ships blue widgets to Globex."]);
+          width = vectors[0] ? vectors[0].length : 0;
+          break;
+        } catch (err) {
+          refusals.push("try " + attempt + ": " + String((err && err.message) || err).slice(0, 200));
+          if (err && err.retryable === false) break;
+          if (attempt < 12) await new Promise((r) => setTimeout(r, 10000));
+        }
+      }
+      out.embedded = { width, tries: refusals.length + (width > 0 ? 1 : 0), refusals: refusals.slice(0, 3) };
     } else {
       out.embedded = null;
     }
 
-    const { clawboxAiProxyUrl } = await import(R + "/src/lib/clawbox-ai-models.ts");
-    const { cloudEmbeddingsUrl } = await import(R + "/src/lib/clawai-cloud-embeddings.ts");
-    const cloud = [clawboxAiProxyUrl(), cloudEmbeddingsUrl()].filter(Boolean).map((u) => u.replace(/\/+$/, ""));
-    out.cloudRequests = urls.filter((u) => cloud.some((c) => u.startsWith(c))).length;
   } catch (err) {
     out.crash = String((err && err.stack) || err).split("\n").slice(0, 4).join(" | ");
   } finally {
     globalThis.fetch = realFetch;
+  }
+  // Counted whatever happened above: a crash must not leave the count unknown
+  // and the verdict naming no request at all.
+  try {
+    const { clawboxAiProxyUrl } = await import(R + "/src/lib/clawbox-ai-models.ts");
+    const { cloudEmbeddingsUrl } = await import(R + "/src/lib/clawai-cloud-embeddings.ts");
+    const cloud = [clawboxAiProxyUrl(), cloudEmbeddingsUrl()].filter(Boolean).map((u) => u.replace(/\/+$/, ""));
+    const hits = urls.filter((u) => cloud.some((c) => u.startsWith(c)));
+    out.cloudRequests = hits.length;
+    // Where each went (the path, never a query), so the verdict names it.
+    out.cloudUrls = hits.slice(0, 5).map((u) => u.split("?")[0]);
+  } catch (err) {
+    out.cloudCountError = String((err && err.message) || err).slice(0, 200);
   }
   console.log("INPROC " + JSON.stringify(out));
   process.exit(0);
@@ -349,14 +375,17 @@ fi
 if [ "$(j '.embedded')" = null ]; then
   skip "the embedding model is not installed on this board: no text embedded"
 elif [ "$(j '.embedded.width')" -gt 0 ] 2>/dev/null; then
-  ok "a text was embedded through the Local AI proxy ($(j '.embedded.width') dimensions)"
+  ok "a text was embedded through the Local AI proxy ($(j '.embedded.width') dimensions, try $(j '.embedded.tries'))"
+  [ "$(j '.embedded.tries')" -gt 1 ] 2>/dev/null && note "the embedder refused first: $(j -c '.embedded.refusals')"
 else
-  not_ok "the embedder on the box did not embed: $(j -c '.embedded')"
+  not_ok "the embedder on the box did not embed in $(j '.embedded.tries // "?"') tries over two minutes: $(j -c '.embedded.refusals // .embedded')"
 fi
 
 if [ "$(j '.cloudRequests')" = 0 ]; then
   ok "not one in-process request went to ClawBox AI's proxy or its cloud embedder"
+elif [ "$(j '.cloudRequests')" = null ]; then
+  not_ok "the in-process requests to the cloud could not be counted: $(j '.cloudCountError // .crash // "the checks ended before counting"')"
 else
-  not_ok "$(j '.cloudRequests') in-process request(s) went to the cloud"
+  not_ok "$(j '.cloudRequests') in-process request(s) went to the cloud: $(j -c '.cloudUrls')"
 fi
 finish

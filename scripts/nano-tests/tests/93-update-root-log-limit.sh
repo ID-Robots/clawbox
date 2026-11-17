@@ -12,10 +12,15 @@
 # when the unit starts, so rebuild_reboot runs under whatever was loaded before
 # it.
 #
-#   1. The board is put on the head of beta through `nano-ci rebuild`, and that
-#      it IS the stale state is asserted: the root update unit has journald's
-#      default limit and no drop-in. A leftover of a newer build would make the
-#      rest prove nothing, so it ends the test.
+#   1. The board is put on the current RELEASE (the head of main) through
+#      `nano-ci rebuild` — what an owner's box runs, and older than the change
+#      under test until a release carries it. (TASK-2638: it was the head of
+#      beta, which already carried the limit, so the "older build" was never
+#      older and the stale state could not be found.) That it IS the stale
+#      state is asserted: the root update unit has journald's default limit and
+#      no drop-in. A drop-in is a leftover and ends the test as a failure; a
+#      release that already carries the limit leaves no stale path to prove,
+#      and the test says so and skips.
 #   2. Settings > Update to NANO_BRANCH. While rebuild_reboot runs, systemd has
 #      handed journald a limit no step reaches for it (the bridge drop-in the
 #      new install.sh's step_apt_update installs before the rebuild).
@@ -43,7 +48,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../update-raw-log-runs.sh"
 
 RUNTIME=$(board_runtime)
 note "agent runtime: $RUNTIME"
-BASE_BRANCH=beta
+BASE_BRANCH=main
 UNIT_SHOW='systemctl show -p LogRateLimitIntervalUSec -p LogRateLimitBurst -p NeedDaemonReload -p FragmentPath -p DropInPaths clawbox-root-update@rebuild_reboot.service'
 
 # show_unit WHEN — `systemctl show` and the `systemctl cat` lines that set a
@@ -65,8 +70,8 @@ if [ ${#BASE_SHA} -ne 40 ] || ! [[ $BASE_SHA =~ ^[0-9a-f]+$ ]]; then
   not_ok "[$RUNTIME] could not read the head of $BASE_BRANCH on the board's origin"
   finish
 fi
-if [ "$BASE_SHA" = "$NANO_SHA" ]; then
-  skip "[$RUNTIME] the head of $BASE_BRANCH is the commit under test: there is no older build to update from"
+if [ "$BASE_SHA" = "$NANO_SHA" ] || [ "$(board 'git -C "$REPO" merge-base --is-ancestor "$1" "$2" && echo yes' "$NANO_SHA" "$BASE_SHA" 2>/dev/null | tail -n 1)" = yes ]; then
+  skip "[$RUNTIME] the head of $BASE_BRANCH (${BASE_SHA:0:12}) is the commit under test or already contains it: there is no older build to update from"
   finish
 fi
 note "board at $(board_head | cut -c1-12): rebuilding it to $BASE_BRANCH ${BASE_SHA:0:12} first (several minutes)"
@@ -98,7 +103,9 @@ if [ -n "$(drop_ins)" ]; then
   finish
 fi
 if why=$(printf '%s\n' "$SHOWN" | log_limit_ok); then
-  not_ok "[$RUNTIME] the older build's root update unit already has a limit no step reaches: not the stale path"
+  # The release itself carries the limit: nothing older exists to update from,
+  # and the rest would prove nothing. Said as a skip, not a pass.
+  skip "[$RUNTIME] the release $BASE_BRANCH ${BASE_SHA:0:12} already has a root update limit no step reaches ($why): there is no stale path to prove"
   finish
 fi
 ok "[$RUNTIME] on the older build the root update unit has no drop-in and journald's default limit, as an owner's box does ($why)"
