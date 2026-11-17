@@ -277,15 +277,19 @@ describe("the owner's switch", () => {
     expect(await lib.isCodingAgentEnabled()).toBe(true);
   });
 
-  it("refuses every run under the local-only AI lock, before anything of it is touched (TASK-2501)", async () => {
+  it("refuses every cloud run under the local-only AI lock, before anything of it is touched (TASK-2501)", async () => {
     readyDevice();
     writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, ai_cloud_lock: true });
-    await expect(lib.startRun({ task: "do it", projectId: "no-such-project", source: "agent" }))
+    await expect(lib.startRun({ task: "do it", projectId: "no-such-project", source: "agent", provider: "clawbox-ai" }))
       .rejects.toMatchObject({ kind: "not_ready", code: "cloud_ai_locked" });
+    expect(fs.existsSync(argvFile())).toBe(false);
+    // With no provider named the box's own engine answers under the lock
+    // (PR-E), and this box has none set up: not ready, and nothing spawned.
+    await expect(lib.startRun({ task: "do it", projectId: "no-such-project", source: "agent" }))
+      .rejects.toMatchObject({ kind: "not_ready" });
     expect(fs.existsSync(argvFile())).toBe(false);
     const readiness = await lib.checkReadiness();
     expect(readiness.ready).toBe(false);
-    expect(readiness.problems.join("\n")).toMatch(/Local-only AI is on/);
   });
 
   it("refuses before spawning when the harness is not ready", async () => {
@@ -1068,9 +1072,11 @@ describe("a run", () => {
     it("keeps a draft under the local-only AI lock, but refuses to start it with the lock's code (TASK-2501)", async () => {
       readyDevice();
       makeProject("site");
-      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, ai_cloud_lock: true });
-      const draft = await lib.createDraftRun({ task: "later please", projectId: "site", source: "owner" });
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
+      const draft = await lib.createDraftRun({ task: "later please", projectId: "site", source: "owner", provider: "clawbox-ai" });
       expect(draft.status).toBe("draft");
+      // The lock goes on after the draft was made on a cloud provider.
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, ai_cloud_lock: true });
       await expect(lib.startDraftRun(draft.id)).rejects.toMatchObject({ kind: "not_ready", code: "cloud_ai_locked" });
       expect(lib.getRun(draft.id)?.status).toBe("draft");
       expect(fs.existsSync(argvFile())).toBe(false);

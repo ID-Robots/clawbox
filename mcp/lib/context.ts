@@ -224,6 +224,12 @@ export interface McpContext {
    */
   codingAgent: boolean;
   /**
+   * The providers the coding tools' schemas offer, when the device narrows
+   * them: under the local-only AI lock, `local` alone. Absent (or null): every
+   * provider this build knows (CODING_PROVIDERS).
+   */
+  codingProviders?: readonly string[] | null;
+  /**
    * Whether this box can actually make a picture — the agent has an image
    * backend, or the box itself has a credential and a route to spend it on.
    *
@@ -327,20 +333,36 @@ interface CodingAgentStatusPayload {
      */
     anyProviderReady?: boolean;
   };
+  /** The providers the box offers — under the local-only AI lock, `local` alone. */
+  providers?: unknown;
+  cloudAiLocked?: boolean;
 }
 
 /**
  * Same shape as the email probe: an unreachable or older device answers null
  * and the family stays unregistered.
  */
-async function probeCodingAgent(): Promise<boolean> {
+async function probeCodingAgent(): Promise<{ ready: boolean; providers: string[] | null }> {
   const status = await apiTry<CodingAgentStatusPayload>("/setup-api/coding-agent/status", { timeoutMs: 3_000 });
-  if (status?.enabled !== true) return false;
+  if (status?.enabled !== true) return { ready: false, providers: null };
   // The switch is the owner's consent and is checked first. What follows is
   // "can this box run at all" — ANY provider where the device answers that,
   // the default's verdict on a server that does not.
   const any = status.readiness?.anyProviderReady;
-  return typeof any === "boolean" ? any : status.ready === true;
+  return { ready: typeof any === "boolean" ? any : status.ready === true, providers: codingProvidersFrom(status) };
+}
+
+/**
+ * The providers a coding tool's schema may name. Under the local-only AI lock
+ * (TASK-2501) the device answers `local` alone, and a schema that still listed
+ * the cloud accounts would invite a call the device refuses. With no lock the
+ * schema keeps every provider (null): the device's `providers` there is what
+ * the PANEL draws, which leaves out an OpenAI account a caller may still name.
+ */
+function codingProvidersFrom(status: CodingAgentStatusPayload): string[] | null {
+  if (status.cloudAiLocked !== true) return null;
+  const ids = Array.isArray(status.providers) ? status.providers.filter((p): p is string => typeof p === "string" && p !== "") : [];
+  return ids.length > 0 ? ids : ["local"];
 }
 
 interface ChatCapabilitiesBody {
@@ -399,7 +421,7 @@ export async function buildContext(
     probeCodingAgent(),
     probeImageGeneration(),
   ]);
-  const codingAgent = coding;
+  const codingAgent = coding.ready;
 
   let providers: string[] = [];
   if (edition === "hermes") {
@@ -427,6 +449,7 @@ export async function buildContext(
     providers,
     emailCanRead,
     codingAgent,
+    codingProviders: coding.providers,
     canGenerateImages,
   };
 }

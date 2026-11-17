@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHmac } from "node:crypto";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, statSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -884,5 +887,162 @@ describe("the optional provider lock", () => {
     const lock = path.join(home, "coding-provider-lock");
     writeFileSync(lock, "clawbox-ai\n", "utf-8");
     expect(runWrapper({ CLAUDE_DS_PROVIDER_LOCK: lock }).status).toBe(0);
+  });
+});
+
+describe("the box's own engine (`local`, TASK-2501 PR-E)", () => {
+  const LOCAL_AI_TOKEN = "fedcba9876543210fedcba9876543210";
+  const routeToken = () => "clawbox-local-" + createHmac("sha256", LOCAL_AI_TOKEN).update("clawbox local coding route v1").digest("hex");
+  let server: Server;
+  let base: string;
+  let engine: { status: number; body: unknown };
+  let seen: Array<{ url: string; auth: string }>;
+
+  beforeEach(async () => {
+    writeFileSync(path.join(root, "data", ".local-ai-token"), LOCAL_AI_TOKEN, { mode: 0o600 });
+    engine = { status: 200, body: { data: [{ type: "model", id: "dsv41-flash", clawbox: { engine: "clawext", context_tokens: 1_000_000, max_output_tokens: 32_000 } }] } };
+    seen = [];
+    server = createServer((req, res) => {
+      seen.push({ url: req.url ?? "", auth: String(req.headers.authorization ?? "") });
+      const ok = req.headers.authorization === `Bearer ${routeToken()}`;
+      res.writeHead(ok ? engine.status : 401, { "content-type": "application/json" });
+      res.end(JSON.stringify(ok ? engine.body : { type: "error", error: { type: "authentication_error", message: "The local coding token is required." } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/setup-api/local-ai/anthropic`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  /** The wrapper, run without blocking this process: the stand-in route answers from here. */
+  function runLocal(extraEnv: Record<string, string | undefined> = {}): Promise<{ status: number | null; stderr: string }> {
+    return new Promise((resolve) => {
+      const child = spawn("bash", [WRAPPER, "-p", "hello"], {
+        cwd: REPO,
+        env: { PATH: `${binDir}:/usr/bin:/bin`, HOME: home, CLAWBOX_ROOT: root, CLAUDE_DS_PROVIDER: "local", CLAUDE_DS_LOCAL_BASE_URL: base, ...extraEnv } as unknown as NodeJS.ProcessEnv,
+      });
+      let stderr = "";
+      child.stderr.on("data", (d) => { stderr += String(d); });
+      child.on("close", (status) => resolve({ status, stderr }));
+    });
+  }
+
+  it("points both of Claude Code's bases at the box's route, with the token derived from the Local AI token", async () => {
+    const r = await runLocal({ CLAWBOX_AI_PROXY_URL: "https://proxy.example/api/ai", ANTHROPIC_API_KEY: "sk-ant-stale" });
+    expect(r.status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_BASE_URL).toBe(base);
+    expect(env.CLAUDE_CODE_API_BASE_URL).toBe(base);
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe(routeToken());
+    // The route was asked with that token, for the engine's model, and nothing else.
+    expect(seen).toEqual([{ url: "/setup-api/local-ai/anthropic/v1/models", auth: `Bearer ${routeToken()}` }]);
+    // Nothing of the cloud paths reaches the session.
+    expect(env.CLAWBOX_AI_PROXY_URL).toBeUndefined();
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(Object.values(env).join("\n")).not.toMatch(/claw_test_token|fedcba9876543210fedcba9876543210/);
+    expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1");
+    expect(env.CLAUDE_CONFIG_DIR).toBe(path.join(home, ".claude-ds-local"));
+  });
+
+  it("puts the engine's model in every slot, named for its million-token window, and sizes the session to the engine", async () => {
+    expect((await runLocal()).status).toBe(0);
+    const env = capturedEnv();
+    for (const slot of ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]) {
+      expect(env[slot], slot).toBe("dsv41-flash[1m]");
+    }
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe(String(Math.floor(1_000_000 * 84 / 100)));
+    expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("32000");
+  });
+
+  it("names a smaller engine's model as it is, compacts inside its window, and keeps a lower reply cap the runner set", async () => {
+    engine.body = { data: [{ type: "model", id: "qwen3-coder", clawbox: { engine: "llamacpp", context_tokens: 131_072, max_output_tokens: 8_192 } }] };
+    expect((await runLocal({ CLAUDE_CODE_MAX_OUTPUT_TOKENS: "4000" })).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_MODEL).toBe("qwen3-coder");
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe(String(Math.floor(131_072 * 84 / 100)));
+    expect(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).toBeUndefined();
+    expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("4000");
+  });
+
+  // Claude Code takes no auto-compact window under 100k: an engine whose 84%
+  // is below that gets the window AT 100k and the point inside it moved, or
+  // the session would grow past the engine's window before compacting.
+  it("compacts a small engine's session inside its window, below Claude Code's smallest window", async () => {
+    engine.body = { data: [{ type: "model", id: "small-coder", clawbox: { engine: "ollama", context_tokens: 65_536, max_output_tokens: 8_192 } }] };
+    expect((await runLocal({ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "95" })).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("100000");
+    // 84% of 65,536 is 55,050 tokens: 55% of the 100k window, rounded down.
+    expect(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).toBe("55");
+    expect(Number(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) * 1_000).toBeLessThanOrEqual(Math.floor(65_536 * 84 / 100));
+  });
+
+  // The runner clamps a local run's ultracode to xhigh (effortOnProvider); an
+  // older run record resumed, or the owner's stored ultracode in a terminal,
+  // reaches the wrapper as ultracode all the same, and is clamped here too.
+  it("never runs the engine on ultracode, whoever asked for it, as xhigh", async () => {
+    expect((await runLocal({ CLAUDE_DS_EFFORT: "ultracode" })).status).toBe(0);
+    expect(readFileSync(claudeLog, "utf-8")).not.toContain("ultracode");
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("xhigh");
+    writeDeviceConfig({ coding_agent_effort: "ultracode" });
+    expect((await runLocal()).status).toBe(0);
+    expect(readFileSync(claudeLog, "utf-8")).not.toContain("ultracode");
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("xhigh");
+  });
+
+  it("keeps the session's token off any proxy the box's environment names, and leaves the proxy to the run's tools", async () => {
+    expect((await runLocal({ HTTPS_PROXY: "http://proxy.corp.example:3128", NO_PROXY: "git.corp.example" })).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.NO_PROXY).toBe("127.0.0.1,localhost,::1,git.corp.example");
+    // curl reads the lowercase spelling first: the owner's exclusion is there too.
+    expect(env.no_proxy).toBe("127.0.0.1,localhost,::1,git.corp.example");
+    expect(env.HTTPS_PROXY).toBe("http://proxy.corp.example:3128");
+  });
+
+  it("keeps the exclusions inherited under either spelling, in both", async () => {
+    expect((await runLocal({ HTTPS_PROXY: "http://proxy.corp.example:3128", no_proxy: "git.corp.example", NO_PROXY: "pkg.corp.example" })).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.no_proxy).toBe("127.0.0.1,localhost,::1,git.corp.example,pkg.corp.example");
+    expect(env.NO_PROXY).toBe(env.no_proxy);
+    expect((await runLocal({ HTTPS_PROXY: "http://proxy.corp.example:3128", no_proxy: "git.corp.example", NO_PROXY: "git.corp.example" })).status).toBe(0);
+    expect(capturedEnv().no_proxy).toBe("127.0.0.1,localhost,::1,git.corp.example");
+  });
+
+  it("denies WebSearch and WebFetch in the local harness's own settings, beside the rules already there", async () => {
+    mkdirSync(path.join(home, ".claude-ds-local"), { recursive: true });
+    writeFileSync(path.join(home, ".claude-ds-local", "settings.json"), JSON.stringify({ permissions: { deny: ["Read(//etc/**)"] }, theme: "dark" }));
+    expect((await runLocal()).status).toBe(0);
+    const settings = JSON.parse(readFileSync(path.join(home, ".claude-ds-local", "settings.json"), "utf-8"));
+    expect(settings.permissions.deny).toEqual(["Read(//etc/**)", "WebSearch", "WebFetch"]);
+    expect(settings.theme).toBe("dark");
+    // A second launch adds nothing twice.
+    expect((await runLocal()).status).toBe(0);
+    expect(JSON.parse(readFileSync(path.join(home, ".claude-ds-local", "settings.json"), "utf-8")).permissions.deny).toHaveLength(3);
+  });
+
+  it("says the route's own words, and starts nothing, when the box has no engine for it", async () => {
+    engine = { status: 400, body: { type: "error", error: { type: "invalid_request_error", message: "No engine is set up on this box for local coding runs." } } };
+    const r = await runLocal();
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("No engine is set up on this box for local coding runs.");
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("refuses a route that is not on this box, before any token is made", async () => {
+    const r = await runLocal({ CLAUDE_DS_LOCAL_BASE_URL: "https://engine.example/setup-api/local-ai/anthropic" });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/not on this box/);
+    expect(seen).toEqual([]);
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("says so when the box has no Local AI token to derive one from", async () => {
+    rmSync(path.join(root, "data", ".local-ai-token"));
+    const r = await runLocal();
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/no Local AI token/);
+    expect(seen).toEqual([]);
   });
 });
