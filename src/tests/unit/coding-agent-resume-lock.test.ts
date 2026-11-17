@@ -98,11 +98,19 @@ vi.mock("@/lib/local-engine", async (importOriginal) => ({
 // The last await of the preparation, so a flip here is a flip in the middle of
 // everything a resume resolves: exactly where the lock used to be blind.
 const armLockDuringPreparation = vi.hoisted(() => ({ armed: false }));
+// The owner's Stop, pressed on the paused run while the resume is inside its
+// preparation: the record ends under it, and the launch must cancel itself.
+const armStopDuringPreparation = vi.hoisted(() => ({ fn: null as null | (() => void) }));
 vi.mock("@/lib/coding-git-identity", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/coding-git-identity")>();
   return {
     ...real,
     resolveCodingGitIdentity: async (dir: string) => {
+      if (armStopDuringPreparation.fn) {
+        const stop = armStopDuringPreparation.fn;
+        armStopDuringPreparation.fn = null;
+        stop();
+      }
       if (armLockDuringPreparation.armed) cloudLockedSync.mockReturnValue(true);
       return real.resolveCodingGitIdentity(dir);
     },
@@ -215,6 +223,7 @@ beforeEach(async () => {
   cloudLocked.mockReset().mockResolvedValue(false);
   cloudLockedSync.mockReset().mockReturnValue(false);
   armLockDuringPreparation.armed = false;
+  armStopDuringPreparation.fn = null;
   poolPick.id = null;
   resolveLocalEngine.mockReset().mockResolvedValue({
     kind: "clawext",
@@ -294,6 +303,37 @@ describe("a resume on a cloud provider with the lock turned on", () => {
 
     expect(resumed.status).toBe("running");
     await vi.waitFor(() => { expect(spawnCount()).toBe(spawnedBefore + 1); }, { timeout: 10_000 });
+  });
+});
+
+describe("a run the owner stops while the preparation is running", () => {
+  it("does not start a process, gives its prepared secrets back and leaves the record stopped", async () => {
+    const id = await pausedRun("clawbox-ai", "zeta");
+    const spawnedBefore = spawnCount();
+    expect(spawnedBefore).toBe(1);
+    // A one-run copy appears after the pause. The preparation claims it; the
+    // cancelled attempt has to hand it back rather than leave it spent.
+    await secrets.importSecret({ name: "LATE_TOKEN", value: "late-one-run-value-000", scope: "@box", source: "hermes", expiresAt: "run" });
+    await secrets.setSecretInject({ name: "LATE_TOKEN", scope: "@box", inject: true });
+    // The owner presses Stop on the paused run from inside the preparation —
+    // the window where the record is still paused and nothing has been flipped.
+    armStopDuringPreparation.fn = () => { lib.stopRun(id); };
+
+    const resumed = await lib.resumeRun(id);
+
+    // The record the Stop left, not a run revived as running.
+    expect(resumed.status).toBe("stopped");
+    expect(spawnCount()).toBe(spawnedBefore);
+    const after = lib.getRun(id)!;
+    expect(after.status).toBe("stopped");
+    expect(after.error).toBe("Stopped.");
+    expect(after.completedAt).not.toBeNull();
+    // The copy this attempt claimed is given back — by the Stop's own settle or
+    // by this cancel, but gone either way: a stopped record keeps no hand-off
+    // nothing will use.
+    await vi.waitFor(async () => {
+      expect((await secrets.listSecrets()).filter((s) => s.name === "LATE_TOKEN")).toEqual([]);
+    }, { timeout: 10_000 });
   });
 });
 

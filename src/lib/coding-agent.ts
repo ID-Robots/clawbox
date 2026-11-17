@@ -15344,6 +15344,25 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // CodeRabbit's finding on #1511).
     const accountBefore = run.anthropicAccount;
     const prepared = await prepareRunSecrets(run);
+    // The record can END inside that preparation: the owner may press Stop on the
+    // paused run, and `stopRun` closes the book on it — status stopped, its pull
+    // request settled, its one-run copies given back. This attempt is then a
+    // resume of something that no longer asks to continue, so it cancels itself:
+    // only what IT prepared is given back and the record keeps the state the Stop
+    // left, instead of being revived as running with a process behind it
+    // (TASK-2501 PR-E, CodeRabbit's finding on #1511). Checked synchronously here,
+    // with nothing awaited before the flip below, so no Stop can land in between.
+    const live = loadRuns().find((r) => r.id === id);
+    if (!live || live !== run || (run.status !== "paused" && run.status !== "gave_up")) {
+      dropRunSecrets(run.id);
+      runSecretScopes.delete(run.id);
+      runSecretExpiry.delete(run.id);
+      // Only what THIS resolve claimed: the copies a stopped run's own settle
+      // released are already gone, and the paused run's are not this attempt's.
+      trackSettleWork(releaseRunSecretNames(run.id, prepared.claimed));
+      if (!live) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+      return cloneRun(live);
+    }
     // Asked ONCE MORE here (TASK-2501 PR-E): the gate above was read before the
     // tools, the worktree, the folder, the allow rules and the preparation, and
     // every one of those awaits is long enough for the owner to turn the lock on
