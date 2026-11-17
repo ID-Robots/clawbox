@@ -55,13 +55,17 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
   /**
    * Whether no turn runs under `key` any more, as the route itself tells it:
    * GET re-attaches to the key's newest live turn — a running one if there is
-   * one — and replays its frames (204: no turn on record). Settled means a 204
-   * or a replayed end of that turn (a done, error or stopped frame). A stream
-   * that just closes proves nothing (a dropped connection, a session that
-   * expired, a turn that keeps running): it is asked again. Not settled by
-   * `settleMs`, or no answer by then, is not. Asked only after a Stop that did
-   * stop a registered turn: every earlier turn on the session had settled, so
-   * that turn was this one, and it is the newest the route can replay.
+   * one — and replays its frames (204: no turn on record). Settled means a
+   * 204, or a replayed end of that turn (a done, error or stopped frame)
+   * followed by the stream closing: the route closes a re-attach only once
+   * the turn has ended, and a `done` can go out before that. A stream that
+   * closes with no end in it proves nothing (a dropped connection, a session
+   * that expired): it is asked again. Not settled by `settleMs`, or no answer
+   * by then, is not.
+   *
+   * Asked before each turn on a session that had one (the previous turn has
+   * ended), and after a Stop that did stop a registered turn: with every
+   * earlier turn ended, that turn was this one.
    */
   async function settled(key) {
     const deadline = Date.now() + settleMs;
@@ -81,15 +85,16 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
             const reader = res.body.getReader();
             const dec = new TextDecoder();
             let buf = "";
+            let sawEnd = false;
             for (;;) {
               const { value, done } = await reader.read();
-              if (done) break;
+              if (done) {
+                if (sawEnd) return true;
+                break;
+              }
               const taken = takeSseFrames(buf + dec.decode(value, { stream: true }));
               buf = taken.rest;
-              if (taken.frames.some((f) => TERMINAL_EVENTS.has(f.event))) {
-                try { await reader.cancel(); } catch { /* ended */ }
-                return true;
-              }
+              if (taken.frames.some((f) => TERMINAL_EVENTS.has(f.event))) sawEnd = true;
             }
           }
         } catch (e) {
@@ -129,6 +134,20 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
       r.error = { kind: "blocked", message: "an earlier turn on this session was never confirmed stopped" };
       return r;
     }
+    // The previous turn on this session must have ENDED on the route (not
+    // only answered) before the next is sent: then the only turn a Stop can
+    // find under this key is this one.
+    if (sess.turnsSent && !(await settled(sess.key))) {
+      sess.blocked = true;
+      r.error = { kind: "blocked", message: "the previous turn on this session was not confirmed ended" };
+      log(`${sess.key}: the previous turn was not confirmed ended: no more turns on this session`);
+      return r;
+    }
+    if (signal?.aborted) {
+      r.error = { kind: "stopped", message: "the run was stopped" };
+      return r;
+    }
+    sess.turnsSent = (sess.turnsSent || 0) + 1;
     const threadedBefore = Boolean(sess.sessionId);
     const t0 = performance.now();
     const ms = () => Math.round(performance.now() - t0);
