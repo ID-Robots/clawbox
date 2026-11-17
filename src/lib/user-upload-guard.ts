@@ -13,6 +13,7 @@
  */
 
 import fs from "fs";
+import path from "@/lib/runtime-path";
 import { MEMBER_HOME_ENTRY, type FilesFence } from "@/lib/files-scope";
 import { insideHome, measureHomeUsage, noteHomeChange, openQuotaWrite, type QuotaWrite } from "@/lib/home-usage";
 import { quotaExceededMessage, quotaUnmeasuredMessage, uploadTooLargeMessage } from "@/lib/user-limits";
@@ -85,6 +86,7 @@ export async function userUploadGuard(opts: {
   const { limitedUser, fence, destPath, disk } = opts;
   let uploadLimit: number | null = null;
   let quota: QuotaWrite | null = null;
+  let writing: string | null = null;
   let quotaHome: string | null = null;
   let replaced = 0;
   if (limitedUser) {
@@ -145,6 +147,10 @@ export async function userUploadGuard(opts: {
     lastBound: () => bound,
     quotaCeiling: (passed: number) => (quota ? quota.ceiling(passed) : Infinity),
     destination(path: string) {
+      // Every upload's file is known to be written until it ends, whoever
+      // writes it: a move must not carry it into a limited home meanwhile.
+      writing = path;
+      beginWriting(path);
       if (!quota || !quotaHome || !insideHome(quotaHome, path)) return;
       replaced = replacedBytes(path);
       quota.replacing(replaced);
@@ -162,6 +168,8 @@ export async function userUploadGuard(opts: {
     },
     refusalFor,
     finish(landedBytes: number | null) {
+      if (writing) endWriting(writing);
+      writing = null;
       if (!quota) return;
       quota.finish(landedBytes === null ? 0 : landedBytes - replaced);
       // A failed write may have taken the file it was replacing with it.
@@ -215,6 +223,46 @@ async function bytesAt(abs: string): Promise<{ bytes: number; truncated: boolean
   return { bytes: 0, truncated: false };
 }
 
+// ── Files being written ──────────────────────────────────────────────────────
+//
+// An upload writes through a descriptor: a file moved while it is still being
+// written goes on growing where it now is. So the files uploads are writing
+// right now are kept here — on `globalThis`, one set for every route bundle —
+// and a move into a limited user's home refuses to carry one (TASK-2446):
+// whatever it would still grow by is bytes no quota check sees.
+
+const WRITING_KEY = Symbol.for("clawbox.userUploadGuard.writing");
+function writingNow(): Map<string, number> {
+  const g = globalThis as unknown as Record<symbol, Map<string, number> | undefined>;
+  let map = g[WRITING_KEY];
+  if (!map) {
+    map = new Map();
+    g[WRITING_KEY] = map;
+  }
+  return map;
+}
+
+function beginWriting(abs: string): void {
+  const k = path.resolve(abs);
+  const map = writingNow();
+  map.set(k, (map.get(k) ?? 0) + 1);
+}
+
+function endWriting(abs: string): void {
+  const k = path.resolve(abs);
+  const map = writingNow();
+  const n = (map.get(k) ?? 0) - 1;
+  if (n > 0) map.set(k, n);
+  else map.delete(k);
+}
+
+/** Is an upload writing `abs`, or a file under it right now? */
+export function uploadWritingUnder(abs: string): boolean {
+  const k = path.resolve(abs);
+  for (const p of writingNow().keys()) if (p === k || p.startsWith(k + path.sep)) return true;
+  return false;
+}
+
 /** A move's claim on a home's quota: released once the move has run, whatever it moved. */
 export interface MoveQuotaHold {
   done(): void;
@@ -242,6 +290,15 @@ export async function moveQuotaCheck(opts: {
   if (!home || !insideHome(home, destAbs)) return null;
   const incoming = sources.filter((s): s is string => typeof s === "string" && !insideHome(home, s));
   if (incoming.length === 0) return null;
+  // A file an upload is still writing would keep growing once in the home.
+  if (incoming.some(uploadWritingUnder)) {
+    return {
+      refusal: {
+        status: 409,
+        body: { error: "This file is still being uploaded. Move it into your home folder once the upload has finished.", code: "upload_in_progress" },
+      },
+    };
+  }
   const quotaBytes = homeQuotaBytes(await readUserLimits());
   if (quotaBytes === null) return null;
   const write = await openQuotaWrite(home, quotaBytes);

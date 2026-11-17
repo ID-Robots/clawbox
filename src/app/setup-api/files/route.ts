@@ -752,6 +752,7 @@ export async function PUT(req: NextRequest) {
   // A user other than the owner is held to their upload limit and — into
   // their own home — their quota as well (src/lib/user-upload-guard.ts).
   const guard = await userUploadGuard({ limitedUser, fence, destPath, disk: uploadBudget(abs) });
+  guard.destination(destPath);
   const early = guard.precheck(contentLength);
   if (early) {
     guard.finish(null);

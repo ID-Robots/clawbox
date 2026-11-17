@@ -305,6 +305,30 @@ describe("the home quota", () => {
     for (const r of [a, b]) if (r && "hold" in r) r.hold.done();
   });
 
+  it("refuses to move a file into the home while an upload is still writing it", async () => {
+    fs.writeFileSync(path.join(OWNER, "Shared", "growing.bin"), Buffer.alloc(100 * KB));
+    const { moveQuotaCheck, userUploadGuard, uploadWritingUnder } = await import("@/lib/user-upload-guard");
+    const { fenceFor, memberRoots } = await import("@/lib/files-scope");
+    const roots = memberRoots(IVAN, OWNER);
+    if (!roots.ok) throw new Error("no member roots");
+    const fence = fenceFor({ kind: "member", username: "ivan", roots: roots.roots });
+    const growing = path.join(OWNER, "Shared", "growing.bin");
+    // An upload into Shared is still writing the file (by anyone: the owner's too).
+    const upload = await userUploadGuard({ limitedUser: null, fence, destPath: growing, disk: () => Infinity });
+    upload.destination(growing);
+    expect(uploadWritingUnder(path.join(OWNER, "Shared"))).toBe(true);
+    const check = (sources: string[]) => moveQuotaCheck({ limitedUser: "ivan", fence, destAbs: IVAN, sources });
+    for (const sources of [[growing], [path.join(OWNER, "Shared")]]) {
+      const refused = await check(sources);
+      expect(refused && "refusal" in refused ? refused.refusal : null).toMatchObject({ status: 409, body: { code: "upload_in_progress" } });
+    }
+    upload.finish(100 * KB);
+    expect(uploadWritingUnder(growing)).toBe(false);
+    const allowed = await check([growing]);
+    expect(allowed && "hold" in allowed).toBe(true);
+    if (allowed && "hold" in allowed) allowed.hold.done();
+  });
+
   it("does not apply to the owner, nor without a quota", async () => {
     fs.writeFileSync(path.join(IVAN, "old.bin"), Buffer.alloc(Math.round(2.9 * MB)));
     setLimits({ uploadMaxMb: 1, homeQuotaMb: 0 });
