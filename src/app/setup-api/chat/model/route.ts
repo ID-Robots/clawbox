@@ -51,6 +51,7 @@ import {
 } from "@/lib/provider-models";
 import {
   DISABLED_PROVIDERS_KEY,
+  chatgptSignInFenced,
   claudeSignInFenced,
   credentialedProviders,
   normalizeProviderId,
@@ -973,6 +974,12 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
   const claudeOption = configuredPrimaryOptions.get("anthropic");
   if (claudeOption && claudeSignInFenced(openclawConfig)) {
     configuredPrimaryOptions.set("anthropic", { ...claudeOption, available: false, reauthRequired: true });
+  }
+  // The ChatGPT sign-in, by the same rule and the same function the strip asks
+  // (SUP-1023): a dead refresh marker where the credential was.
+  const chatgptOption = configuredPrimaryOptions.get(CHATGPT_UI_PROVIDER);
+  if (chatgptOption && chatgptSignInFenced(openclawConfig)) {
+    configuredPrimaryOptions.set(CHATGPT_UI_PROVIDER, { ...chatgptOption, available: false, reauthRequired: true });
   }
 
   // When Local-only mode is on, the cloud providers are intentionally
