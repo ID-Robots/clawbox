@@ -34,6 +34,7 @@
 
 import { z } from "zod";
 import { api, apiGet, type ApiOptions } from "../lib/api";
+import { installEdition } from "../lib/edition";
 import { ApiError, redact, ToolError, type ToolErrorCode } from "../lib/errors";
 import { json, text, type Ed, type Registrar, type ToolOpts } from "../lib/register";
 import { zBool, zEnumOf, zInt, zText } from "../lib/schema";
@@ -373,11 +374,13 @@ function describeMemoryStatus(s: MemoryStatusBody, searchHint: boolean): Record<
 }
 
 function registerMemoryStatus(reg: Registrar, edition: Ed): void {
-  const hermes = edition === "hermes";
+  // The search route answers only where there is no OpenClaw: on a dual box
+  // running Hermes the index is OpenClaw's and the route answers 409 `edition`.
+  const searchHint = edition === "hermes" && installEdition() !== "dual";
   reg.tool(
     "memory_shard_status",
     "Read the state of Memory Shard, the index of the folders the owner added: whether it is on and healthy, what it holds, why it wants a reindex and how far a pass has got. "
-      + (hermes ? "Search it with memory_shard_search. " : "")
+      + (searchHint ? "Search it with memory_shard_search. " : "")
       + "Use it when the user asks whether their documents are indexed, or how a reindex is going.",
     {},
     { editions: [edition], readOnly: true },
@@ -388,7 +391,7 @@ function registerMemoryStatus(reg: Registrar, edition: Ed): void {
         // it has one.
         timeoutMs: READ_MS,
       });
-      return json(describeMemoryStatus(status, hermes));
+      return json(describeMemoryStatus(status, searchHint));
     },
   );
 }

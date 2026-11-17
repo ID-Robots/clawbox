@@ -14,6 +14,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { apiGet, apiTry } = vi.hoisted(() => ({ apiGet: vi.fn(), apiTry: vi.fn() }));
+// The install edition the memory tools read, set by the test that needs another one.
+const { installed } = vi.hoisted(() => ({ installed: { edition: "openclaw" as "openclaw" | "hermes" | "dual" } }));
+vi.mock("../../../mcp/lib/edition", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../mcp/lib/edition")>(),
+  installEdition: () => installed.edition,
+}));
 
 vi.mock("../../../mcp/lib/api", async () => ({
   apiGet: (...a: unknown[]) => apiGet(...a),
@@ -176,6 +182,24 @@ describe("memory_shard_status", () => {
     const unknown = await harness("hermes").call("memory_shard_status", {});
     if (unknown.isError) throw new Error("expected a status");
     expect(unknown.text).not.toMatch(/memory_shard_search/);
+  });
+
+  it("does not point Hermes on a dual box at memory_shard_search, whose route answers only where there is no OpenClaw", async () => {
+    installed.edition = "dual";
+    try {
+      const dual = harness("hermes");
+      expect(dual.get("memory_shard_status").description).not.toMatch(/memory_shard_search/);
+      for (const semanticAvailable of [true, false]) {
+        apiGet.mockResolvedValue({ ...MEMORY, semanticAvailable });
+        const out = await dual.call("memory_shard_status", {});
+        if (out.isError) throw new Error("expected a status");
+        const s = JSON.parse(out.text) as { searchable: unknown; guidance: string };
+        expect(s.searchable).toBe(semanticAvailable);
+        expect(s.guidance).not.toMatch(/memory_shard_search/);
+      }
+    } finally {
+      installed.edition = "openclaw";
+    }
   });
 });
 
