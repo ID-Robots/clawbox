@@ -49,6 +49,17 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 openclaw_only "Local AI as the OpenClaw chat model"
 
+# The gateway up first. The test before can leave it restarting on its way
+# out (66 puts memory search back in the cloud: an offline config write that
+# stops and starts the gateway), and Local AI's Install refuses its configure
+# step on a gateway that is not up yet ("the gateway is held stopped for other
+# offline work").
+if ! wait_gateway_health 240; then
+  not_ok "the gateway was not up within 240 s before the test: $(api_error)"
+  finish
+fi
+[ "$WAITED" -gt 0 ] && note "waited ${WAITED}s for the gateway to be up before the test"
+
 PROMPT="направи ми проста todo страница"
 # Seconds one attempt may take, model load included (a cold start reads a
 # 3.35 GB GGUF; the page-writing turn took 31-56 s in the benchmark).
