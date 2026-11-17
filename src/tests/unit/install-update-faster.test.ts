@@ -255,6 +255,22 @@ d("build_is_current_for_checkout: a rebuild only when one could change something
     expect(stale.reason).toContain(".next/standalone/apps/box/.next/build-info.json was built on Node v1.0.0");
   });
 
+  it.each([
+    ["a commit other than HEAD", { commit: "0".repeat(40) }, "names commit 000000000000, and HEAD is"],
+    ["a build id other than the one beside it", { buildId: "build-9" }, "describes build build-9, and build-1 is beside it"],
+  ])("rebuilds over a nested served stamp with %s, which the identity script does not read", (_case, over, said) => {
+    const standalone = path.join(project, ".next", "standalone");
+    fs.rmSync(standalone, { recursive: true, force: true });
+    const nested = path.join(standalone, "apps", "box");
+    fs.mkdirSync(path.join(nested, ".next"), { recursive: true });
+    fs.writeFileSync(path.join(nested, "server.js"), "// entry\n");
+    writeStamp(path.join(nested, ".next"), over as Stamp);
+    fs.symlinkSync(path.join(nested, "server.js"), path.join(standalone, "server.js"));
+    const r = ask();
+    expect(r.status).toBe(1);
+    expect(r.reason).toContain(`.next/standalone/apps/box/.next/build-info.json ${said}`);
+  });
+
   it("rebuilds over a standalone entry that is a dangling link", () => {
     const entry = path.join(project, ".next", "standalone", "server.js");
     fs.rmSync(entry);
