@@ -83,10 +83,12 @@ drop_fixture() {
 }
 
 # back_on_test_build — the tests after this one (99-) judge the commit under
-# test: when the board is not on it (an early exit on the older release, or an
-# update that did not land), it is rebuilt to it before leaving.
+# test. Called only once the board has been moved off it: unless the owner's
+# update completed AND left the board on it, it is rebuilt to it before leaving
+# (an update that failed after its checkout moved can leave HEAD right and the
+# build half installed).
 back_on_test_build() {
-  if [ "$(board_head)" != "$NANO_SHA" ]; then
+  if [ "${UPDATE_PHASE:-}" != completed ] || [ "$(board_head)" != "$NANO_SHA" ]; then
     # shellcheck disable=SC2016  # expanded on the board
     board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$NANO_SHA" >/dev/null
     "$NANO_CI" rebuild "$NANO_SERIAL" "$NANO_BRANCH" 2>&1 | grep -E '^\[nano-ci\]|rc=|FAILED' | while IFS= read -r l; do note "restore: $l"; done
@@ -212,7 +214,32 @@ note "update took $(( $(date +%s) - START ))s and ended: $UPDATE_PHASE${UPDATE_E
 case "$UPDATE_PHASE" in
   completed) ok "[$RUNTIME] the update from the $BASE_NAME completed" ;;
   failed) not_ok "[$RUNTIME] the update from the $BASE_NAME failed: $UPDATE_ERROR" ;;
-  *) not_ok "[$RUNTIME] the update did not end within 60 minutes"; finish ;;
+  *)
+    not_ok "[$RUNTIME] the update did not end within 60 minutes"
+    # Bounded recovery: a rebuild beside a running update would race it, so a
+    # surviving update gets 15 more minutes to end first; then the build under
+    # test is put back and the fixture removed. Still running after that, the
+    # board is left as it is (and said so) — only the fixture ref goes.
+    API_MAX_TIME=20 board_api GET /setup-api/update/status
+    case "$(api_json '.phase // empty' 2>/dev/null)" in
+      completed|failed) UPDATE_PHASE=$(api_json '.phase') ;;
+      *)
+        wait_app_update 900
+        if [ "$UPDATE_PHASE" = timeout ]; then
+          API_MAX_TIME=20 board_api GET /setup-api/update/status
+          case "$(api_json '.phase // empty' 2>/dev/null)" in completed|failed) UPDATE_PHASE=$(api_json '.phase') ;; esac
+        fi
+        ;;
+    esac
+    note "15 minutes later the update is: $UPDATE_PHASE"
+    if [ "$UPDATE_PHASE" = timeout ]; then
+      not_ok "[$RUNTIME] the update was still running 75 minutes in: the board is left as it is, a rebuild would race it"
+      drop_fixture
+    else
+      back_on_test_build
+    fi
+    finish
+    ;;
 esac
 [ "$REBUILD_SEEN" = 1 ] || not_ok "[$RUNTIME] rebuild_reboot was never seen running, so its journald limit went unchecked"
 if [ "$(board_head)" = "$NANO_SHA" ]; then ok "[$RUNTIME] the board is on ${NANO_SHA:0:12} after the update"; else not_ok "[$RUNTIME] the board is on $(board_head | cut -c1-12), not ${NANO_SHA:0:12}"; fi

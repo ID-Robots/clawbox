@@ -385,37 +385,37 @@ describe("the auto-compact window", () => {
  */
 describe("the read cap of a 200k model", () => {
   const READ = "CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS";
+  // One launch's environment, never an earlier one's: the dump is removed
+  // first and the launch must have reached the fake `claude`.
+  const launchedEnv = (extraEnv: Record<string, string | undefined> = {}) => {
+    rmSync(envDump, { force: true });
+    const { status, stderr } = runWrapper(extraEnv);
+    expect(status, stderr).toBe(0);
+    return capturedEnv();
+  };
 
   it("cuts one read to a 25th of the 200k window Claude Code believes", () => {
-    const { status } = runWrapper();
-    expect(status).toBe(0);
-    expect(capturedEnv().ANTHROPIC_MODEL).toBe("deepseek-v4-flash");
-    expect(capturedEnv()[READ]).toBe("8000");
+    const env = launchedEnv();
+    expect(env.ANTHROPIC_MODEL).toBe("deepseek-v4-flash");
+    expect(env[READ]).toBe("8000");
   });
 
   it("leaves a 1M model Claude Code's own default", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
-    runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" });
-    expect(capturedEnv()[READ]).toBeUndefined();
+    expect(launchedEnv({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" })[READ]).toBeUndefined();
     // The 8000 an outer 200k session exported must not follow into a nested 1M one.
-    runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]", [READ]: "8000" });
-    expect(capturedEnv()[READ]).toBeUndefined();
+    expect(launchedEnv({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]", [READ]: "8000" })[READ]).toBeUndefined();
   });
 
   it("keeps a smaller cap the runner inherited, and lowers a larger one", () => {
-    runWrapper({ [READ]: "3000" });
-    expect(capturedEnv()[READ]).toBe("3000");
-    runWrapper({ [READ]: "25000" });
-    expect(capturedEnv()[READ]).toBe("8000");
-    runWrapper({ [READ]: "junk" });
-    expect(capturedEnv()[READ]).toBe("8000");
+    expect(launchedEnv({ [READ]: "3000" })[READ]).toBe("3000");
+    expect(launchedEnv({ [READ]: "25000" })[READ]).toBe("8000");
+    expect(launchedEnv({ [READ]: "junk" })[READ]).toBe("8000");
   });
 
   it("takes an explicit cap, or `off` for Claude Code's default", () => {
-    runWrapper({ CLAUDE_DS_READ_CAP: "12000" });
-    expect(capturedEnv()[READ]).toBe("12000");
-    runWrapper({ CLAUDE_DS_READ_CAP: "off", [READ]: "3000" });
-    expect(capturedEnv()[READ]).toBeUndefined();
+    expect(launchedEnv({ CLAUDE_DS_READ_CAP: "12000" })[READ]).toBe("12000");
+    expect(launchedEnv({ CLAUDE_DS_READ_CAP: "off", [READ]: "3000" })[READ]).toBeUndefined();
   });
 
   it("refuses a cap that is not a number of tokens, before Claude Code starts", () => {
@@ -430,8 +430,7 @@ describe("the read cap of a 200k model", () => {
 
   it("leaves an Anthropic run exactly as it was", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro", anthropic_api_key: "sk-ant-api03-test-key" });
-    runWrapper({ CLAUDE_DS_PROVIDER: "anthropic" });
-    expect(capturedEnv()[READ]).toBeUndefined();
+    expect(launchedEnv({ CLAUDE_DS_PROVIDER: "anthropic" })[READ]).toBeUndefined();
   });
 });
 
