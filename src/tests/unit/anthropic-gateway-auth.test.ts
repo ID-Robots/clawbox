@@ -162,6 +162,24 @@ describe("one provider's profiles, order and failures, as core resolves them", (
     expect(fs.existsSync(main)).toBe(true);
   });
 
+  it("reads each profile's authorization lifetime from the row that holds it — what an automation's recorded account is checked against (TASK-2533)", () => {
+    const LIFE_MAIN = "11111111-1111-4111-8111-111111111111";
+    const LIFE_SHARED = "22222222-2222-4222-8222-222222222222";
+    writeAgentDb("main", {
+      profiles: { "anthropic:clawbox-0a1b2c3d": { type: "token", provider: "anthropic", token: "sk-ant-oat01-pool" } },
+      authorizationLifetimes: { "anthropic:clawbox-0a1b2c3d": LIFE_MAIN, "anthropic:default": "33333333-3333-4333-8333-333333333333" },
+    });
+    writeSharedDb(true, { ...storeBlob(), authorizationLifetimes: { "anthropic:default": LIFE_SHARED, "anthropic:clawbox-0a1b2c3d": "44444444-4444-4444-8444-444444444444" } });
+    const read = readGatewayProviderAuth("anthropic", paths);
+    if (read.kind !== "present") throw new Error(read.kind);
+    const of = (id: string) => read.profiles.find((p) => p.profileId === id)?.authorization;
+    // The main agent's own copy carries its own lifetime; the shared one, the shared row's.
+    expect(of("anthropic:clawbox-0a1b2c3d")).toBe(LIFE_MAIN);
+    expect(of("anthropic:default")).toBe(LIFE_SHARED);
+    // Not enrolled yet: none.
+    expect(of("anthropic:manual")).toBeNull();
+  });
+
   it("answers no-store for a box with no OpenClaw store, unreadable for one it cannot ask — and never writes", () => {
     expect(readGatewayProviderAuth("anthropic", { agentsDir: path.join(home, "none"), sharedDb: path.join(home, "none.sqlite") })).toEqual({ kind: "no-store" });
     const main = writeAgentDb("main", storeBlob());

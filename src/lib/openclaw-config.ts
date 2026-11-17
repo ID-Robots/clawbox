@@ -3045,6 +3045,25 @@ export async function setPrimaryModelWithoutCatalogValidation(modelRef: string):
 }
 
 /**
+ * Set openclaw.json's `auth.order.<provider>` with the gateway stopped (the
+ * Anthropic pool's offline window): the read, the change and the write are ONE
+ * step under core's sidecar lock, a starting gateway waited out before it is
+ * taken. Every other key is written back as the file holds it at that moment,
+ * so an edit that landed after an earlier read — a staged write flushed, a CLI
+ * or gateway write, the owner's own — is never written over with an older
+ * snapshot.
+ */
+export async function setConfigAuthOrderOffline(provider: string, profileIds: readonly string[]): Promise<void> {
+  await withOpenclawConfigSidecarLock(async () => {
+    const config = (await readConfigFileForWrite()) as Record<string, unknown>;
+    const auth = isPlainObject(config.auth) ? (config.auth as Record<string, unknown>) : {};
+    const order = isPlainObject(auth.order) ? (auth.order as Record<string, unknown>) : {};
+    config.auth = { ...auth, order: { ...order, [provider]: [...profileIds] } };
+    await writeConfigFile(config as OpenClawConfig);
+  });
+}
+
+/**
  * Grant the equivalent Flash alias only while the policy explicitly allows
  * former Pro. The native cross-process lock covers the read, permission check,
  * append and atomic write, so concurrent CLI/gateway edits cannot be replaced
