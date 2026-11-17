@@ -27,6 +27,32 @@ than you becomes a **member of staff**:
 
 You keep everything else, including the AI providers and the system settings.
 
+## Limits for other users
+
+**Limits for other users** sets what everyone but you may use. You are never limited, and a
+ClawBox with only you on it has nobody they apply to. Type **0** to turn a limit off.
+
+| Limit | Default | What happens past it |
+| --- | --- | --- |
+| Largest file per upload or chat attachment | 100 MB | The upload is refused and the person is told the limit. A chat attachment stays within the chat's own 25 MB limit as well. |
+| Home folder quota per user | 10 GB | An upload, or a move from Shared into Home, that would go past it is refused. Deleting files always works. |
+| Chat messages per user, per minute | 20 | The message is not sent. The chat says how long to wait. |
+| Chat messages per user, per hour | 300 | The same, counted over the last hour. |
+
+The quota counts each person's own home folder. While organisation mode is on, Files shows it
+to them as **Home**. Under **Home folder usage** you see how much each person's home holds. Writes
+into **Shared** do not count against anyone's quota.
+
+## Audit log
+
+The **Audit log** card lists sign-ins and administrator actions, newest first: who signed in or
+failed to sign in, and from which address; users added and removed; passwords reset or changed;
+organisation mode and OpenClaw sharing switched on or off; the limits changed; the owner's
+password changed; updates started; the assistant's runtime changed; and a factory reset. A
+failed sign-in names the account only when it exists on this ClawBox. Only you can read the log,
+and nothing on the box edits or deletes an entry. It is kept in the ClawBox data folder. The
+newest few megabytes are kept, and older entries are dropped.
+
 ## Tools for members of staff
 
 Under **Tools for members of staff** you choose which of your assistant's MCP servers your

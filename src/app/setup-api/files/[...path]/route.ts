@@ -7,6 +7,7 @@ import { openInMemberView, type FilesFence } from "@/lib/files-scope";
 import { filesFenceFor } from "@/lib/files-scope-server";
 import { summarizeFolderForZip, zipFolderStream } from "@/lib/zip-stream";
 import { contentDisposition } from "@/lib/content-disposition";
+import { memberHomeChanged } from "@/lib/user-upload-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -255,7 +256,10 @@ export async function DELETE(req: NextRequest, { params }: Params) {
       fs.unlinkSync(abs);
     }
   } catch (err) {
+    memberHomeChanged(fence);
     return mutationErrorResponse(err, "Failed to delete");
   }
+  // A member's home just got smaller: their quota is measured again.
+  memberHomeChanged(fence);
   return NextResponse.json({ ok: true });
 }

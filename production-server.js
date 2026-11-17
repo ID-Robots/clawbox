@@ -32,6 +32,7 @@ const { createMediaOwners } = require("./scripts/chat-media-owners.js");
 const { staffAgentId } = require("./scripts/org-staff-policy.js");
 const { OPENCLAW_SHARED_KEY, USER_CHAT_WS_PATH, openclawSharedFrom } = require("./scripts/openclaw-sharing.js");
 const { ORG_MODE_KEY, orgModeFrom, orgModeRefusesUpgrade } = require("./scripts/org-mode.js");
+const { USER_LIMITS_KEY, admitChatRequest, userLimitsFrom } = require("./scripts/user-limits.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // entry point is standalone CommonJS and cannot import the TypeScript helper:
@@ -173,11 +174,14 @@ function readSessionConfig() {
       users: parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername()),
       openclawShared: openclawSharedFrom(parsed[OPENCLAW_SHARED_KEY]),
       orgMode: orgModeFrom(parsed[ORG_MODE_KEY]),
+      // The owner's limits for every other user (TASK-2446): the relay counts
+      // each user's chat turns against them.
+      userLimits: userLimitsFrom(parsed[USER_LIMITS_KEY]),
     };
     sessionConfigCache = { mtimeMs: stat.mtimeMs, value };
     return value;
   } catch {
-    const value = { gen: 0, users: new Map(), openclawShared: false, orgMode: false };
+    const value = { gen: 0, users: new Map(), openclawShared: false, orgMode: false, userLimits: userLimitsFrom(undefined) };
     sessionConfigCache = { mtimeMs: -1, value };
     return value;
   }
@@ -377,6 +381,9 @@ function relayUserChatUpgrade(req, socket, head, url, identity) {
       staffAgent,
       staffReady: staffAgent ? staffReadyReader(OPENCLAW_CONFIG_PATH, staffAgent) : undefined,
       stillCurrent: () => readSessionConfig().orgMode === orgMode,
+      // Each turn the user starts is counted against the owner's chat limits
+      // for them, read fresh per turn (scripts/user-limits.js).
+      admitChat: () => admitChatRequest(identity.username, readSessionConfig().userLimits),
       onReplyMedia: staffAgent ? (claim) => recordStaffReplyMedia(identity.username, claim) : null,
       connectUpstream: () => new WebSocket(`ws://127.0.0.1:${GATEWAY_PORT}${url}`, {
         // Port-less to satisfy the gateway's strict origin allowlist, as the

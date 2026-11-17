@@ -15,6 +15,8 @@ import { isImageMedia } from "@/lib/chat-media";
 import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_DROP_BATCH_RE, CHAT_DROP_MAX_DEPTH } from "@/lib/chat-attachments";
 import { isOfficeDocumentName, officeTextPath } from "@/lib/office-documents";
 import { extractOfficeText, type OfficeTextResult } from "@/lib/office-text";
+import { uploadTooLargeMessage } from "@/lib/user-limits";
+import { readUserLimits, uploadLimitBytes } from "@/lib/user-limits-server";
 
 export const dynamic = "force-dynamic";
 
@@ -407,6 +409,20 @@ export async function POST(req: NextRequest) {
   const user = person && !person.isOwner ? person.username : null;
   let batchDirUsed: string | null = null;
 
+  // A user other than the owner is held to the owner's upload limit for them
+  // as well (src/lib/user-limits.ts), when it is below this route's own
+  // ceiling; the refusal then names THEIR limit, not the route's.
+  const userLimit = user ? uploadLimitBytes(await readUserLimits()) : null;
+  const byUserLimit = userLimit !== null && userLimit < MAX_BYTES;
+  const maxBytes = byUserLimit ? userLimit : MAX_BYTES;
+  const maxRequestBytes = byUserLimit ? userLimit + (MAX_REQUEST_BYTES - MAX_BYTES) : MAX_REQUEST_BYTES;
+  const tooLarge = (fallback: string) =>
+    byUserLimit ? new BadUpload(uploadTooLargeMessage(userLimit), 413, "upload_too_large") : new BadUpload(fallback, 413);
+  const declared = parseInt(req.headers.get("content-length") ?? "0", 10);
+  if (byUserLimit && Number.isFinite(declared) && declared > maxRequestBytes) {
+    return NextResponse.json({ error: uploadTooLargeMessage(userLimit), code: "upload_too_large", limitBytes: userLimit }, { status: 413 });
+  }
+
   let written: string | null = null;
   // Hoisted so the cleanup below can wait for the write to stop before
   // unlinking. Rejecting on a limit does not halt the pipeline synchronously,
@@ -422,7 +438,7 @@ export async function POST(req: NextRequest) {
         defParamCharset: "utf8",
         limits: {
           files: 1,
-          fileSize: MAX_BYTES,
+          fileSize: maxBytes,
           fields: MAX_FIELDS,
           fieldSize: MAX_FIELD_BYTES,
           parts: MAX_PARTS,
@@ -605,7 +621,7 @@ export async function POST(req: NextRequest) {
         written = dest;
         // busboy raises `limit` and then ends the stream, so the pipeline would
         // otherwise resolve on a truncated file and hand back a path to it.
-        fileStream.on("limit", () => fail(new BadUpload("File exceeds the size limit", 413)));
+        fileStream.on("limit", () => fail(tooLarge("File exceeds the size limit")));
         // "wx": never clobber. A path we just generated should not exist, and
         // if it does, something is wrong enough that overwriting is the worst
         // available answer.
@@ -640,8 +656,8 @@ export async function POST(req: NextRequest) {
       let receivedBytes = 0;
       source.on("data", (chunk: Buffer) => {
         receivedBytes += chunk.length;
-        if (receivedBytes > MAX_REQUEST_BYTES) {
-          fail(new BadUpload("Request exceeds the size limit", 413));
+        if (receivedBytes > maxRequestBytes) {
+          fail(tooLarge("Request exceeds the size limit"));
         }
       });
       source.on("error", fail);
@@ -686,7 +702,8 @@ export async function POST(req: NextRequest) {
     const status = err instanceof BadUpload ? err.status : (err as NodeJS.ErrnoException)?.code === "EEXIST" ? 409 : 500;
     // A refusal with a code is a sentence written for the customer: shown as is.
     if (err instanceof BadUpload && err.code) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status });
+      const limit = err.code === "upload_too_large" && userLimit !== null ? { limitBytes: userLimit } : {};
+      return NextResponse.json({ error: err.message, code: err.code, ...limit }, { status });
     }
     return NextResponse.json(
       { error: `Upload failed: ${err instanceof Error ? err.message : String(err)}` },

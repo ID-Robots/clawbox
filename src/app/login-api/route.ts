@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { recordAudit } from "@/lib/audit-log";
 import { get, set } from "@/lib/config-store";
 import {
   verifyPassword,
@@ -216,6 +217,16 @@ export async function POST(request: Request) {
       const after = await recordFailure(bucket.key, { maxLockMs: bucket.maxLockMs });
       if (after.locked) worstRetryAfter = Math.max(worstRetryAfter, after.retryAfterSeconds);
     }
+    // Who it was tried as only when that is an account on this box: a name
+    // nobody has may be a password typed into the wrong field.
+    await recordAudit(
+      {
+        event: "login_failed",
+        actor: target.kind === "unknown" ? null : target.username,
+        detail: { locked: worstRetryAfter > 0, remote: isTunnelRequest(request.headers) },
+      },
+      request,
+    );
     await padResponseTime(startedAt);
     if (worstRetryAfter > 0) {
       return lockoutResponse(worstRetryAfter);
@@ -246,6 +257,10 @@ export async function POST(request: Request) {
     ? createSessionCookie(duration, secret, gen, { u: target.username, sv: target.sv })
     : createSessionCookie(duration, secret, gen, { u: target.username });
 
+  await recordAudit(
+    { event: "login", actor: target.username, detail: { remote: isTunnelRequest(request.headers), hours: Math.round(duration / 360) / 10 } },
+    request,
+  );
   await padResponseTime(startedAt);
   const res = NextResponse.json({ success: true, username: target.username });
   res.cookies.set("clawbox_session", cookie, {

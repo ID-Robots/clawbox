@@ -14,6 +14,7 @@ import { MAX_MOVE_ITEMS, moveEntries, type MoveConflictPolicy } from "@/lib/file
 import { summarizeSelectionForZip, zipSelectionStream } from "@/lib/zip-stream";
 import { issueZipTicket, redeemZipTicket, uniqueArchiveNames } from "@/lib/zip-tickets";
 import { contentDisposition } from "@/lib/content-disposition";
+import { memberHomeChanged, moveQuotaRefusal, userUploadGuard, type UploadBound, type UploadGuard } from "@/lib/user-upload-guard";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -98,7 +99,13 @@ const MULTIPART_HEADROOM_BYTES = 1024 * 1024;
 // code a screen can act on. Anything else that escapes the promise below is
 // ours — a permission problem, a genuine write error — and stays a 500.
 class UploadRefused extends Error {
-  constructor(message: string, readonly status: number, readonly code: string) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string,
+    /** Numbers a screen words the refusal with (the limit, what the home holds). */
+    readonly extra: Record<string, number> = {},
+  ) {
     super(message);
     this.name = "UploadRefused";
   }
@@ -106,9 +113,30 @@ class UploadRefused extends Error {
 
 const DISK_FULL = `Not enough disk space: the upload would leave the disk under its ${formatBytes(DISK_FREE_RESERVE_BYTES)} reserve.`;
 
-function refusal(err: unknown): { status: number; body: { error: string; code: string } } {
-  if (err instanceof UploadRefused) return { status: err.status, body: { error: err.message, code: err.code } };
+/**
+ * The refusal for an upload a bound stopped (src/lib/user-upload-guard.ts):
+ * the user's upload limit or home quota, else the disk's reserve.
+ */
+function boundRefusal(guard: UploadGuard, bound: UploadBound): UploadRefused {
+  const r = guard.refusalFor(bound);
+  if (!r) return new UploadRefused(DISK_FULL, 507, "disk_full");
+  const { error, code, ...numbers } = r.body;
+  return new UploadRefused(error, r.status, code, numbers as Record<string, number>);
+}
+
+function refusal(err: unknown): { status: number; body: { error: string; code: string } & Record<string, unknown> } {
+  if (err instanceof UploadRefused) return { status: err.status, body: { error: err.message, code: err.code, ...err.extra } };
   return { status: 500, body: { error: `Upload failed: ${err instanceof Error ? err.message : String(err)}`, code: "upload_failed" } };
+}
+
+/** The size of the file an upload wrote (0 when there was none, or it is gone). */
+function landedSize(abs: string): number {
+  if (!abs) return 0;
+  try {
+    return fs.statSync(/* turbopackIgnore: true */ abs).size;
+  } catch {
+    return 0;
+  }
 }
 
 export const dynamic = "force-dynamic";
@@ -297,23 +325,28 @@ function selectionZipDownload(fence: FilesFence, ticketId: string): NextResponse
  * app's "Move to…" and its drag-and-drop. See src/lib/files-move.ts for the
  * rules.
  */
-async function moveAction(fence: FilesFence, destAbs: string | null, body: Record<string, unknown>): Promise<NextResponse> {
+async function moveAction(fence: FilesFence, destAbs: string | null, body: Record<string, unknown>, limitedUser: string | null): Promise<NextResponse> {
   const parsed = parseItemPaths(body.paths, MAX_MOVE_ITEMS);
   if (!parsed.ok) return parsed.response;
   const conflict: MoveConflictPolicy = body.conflict === "rename" || body.conflict === "skip" ? body.conflict : "fail";
+  // A source that leads out of the view (a member's link into the owner's
+  // home) is refused like a path that does not resolve.
+  const sources = parsed.paths.map((rel) => {
+    const abs = fence.resolve(rel);
+    return { rel, abs: abs && fence.allows(abs) ? abs : null };
+  });
+  // What a move brings into a member's home from Shared counts against their quota.
+  const overQuota = await moveQuotaRefusal({ limitedUser, fence, destAbs, sources: sources.map((s) => s.abs) });
+  if (overQuota) return NextResponse.json(overQuota.body, { status: overQuota.status });
   const result = moveEntries({
     root: fence.scope.kind === "owner" ? fence.scope.base : BASE_DIR,
     destAbs,
     conflict,
-    // A source that leads out of the view (a member's link into the owner's
-    // home) is refused like a path that does not resolve.
-    sources: parsed.paths.map((rel) => {
-      const abs = fence.resolve(rel);
-      return { rel, abs: abs && fence.allows(abs) ? abs : null };
-    }),
+    sources,
     isRoot: fence.isRoot,
     relOfTarget: fence.relOf,
   });
+  memberHomeChanged(fence);
   if (!result.ok) return NextResponse.json(result.refusal.body, { status: result.refusal.status });
   const { moved, skipped, failed } = result.outcome;
   return NextResponse.json({ ok: failed.length === 0, moved, skipped, failed });
@@ -421,7 +454,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const scoped = await filesFenceFor(req);
   if (!scoped.ok) return scoped.response;
-  const { fence } = scoped;
+  const { fence, limitedUser } = scoped;
   ensureBaseDir(fence);
   const dir = req.nextUrl.searchParams.get("dir") ?? "";
   const atVirtualRoot = fence.isVirtualRoot(dir);
@@ -452,15 +485,22 @@ export async function POST(req: NextRequest) {
     // fits exactly is accepted whole and only a larger one trips `limit`; the
     // meter around the source carries the framing's headroom and is what
     // notices a disk that filled from elsewhere while this upload ran.
-    const room = uploadRoom(abs);
+    // The bounds (src/lib/user-upload-guard.ts): the disk's room for
+    // everyone, and for a user other than the owner their upload limit and —
+    // into their own home — their quota. A body that declares more than the
+    // limit or the quota is refused before a byte of it is read.
+    const guard = await userUploadGuard({ limitedUser, fence, destPath: abs, disk: uploadBudget(abs) });
+    const declared = parseInt(req.headers.get("content-length") ?? "0", 10);
+    const early = Number.isFinite(declared) ? guard.precheck(declared - MULTIPART_HEADROOM_BYTES) : null;
+    if (early) {
+      guard.finish(null);
+      return NextResponse.json(early.body, { status: early.status });
+    }
     const bounded = boundedBody(req.body, {
-      limit: (() => {
-        const budget = uploadBudget(abs);
-        return (passed: number) => {
-          const ceiling = budget(passed);
-          return ceiling === Infinity ? Infinity : ceiling + MULTIPART_HEADROOM_BYTES;
-        };
-      })(),
+      limit: (passed: number) => {
+        const ceiling = guard.ceiling(passed);
+        return ceiling === Infinity ? Infinity : ceiling + MULTIPART_HEADROOM_BYTES;
+      },
       message: DISK_FULL,
     });
 
@@ -483,7 +523,7 @@ export async function POST(req: NextRequest) {
             parts: 4,
             fields: 2,
             fieldSize: 1024,
-            fileSize: room === null ? Infinity : room + 1,
+            fileSize: guard.initialMax === Infinity ? Infinity : guard.initialMax + 1,
           },
         });
         let fileName = "";
@@ -553,7 +593,7 @@ export async function POST(req: NextRequest) {
           // The truncation trap: without this, an oversize part is cut at
           // the limit, the pipeline resolves, and the caller is told the
           // upload worked.
-          fileStream.on("limit", () => fail(new UploadRefused(DISK_FULL, 507, "disk_full")));
+          fileStream.on("limit", () => fail(boundRefusal(guard, guard.initialBound)));
           // A member's destination is judged again by the descriptor opened.
           let member: { fd: number; real: string } | null = null;
           if (fence.scope.kind === "member") {
@@ -589,12 +629,14 @@ export async function POST(req: NextRequest) {
         const source = Readable.fromWeb(bounded.stream as unknown as import("stream/web").ReadableStream);
         nodeStream = source;
         source.on("error", (err) => {
-          fail(bounded.overflowed() ? new UploadRefused(DISK_FULL, 507, "disk_full") : err);
+          fail(bounded.overflowed() ? boundRefusal(guard, guard.lastBound()) : err);
         });
         source.pipe(busboy);
       });
+      guard.finish(landedSize(result.path));
       return NextResponse.json({ ok: true, name: result.name, path: result.path });
     } catch (err) {
+      guard.finish(null);
       // A refused upload must not leave a partial file behind: the caller is
       // told nothing landed, and a later upload of the same name would
       // silently inherit whatever bytes did.
@@ -623,7 +665,7 @@ export async function POST(req: NextRequest) {
   // JSON action. Anything that is not a plain object carries no action.
   const parsedBody: unknown = await req.json().catch(() => null);
   const body = (parsedBody && typeof parsedBody === "object" ? parsedBody : {}) as Record<string, unknown> & { name?: string; filePath?: string };
-  if (body.action === "move") return moveAction(fence, abs, body);
+  if (body.action === "move") return moveAction(fence, abs, body, limitedUser);
   if (body.action === "zip") return selectionZipTicket(fence, abs, body.paths);
   if (body.action === "mkdir") {
     if (!body.name) return NextResponse.json({ error: "Name required" }, { status: 400 });
@@ -657,7 +699,7 @@ function resolveAction(fence: FilesFence, filePath: unknown): NextResponse {
 export async function PUT(req: NextRequest) {
   const scoped = await filesFenceFor(req);
   if (!scoped.ok) return scoped.response;
-  const { fence } = scoped;
+  const { fence, limitedUser } = scoped;
   ensureBaseDir(fence);
   const dir = req.nextUrl.searchParams.get("dir") ?? "";
   const name = req.nextUrl.searchParams.get("name");
@@ -680,18 +722,28 @@ export async function PUT(req: NextRequest) {
   // gets it past this line. The metered write below is what actually holds,
   // and it measures against the box's reserve, not the raw free space.
   const contentLength = parseInt(req.headers.get("content-length") ?? "0", 10);
+  // A user other than the owner is held to their upload limit and — into
+  // their own home — their quota as well (src/lib/user-upload-guard.ts).
+  const guard = await userUploadGuard({ limitedUser, fence, destPath, disk: uploadBudget(abs) });
+  const early = guard.precheck(contentLength);
+  if (early) {
+    guard.finish(null);
+    return NextResponse.json(early.body, { status: early.status });
+  }
   const room = uploadRoom(abs);
   if (contentLength > 0 && room !== null && contentLength > room) {
     const avail = formatBytes(room);
     const need = formatBytes(contentLength);
+    guard.finish(null);
     return NextResponse.json(
       { error: `Not enough disk space. Need ${need}, only ${avail} available.`, code: "disk_full" },
       { status: 507 },
     );
   }
 
-  const bounded = boundedBody(req.body, { limit: uploadBudget(abs), message: DISK_FULL });
+  const bounded = boundedBody(req.body, { limit: (passed: number) => guard.ceiling(passed), message: DISK_FULL });
   let member: { fd: number; real: string } | null = null;
+  let landed: number | null = null;
   try {
     const nodeReadable = Readable.fromWeb(bounded.stream as unknown as import("stream/web").ReadableStream);
     if (fence.scope.kind === "member") {
@@ -700,6 +752,7 @@ export async function PUT(req: NextRequest) {
       if (member === null) return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
     }
     await pipeline(nodeReadable, member === null ? fs.createWriteStream(destPath) : fs.createWriteStream(destPath, { fd: member.fd }));
+    landed = bounded.bytes();
   } catch (err) {
     // Whatever landed comes off the disk either way; only the STATUS differs,
     // and it is decided by the meter's flag, never by the error's text — the
@@ -711,8 +764,10 @@ export async function PUT(req: NextRequest) {
     } else {
       try { fs.unlinkSync(destPath); } catch { /* cleanup best-effort */ }
     }
-    const { status, body } = refusal(bounded.overflowed() ? new UploadRefused(DISK_FULL, 507, "disk_full") : err);
+    const { status, body } = refusal(bounded.overflowed() ? boundRefusal(guard, guard.lastBound()) : err);
     return NextResponse.json(body, { status });
+  } finally {
+    guard.finish(landed);
   }
   return NextResponse.json({ ok: true, name });
 }

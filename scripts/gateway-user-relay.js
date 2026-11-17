@@ -84,6 +84,7 @@ const fs = require("fs");
 const path = require("path");
 const { agentIdOfKey, openclawUserMainKey, userMayUseKey } = require("./chat-scope.js");
 const { historyClaims, replyMediaPaths } = require("./chat-reply-media.js");
+const { chatLimitSentence } = require("./user-limits.js");
 const {
   STAFF_GUARD_PLUGIN_ID,
   isStaffCatalogueCommand,
@@ -142,6 +143,16 @@ function refusalFrame(id, message) {
     id,
     ok: false,
     error: { code: "FORBIDDEN", message },
+  };
+}
+
+/** A turn past the user's chat limit (scripts/user-limits.js): the same shape, its own code and the wait. */
+function chatLimitFrame(id, verdict) {
+  return {
+    type: "res",
+    id,
+    ok: false,
+    error: { code: "RATE_LIMITED", message: chatLimitSentence(verdict), retryAfterMs: verdict.retryAfterSeconds * 1000 },
   };
 }
 
@@ -220,6 +231,9 @@ function createRelayState(username, options = {}) {
     staffAgent: typeof options.staffAgent === "string" && options.staffAgent ? options.staffAgent.toLowerCase() : null,
     // Whether that agent is configured with the staff policy right now.
     staffReady: typeof options.staffReady === "function" ? options.staffReady : () => false,
+    // The owner's chat limits for this user (scripts/user-limits.js): asked
+    // once per turn the user starts; null counts nothing.
+    admitChat: typeof options.admitChat === "function" ? options.admitChat : null,
     connectId: null,
     connected: false,
     challenge: null,
@@ -320,6 +334,16 @@ function filterClientFrame(state, frame) {
   if (keyParam) {
     if (!mayUseKey(state, params[keyParam])) {
       return { toClient: refusalFrame(id, "That conversation belongs to someone else on this ClawBox.") };
+    }
+    if (method === "chat.send" && state.admitChat) {
+      // Counted against the owner's chat limits for this user, and refused
+      // here — before the model is asked — past them. A bare /new or /reset
+      // starts no turn of the model's and is never counted.
+      const typed = typedResetCommand(params.message);
+      if (!typed || typed.tail) {
+        const verdict = state.admitChat();
+        if (verdict && verdict.ok === false) return { toClient: chatLimitFrame(id, verdict) };
+      }
     }
     if (method === "sessions.reset") {
       // Only the key and the reason travel: nothing else of the browser's frame
@@ -649,9 +673,9 @@ const MAX_QUEUED_FRAMES = 64;
  * Relay one user's chat socket. `clientWs` is the browser's socket (already
  * upgraded), `connectUpstream()` opens the gateway's.
  */
-function relayUserChat({ clientWs, username, connectUpstream, token, identity, staffAgent = null, staffReady, stillCurrent = () => true, onReplyMedia = null, log = () => {} }) {
+function relayUserChat({ clientWs, username, connectUpstream, token, identity, staffAgent = null, staffReady, admitChat = null, stillCurrent = () => true, onReplyMedia = null, log = () => {} }) {
   const WebSocket = require("ws");
-  const state = createRelayState(username, { staffAgent, staffReady });
+  const state = createRelayState(username, { staffAgent, staffReady, admitChat });
   const queued = [];
   let upstream;
   let closed = false;

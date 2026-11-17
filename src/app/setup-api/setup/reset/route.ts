@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
+import { auditActorOf, recordAudit } from "@/lib/audit-log";
 import { padResponseTime } from "@/lib/login-rate-limit";
 import {
   checkReproveLockout,
@@ -781,6 +782,8 @@ export async function POST(request: Request) {
     await padResponseTime(startedAt);
     return unauthorized;
   }
+  // Read now: the wipe below takes the session secret that names them.
+  const resetBy = await auditActorOf(request);
 
   // A session is what stops a stranger; it is not what stops the owner losing
   // the box to one misdirected click, and a stolen or shared browser carries a
@@ -918,6 +921,11 @@ export async function POST(request: Request) {
         { status: 500 },
       );
     }
+
+    // The one line the wiped box keeps of its past: that it was reset, when
+    // and by whom (data/ — the old audit log with it — is gone by now). No
+    // address: the box may be about to change hands.
+    await recordAudit({ event: "factory_reset", actor: resetBy });
 
     // 6. Delete saved WiFi connections so device returns to AP mode after reboot
     await deleteWifiConnections().catch((err) => {

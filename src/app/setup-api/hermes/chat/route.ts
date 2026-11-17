@@ -105,6 +105,8 @@ import {
   SESSION_REFUSED_PICTURE_MESSAGE,
   waitForDashboard,
 } from "@/lib/hermes-session-refusal";
+import { admitChatRequest, chatLimitSentence } from "@/lib/user-limits";
+import { readUserLimits } from "@/lib/user-limits-server";
 
 /**
  * How many images one turn may carry — the same number the composer is told,
@@ -1365,6 +1367,18 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: which.error, code: which.code }, { status: which.status });
   }
   const sessionKey = which.key;
+  // A user other than the owner is held to the owner's chat limits
+  // (src/lib/user-limits.ts) — the same count the OpenClaw relay keeps. A
+  // bare /new starts no turn of the model's and is never counted.
+  if (!which.principal.isOwner && !/^\/(?:new|reset)\s*$/i.test(message)) {
+    const verdict = admitChatRequest(which.principal.username, await readUserLimits());
+    if (!verdict.ok) {
+      return NextResponse.json(
+        { error: chatLimitSentence(verdict), code: "rate_limited", retryAfterSeconds: verdict.retryAfterSeconds },
+        { status: 429, headers: { "Retry-After": String(verdict.retryAfterSeconds) } },
+      );
+    }
+  }
   // A Hermes session another person's chat opened is not resumed: the turn
   // starts a fresh one instead.
   const rawSessionId = hermesSessionFor(which.principal, requestedSessionId);
