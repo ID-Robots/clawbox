@@ -50,6 +50,11 @@ class Dashboard {
   attaches = 0;
   // The Stop request itself fails (HTTP 500).
   failStop = false;
+  // How many running turns a Stop reports it stopped (0: the POST had not
+  // registered its turn yet).
+  stoppedCount = 1;
+  // The status a plain JSON error answer comes back with.
+  errorStatus = 502;
   onPost: (() => void) | null = null;
 
   async start() {
@@ -64,6 +69,8 @@ class Dashboard {
     this.attach = "none";
     this.attaches = 0;
     this.failStop = false;
+    this.stoppedCount = 1;
+    this.errorStatus = 502;
     for (const res of this.hanging) res.end();
     this.hanging.clear();
     for (const res of this.heldStops) res.destroy();
@@ -104,14 +111,14 @@ class Dashboard {
         if (this.mode === "hang-stop" && url.searchParams.get("turnId")) { this.heldStops.add(res); return; }
         for (const h of this.hanging) h.end();
         this.hanging.clear();
-        return this.json(res, 200, { stopped: 1 });
+        return this.json(res, 200, { stopped: this.stoppedCount });
       }
       const turn = JSON.parse(body || "{}");
       this.posts.push({ sessionKey: turn.sessionKey, turnId: turn.turnId, message: turn.message });
       this.onPost?.();
       if (this.mode === "refuse") return this.json(res, 409, { error: "a turn is already running" });
       // The CLI fallback failing after it may have opened a session.
-      if (this.mode === "cli-502") return this.json(res, 502, { error: "hermes exited with code 1" });
+      if (this.mode === "cli-502") return this.json(res, this.errorStatus, { error: "hermes exited with code 1" });
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       res.write(`event: delta\ndata: ${JSON.stringify({ text: "…" })}\n\n`);
       if (this.mode === "answer") {
@@ -314,16 +321,39 @@ describe("the Hermes turn", () => {
     expect(dash.attaches).toBe(0);
   });
 
-  it("counts a 5xx answer as a turn that may have opened a session, a 4xx refusal as none", async () => {
-    dash.reset("cli-502");
-    const failed = sess();
-    expect((await live().turn(failed, ask, 5000)).error?.kind).toBe("http");
-    expect(failed.untracked).toBe(1);
+  it("counts every plain error answer with no session id as a turn that may have opened a session", async () => {
+    // 502 from the CLI fallback, 401 when the owner's session ran out after
+    // the turn, 499 after a Stop: none proves that no turn ran.
+    for (const status of [502, 401, 499]) {
+      dash.reset("cli-502");
+      dash.errorStatus = status;
+      const failed = sess();
+      expect((await live().turn(failed, ask, 5000)).error?.message).toContain(`HTTP ${status}`);
+      expect(failed.untracked).toBe(1);
+    }
     dash.reset("refuse");
     const refused = sess();
     expect((await live().turn(refused, ask, 5000)).error?.kind).toBe("http");
-    expect(refused).not.toHaveProperty("untracked");
+    expect(refused.untracked).toBe(1);
     expect(dash.stops).toEqual([]);
+  });
+
+  it("after a Stop that found no registered turn, takes only a replayed end as settled, not a 204", async () => {
+    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleMs: 1500 });
+    dash.reset("hang");
+    dash.stoppedCount = 0; // the POST may still be in its setup
+    const early = sess();
+    const r = await driver.turn(early, ask, 300);
+    expect(r.error?.message).toContain("its Stop was not confirmed within 2 s");
+    expect(early.blocked).toBe(true);
+    expect(dash.attaches).toBeGreaterThan(1);
+
+    dash.reset("hang");
+    dash.stoppedCount = 0;
+    dash.attach = "replay"; // the turn registered, was stopped on arrival, and ended
+    const late = sess();
+    await driver.turn(late, ask, 300);
+    expect(late).not.toHaveProperty("blocked");
   });
 
   it("ends at once, Stopped, when the run stops; starts nothing once it has", async () => {

@@ -55,13 +55,16 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
   /**
    * Whether no turn runs under `key` any more, as the route itself tells it:
    * GET re-attaches to the key's newest live turn — a running one if there is
-   * one — and replays its frames (204: no turn on record). Settled means a 204,
-   * or a replayed end of that turn (a done, error or stopped frame). A stream
-   * that just closes proves nothing (a dropped connection, a session that
-   * expired, a turn that keeps running): it is asked again. Not settled by
-   * `settleMs`, or no answer by then, is not settled.
+   * one — and replays its frames (204: no turn on record). Settled means a
+   * replayed end of that turn (a done, error or stopped frame), or a 204 when
+   * `emptyCounts` (the Stop did stop a registered turn). After a Stop that
+   * found no turn, a 204 can mean the POST is still in its setup, before it
+   * registers; the Stop held for it expires (60 s, 64 held), so only a replayed
+   * end confirms then. A stream that just closes proves nothing (a dropped
+   * connection, a session that expired, a turn that keeps running): it is
+   * asked again. Not settled by `settleMs`, or no answer by then, is not.
    */
-  async function settled(key) {
+  async function settled(key, emptyCounts = true) {
     const deadline = Date.now() + settleMs;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), settleMs);
@@ -72,8 +75,9 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
             headers: headers({ Accept: "text/event-stream" }),
             signal: ac.signal,
           });
-          if (res.status === 204) return true;
-          if (!res.ok || !res.body) {
+          if (res.status === 204) {
+            if (emptyCounts) return true;
+          } else if (!res.ok || !res.body) {
             log(`settle ${key}: HTTP ${res.status}`);
           } else {
             const reader = res.body.getReader();
@@ -128,7 +132,6 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
       return r;
     }
     const threadedBefore = Boolean(sess.sessionId);
-    let refused = false;
     const t0 = performance.now();
     const ms = () => Math.round(performance.now() - t0);
     const turnId = crypto.randomBytes(8).toString("hex");
@@ -156,10 +159,10 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
         const json = await res.json().catch(() => null);
         if (res.ok && json && typeof json.text === "string") done = json;
         else {
-          // A 4xx is the route refusing before any turn ran. A 5xx can come
-          // after the CLI fallback had opened a session (it answers 502 with
-          // no id): that one may leave a session behind.
-          refused = res.status >= 400 && res.status < 500;
+          // No status proves that no turn ran: the CLI fallback answers 502
+          // after it may have opened a session, 401 when the owner's session
+          // ran out after the turn, 499 after a Stop — none with an id. Every
+          // such answer counts as a turn that may have left a session behind.
           error = { kind: "http", message: `HTTP ${res.status}: ${String(json?.error || "").slice(0, 160)}` };
         }
       } else {
@@ -216,14 +219,14 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
       // registered its turn yet, so a late start is stopped on arrival. A Stop
       // that failed holds nothing: the route showing no turn proves nothing.
       const stopped = await stop(sess.key, turnId);
-      const why = stopped === null ? "its Stop failed" : (await settled(sess.key)) ? null : `its Stop was not confirmed within ${Math.round(settleMs / 1000)} s`;
+      const why = stopped === null ? "its Stop failed" : (await settled(sess.key, stopped > 0)) ? null : `its Stop was not confirmed within ${Math.round(settleMs / 1000)} s`;
       if (why) {
         sess.blocked = true;
         r.error.message = `${r.error.message}; ${why}, so no more turns go to this session`.slice(0, 300);
         log(`${sess.key}: ${why}: no more turns on this session`);
       }
     }
-    if (!threadedBefore && !sess.sessionId && !refused) sess.untracked = (sess.untracked || 0) + 1;
+    if (!threadedBefore && !sess.sessionId) sess.untracked = (sess.untracked || 0) + 1;
     return r;
   }
 
