@@ -35,7 +35,7 @@ const lines = () => fs.readFileSync(audit.auditLogPath(), "utf-8").trim().split(
 
 describe("writing", () => {
   it("appends one JSON line per entry under the data directory, readable by the box account only", async () => {
-    await audit.recordAudit({ event: "login", actor: "owner", detail: { remote: false } }, req({ "x-forwarded-for": "192.0.2.10" }));
+    await audit.recordAudit({ event: "login", actor: "owner", detail: { remote: false } }, req({ "x-clawbox-peer": "192.0.2.10" }));
     await audit.recordAudit({ event: "user_create", actor: "owner", target: "ivan" });
     expect(audit.auditLogPath()).toBe(path.join(ROOT, "data", "audit-log.jsonl"));
     const [first, second] = lines();
@@ -53,10 +53,13 @@ describe("writing", () => {
     expect(fs.readFileSync(audit.auditLogPath(), "utf-8").startsWith(before)).toBe(true);
   });
 
-  it("prefers the tunnel's address, and keeps nothing that is not an address", async () => {
-    expect(audit.auditAddress(req({ "cf-connecting-ip": "198.51.100.7", "x-forwarded-for": "192.0.2.99" }))).toBe("198.51.100.7");
-    expect(audit.auditAddress(req({ "x-forwarded-for": "::ffff:192.0.2.1, 192.0.2.98" }))).toBe("192.0.2.1");
-    expect(audit.auditAddress(req({ "x-forwarded-for": "<script>" }))).toBeUndefined();
+  it("takes the tunnel's address, else the socket peer the guard wrote — never a client's forwarded-for", async () => {
+    expect(audit.auditAddress(req({ "cf-connecting-ip": "198.51.100.7", "x-clawbox-peer": "127.0.0.1" }))).toBe("198.51.100.7");
+    expect(audit.auditAddress(req({ "x-clawbox-peer": "::ffff:192.0.2.1" }))).toBe("192.0.2.1");
+    // A LAN client sets X-Forwarded-For to whatever it likes: it is not an address the box knows.
+    expect(audit.auditAddress(req({ "x-forwarded-for": "203.0.113.66", "x-clawbox-peer": "192.0.2.5" }))).toBe("192.0.2.5");
+    expect(audit.auditAddress(req({ "x-forwarded-for": "203.0.113.66" }))).toBeUndefined();
+    expect(audit.auditAddress(req({ "x-clawbox-peer": "<script>" }))).toBeUndefined();
     expect(audit.auditAddress(req())).toBeUndefined();
   });
 
@@ -129,5 +132,27 @@ describe("reading", () => {
 
   it("answers an empty log for a box that has recorded nothing", async () => {
     expect(await audit.readAuditLog()).toEqual({ entries: [], more: false });
+  });
+
+  it("fails, rather than answering empty, for a log that is there but cannot be read", async () => {
+    fs.mkdirSync(path.join(ROOT, "data"), { recursive: true });
+    // A folder where the file should be: open() fails with EISDIR, not ENOENT.
+    fs.mkdirSync(audit.auditLogPath());
+    await expect(audit.readAuditLog()).rejects.toThrow();
+  });
+});
+
+describe("a factory reset", () => {
+  it("clears the log and its older generation after every line queued before it", async () => {
+    fs.mkdirSync(path.join(ROOT, "data"), { recursive: true });
+    fs.writeFileSync(`${audit.auditLogPath()}.1`, "old\n");
+    // Queued first, then the clear: the queued line is written and then removed with the rest.
+    const queued = audit.recordAudit({ event: "login", actor: "previous-owner" });
+    const cleared = audit.clearAuditLogForReset();
+    await Promise.all([queued, cleared]);
+    expect(fs.existsSync(audit.auditLogPath())).toBe(false);
+    expect(fs.existsSync(`${audit.auditLogPath()}.1`)).toBe(false);
+    await audit.recordAudit({ event: "factory_reset", actor: "owner" });
+    expect(lines().map((l) => l.event)).toEqual(["factory_reset"]);
   });
 });

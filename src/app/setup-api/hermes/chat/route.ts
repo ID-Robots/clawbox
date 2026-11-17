@@ -1369,8 +1369,13 @@ export async function POST(request: Request) {
   const sessionKey = which.key;
   // A user other than the owner is held to the owner's chat limits
   // (src/lib/user-limits.ts) — the same count the OpenClaw relay keeps. A
-  // bare /new starts no turn of the model's and is never counted.
-  if (!which.principal.isOwner && !/^\/(?:new|reset)\s*$/i.test(message)) {
+  // typed /new or /reset that names no file is answered below without a turn
+  // of the model's (the words after it come back as a turn of their own,
+  // which is counted then), so it is the one message never counted. One that
+  // names a file — even an empty entry — is a turn, and counts.
+  const namesFile = [body.imagePaths, body.documentPaths].some((v) => v !== undefined && v !== null && !(Array.isArray(v) && v.length === 0));
+  const resetOnly = !namesFile && typedResetCommand(message) !== null;
+  if (!which.principal.isOwner && !resetOnly) {
     const verdict = admitChatRequest(which.principal.username, await readUserLimits());
     if (!verdict.ok) {
       return NextResponse.json(

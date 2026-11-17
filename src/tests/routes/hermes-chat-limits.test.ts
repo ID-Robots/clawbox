@@ -170,6 +170,21 @@ describe("chat limits on the Hermes route", () => {
     for (let i = 0; i < 4; i++) expect((await POST(post({ message: `turn ${i}` }))).status).toBe(200);
   });
 
+  it("does not count a typed /new with words either: the words come back as a turn of their own", async () => {
+    who.limits = { ...who.limits, chatPerMinute: 1 };
+    expect((await POST(post({ message: "/new what is on today?" }))).status).toBe(200);
+    expect((await POST(post({ message: "what is on today?" }))).status).toBe(200);
+    expect((await POST(post({ message: "and tomorrow?" }))).status).toBe(429);
+  });
+
+  it("counts a /new that names a file, even an empty entry: that is a turn of the model's", async () => {
+    who.limits = { ...who.limits, chatPerMinute: 1 };
+    expect((await POST(post({ message: "first" }))).status).toBe(200);
+    const res = await POST(post({ message: "/new", documentPaths: [null] }));
+    expect(res.status).toBe(429);
+    expect((await res.json()).code).toBe("rate_limited");
+  });
+
   it("does not count a bare /new, and admits everything when the owner turned the limits off", async () => {
     who.limits = { ...who.limits, chatPerMinute: 1 };
     expect((await POST(post({ message: "/new" }))).status).toBe(200);

@@ -26,5 +26,13 @@ export async function GET(req: Request) {
   }
   const raw = Number(new URL(req.url).searchParams.get("limit") ?? "");
   const limit = Number.isInteger(raw) && raw > 0 ? Math.min(raw, AUDIT_READ_MAX) : 200;
-  return NextResponse.json(await readAuditLog({ limit }), { headers: NO_STORE });
+  try {
+    return NextResponse.json(await readAuditLog({ limit }), { headers: NO_STORE });
+  } catch (err) {
+    console.error("[audit-log] the audit log could not be read:", (err as NodeJS.ErrnoException)?.code ?? "error");
+    return NextResponse.json(
+      { error: "The audit log could not be read on this ClawBox.", code: "audit_log_unreadable" },
+      { status: 500, headers: NO_STORE },
+    );
+  }
 }

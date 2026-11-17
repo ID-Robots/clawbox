@@ -133,10 +133,15 @@ async function hermesPost(cookie, body) {
 }
 
 async function hermesRun() {
-  const first = await hermesPost(A_COOKIE, { message: PROMPT });
+  // The refusal probe goes out while the first turn is still running: the
+  // route counts a turn when it is taken, and a first answer slower than a
+  // minute would otherwise have freed the slot before the probe is sent.
+  const firstRequest = hermesPost(A_COOKIE, { message: PROMPT });
+  await sleep(3000);
+  const second = await hermesPost(A_COOKIE, { message: PROMPT });
+  const first = await firstRequest;
   check(first.status === 200, "A's first turn within the limit runs", `${first.status} ${JSON.stringify(first.json).slice(0, 300)}`);
   note(`A's first answer: ${JSON.stringify(first.json?.text ?? first.json).slice(0, 200)}`);
-  const second = await hermesPost(A_COOKIE, { message: PROMPT });
   check(second.status === 429 && second.json?.code === "rate_limited" && LIMIT_RE.test(second.json?.error || "") && Number(second.retryAfter) > 0,
     "A's second turn in the same minute is refused 429 rate_limited with Retry-After, and no turn runs", `${second.status} ${JSON.stringify(second.json)}`);
   note(`A's refusal: ${second.status} Retry-After=${second.retryAfter} "${second.json?.error}"`);

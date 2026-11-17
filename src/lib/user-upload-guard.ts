@@ -15,7 +15,7 @@
 import fs from "fs";
 import { MEMBER_HOME_ENTRY, type FilesFence } from "@/lib/files-scope";
 import { insideHome, measureHomeUsage, noteHomeChange, openQuotaWrite, type QuotaWrite } from "@/lib/home-usage";
-import { quotaExceededMessage, uploadTooLargeMessage } from "@/lib/user-limits";
+import { quotaExceededMessage, quotaUnmeasuredMessage, uploadTooLargeMessage } from "@/lib/user-limits";
 import { homeQuotaBytes, readUserLimits, uploadLimitBytes } from "@/lib/user-limits-server";
 
 export type UploadBound = "disk" | "upload_limit" | "quota";
@@ -130,17 +130,7 @@ export async function userUploadGuard(opts: {
     if (which === "upload_limit" && uploadLimit !== null) {
       return { status: 413, body: { error: uploadTooLargeMessage(uploadLimit), code: "upload_too_large", limitBytes: uploadLimit } };
     }
-    if (which === "quota" && quota) {
-      return {
-        status: 507,
-        body: {
-          error: quotaExceededMessage(quota.usedBytes, quota.quotaBytes),
-          code: "quota_exceeded",
-          usedBytes: quota.usedBytes,
-          quotaBytes: quota.quotaBytes,
-        },
-      };
-    }
+    if (which === "quota" && quota) return quotaRefusal(quota);
     return null;
   };
 
@@ -187,29 +177,65 @@ export function memberHome(fence: FilesFence): string | null {
 }
 
 /** Bytes the regular files at `abs` hold: the file itself, or everything under a folder. */
-async function bytesAt(abs: string): Promise<number> {
+/**
+ * The refusal of a write past a home's quota — or, for a home too large to
+ * measure whole within the walk's bounds, of any write that would add to it:
+ * a floor of its usage grants no room (src/lib/home-usage.ts).
+ */
+function quotaRefusal(quota: QuotaWrite): { status: number; body: UploadRefusalBody } {
+  if (quota.truncated) {
+    return {
+      status: 507,
+      body: { error: quotaUnmeasuredMessage(quota.quotaBytes), code: "quota_unmeasured", usedBytes: quota.usedBytes, quotaBytes: quota.quotaBytes },
+    };
+  }
+  return {
+    status: 507,
+    body: {
+      error: quotaExceededMessage(quota.usedBytes, quota.quotaBytes),
+      code: "quota_exceeded",
+      usedBytes: quota.usedBytes,
+      quotaBytes: quota.quotaBytes,
+    },
+  };
+}
+
+/** Bytes the regular files at `abs` hold, and whether a folder's walk stopped short (then a floor). */
+async function bytesAt(abs: string): Promise<{ bytes: number; truncated: boolean }> {
   try {
     const st = await fs.promises.lstat(/* turbopackIgnore: true */ abs);
-    if (st.isFile()) return st.size;
-    if (st.isDirectory()) return (await measureHomeUsage(abs))?.bytes ?? 0;
+    if (st.isFile()) return { bytes: st.size, truncated: false };
+    if (st.isDirectory()) {
+      const usage = await measureHomeUsage(abs);
+      return usage ? { bytes: usage.bytes, truncated: usage.truncated } : { bytes: 0, truncated: true };
+    }
   } catch {
     // gone: it moves nothing
   }
-  return 0;
+  return { bytes: 0, truncated: false };
+}
+
+/** A move's claim on a home's quota: released once the move has run, whatever it moved. */
+export interface MoveQuotaHold {
+  done(): void;
 }
 
 /**
  * A move into a limited user's home from outside it (their Shared folder)
- * adds what it carries: refused 507 `quota_exceeded` when that would take the
- * home past its quota. Null when the move may go ahead — and always for the
- * owner, a move within one folder tree, or a home that cannot be measured.
+ * adds what it carries. Refused 507 `quota_exceeded` when that would take the
+ * home past its quota, and `quota_unmeasured` when the size of what it
+ * carries — or of the home — could not be established within the walk's
+ * bounds. When it may go ahead, the bytes it carries are HELD against the
+ * quota until `done()` (after the move ran), so two moves checked at once
+ * cannot each be granted the same room. Null for the owner, a move within one
+ * folder tree, no quota, or a home that cannot be read at all.
  */
-export async function moveQuotaRefusal(opts: {
+export async function moveQuotaCheck(opts: {
   limitedUser: string | null;
   fence: FilesFence;
   destAbs: string | null;
   sources: ReadonlyArray<string | null>;
-}): Promise<{ status: number; body: UploadRefusalBody } | null> {
+}): Promise<{ refusal: { status: number; body: UploadRefusalBody } } | { hold: MoveQuotaHold } | null> {
   const { limitedUser, fence, destAbs, sources } = opts;
   if (!limitedUser || !destAbs) return null;
   const home = memberHome(fence);
@@ -218,24 +244,40 @@ export async function moveQuotaRefusal(opts: {
   if (incoming.length === 0) return null;
   const quotaBytes = homeQuotaBytes(await readUserLimits());
   if (quotaBytes === null) return null;
-  let bytes = 0;
-  for (const abs of incoming) bytes += await bytesAt(abs);
   const write = await openQuotaWrite(home, quotaBytes);
   if (!write) return null;
-  try {
-    if (bytes <= write.ceiling(0)) return null;
+  let bytes = 0;
+  let unmeasured = false;
+  for (const abs of incoming) {
+    const at = await bytesAt(abs);
+    bytes += at.bytes;
+    if (at.truncated) unmeasured = true;
+  }
+  if (unmeasured) {
+    write.finish(0);
     return {
-      status: 507,
-      body: {
-        error: quotaExceededMessage(write.usedBytes, write.quotaBytes),
-        code: "quota_exceeded",
-        usedBytes: write.usedBytes,
-        quotaBytes: write.quotaBytes,
+      refusal: {
+        status: 507,
+        body: { error: quotaUnmeasuredMessage(quotaBytes), code: "quota_unmeasured", usedBytes: write.usedBytes, quotaBytes },
       },
     };
-  } finally {
-    write.finish(0);
   }
+  if (bytes > write.ceiling(0)) {
+    write.finish(0);
+    return { refusal: quotaRefusal(write) };
+  }
+  write.reserve(bytes);
+  return {
+    hold: {
+      done() {
+        // Counted whole at once — a write that opens before the next walk
+        // must not be granted these bytes again — and then measured anew, so
+        // a move that ran only in part is not counted whole for long.
+        write.finish(bytes);
+        noteHomeChange(home);
+      },
+    },
+  };
 }
 
 /** Something under a member's view changed by other means (a move, a delete): measure the home again next time. */

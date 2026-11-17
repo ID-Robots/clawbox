@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
-import { auditActorOf, recordAudit } from "@/lib/audit-log";
+import { auditActorOf, clearAuditLogForReset, recordAudit } from "@/lib/audit-log";
 import { padResponseTime } from "@/lib/login-rate-limit";
 import {
   checkReproveLockout,
@@ -923,8 +923,11 @@ export async function POST(request: Request) {
     }
 
     // The one line the wiped box keeps of its past: that it was reset, when
-    // and by whom (data/ — the old audit log with it — is gone by now). No
-    // address: the box may be about to change hands.
+    // and by whom. data/ — the old audit log with it — is gone by now; the
+    // log is cleared once more under its own lock, so a line queued during
+    // the wipe cannot bring the previous owner's entries back. No address:
+    // the box may be about to change hands.
+    await clearAuditLogForReset().catch(() => {});
     await recordAudit({ event: "factory_reset", actor: resetBy });
 
     // 6. Delete saved WiFi connections so device returns to AP mode after reboot

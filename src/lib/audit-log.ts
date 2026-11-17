@@ -30,6 +30,7 @@ import fs from "fs";
 import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import { createSerialLock } from "@/lib/serial-lock";
+import { PEER_HEADER } from "../../scripts/proxy-peer.js";
 
 export const AUDIT_LOG_NAME = "audit-log.jsonl";
 /** Past this the log is rotated to `<name>.1`. */
@@ -146,14 +147,17 @@ function cleanDetail(detail: unknown): AuditDetail | undefined {
 }
 
 /**
- * The address a request came from, as the box was told it: Cloudflare's
- * header on a tunnel request (production-server.js deletes it from anyone but
- * the local tunnel, scripts/proxy-peer.js), else the forwarded-for address
- * Next records for the socket. Characters of an address only.
+ * The address a request came from, from headers a client cannot choose:
+ * Cloudflare's on a tunnel request (production-server.js deletes it from every
+ * peer but the local tunnel), else the socket's own peer, which the same guard
+ * writes into `x-clawbox-peer` on every request (scripts/proxy-peer.js) over
+ * anything a client sent. Never `X-Forwarded-For`: a LAN client sets that to
+ * whatever it likes. Characters of an address only; none under `next dev`,
+ * which has no such guard.
  */
 export function auditAddress(request: Request): string | undefined {
   const raw = request.headers.get("cf-connecting-ip")?.trim()
-    || request.headers.get("x-forwarded-for")?.split(",")[0]?.trim()
+    || request.headers.get(PEER_HEADER)?.trim()
     || "";
   const address = raw.replace(/^::ffff:/, "");
   return /^[0-9A-Fa-f:.]{2,64}$/.test(address) ? address : undefined;
@@ -247,8 +251,11 @@ async function tailEntries(file: string): Promise<{ entries: AuditEntry[]; cut: 
   let handle: fs.promises.FileHandle;
   try {
     handle = await fs.promises.open(file, "r");
-  } catch {
-    return { entries: [], cut: false };
+  } catch (err) {
+    // No log yet is an empty one; a log that is there but cannot be read is
+    // a failure the owner is told about, never "nothing has been recorded".
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { entries: [], cut: false };
+    throw err;
   }
   try {
     const { size } = await handle.stat();
@@ -285,5 +292,20 @@ export async function readAuditLog({ limit = 200 }: { limit?: number } = {}): Pr
     }
     if (entries.length > want) more = true;
     return { entries: entries.slice(-want).reverse(), more };
+  });
+}
+
+/**
+ * Remove the log and its older generation for a factory reset, under the
+ * same lock every write takes: a line queued before the reset (a sign-in at
+ * that moment, carrying the previous owner's name and address) is written
+ * first and removed with the rest, never left to recreate the file after the
+ * data directory was wiped. The lock runs its work in the order it was asked.
+ */
+export async function clearAuditLogForReset(): Promise<void> {
+  await withLogLock(async () => {
+    const file = auditLogPath();
+    await fs.promises.rm(file, { force: true });
+    await fs.promises.rm(`${file}.1`, { force: true });
   });
 }

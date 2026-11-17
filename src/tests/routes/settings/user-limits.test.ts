@@ -146,7 +146,7 @@ describe("GET /setup-api/settings/audit-log", () => {
     await post({ homeQuotaMb: 2048 });
     const on = await orgMode.POST(new Request("http://box.local/setup-api/settings/org-mode", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-forwarded-for": "192.0.2.44" },
+      headers: { "content-type": "application/json", "x-clawbox-peer": "192.0.2.44" },
       body: JSON.stringify({ orgMode: true }),
     }));
     expect(on.status).toBe(200);

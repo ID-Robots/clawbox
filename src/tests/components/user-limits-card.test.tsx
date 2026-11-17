@@ -94,8 +94,31 @@ describe("UserLimitsCard", () => {
     fireEvent.click(screen.getByTestId("user-limits-save"));
     expect(await screen.findByTestId("user-limits-saved")).toBeInTheDocument();
     const post = fetchMock.mock.calls.find(([, init]) => (init as RequestInit | undefined)?.method === "POST");
-    expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({ uploadMaxMb: 25, homeQuotaMb: 10240, chatPerMinute: 20, chatPerHour: 0 });
+    // Only what the owner changed: a field left alone keeps what another window may have saved.
+    expect(JSON.parse(String((post![1] as RequestInit).body))).toEqual({ uploadMaxMb: 25, chatPerHour: 0 });
     expect(screen.getByTestId("user-limits-uploadMaxMb")).toHaveValue("25");
+  });
+
+  it("holds the fields while a save is on its way", async () => {
+    let answer: (v: unknown) => void = () => {};
+    fetchMock.mockImplementation((url: string, init?: RequestInit) =>
+      init?.method === "POST" ? new Promise((r) => { answer = r; }) : json(200, status()));
+    render(<UserLimitsCard />);
+    fireEvent.change(await screen.findByTestId("user-limits-uploadMaxMb"), { target: { value: "50" } });
+    fireEvent.click(screen.getByTestId("user-limits-save"));
+    await waitFor(() => expect(screen.getByTestId("user-limits-uploadMaxMb")).toBeDisabled());
+    answer(await json(200, status({ ...LIMITS, uploadMaxMb: 50 })));
+    await waitFor(() => expect(screen.getByTestId("user-limits-uploadMaxMb")).toBeEnabled());
+    expect(screen.getByTestId("user-limits-uploadMaxMb")).toHaveValue("50");
+  });
+
+  it("says when the limits could not be read, and reads them again on request", async () => {
+    let calls = 0;
+    fetchMock.mockImplementation(() => (++calls === 1 ? json(500, { error: "boom" }) : json(200, status())));
+    render(<UserLimitsCard />);
+    expect(await screen.findByTestId("user-limits-load-failed")).toHaveTextContent("users.limits.loadFailed");
+    fireEvent.click(screen.getByTestId("user-limits-retry"));
+    expect(await screen.findByTestId("user-limits-uploadMaxMb")).toHaveValue("100");
   });
 
   it("says why a save failed", async () => {

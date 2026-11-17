@@ -84,3 +84,8 @@ export function uploadTooLargeMessage(limitBytes: number): string {
 export function quotaExceededMessage(usedBytes: number, quotaBytes: number): string {
   return `Your home folder is full: it holds ${formatLimitBytes(usedBytes)} of its ${formatLimitBytes(quotaBytes)} quota. Delete some files, or ask the owner of this ClawBox for more room.`;
 }
+
+/** The sentence a write into a home too large to measure within the walk's bounds is refused with. */
+export function quotaUnmeasuredMessage(quotaBytes: number): string {
+  return `Your home folder holds too many files to check against its ${formatLimitBytes(quotaBytes)} quota, so nothing more can be added to it. Delete some files, or ask the owner of this ClawBox for help.`;
+}

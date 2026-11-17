@@ -57,6 +57,10 @@ export default function UserLimitsCard() {
   const [draft, setDraft] = useState<Record<LimitName, string> | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ type: "saved" | "failed"; detail?: string } | null>(null);
+  // The first read failed for a reason other than "not yours" (403/401):
+  // said, with a retry, rather than hidden as if the owner could not see it.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   const accept = useCallback((body: LimitsStatus) => {
     setStatus(body);
@@ -68,16 +72,40 @@ export default function UserLimitsCard() {
     (async () => {
       try {
         const r = await fetch(URL_, { cache: "no-store" });
-        if (!r.ok || !alive) return;
-        const body: unknown = await r.json();
-        if (alive && isStatus(body)) accept(body);
+        if (!alive) return;
+        // Not the owner's session: nothing to draw, the card stays hidden.
+        if (r.status === 401 || r.status === 403) return;
+        const body: unknown = r.ok ? await r.json().catch(() => null) : null;
+        if (!alive) return;
+        if (isStatus(body)) {
+          setLoadFailed(false);
+          accept(body);
+        } else {
+          setLoadFailed(true);
+        }
       } catch {
-        // Nothing to draw: the card stays hidden.
+        if (alive) setLoadFailed(true);
       }
     })();
     return () => { alive = false; };
-  }, [accept]);
+  }, [accept, attempt]);
 
+  if (loadFailed && !status) {
+    return (
+      <div className="rounded-xl border border-white/10 p-4 space-y-2" data-testid="user-limits">
+        <h4 className="text-sm font-semibold text-white">{t("users.limits.title")}</h4>
+        <p className="text-xs text-[var(--amber-ink)]" role="alert" data-testid="user-limits-load-failed">{t("users.limits.loadFailed")}</p>
+        <button
+          type="button"
+          onClick={() => setAttempt((n) => n + 1)}
+          className="px-3 h-8 rounded-lg text-xs text-white bg-white/10 hover:bg-white/15 cursor-pointer"
+          data-testid="user-limits-retry"
+        >
+          {t("users.staffMcp.retry")}
+        </button>
+      </div>
+    );
+  }
   if (!status || !draft) return null;
 
   const parsed = (name: LimitName): number | null => {
@@ -94,10 +122,13 @@ export default function UserLimitsCard() {
     setBusy(true);
     setNotice(null);
     try {
+      // Only what the owner changed: a field they left alone keeps whatever
+      // another window may have saved meanwhile.
+      const patch = Object.fromEntries(LIMIT_NAMES.filter((n) => parsed(n) !== status.limits[n]).map((n) => [n, parsed(n)]));
       const r = await fetch(URL_, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(Object.fromEntries(LIMIT_NAMES.map((n) => [n, parsed(n)]))),
+        body: JSON.stringify(patch),
       });
       const body: unknown = await r.json().catch(() => null);
       if (r.ok && isStatus(body)) {
@@ -157,8 +188,11 @@ export default function UserLimitsCard() {
                   setNotice(null);
                 }}
                 aria-invalid={bad}
+                // Held while a save is on its way: what comes back replaces
+                // the fields, and a value typed meanwhile would be lost.
+                disabled={busy}
                 data-testid={`user-limits-${name}`}
-                className={`${inputClass} ${bad ? "border-red-400/70" : ""}`}
+                className={`${inputClass} disabled:opacity-60 ${bad ? "border-red-400/70" : ""}`}
               />
               <span className={`w-24 shrink-0 text-[11px] ${bad ? "text-red-400" : "text-white/45"}`}>{shown(name)}</span>
             </label>

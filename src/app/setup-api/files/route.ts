@@ -14,7 +14,7 @@ import { MAX_MOVE_ITEMS, moveEntries, type MoveConflictPolicy } from "@/lib/file
 import { summarizeSelectionForZip, zipSelectionStream } from "@/lib/zip-stream";
 import { issueZipTicket, redeemZipTicket, uniqueArchiveNames } from "@/lib/zip-tickets";
 import { contentDisposition } from "@/lib/content-disposition";
-import { memberHomeChanged, moveQuotaRefusal, userUploadGuard, type UploadBound, type UploadGuard } from "@/lib/user-upload-guard";
+import { memberHomeChanged, moveQuotaCheck, userUploadGuard, type UploadBound, type UploadGuard } from "@/lib/user-upload-guard";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -94,6 +94,11 @@ function uploadBudget(dir: string): (bytesPassed: number) => number {
 // headers, the two fields the limits allow. The body meter grants it on top of
 // the disk's room so a file that fits exactly is not refused for its framing.
 const MULTIPART_HEADROOM_BYTES = 1024 * 1024;
+
+// What that framing actually comes to for the one file part and two small
+// fields the parser allows: a declared body this much over a file's room is
+// over it for certain.
+const MULTIPART_FRAMING_BYTES = 8 * 1024;
 
 // An upload the route turned away, with the status the caller reads and a
 // code a screen can act on. Anything else that escapes the promise below is
@@ -335,18 +340,24 @@ async function moveAction(fence: FilesFence, destAbs: string | null, body: Recor
     const abs = fence.resolve(rel);
     return { rel, abs: abs && fence.allows(abs) ? abs : null };
   });
-  // What a move brings into a member's home from Shared counts against their quota.
-  const overQuota = await moveQuotaRefusal({ limitedUser, fence, destAbs, sources: sources.map((s) => s.abs) });
-  if (overQuota) return NextResponse.json(overQuota.body, { status: overQuota.status });
-  const result = moveEntries({
-    root: fence.scope.kind === "owner" ? fence.scope.base : BASE_DIR,
-    destAbs,
-    conflict,
-    sources,
-    isRoot: fence.isRoot,
-    relOfTarget: fence.relOf,
-  });
-  memberHomeChanged(fence);
+  // What a move brings into a member's home from Shared counts against their
+  // quota, and is held against it until the move has run.
+  const quota = await moveQuotaCheck({ limitedUser, fence, destAbs, sources: sources.map((s) => s.abs) });
+  if (quota && "refusal" in quota) return NextResponse.json(quota.refusal.body, { status: quota.refusal.status });
+  let result: ReturnType<typeof moveEntries>;
+  try {
+    result = moveEntries({
+      root: fence.scope.kind === "owner" ? fence.scope.base : BASE_DIR,
+      destAbs,
+      conflict,
+      sources,
+      isRoot: fence.isRoot,
+      relOfTarget: fence.relOf,
+    });
+  } finally {
+    quota?.hold.done();
+    memberHomeChanged(fence);
+  }
   if (!result.ok) return NextResponse.json(result.refusal.body, { status: result.refusal.status });
   const { moved, skipped, failed } = result.outcome;
   return NextResponse.json({ ok: failed.length === 0, moved, skipped, failed });
@@ -592,8 +603,15 @@ export async function POST(req: NextRequest) {
           }
           absPath = destPath;
           // A file of that name gives its room back to the quota, which is
-          // then held on the part's own bytes.
+          // then held on the part's own bytes — and a body that declared more
+          // than the room is refused here, before the file it would replace
+          // is opened (and truncated).
           guard.destination(destPath);
+          if (declared > MULTIPART_FRAMING_BYTES && declared - MULTIPART_FRAMING_BYTES > guard.quotaCeiling(0)) {
+            fileStream.resume();
+            fail(boundRefusal(guard, "quota"));
+            return;
+          }
           let fileBytes = 0;
           fileStream.on("data", (chunk: Buffer) => {
             fileBytes += chunk.length;

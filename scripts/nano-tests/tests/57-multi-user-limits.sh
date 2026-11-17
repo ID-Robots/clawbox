@@ -91,11 +91,13 @@ sign_in() {
 }
 
 ORIGINAL_LIMITS=""
+ORIGINAL_ORG=""
 cleanup() {
   local r
   [ -n "$ORIGINAL_LIMITS" ] && r=$(call POST /setup-api/settings/user-limits "$OWNER" "$ORIGINAL_LIMITS") && CLEANUP="limits:$(status_of "$r")"
-  r=$(call POST /setup-api/settings/org-mode "$OWNER" "{\"orgMode\":false}" 2>/dev/null || true)
-  CLEANUP="$CLEANUP org-off:$(status_of "$r")"
+  # The switch as the test found it, whatever it was.
+  r=$(call POST /setup-api/settings/org-mode "$OWNER" "{\"orgMode\":${ORIGINAL_ORG:-false}}" 2>/dev/null || true)
+  CLEANUP="$CLEANUP org-restored:$(status_of "$r")"
   r=$(call DELETE /setup-api/users "$OWNER" "{\"username\":\"$A_NAME\"}" 2>/dev/null || true)
   CLEANUP="$CLEANUP delete-user:$(status_of "$r")"
   rm -rf "$HOME/$MARK" "$WORK"
@@ -109,8 +111,13 @@ printf "NOTE [%s] runtime under test: %s\n" "$RUNTIME" "$RUNTIME"
 r=$(call GET /setup-api/settings/user-limits "$OWNER")
 if [ "$(status_of "$r")" != 200 ]; then no_ "the owner could not read the limits ($(status_of "$r"))"; echo "FLOW-END"; exit 0; fi
 ORIGINAL_LIMITS=$(body_of "$r" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)[\"limits\"]))")
-printf "NOTE [%s] limits before the test: %s\n" "$RUNTIME" "$ORIGINAL_LIMITS"
+r=$(call GET /setup-api/settings/org-mode "$OWNER")
+ORIGINAL_ORG=$(body_of "$r" | python3 -c "import json,sys; print(\"true\" if json.load(sys.stdin).get(\"orgMode\") is True else \"false\")" 2>/dev/null)
+[ "$ORIGINAL_ORG" = true ] || [ "$ORIGINAL_ORG" = false ] || { no_ "the owner could not read the organisation switch ($(status_of "$r"))"; echo "FLOW-END"; exit 0; }
+printf "NOTE [%s] before the test: limits %s, organisation mode %s\n" "$RUNTIME" "$ORIGINAL_LIMITS" "$ORIGINAL_ORG"
 trap cleanup EXIT
+# Only audit lines written from here on belong to this run.
+AUDIT_SINCE=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
 
 # 1. The user, their sign-ins, and the limits.
 r=$(call POST /setup-api/users "$OWNER" "{\"username\":\"$A_NAME\",\"password\":\"$A_PASS\"}")
@@ -124,6 +131,8 @@ ra=$(call GET /setup-api/settings/user-limits "$A_COOKIE"); rb=$(call POST /setu
 if [ "$(status_of "$ra")" = 403 ] && [ "$(status_of "$rb")" = 403 ]; then ok_ "A may neither read nor change the limits (403/403)"; else no_ "A reading/changing the limits answered $(status_of "$ra")/$(status_of "$rb")"; fi
 
 # 2. Upload size, on a home box: A writes into the owner folders, held to 1 MB.
+r=$(call POST /setup-api/settings/org-mode "$OWNER" "{\"orgMode\":false}")
+[ "$(status_of "$r")" = 200 ] || no_ "turning organisation mode off for the home-box phase answered $(status_of "$r")"
 r=$(put_file "$A_COOKIE" "$MARK" big.bin 2097152)
 code=$(body_of "$r" | field code); limit=$(body_of "$r" | field limitBytes)
 if [ "$(status_of "$r")" = 413 ] && [ "$code" = upload_too_large ] && [ "$limit" = 1048576 ] && [ ! -e "$HOME/$MARK/big.bin" ]; then
@@ -177,10 +186,10 @@ r=$(call POST /setup-api/settings/org-mode "$OWNER" "{\"orgMode\":false}")
 r=$(call GET "/setup-api/settings/audit-log?limit=200" "$OWNER")
 seen=$(body_of "$r" | python3 -c "
 import json,sys
-a=sys.argv[1]; e=json.load(sys.stdin)[\"entries\"]
+a=sys.argv[1]; e=[x for x in json.load(sys.stdin)[\"entries\"] if x[\"ts\"] >= sys.argv[2]]
 want={\"login\":lambda x:x.get(\"actor\")==a, \"login_failed\":lambda x:x.get(\"actor\")==a, \"user_create\":lambda x:x.get(\"target\")==a, \"user_limits\":lambda x:(x.get(\"detail\") or {}).get(\"chatPerMinute\")==1, \"org_mode\":lambda x:(x.get(\"detail\") or {}).get(\"on\") is True}
 print(\" \".join(k for k,f in want.items() if any(x[\"event\"]==k and f(x) for x in e)))
-" "$A_NAME" 2>/dev/null)
+" "$A_NAME" "$AUDIT_SINCE" 2>/dev/null)
 if [ "$(status_of "$r")" = 200 ] && [ "$seen" = "login login_failed user_create user_limits org_mode" ]; then
   ok_ "the owner audit log holds A sign-in and failed sign-in, the user added, the limits set and the switch"
 else no_ "the audit log answered $(status_of "$r"), found: $seen"; fi

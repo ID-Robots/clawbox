@@ -86,6 +86,21 @@ function multipart(dir: string, name: string, bytes: number) {
   }));
 }
 
+/** A multipart upload that declares its length, as a browser's does. */
+function multipartDeclared(dir: string, name: string, bytes: number) {
+  const boundary = "----b" + Date.now();
+  const body = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${name}"\r\nContent-Type: application/octet-stream\r\n\r\n`),
+    Buffer.alloc(bytes, 0x62),
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+  return post(new NextRequest(url(`/setup-api/files?dir=${encodeURIComponent(dir)}`), {
+    method: "POST",
+    headers: { "Content-Type": `multipart/form-data; boundary=${boundary}`, "Content-Length": String(body.length) },
+    body,
+  }));
+}
+
 beforeAll(async () => {
   for (const dir of [OWNER, IVAN]) fs.mkdirSync(dir, { recursive: true });
   process.env.FILES_ROOT = OWNER;
@@ -257,6 +272,37 @@ describe("the home quota", () => {
     const limit = await putFile("Home", "x.bin", 2 * MB);
     expect(limit.status).toBe(413);
     expect((await limit.json()).code).toBe("upload_too_large");
+  });
+
+  it("refuses a declared multipart overwrite past the quota before it opens — the file it would replace is kept", async () => {
+    fs.writeFileSync(path.join(IVAN, "keep.bin"), Buffer.alloc(500 * KB, 0x6b));
+    fs.writeFileSync(path.join(IVAN, "old.bin"), Buffer.alloc(Math.round(2.4 * MB)));
+    // keep.bin gives back 500 KB, but 900 KB still does not fit.
+    const res = await multipartDeclared("Home", "keep.bin", 900 * KB);
+    expect(res.status).toBe(507);
+    expect((await res.json()).code).toBe("quota_exceeded");
+    const kept = fs.readFileSync(path.join(IVAN, "keep.bin"));
+    expect(kept.length).toBe(500 * KB);
+    expect(kept[0]).toBe(0x6b);
+  });
+
+  it("holds each move's bytes until it has run, so two moves checked at once cannot share the same room", async () => {
+    // Asked of the check itself: two requests through the route at once meet
+    // vitest's uneven handling of a mocked module's concurrent imports.
+    // Room for one 600 KB move (about 800 KB left of the 3 MB quota), not two.
+    fs.writeFileSync(path.join(IVAN, "old.bin"), Buffer.alloc(Math.round(2.2 * MB)));
+    fs.writeFileSync(path.join(OWNER, "Shared", "one.bin"), Buffer.alloc(600 * KB));
+    fs.writeFileSync(path.join(OWNER, "Shared", "two.bin"), Buffer.alloc(600 * KB));
+    const { moveQuotaCheck } = await import("@/lib/user-upload-guard");
+    const { fenceFor, memberRoots } = await import("@/lib/files-scope");
+    const roots = memberRoots(IVAN, OWNER);
+    if (!roots.ok) throw new Error("no member roots");
+    const fence = fenceFor({ kind: "member", username: "ivan", roots: roots.roots });
+    const check = (name: string) => moveQuotaCheck({ limitedUser: "ivan", fence, destAbs: IVAN, sources: [path.join(OWNER, "Shared", name)] });
+    const [a, b] = await Promise.all([check("one.bin"), check("two.bin")]);
+    const outcomes = [a, b].map((r) => (r && "refusal" in r ? r.refusal.body.code : r && "hold" in r ? "held" : "none")).sort();
+    expect(outcomes).toEqual(["held", "quota_exceeded"]);
+    for (const r of [a, b]) if (r && "hold" in r) r.hold.done();
   });
 
   it("does not apply to the owner, nor without a quota", async () => {
