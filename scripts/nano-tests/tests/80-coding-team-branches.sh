@@ -139,7 +139,7 @@ if [ "$A_SINGLE" = true ]; then
   fi
   if grep -q 'NO CHANGE' <<<"$(team_json '.team.log[].message')"; then
     not_ok "single run: the team rejected the run's work as NO CHANGE"
-  elif [ "$A_STATUS" != done ]; then
+  elif [ "$A_STATUS" != "done" ]; then
     note "single run: the team ended $A_STATUS ($(team_json '.team.error // "no error"')), so where its work landed was not checked"
   else
     # shellcheck disable=SC2016  # expanded on the board
