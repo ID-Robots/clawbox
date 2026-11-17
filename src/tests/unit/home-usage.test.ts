@@ -1,7 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   homeUsage,
@@ -52,6 +52,26 @@ describe("measuring a home", () => {
     const usage = await measureHomeUsage(HOME, { maxEntries: 2 });
     expect(usage?.truncated).toBe(true);
     expect(usage!.bytes).toBeLessThan(6000);
+  });
+
+  it("skips a folder swapped for a link between its listing and its descent", async () => {
+    const sub = path.join(HOME, "Documents", "deep");
+    const real = fs.promises.lstat.bind(fs.promises);
+    // The moment the walk checks the queued folder again, it has become a
+    // link to a folder outside the home.
+    const spy = vi.spyOn(fs.promises, "lstat").mockImplementation(async (p, ...rest) => {
+      if (String(p) === sub && fs.lstatSync(sub).isDirectory()) {
+        fs.rmSync(sub, { recursive: true });
+        fs.symlinkSync(path.join(ROOT, "elsewhere"), sub);
+      }
+      return real(p as string, ...(rest as []));
+    });
+    try {
+      // a.txt and Documents/b.txt; neither deep/c.txt (gone) nor huge.bin (outside).
+      expect((await measureHomeUsage(HOME))?.bytes).toBe(3000);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("answers null for a home it cannot read", async () => {
