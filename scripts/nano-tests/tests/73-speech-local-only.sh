@@ -366,7 +366,13 @@ else
   not_ok "the voice reply under the lock: $(r '.speak | tojson')"
 fi
 if [ "$RUNTIME" = hermes ]; then
-  if [ "$(r '.hermesBefore')" = edge ] && [ "$(r '.hermesAfter')" = clawbox-local ]; then
+  if [ "$(r '.localVoice')" = false ]; then
+    # Kokoro is what Hermes is moved to: with no voice installed there is
+    # nothing to move it to, and the product rightly leaves its voice alone
+    # (TASK-2638: a golden-restored board has none). The move itself is
+    # asserted below whenever a voice is installed.
+    skip "no voice is installed on this board (Kokoro), so Hermes has no local voice to move to under the lock (its voice: before $(r '.hermesBefore'), after $(r '.hermesAfter'))"
+  elif [ "$(r '.hermesBefore')" = edge ] && [ "$(r '.hermesAfter')" = clawbox-local ]; then
     ok "Hermes' factory edge voice (Microsoft's cloud) was replaced by Kokoro under the lock (edge → clawbox-local)"
   else
     not_ok "Hermes' voice selection under the lock: before $(r '.hermesBefore'), after $(r '.hermesAfter')"
