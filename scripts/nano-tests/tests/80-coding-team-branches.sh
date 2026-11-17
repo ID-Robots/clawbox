@@ -152,7 +152,9 @@ if [ "$A_SINGLE" = true ]; then
   if grep -q 'NO CHANGE' <<<"$(team_json '.team.log[].message')"; then
     not_ok "single run: the team rejected the run's work as NO CHANGE"
   elif [ "$A_STATUS" != "done" ]; then
-    note "single run: the team ended $A_STATUS ($(team_json '.team.error // "no error"')), so where its work landed was not checked"
+    # One ordinary run has none of the team checks below to catch a run that
+    # broke on its own branch, so not finishing is a failure here.
+    not_ok "single run: the team ended $A_STATUS, not done ($(team_json '.team.error // "no error"')), so its work never landed"
   else
     # shellcheck disable=SC2016  # expanded on the board
     # Exit 0 and where both changes are, 1 and nothing when they are nowhere
