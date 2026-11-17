@@ -21,7 +21,9 @@
 # A check whose situation the models did not bring about (no conflict, no
 # branch of the worker's own) is a note, never a pass. A planner that runs the
 # plan as ONE ordinary run is a valid outcome with checks of its own (TASK-2612).
-# The owner's settings it changes are put back.
+# The second team is started only when the base check can run: the first team
+# left the checkout on its branch and was not stopped (a stopped team holds its
+# folder). The owner's settings it changes are put back.
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
@@ -54,8 +56,17 @@ trap cleanup EXIT
 board_api POST /setup-api/coding-agent/settings '{"autoPr":true,"maxParallelRuns":2}'
 [ "$API_STATUS" = 200 ] || { not_ok "could not turn pull requests on and allow two runs at once: $(api_error)"; finish; }
 
+# A team the owner stopped holds its work: the assistant's next team is refused
+# 409 when it names the same goal OR works in that team's folder
+# (coding-team.ts ownerStopRefusal, isTeamsWork). This test stops teams (the
+# second one always, the first on its deadline), so every goal carries this
+# run's own tag and the folder is this run's own, even when a run id is used
+# again: no stopped team of an earlier run, or of an earlier step, holds this
+# run's work.
+RUN_STAMP=$(date +%s)
+RUN_TAG="$NANO_RUN_ID-$RUN_STAMP"
 API_BODY=$STATUS_BODY
-if ! fresh_project_dir "-branches" || ! make_sim_repo; then
+if ! fresh_project_dir "-branches-$RUN_STAMP" || ! make_sim_repo; then
   not_ok "could not prepare the simulated repository in $PROJECT_DIR"
   finish
 fi
@@ -76,7 +87,8 @@ GOAL="Make two independent changes in this project, as two tasks that can run si
    This task is to be committed on a git branch of its own: first run \`git checkout -b fix/arrow-up-own\` in your folder, then edit src/up.js, write UP.md and commit them there.
 2. In src/down.js change the value to: export const down = -1; and create DOWN.md holding the one line: down is now -1.
 Each task also appends exactly one line to the end of CHANGELOG.md that says what it changed. After your change, run ./test.sh and quote what it prints.
-Each task is to be reviewed on its own, by a reviewer that runs ./test.sh on it."
+Each task is to be reviewed on its own, by a reviewer that runs ./test.sh on it.
+(nano-ci $RUN_TAG)"
 if ! start_coding_team "$GOAL"; then
   not_ok "the first team did not start: $(api_error)"
   finish
@@ -99,7 +111,7 @@ if [ -n "$PLANNER" ]; then
   elif [ "$(api_json '.run.readOnly')" = true ] && [ "${READS:-0}" -gt 0 ]; then
     ok "planner: $PLANNER, read-only, read the project ($READS read step(s)) before it planned"
   else
-    note "planner: $PLANNER readOnly=$(api_json '.run.readOnly'), $READS read step(s)"
+    note "planner: $PLANNER $(api_json '.run.status // "status unknown"'), readOnly=$(api_json '.run.readOnly'), $READS read step(s)"
   fi
 fi
 
@@ -237,13 +249,25 @@ fi
 # shellcheck disable=SC2016  # expanded on the board
 LEFT=$(board 'git -C "$1" rev-parse --abbrev-ref HEAD' "$PROJECT_DIR")
 note "the checkout is on $LEFT after the first team"
-# This test stops the second team, and a team the owner stopped holds its
-# goal (coding-team.ts ownerStopRefusal): the run id keeps the next run of
-# this test on the same board from being refused as that work.
+# The second team is there for the base check alone, which needs the checkout
+# left on the first team's branch. And a first team this test stopped on its
+# deadline holds this folder: the box refuses the next team in it with 409
+# (ownerStopRefusal, above), as it should. In either case the second team has
+# nothing to show, so it is not started.
+if [ -z "$A_BRANCH" ] || [ "$LEFT" != "$A_BRANCH" ]; then
+  note "base: the first team left the checkout on $LEFT, not on its branch (${A_BRANCH:-none}), so this run did not test it (the second team is not started)"
+  finish
+fi
+if [ "$A_STATUS" = timeout ] || [ "$A_STATUS" = stopped ]; then
+  note "base: the first team was stopped ($A_STATUS) and holds this folder (ownerStopRefusal), so this run did not test it (the second team is not started)"
+  finish
+fi
+# The test stops the second team once it has its branch, so its goal carries
+# the run's tag like the first one's.
 # Two files at the top of the project, in no shared folder: a planner that
 # hinted docs/ for both (docs/a.md, docs/b.md) made it 100% overlap and one
 # run, with no branch to judge the base by.
-GOAL="Two independent tasks that can run side by side: 1. create A.md at the top of the project holding the line A. 2. create B.md at the top of the project holding the line B. Change nothing else. (nano-ci $NANO_RUN_ID)"
+GOAL="Two independent tasks that can run side by side: 1. create A.md at the top of the project holding the line A. 2. create B.md at the top of the project holding the line B. Change nothing else. (nano-ci $RUN_TAG)"
 if ! start_coding_team "$GOAL"; then
   not_ok "the second team did not start: $(api_error)"
   finish
@@ -255,9 +279,7 @@ note_team "second team"
 B_BRANCH=$(team_json '.team.branch // empty')
 B_BASE=$(team_json '.team.base // empty')
 # shellcheck disable=SC2016  # expanded on the board
-if [ -z "$A_BRANCH" ] || [ "$LEFT" != "$A_BRANCH" ]; then
-  note "base: the first team left the checkout on $LEFT, not on its branch, so this run did not test it"
-elif [ -z "$B_BRANCH" ]; then
+if [ -z "$B_BRANCH" ]; then
   note "base: the second team got no branch of its own (singleRun $(team_json '.team.singleRun')), so this run did not test it"
 elif [ "$B_BASE" = develop ] && ! board 'git -C "$1" merge-base --is-ancestor "$2" "$3"' "$PROJECT_DIR" "$A_BRANCH" "$B_BRANCH"; then
   ok "base: the second team forked $B_BRANCH from develop, without the first team's commits, although the checkout was on $A_BRANCH"
