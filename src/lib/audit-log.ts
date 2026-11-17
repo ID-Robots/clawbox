@@ -88,6 +88,46 @@ function cleanString(value: unknown, max = STRING_MAX): string | undefined {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+/**
+ * The characters a written field may hold: printable ASCII. What is written is
+ * REBUILT from this alphabet character by character (the `rebuildUsername`
+ * idiom, src/lib/clawbox-users.ts) — a control character becomes a space and
+ * anything else outside it a `?` — so the line on disk is this module's own
+ * string, never a request's that a check merely vouched for.
+ */
+const LINE_ALPHABET = " !#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_`abcdefghijklmnopqrstuvwxyz{|}~\"";
+
+function rebuilt(value: unknown, max = STRING_MAX): string | undefined {
+  if (typeof value !== "string") return undefined;
+  let out = "";
+  for (const ch of value) {
+    if (out.length >= max) break;
+    const at = LINE_ALPHABET.indexOf(ch);
+    out += at >= 0 ? LINE_ALPHABET[at] : /[\u0000-\u001f\u007f]/.test(ch) ? " " : "?";
+  }
+  out = out.trim();
+  return out || undefined;
+}
+
+/** A detail as it is written: plain values only, every string and number rebuilt. */
+function writtenDetail(detail: unknown): AuditDetail | undefined {
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) return undefined;
+  const out: AuditDetail = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(detail as Record<string, unknown>)) {
+    if (n >= DETAIL_KEYS_MAX) break;
+    const name = rebuilt(k, 40);
+    if (!name) continue;
+    if (v === null) out[name] = null;
+    else if (typeof v === "boolean") out[name] = v === true;
+    else if (typeof v === "number" && Number.isFinite(v)) out[name] = Number(rebuilt(String(v), 32));
+    else if (typeof v === "string") out[name] = rebuilt(v) ?? "";
+    else continue;
+    n++;
+  }
+  return n > 0 ? out : undefined;
+}
+
 function cleanDetail(detail: unknown): AuditDetail | undefined {
   if (!detail || typeof detail !== "object" || Array.isArray(detail)) return undefined;
   const out: AuditDetail = {};
@@ -140,29 +180,39 @@ export async function recordAudit(
   request?: Request,
 ): Promise<void> {
   if (!(AUDIT_EVENTS as readonly string[]).includes(entry.event)) return;
+  const event = AUDIT_EVENTS[(AUDIT_EVENTS as readonly string[]).indexOf(entry.event)];
   const line: AuditEntry = {
     ts: new Date().toISOString(),
-    event: entry.event,
-    actor: cleanString(entry.actor, 64) ?? null,
+    event,
+    actor: rebuilt(entry.actor, 64) ?? null,
   };
-  const target = cleanString(entry.target, 64);
+  const target = rebuilt(entry.target, 64);
   if (target) line.target = target;
-  const ip = request ? auditAddress(request) : undefined;
+  const ip = request ? rebuilt(auditAddress(request), 64) : undefined;
   if (ip) line.ip = ip;
-  const detail = cleanDetail(entry.detail);
+  const detail = writtenDetail(entry.detail);
   if (detail) line.detail = detail;
   const text = `${JSON.stringify(line)}\n`;
   await withLogLock(async () => {
     const file = auditLogPath();
+    let handle: fs.promises.FileHandle | null = null;
     try {
       await fs.promises.mkdir(path.dirname(file), { recursive: true });
-      const size = await fs.promises.stat(file).then((s) => s.size, () => 0);
-      if (size + Buffer.byteLength(text) > AUDIT_LOG_MAX_BYTES && size > 0) {
+      // Opened first and measured by its descriptor: the size checked is the
+      // size of the file written, with nothing between the two to swap it.
+      handle = await fs.promises.open(file, "a", 0o600);
+      const { size } = await handle.stat();
+      if (size > 0 && size + Buffer.byteLength(text) > AUDIT_LOG_MAX_BYTES) {
+        await handle.close();
+        handle = null;
         await fs.promises.rename(file, `${file}.1`);
+        handle = await fs.promises.open(file, "a", 0o600);
       }
-      await fs.promises.appendFile(file, text, { mode: 0o600, flag: "a" });
+      await handle.write(text);
     } catch (err) {
       console.error("[audit-log] could not write the audit log:", err instanceof Error ? err.message : err);
+    } finally {
+      await handle?.close().catch(() => {});
     }
   });
 }

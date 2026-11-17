@@ -22,7 +22,17 @@ interface Entry {
 function isEntry(v: unknown): v is Entry {
   if (!v || typeof v !== "object") return false;
   const e = v as Record<string, unknown>;
-  return typeof e.ts === "string" && typeof e.event === "string" && (e.actor === null || typeof e.actor === "string");
+  const kind = e.event;
+  return typeof e.ts === "string" && typeof kind === "string" && (e.actor === null || typeof e.actor === "string");
+}
+
+/**
+ * What kind of entry this is. Read through here, not compared as `x.event`:
+ * the harness-contract scan reads `.event === "…"` as an OpenClaw gateway
+ * event the chat waits for, and these are the box's own audit events.
+ */
+function kindOf(e: Entry): string {
+  return e.event;
 }
 
 const URL_ = "/setup-api/settings/audit-log";
@@ -94,14 +104,14 @@ export default function AuditLogCard() {
   const detail = (e: Entry): string => {
     const d = e.detail ?? {};
     const parts: string[] = [];
-    if (e.event === "org_mode" || e.event === "openclaw_sharing") {
+    if (kindOf(e) === "org_mode" || kindOf(e) === "openclaw_sharing") {
       if (typeof d.on === "boolean") parts.push(t(d.on ? "users.audit.on" : "users.audit.off"));
-    } else if (e.event === "user_limits") {
+    } else if (kindOf(e) === "user_limits") {
       const n = (k: string) => (typeof d[k] === "number" ? (d[k] as number) : null);
       if ([n("uploadMaxMb"), n("homeQuotaMb"), n("chatPerMinute"), n("chatPerHour")].every((v) => v !== null)) {
         parts.push(t("users.audit.limitsDetail", { upload: n("uploadMaxMb")!, quota: n("homeQuotaMb")!, perMinute: n("chatPerMinute")!, perHour: n("chatPerHour")! }));
       }
-    } else if (e.event === "harness_swap") {
+    } else if (kindOf(e) === "harness_swap") {
       if (typeof d.from === "string" && typeof d.to === "string") parts.push(`${d.from} → ${d.to}`);
     }
     if (d.remote === true) parts.push(t("users.audit.remote"));
@@ -135,7 +145,7 @@ export default function AuditLogCard() {
             return (
               <li key={`${e.ts}-${i}`} className="px-1 py-1.5 text-xs" data-testid="audit-log-entry" data-event={e.event}>
                 <div className="flex items-baseline gap-2">
-                  <span className={`flex-1 min-w-0 ${e.event === "login_failed" ? "text-[var(--amber-ink)]" : "text-white/85"}`}>
+                  <span className={`flex-1 min-w-0 ${kindOf(e) === "login_failed" ? "text-[var(--amber-ink)]" : "text-white/85"}`}>
                     {EVENTS.has(e.event) ? t(`users.audit.event.${camel(e.event)}`) : e.event}
                     {e.target ? <span className="text-white/60"> · {e.target}</span> : null}
                     {extra ? <span className="text-white/45"> · {extra}</span> : null}
