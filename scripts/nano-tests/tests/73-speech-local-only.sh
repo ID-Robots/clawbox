@@ -17,7 +17,9 @@
 #      the mock;
 #   3. a spoken reply: POST /setup-api/tts/speak answers audio from the box's
 #      own voice (Kokoro); on Hermes the factory `edge` (Microsoft's cloud) is
-#      set first and must have been replaced by `clawbox-local`; on OpenClaw no
+#      set first and must have been replaced by `clawbox-local` — a box with no
+#      voice installed has nothing to select onto, so that check skips with the
+#      spoken-reply leg rather than asking for a swap that cannot happen; on OpenClaw no
 #      ClawBox AI cloud voice entry is left in openclaw.json. Local engines
 #      earlier tests left loaded are put on standby first when Kokoro's cold
 #      start would not have its 3000 MB; a 502 local_memory that remains is
