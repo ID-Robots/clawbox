@@ -29,12 +29,21 @@ export interface UploadRefusalBody {
 }
 
 export interface UploadGuard {
-  /** The most the file may be, judged once now, or Infinity. */
+  /**
+   * The most the file may be by the disk's room and the upload limit, judged
+   * once now, or Infinity — a multipart parser's per-file limit. The quota is
+   * not in it: what a part replaces is known only once it names its file, so
+   * the quota is metered on the part's own bytes (`quotaCeiling`).
+   */
   readonly initialMax: number;
   /** Which bound `initialMax` came from. */
   readonly initialBound: UploadBound;
   /** The body meter's ceiling for the bytes passed so far; re-asks the disk and the quota. */
   ceiling(passed: number): number;
+  /** The quota's ceiling alone for a file that has passed `passed` bytes; Infinity without one. */
+  quotaCeiling(passed: number): number;
+  /** The upload writes `destPath` (a multipart part named it): a file there gives its room back. */
+  destination(destPath: string): void;
   /** Which bound the last `ceiling` came from. */
   lastBound(): UploadBound;
   /**
@@ -42,7 +51,7 @@ export interface UploadGuard {
    * past the upload limit or the quota. Null when it may go ahead (the disk's
    * own pre-check is the route's).
    */
-  precheck(declaredBytes: number): { status: number; body: UploadRefusalBody } | null;
+  precheck(declaredBytes: number, opts?: { quota?: boolean }): { status: number; body: UploadRefusalBody } | null;
   /** The refusal for an upload stopped at `bound`; null for the disk's (the route words that). */
   refusalFor(bound: UploadBound): { status: number; body: UploadRefusalBody } | null;
   /**
@@ -110,7 +119,11 @@ export async function userUploadGuard(opts: {
     }
     return { max, bound: which };
   };
-  const first = lowest(0);
+  // The parser's per-file limit: the disk and the upload limit, not the quota.
+  const firstRoom = disk(0);
+  const first: { max: number; bound: UploadBound } = uploadLimit !== null && uploadLimit < firstRoom
+    ? { max: uploadLimit, bound: "upload_limit" }
+    : { max: firstRoom, bound: "disk" };
   bound = first.bound;
 
   const refusalFor = (which: UploadBound): { status: number; body: UploadRefusalBody } | null => {
@@ -140,10 +153,21 @@ export async function userUploadGuard(opts: {
       return now.max;
     },
     lastBound: () => bound,
-    precheck(declaredBytes: number) {
+    quotaCeiling: (passed: number) => (quota ? quota.ceiling(passed) : Infinity),
+    destination(path: string) {
+      if (!quota || !quotaHome || !insideHome(quotaHome, path)) return;
+      replaced = replacedBytes(path);
+      quota.replacing(replaced);
+    },
+    precheck(declaredBytes: number, { quota: withQuota = true }: { quota?: boolean } = {}) {
       if (!(declaredBytes > 0)) return null;
-      if (uploadLimit !== null && declaredBytes > uploadLimit) return refusalFor("upload_limit");
-      if (quota && declaredBytes > quota.ceiling(0)) return refusalFor("quota");
+      const overLimit = uploadLimit !== null && declaredBytes > uploadLimit;
+      const room = quota && withQuota ? quota.ceiling(0) : Infinity;
+      const overQuota = declaredBytes > room;
+      // Past both: the lower of the two is the one the person has to deal with.
+      if (overLimit && overQuota) return refusalFor(uploadLimit! <= room ? "upload_limit" : "quota");
+      if (overLimit) return refusalFor("upload_limit");
+      if (overQuota) return refusalFor("quota");
       return null;
     },
     refusalFor,

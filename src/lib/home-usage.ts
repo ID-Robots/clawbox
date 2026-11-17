@@ -170,6 +170,8 @@ export interface QuotaWrite {
   ceiling(passed: number): number;
   /** The write landed `addedBytes` (net of anything it replaced), or failed (0). */
   finish(addedBytes: number): void;
+  /** The file it writes turned out to replace one of `bytes` (known once a multipart part names it). */
+  replacing(bytes: number): void;
 }
 
 /**
@@ -189,6 +191,7 @@ export async function openQuotaWrite(home: string, quotaBytes: number, replacing
   }
   set.add(mine);
   let open = true;
+  let replaced = Math.max(0, replacingBytes);
   const others = () => {
     let sum = 0;
     for (const w of openWrites.get(k) ?? []) if (w !== mine) sum += w.passed;
@@ -202,7 +205,10 @@ export async function openQuotaWrite(home: string, quotaBytes: number, replacing
       // What the home holds NOW: a write that finished since this one began
       // has moved the cached figure and left `others()`.
       const held = cache.get(k)?.bytes ?? usage.bytes;
-      return Math.max(0, quotaBytes - held - others() + Math.max(0, replacingBytes));
+      return Math.max(0, quotaBytes - held - others() + replaced);
+    },
+    replacing(bytes: number) {
+      replaced = Math.max(0, Number.isFinite(bytes) ? bytes : 0);
     },
     finish(addedBytes: number) {
       if (!open) return;

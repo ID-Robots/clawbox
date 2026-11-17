@@ -491,7 +491,8 @@ export async function POST(req: NextRequest) {
     // limit or the quota is refused before a byte of it is read.
     const guard = await userUploadGuard({ limitedUser, fence, destPath: abs, disk: uploadBudget(abs) });
     const declared = parseInt(req.headers.get("content-length") ?? "0", 10);
-    const early = Number.isFinite(declared) ? guard.precheck(declared - MULTIPART_HEADROOM_BYTES) : null;
+    // The quota waits for the part's name (a file it replaces gives its room back).
+    const early = Number.isFinite(declared) ? guard.precheck(declared - MULTIPART_HEADROOM_BYTES, { quota: false }) : null;
     if (early) {
       guard.finish(null);
       return NextResponse.json(early.body, { status: early.status });
@@ -590,6 +591,14 @@ export async function POST(req: NextRequest) {
             return;
           }
           absPath = destPath;
+          // A file of that name gives its room back to the quota, which is
+          // then held on the part's own bytes.
+          guard.destination(destPath);
+          let fileBytes = 0;
+          fileStream.on("data", (chunk: Buffer) => {
+            fileBytes += chunk.length;
+            if (fileBytes > guard.quotaCeiling(fileBytes)) fail(boundRefusal(guard, "quota"));
+          });
           // The truncation trap: without this, an oversize part is cut at
           // the limit, the pipeline resolves, and the caller is told the
           // upload worked.

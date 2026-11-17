@@ -406,6 +406,15 @@ export async function POST(req: NextRequest) {
   // recorded as theirs (src/lib/chat-media-owners.ts), and may add to a
   // dropped folder's batch only when that batch is new or already theirs.
   const person = await personSession(req);
+  // A session cookie whose person could not be resolved just now (the user
+  // registry unreadable for a moment) is not the owner's: refused, never
+  // staged as the owner's upload past that user's limits.
+  if (!person && /(?:^|;\s*)clawbox_session=/.test(req.headers.get("cookie") ?? "")) {
+    return NextResponse.json(
+      { error: "Who is signed in could not be checked just now. Try again in a moment.", code: "session_unknown" },
+      { status: 503 },
+    );
+  }
   const user = person && !person.isOwner ? person.username : null;
   let batchDirUsed: string | null = null;
 
@@ -438,7 +447,10 @@ export async function POST(req: NextRequest) {
         defParamCharset: "utf8",
         limits: {
           files: 1,
-          fileSize: maxBytes,
+          // One sentinel byte over, as the Files route does: busboy raises
+          // `limit` when a part REACHES its fileSize, so a file of exactly the
+          // limit would otherwise be refused.
+          fileSize: maxBytes + 1,
           fields: MAX_FIELDS,
           fieldSize: MAX_FIELD_BYTES,
           parts: MAX_PARTS,

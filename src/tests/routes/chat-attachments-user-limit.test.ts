@@ -118,6 +118,25 @@ describe("a user's chat attachment", () => {
     expect(body.error).toMatch(/size limit/);
   });
 
+  it("of exactly their limit is staged", async () => {
+    expect((await POST(request("exact.txt", MB))).status).toBe(200);
+  });
+
+  it("with a session cookie whose person cannot be resolved is refused, never staged as the owner's", async () => {
+    h.who = null;
+    const req = new NextRequest("http://localhost/setup-api/chat/attachments", {
+      method: "POST",
+      headers: { "content-type": `multipart/form-data; boundary=${BOUNDARY}`, cookie: "clawbox_session=unresolvable" },
+      body: new Uint8Array(Buffer.from(`--${BOUNDARY}--\r\n`)),
+      duplex: "half",
+    } as unknown as ConstructorParameters<typeof NextRequest>[1]);
+    const res = await POST(req);
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("session_unknown");
+    // The agent's bearer (no cookie at all) is still served.
+    expect((await POST(request("agent.txt", 2 * MB))).status).toBe(200);
+  });
+
   it("of the owner is never held to the users' limit", async () => {
     h.who = { username: "clawbox", isOwner: true };
     expect((await POST(request("notes.txt", 2 * MB))).status).toBe(200);

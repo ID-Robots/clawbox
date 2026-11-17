@@ -228,6 +228,37 @@ describe("the home quota", () => {
     expect(fs.existsSync(path.join(IVAN, "small.bin"))).toBe(true);
   });
 
+  it("gives back the room of a file a multipart upload replaces", async () => {
+    fs.writeFileSync(path.join(IVAN, "same.bin"), Buffer.alloc(Math.round(2.8 * MB)));
+    expect((await multipart("Home", "same.bin", 900 * KB)).status).toBe(200);
+    expect(fs.statSync(path.join(IVAN, "same.bin")).size).toBe(900 * KB);
+    // Counted once, net of what it replaced: room is left for another 900 KB.
+    expect((await multipart("Home", "next.bin", 900 * KB)).status).toBe(200);
+  });
+
+  it("holds a multipart upload to the quota on the part's own bytes", async () => {
+    fs.writeFileSync(path.join(IVAN, "old.bin"), Buffer.alloc(Math.round(2.5 * MB)));
+    const res = await multipart("Home", "more.bin", 900 * KB);
+    expect(res.status).toBe(507);
+    expect((await res.json()).code).toBe("quota_exceeded");
+    expect(fs.existsSync(path.join(IVAN, "more.bin"))).toBe(false);
+  });
+
+  it("names whichever bound is lower when a declared upload is past both", async () => {
+    // 1 MB upload limit, but only ~0.5 MB of quota left: the quota is the one to deal with.
+    fs.writeFileSync(path.join(IVAN, "old.bin"), Buffer.alloc(Math.round(2.5 * MB)));
+    const quota = await putFile("Home", "x.bin", 2 * MB);
+    expect(quota.status).toBe(507);
+    expect((await quota.json()).code).toBe("quota_exceeded");
+    // Plenty of quota: the upload limit is.
+    fs.rmSync(path.join(IVAN, "old.bin"));
+    resetUsage();
+    setLimits({ uploadMaxMb: 1, homeQuotaMb: 100 });
+    const limit = await putFile("Home", "x.bin", 2 * MB);
+    expect(limit.status).toBe(413);
+    expect((await limit.json()).code).toBe("upload_too_large");
+  });
+
   it("does not apply to the owner, nor without a quota", async () => {
     fs.writeFileSync(path.join(IVAN, "old.bin"), Buffer.alloc(Math.round(2.9 * MB)));
     setLimits({ uploadMaxMb: 1, homeQuotaMb: 0 });
