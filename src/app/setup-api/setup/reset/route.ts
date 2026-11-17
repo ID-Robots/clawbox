@@ -863,7 +863,15 @@ export async function POST(request: Request) {
     const clawkeepFailures = await removeDirectoryContents(CLAWKEEP_DATA_DIR);
     // Previous-owner home-dir state (SSH keys, browser profile, user files…).
     const homeFailures = await wipeHomeUserState();
-    const allFailures = [...dataFailures, ...openclawFailures, ...clawkeepFailures, ...homeFailures];
+    // The audit log is cleared once more under its own lock: a line queued
+    // during the wipe (a sign-in at that moment, carrying the previous
+    // owner's name and address) is written first and removed with the rest,
+    // never left to recreate the file. A clear that fails is a wipe failure.
+    const auditFailures = await clearAuditLogForReset().then(
+      () => [] as string[],
+      (err: unknown) => [labelFailure("audit-log", err instanceof Error ? err.message : String(err))],
+    );
+    const allFailures = [...dataFailures, ...openclawFailures, ...clawkeepFailures, ...homeFailures, ...auditFailures];
 
     // 4. Seed minimal openclaw.json with token-based gateway auth so the
     // gateway can still bind on LAN after reboot. The token is a freshly
@@ -923,11 +931,8 @@ export async function POST(request: Request) {
     }
 
     // The one line the wiped box keeps of its past: that it was reset, when
-    // and by whom. data/ — the old audit log with it — is gone by now; the
-    // log is cleared once more under its own lock, so a line queued during
-    // the wipe cannot bring the previous owner's entries back. No address:
-    // the box may be about to change hands.
-    await clearAuditLogForReset().catch(() => {});
+    // and by whom (the old log was cleared above). No address: the box may be
+    // about to change hands.
     await recordAudit({ event: "factory_reset", actor: resetBy });
 
     // 6. Delete saved WiFi connections so device returns to AP mode after reboot

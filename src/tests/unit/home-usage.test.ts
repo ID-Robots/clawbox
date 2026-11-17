@@ -137,6 +137,19 @@ describe("one figure per home while writes are open", () => {
     expect((await homeUsage(HOME))?.bytes).toBe(7500);
   });
 
+  it("keeps the figure a write opened on when a walk that started before it ends while it is open", async () => {
+    expect((await homeUsage(HOME))?.bytes).toBe(6000);
+    // A forced walk starts; a write opens on the cached figure before it ends
+    // and lands bytes the walk may count.
+    const walking = homeUsage(HOME, { maxAgeMs: 0 });
+    const w = (await openQuotaWrite(HOME, 100_000))!;
+    fs.writeFileSync(path.join(HOME, "upload.bin"), Buffer.alloc(1500));
+    await walking;
+    w.ceiling(1500);
+    w.finish(1500);
+    expect((await homeUsage(HOME))?.bytes).toBe(7500);
+  });
+
   it("keeps counting the writes that land after a delete asked for a fresh walk, then walks once they are done", async () => {
     const a = (await openQuotaWrite(HOME, 10_000))!;
     const b = (await openQuotaWrite(HOME, 10_000))!;

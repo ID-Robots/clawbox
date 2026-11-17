@@ -194,6 +194,10 @@ export async function homeUsage(home: string, { maxAgeMs = USAGE_CACHE_MS }: { m
   if (running) return running;
   const run = measureHomeUsage(k)
     .then((usage) => {
+      // A write that opened on the cached figure while this walk ran may have
+      // put bytes on disk the walk counted and its `finish` will add: while
+      // any write is open, the figure it opened on stands.
+      if (writesOpen(k) && cache.has(k)) return usage;
       if (usage) cache.set(k, usage);
       else cache.delete(k);
       return usage;

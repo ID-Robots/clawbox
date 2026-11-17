@@ -503,7 +503,7 @@ export async function POST(req: NextRequest) {
     const guard = await userUploadGuard({ limitedUser, fence, destPath: abs, disk: uploadBudget(abs) });
     const declared = parseInt(req.headers.get("content-length") ?? "0", 10);
     // The quota waits for the part's name (a file it replaces gives its room back).
-    const early = Number.isFinite(declared) ? guard.precheck(declared - MULTIPART_HEADROOM_BYTES, { quota: false }) : null;
+    const early = Number.isFinite(declared) ? guard.precheck(declared - MULTIPART_FRAMING_BYTES, { quota: false }) : null;
     if (early) {
       guard.finish(null);
       return NextResponse.json(early.body, { status: early.status });

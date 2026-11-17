@@ -73,8 +73,12 @@ export default function UserLimitsCard() {
       try {
         const r = await fetch(URL_, { cache: "no-store" });
         if (!alive) return;
-        // Not the owner's session: nothing to draw, the card stays hidden.
-        if (r.status === 401 || r.status === 403) return;
+        // Not the owner's session: nothing to draw, the card stays hidden —
+        // a failure line from an earlier attempt included.
+        if (r.status === 401 || r.status === 403) {
+          setLoadFailed(false);
+          return;
+        }
         const body: unknown = r.ok ? await r.json().catch(() => null) : null;
         if (!alive) return;
         if (isStatus(body)) {

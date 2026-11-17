@@ -63,6 +63,17 @@ describe("writing", () => {
     expect(audit.auditAddress(req())).toBeUndefined();
   });
 
+  it("records no address under next dev, which runs without the guard that writes them", async () => {
+    const env = process.env as Record<string, string | undefined>;
+    const before = env.NODE_ENV;
+    env.NODE_ENV = "development";
+    try {
+      expect(audit.auditAddress(req({ "cf-connecting-ip": "198.51.100.7", "x-clawbox-peer": "192.0.2.5" }))).toBeUndefined();
+    } finally {
+      env.NODE_ENV = before;
+    }
+  });
+
   it("strips control characters, bounds every field and drops what is not a plain value", async () => {
     await audit.recordAudit({
       event: "user_remove",

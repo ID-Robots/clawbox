@@ -121,6 +121,15 @@ describe("UserLimitsCard", () => {
     expect(await screen.findByTestId("user-limits-uploadMaxMb")).toHaveValue("100");
   });
 
+  it("hides the failure line again when a retry is refused as not the owner's", async () => {
+    let calls = 0;
+    fetchMock.mockImplementation(() => (++calls === 1 ? json(500, {}) : json(403, { code: "owner_only" })));
+    const { container } = render(<UserLimitsCard />);
+    expect(await screen.findByTestId("user-limits-load-failed")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("user-limits-retry"));
+    await waitFor(() => expect(container.querySelector("[data-testid=user-limits]")).toBeNull());
+  });
+
   it("says why a save failed", async () => {
     fetchMock.mockImplementation((url: string, init?: RequestInit) =>
       init?.method === "POST" ? json(500, { error: "The settings file could not be written." }) : json(200, status()));

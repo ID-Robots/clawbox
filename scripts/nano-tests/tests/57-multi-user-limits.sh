@@ -96,8 +96,10 @@ cleanup() {
   local r
   [ -n "$ORIGINAL_LIMITS" ] && r=$(call POST /setup-api/settings/user-limits "$OWNER" "$ORIGINAL_LIMITS") && CLEANUP="limits:$(status_of "$r")"
   # The switch as the test found it, whatever it was.
-  r=$(call POST /setup-api/settings/org-mode "$OWNER" "{\"orgMode\":${ORIGINAL_ORG:-false}}" 2>/dev/null || true)
-  CLEANUP="$CLEANUP org-restored:$(status_of "$r")"
+  if [ -n "$ORIGINAL_ORG" ]; then
+    r=$(call POST /setup-api/settings/org-mode "$OWNER" "{\"orgMode\":$ORIGINAL_ORG}" 2>/dev/null || true)
+    CLEANUP="$CLEANUP org-restored:$(status_of "$r")"
+  fi
   r=$(call DELETE /setup-api/users "$OWNER" "{\"username\":\"$A_NAME\"}" 2>/dev/null || true)
   CLEANUP="$CLEANUP delete-user:$(status_of "$r")"
   rm -rf "$HOME/$MARK" "$WORK"
@@ -112,12 +114,17 @@ r=$(call GET /setup-api/settings/user-limits "$OWNER")
 if [ "$(status_of "$r")" != 200 ]; then no_ "the owner could not read the limits ($(status_of "$r"))"; echo "FLOW-END"; exit 0; fi
 ORIGINAL_LIMITS=$(body_of "$r" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin)[\"limits\"]))")
 r=$(call GET /setup-api/settings/org-mode "$OWNER")
-ORIGINAL_ORG=$(body_of "$r" | python3 -c "import json,sys; print(\"true\" if json.load(sys.stdin).get(\"orgMode\") is True else \"false\")" 2>/dev/null)
-[ "$ORIGINAL_ORG" = true ] || [ "$ORIGINAL_ORG" = false ] || { no_ "the owner could not read the organisation switch ($(status_of "$r"))"; echo "FLOW-END"; exit 0; }
+# Only a 200 carrying a boolean is the switch as stored; anything else is not
+# a value to put back.
+ORIGINAL_ORG=""
+[ "$(status_of "$r")" = 200 ] && ORIGINAL_ORG=$(body_of "$r" | python3 -c "import json,sys; v=json.load(sys.stdin).get(\"orgMode\"); print(\"true\" if v is True else \"false\" if v is False else \"\")" 2>/dev/null)
+[ "$ORIGINAL_ORG" = true ] || [ "$ORIGINAL_ORG" = false ] || { ORIGINAL_ORG=""; no_ "the owner could not read the organisation switch ($(status_of "$r"))"; echo "FLOW-END"; exit 0; }
 printf "NOTE [%s] before the test: limits %s, organisation mode %s\n" "$RUNTIME" "$ORIGINAL_LIMITS" "$ORIGINAL_ORG"
 trap cleanup EXIT
-# Only audit lines written from here on belong to this run.
-AUDIT_SINCE=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+# Only audit lines written after the newest one now belong to this run.
+r=$(call GET "/setup-api/settings/audit-log?limit=1" "$OWNER")
+[ "$(status_of "$r")" = 200 ] || { no_ "the owner could not read the audit log before the test ($(status_of "$r"))"; echo "FLOW-END"; exit 0; }
+AUDIT_SINCE=$(body_of "$r" | python3 -c "import json,sys; e=json.load(sys.stdin)[\"entries\"]; print(e[0][\"ts\"] if e else \"\")" 2>/dev/null)
 
 # 1. The user, their sign-ins, and the limits.
 r=$(call POST /setup-api/users "$OWNER" "{\"username\":\"$A_NAME\",\"password\":\"$A_PASS\"}")
@@ -186,7 +193,7 @@ r=$(call POST /setup-api/settings/org-mode "$OWNER" "{\"orgMode\":false}")
 r=$(call GET "/setup-api/settings/audit-log?limit=200" "$OWNER")
 seen=$(body_of "$r" | python3 -c "
 import json,sys
-a=sys.argv[1]; e=[x for x in json.load(sys.stdin)[\"entries\"] if x[\"ts\"] >= sys.argv[2]]
+a=sys.argv[1]; e=[x for x in json.load(sys.stdin)[\"entries\"] if x[\"ts\"] > sys.argv[2]]
 want={\"login\":lambda x:x.get(\"actor\")==a, \"login_failed\":lambda x:x.get(\"actor\")==a, \"user_create\":lambda x:x.get(\"target\")==a, \"user_limits\":lambda x:(x.get(\"detail\") or {}).get(\"chatPerMinute\")==1, \"org_mode\":lambda x:(x.get(\"detail\") or {}).get(\"on\") is True}
 print(\" \".join(k for k,f in want.items() if any(x[\"event\"]==k and f(x) for x in e)))
 " "$A_NAME" "$AUDIT_SINCE" 2>/dev/null)

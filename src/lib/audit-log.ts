@@ -156,6 +156,9 @@ function cleanDetail(detail: unknown): AuditDetail | undefined {
  * which has no such guard.
  */
 export function auditAddress(request: Request): string | undefined {
+  // `next dev` runs without production-server.js's guard, so both headers
+  // are whatever a client sent: no address is better than a chosen one.
+  if (process.env.NODE_ENV === "development") return undefined;
   const raw = request.headers.get("cf-connecting-ip")?.trim()
     || request.headers.get(PEER_HEADER)?.trim()
     || "";
@@ -173,7 +176,22 @@ export async function auditActorOf(request: Request): Promise<string | null> {
   }
 }
 
-const withLogLock = createSerialLock();
+/**
+ * One lock for every copy of this module the box loads: Next can give route
+ * bundles their own module instances, and the reset's clear must wait for a
+ * sign-in line queued from any of them. Kept on `globalThis` under a
+ * registered symbol, like the chat counter (scripts/user-limits.js).
+ */
+const LOCK_KEY = Symbol.for("clawbox.auditLog.lock");
+const withLogLock: ReturnType<typeof createSerialLock> = (() => {
+  const g = globalThis as unknown as Record<symbol, ReturnType<typeof createSerialLock> | undefined>;
+  let lock = g[LOCK_KEY];
+  if (!lock) {
+    lock = createSerialLock();
+    g[LOCK_KEY] = lock;
+  }
+  return lock;
+})();
 
 /**
  * Append one line. Never throws. `request`, when given, supplies the address
