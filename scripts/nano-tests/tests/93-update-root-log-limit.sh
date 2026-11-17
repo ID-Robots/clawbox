@@ -63,6 +63,21 @@ show_unit() {
 }
 drop_ins() { printf '%s\n' "$SHOWN" | sed -n 's/^DropInPaths=//p'; }
 
+# back_on_test_build — the board is on the release by now; the tests after this
+# one (99-) judge the commit under test, so put it back before leaving early.
+back_on_test_build() {
+  # shellcheck disable=SC2016  # expanded on the board
+  board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$NANO_SHA" >/dev/null
+  "$NANO_CI" rebuild "$NANO_SERIAL" "$NANO_BRANCH" 2>&1 | grep -E '^\[nano-ci\]|rc=|FAILED' | while IFS= read -r l; do note "restore: $l"; done
+  if [ "$(board_head)" = "$NANO_SHA" ]; then
+    note "the board is back on ${NANO_SHA:0:12}"
+  else
+    not_ok "[$RUNTIME] could not put the board back on ${NANO_SHA:0:12} (it is at $(board_head | cut -c1-12)): the tests after this one would judge the wrong build"
+  fi
+  # shellcheck disable=SC2016  # expanded on the board
+  if [ -n "${SAVED_WANT:-}" ]; then board 'printf "%s\n" "$1" > /tmp/nano-ci-want-sha' "$SAVED_WANT" >/dev/null; else board 'rm -f /tmp/nano-ci-want-sha' >/dev/null; fi
+}
+
 # 1. The older build an owner's box is on.
 # shellcheck disable=SC2016  # expanded on the board
 BASE_SHA=$(board 'git -C "$REPO" ls-remote origin "refs/heads/$1" 2>/dev/null | cut -f1' "$BASE_BRANCH" | tail -n 1 | tr -d '[:space:]')
@@ -70,7 +85,12 @@ if [ ${#BASE_SHA} -ne 40 ] || ! [[ $BASE_SHA =~ ^[0-9a-f]+$ ]]; then
   not_ok "[$RUNTIME] could not read the head of $BASE_BRANCH on the board's origin"
   finish
 fi
-if [ "$BASE_SHA" = "$NANO_SHA" ] || [ "$(board 'git -C "$REPO" merge-base --is-ancestor "$1" "$2" && echo yes' "$NANO_SHA" "$BASE_SHA" 2>/dev/null | tail -n 1)" = yes ]; then
+# Whether the release already contains the commit under test: the board's clone
+# may never have fetched the release's head (ls-remote only names it), so it is
+# fetched first.
+# shellcheck disable=SC2016  # expanded on the board
+CONTAINED=$(board 'git -C "$REPO" fetch -q origin "$3" 2>/dev/null; git -C "$REPO" merge-base --is-ancestor "$1" "$2" 2>/dev/null && echo yes' "$NANO_SHA" "$BASE_SHA" "$BASE_BRANCH" 2>/dev/null | tail -n 1 | tr -d '[:space:]')
+if [ "$BASE_SHA" = "$NANO_SHA" ] || [ "$CONTAINED" = yes ]; then
   skip "[$RUNTIME] the head of $BASE_BRANCH (${BASE_SHA:0:12}) is the commit under test or already contains it: there is no older build to update from"
   finish
 fi
@@ -94,18 +114,21 @@ if wait_runtime_settled 300; then
   ok "[$RUNTIME] older build up and settled"
 else
   not_ok "[$RUNTIME] older build not settled: ${SETTLE_STATE:-unknown}"
+  back_on_test_build
   finish
 fi
 
 show_unit "on the older build"
 if [ -n "$(drop_ins)" ]; then
   not_ok "[$RUNTIME] the older build's root update unit has a drop-in ($(drop_ins)): a leftover, not an owner's box — nothing below would prove the stale path"
+  back_on_test_build
   finish
 fi
 if why=$(printf '%s\n' "$SHOWN" | log_limit_ok); then
   # The release itself carries the limit: nothing older exists to update from,
   # and the rest would prove nothing. Said as a skip, not a pass.
   skip "[$RUNTIME] the release $BASE_BRANCH ${BASE_SHA:0:12} already has a root update limit no step reaches ($why): there is no stale path to prove"
+  back_on_test_build
   finish
 fi
 ok "[$RUNTIME] on the older build the root update unit has no drop-in and journald's default limit, as an owner's box does ($why)"

@@ -109,6 +109,16 @@ FACTS=$(board '
 ')
 while IFS= read -r line; do note "$line"; done <<< "$FACTS"
 TIER=$(printf '%s\n' "$FACTS" | sed -n 's/^tier: //p')
+# The cap this test exists for must be on the 200k model's environment and off
+# the 1M one's — and the wrapper the run uses must be the checkout's.
+case "$(printf '%s\n' "$FACTS" | sed -n 's/^env for deepseek-v4-flash: //p')" in
+  *CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS=8000*) ok "claude-ds caps one Read at 8000 tokens on the 200k model" ;;
+  *) not_ok "claude-ds does not cap one Read at 8000 tokens on the 200k model (an installed wrapper that is not the checkout's?)" ;;
+esac
+case "$(printf '%s\n' "$FACTS" | sed -n 's/^env for deepseek-v4-flash\[1m\]: //p')" in
+  *CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS*) not_ok "claude-ds caps a Read on the [1m] model, which has the room for Claude Code's default" ;;
+  *) ok "claude-ds leaves a Read at Claude Code's default on the [1m] model" ;;
+esac
 
 # ---- 2. what the proxy serves behind each id ------------------------------------
 

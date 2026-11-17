@@ -66,7 +66,11 @@ CHECKS='
       // 502 until its model is loaded (TASK-2638: HTTP 502 on a Hermes board
       // right after the swap, the same build embedded 1024 dimensions on an
       // OpenClaw one). A refusal that says "not now" is waited out, bounded —
-      // 12 tries 10 s apart — and every refusal is kept to be read in the log.
+      // up to 12 tries 10 s apart inside 100 s of waiting — and every refusal
+      // is kept to be read in the log. The library marks a local refusal
+      // non-retryable on purpose (its own pass stops at the first), so what is
+      // waited out here is any EmbeddingUnavailableError except an allowance one.
+      const waitedFrom = Date.now();
       const refusals = [];
       let width = 0;
       for (let attempt = 1; attempt <= 12; attempt++) {
@@ -76,11 +80,12 @@ CHECKS='
           break;
         } catch (err) {
           refusals.push("try " + attempt + ": " + String((err && err.message) || err).slice(0, 200));
-          if (err && err.retryable === false) break;
-          if (attempt < 12) await new Promise((r) => setTimeout(r, 10000));
+          if (!err || err.name !== "EmbeddingUnavailableError" || err.allowance) break;
+          if (attempt >= 12 || Date.now() - waitedFrom > 100000) break;
+          await new Promise((r) => setTimeout(r, 10000));
         }
       }
-      out.embedded = { width, tries: refusals.length + (width > 0 ? 1 : 0), refusals: refusals.slice(0, 3) };
+      out.embedded = { width, tries: refusals.length + (width > 0 ? 1 : 0), refusals };
     } else {
       out.embedded = null;
     }
@@ -270,7 +275,7 @@ ALIAS=$(timeout 60 bun -e "
   console.log(s.installed ? s.alias : \"\");
 " 2>/dev/null | tail -n 1)
 keys on "$ALIAS"
-timeout 200 bun -e "$1" 2>&1 | tail -n 5
+timeout 330 bun -e "$1" 2>&1 | tail -n 5
 timeout 540 node -e "$2" "$3" 2>&1 | tail -n 5
 ' "$CHECKS" "$SERVER_FLOW" "$NANO_RUN_ID")
 
@@ -378,7 +383,7 @@ elif [ "$(j '.embedded.width')" -gt 0 ] 2>/dev/null; then
   ok "a text was embedded through the Local AI proxy ($(j '.embedded.width') dimensions, try $(j '.embedded.tries'))"
   [ "$(j '.embedded.tries')" -gt 1 ] 2>/dev/null && note "the embedder refused first: $(j -c '.embedded.refusals')"
 else
-  not_ok "the embedder on the box did not embed in $(j '.embedded.tries // "?"') tries over two minutes: $(j -c '.embedded.refusals // .embedded')"
+  not_ok "the embedder on the box did not embed in $(j '.embedded.tries // "?"') tries over up to 100 s of waiting: $(j -c '.embedded.refusals // .embedded')"
 fi
 
 if [ "$(j '.cloudRequests')" = 0 ]; then

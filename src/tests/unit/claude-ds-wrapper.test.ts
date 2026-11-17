@@ -397,6 +397,9 @@ describe("the read cap of a 200k model", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
     runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" });
     expect(capturedEnv()[READ]).toBeUndefined();
+    // The 8000 an outer 200k session exported must not follow into a nested 1M one.
+    runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]", [READ]: "8000" });
+    expect(capturedEnv()[READ]).toBeUndefined();
   });
 
   it("keeps a smaller cap the runner inherited, and lowers a larger one", () => {
