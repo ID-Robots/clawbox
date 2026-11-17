@@ -378,6 +378,60 @@ describe("the auto-compact window", () => {
   });
 });
 
+/**
+ * TASK-2638: a 200k model's runs died of "Autocompact is thrashing" because four
+ * 20k-token reads in one message put ~70k into the context a turn, two turns
+ * from the next compaction. The size of one read is what the wrapper can cut.
+ */
+describe("the read cap of a 200k model", () => {
+  const READ = "CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS";
+
+  it("cuts one read to a 25th of the 200k window Claude Code believes", () => {
+    const { status } = runWrapper();
+    expect(status).toBe(0);
+    expect(capturedEnv().ANTHROPIC_MODEL).toBe("deepseek-v4-flash");
+    expect(capturedEnv()[READ]).toBe("8000");
+  });
+
+  it("leaves a 1M model Claude Code's own default", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
+    runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" });
+    expect(capturedEnv()[READ]).toBeUndefined();
+  });
+
+  it("keeps a smaller cap the runner inherited, and lowers a larger one", () => {
+    runWrapper({ [READ]: "3000" });
+    expect(capturedEnv()[READ]).toBe("3000");
+    runWrapper({ [READ]: "25000" });
+    expect(capturedEnv()[READ]).toBe("8000");
+    runWrapper({ [READ]: "junk" });
+    expect(capturedEnv()[READ]).toBe("8000");
+  });
+
+  it("takes an explicit cap, or `off` for Claude Code's default", () => {
+    runWrapper({ CLAUDE_DS_READ_CAP: "12000" });
+    expect(capturedEnv()[READ]).toBe("12000");
+    runWrapper({ CLAUDE_DS_READ_CAP: "off", [READ]: "3000" });
+    expect(capturedEnv()[READ]).toBeUndefined();
+  });
+
+  it("refuses a cap that is not a number of tokens, before Claude Code starts", () => {
+    rmSync(envDump, { force: true });
+    for (const bad of ["8k", "0", "-1"]) {
+      const { status, stderr } = runWrapper({ CLAUDE_DS_READ_CAP: bad });
+      expect(status, bad).not.toBe(0);
+      expect(stderr, bad).toContain("CLAUDE_DS_READ_CAP must be a number of tokens or 'off'");
+      expect(existsSync(envDump), bad).toBe(false);
+    }
+  });
+
+  it("leaves an Anthropic run exactly as it was", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro", anthropic_api_key: "sk-ant-api03-test-key" });
+    runWrapper({ CLAUDE_DS_PROVIDER: "anthropic" });
+    expect(capturedEnv()[READ]).toBeUndefined();
+  });
+});
+
 describe("isolation from the rest of the box", () => {
   it("keeps its own Claude Code state directory, never the shared ~/.claude", () => {
     runWrapper();
