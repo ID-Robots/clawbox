@@ -493,6 +493,95 @@ describe("Send", () => {
     expect(sends).toHaveLength(1);
   });
 
+  /**
+   * Two open cards for ONE draft: card A close to its expiry is no longer
+   * handed out, so a later look makes card B, and both stay valid.
+   */
+  async function twoCards() {
+    process.env.CLAWBOX_MAIL_DRAFT_TOKEN_TTL_S = "600";
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const t0 = Date.now();
+    const a = await mint(ownerCookie());
+    vi.setSystemTime(t0 + 481_000);
+    const b = await mint(ownerCookie());
+    expect(a.json.state).toBe("open");
+    expect(b.json.state).toBe("open");
+    expect(b.json.token).not.toBe(a.json.token);
+    return { a: String(a.json.token), b: String(b.json.token), t0 };
+  }
+
+  function cardIdOf(token: string): string {
+    return JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8")).c;
+  }
+
+  it("sends a draft once, not once per card: another card's Send is refused while one runs and after it went", async () => {
+    const { a, b } = await twoCards();
+    let release!: () => void;
+    gate = { id: DRAFT_ID, hit: false, wait: new Promise<void>((resolve) => { release = resolve; }) };
+    // Card A's Send has claimed the draft and is reading it...
+    const first = answer(ownerCookie(), a, "send");
+    await vi.waitFor(() => expect(gate?.hit).toBe(true));
+    // ...when card B, in another tab, is pressed.
+    const second = await answer(ownerCookie(), b, "send");
+    expect(second.status).toBe(409);
+    expect(second.json).toMatchObject({ kind: "reused", state: "sending" });
+    release();
+    expect((await first).status).toBe(200);
+    const third = await answer(ownerCookie(), b, "send");
+    expect(third.status).toBe(409);
+    expect(third.json).toMatchObject({ kind: "reused", state: "sent" });
+    expect(sends).toHaveLength(1);
+  });
+
+  it("frees the draft for the other card when a Send stopped before sending", async () => {
+    const { a, b } = await twoCards();
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError("fetch failed"));
+    expect((await answer(ownerCookie(), a, "send")).json.kind).toBe("backend_unreachable");
+    expect((await answer(ownerCookie(), b, "send")).status).toBe(200);
+    expect(sends).toHaveLength(1);
+  });
+
+  it("a Send whose answer was lost blocks every card made before it, and Review again makes one that may send", async () => {
+    const { a, b } = await twoCards();
+    sendAnswer = 503;
+    expect((await answer(ownerCookie(), a, "send")).json.kind).toBe("send_uncertain");
+    sendAnswer = 200;
+    const older = await answer(ownerCookie(), b, "send");
+    expect(older.status).toBe(409);
+    expect(older.json).toMatchObject({ kind: "reused", state: "uncertain" });
+    expect(sends).toHaveLength(1);
+    // A plain look does not offer it; "Review again" hands out a NEW card, not B.
+    expect((await mint(ownerCookie())).json).toMatchObject({ state: "uncertain" });
+    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect(reopened.json.state).toBe("open");
+    expect(reopened.json.token).not.toBe(b);
+    expect((await answer(ownerCookie(), String(reopened.json.token), "send")).status).toBe(200);
+    expect(sends).toHaveLength(2);
+  });
+
+  it("a Send whose server died mid-call blocks the older cards, never the draft for good", async () => {
+    const { a, b, t0 } = await twoCards();
+    // Card A's Send was claimed, and no answer ever came back.
+    const ledgerPath = path.join(root, "data", "mail-draft-approvals.json");
+    const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as { cards: { c: string; state: string; at: number }[] };
+    const claimedAt = t0 + 482_000;
+    Object.assign(ledger.cards.find((entry) => entry.c === cardIdOf(a))!, { state: "sending", at: claimedAt });
+    fs.writeFileSync(ledgerPath, JSON.stringify(ledger));
+    // While it may still be running, nothing else sends the draft.
+    vi.setSystemTime(claimedAt + 60_000);
+    expect((await answer(ownerCookie(), b, "send")).json).toMatchObject({ kind: "reused", state: "sending" });
+    // Past the time a Send can take, it is a lost Send: B, made before it, still cannot send...
+    vi.setSystemTime(claimedAt + 121_000);
+    expect((await answer(ownerCookie(), b, "send")).json).toMatchObject({ kind: "reused", state: "uncertain" });
+    expect((await mint(ownerCookie())).json).toMatchObject({ state: "uncertain" });
+    // ...and "Review again" makes a card that can, which a reload then shows.
+    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect(reopened.json.state).toBe("open");
+    expect((await mint(ownerCookie())).json).toMatchObject({ state: "open", token: reopened.json.token });
+    expect((await answer(ownerCookie(), String(reopened.json.token), "send")).status).toBe(200);
+    expect(sends).toHaveLength(1);
+  });
+
   it("refuses, rather than guesses, when the ledger cannot be read", async () => {
     const { json } = await mint(ownerCookie());
     fs.writeFileSync(path.join(root, "data", "mail-draft-approvals.json"), "{not json");
@@ -512,6 +601,17 @@ describe("Keep as draft and Tell me what to change", () => {
     // A revised draft is a new question.
     mailbox[OWNER][DRAFT_ID].body = "Hello Ivan, a shorter offer.";
     expect((await mint(ownerCookie())).json.state).toBe("open");
+  });
+
+  it("a reload after Review again shows the open card, not the earlier answer", async () => {
+    const { json } = await mint(ownerCookie());
+    expect((await answer(ownerCookie(), json.token, "keep")).json.state).toBe("kept");
+    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect(reopened.json.state).toBe("open");
+    expect((await mint(ownerCookie())).json).toMatchObject({ state: "open", token: reopened.json.token });
+    // Answered again, the answer is what a reload shows.
+    expect((await answer(ownerCookie(), reopened.json.token, "revise")).json.state).toBe("revised");
+    expect((await mint(ownerCookie())).json.state).toBe("revised");
   });
 
   it("revise closes the card and sends nothing", async () => {

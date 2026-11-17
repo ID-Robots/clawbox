@@ -66,20 +66,43 @@ following, in order, and refuses if any check fails:
 | ClawBox signed this token | 403 `forged` |
 | The token was made for the person pressing | 403 `other_user` |
 | The card is still open (not sent, kept, revised or claimed by a parallel press) | 409 `reused` |
+| Send only: no other card of this person has sent this draft, is sending it, or lost the answer to sending it after this card was made | 409 `reused`, with `state` `sent`, `sending` or `uncertain` |
 | The token has not expired | 410 `expired` |
 | Send only: the draft re-read from the backend still has the approved hash | 409 `changed` |
 
 Only then does the server call the backend's send endpoint. A Send claims the
 card **before** the re-read, so two presses or two tabs cannot both send it.
-Every ledger write happens synchronously after the last network call, from a
-fresh read, so a card minted while a Send is running cannot undo the Send.
+The claim is **per draft**, not per card: in the same synchronous
+read-modify-write it checks every card of that person for that draft. Two open
+cards for one draft exist when the first was close to its expiry as the second
+was made. While one card's Send runs, or after it went, a Send from any other
+card for the draft is refused. Every ledger write happens synchronously after
+the last network call, from a fresh read, so a card minted while a Send is
+running cannot undo the Send. Each ledger event (a card made, claimed or
+settled) is stamped after every earlier one, so "made before that Send was
+lost" is a strict order even within one millisecond.
 
 If the backend could not be reached before sending, the card is reopened. If
 the backend's answer to the send was lost (a timeout or a 5xx), the card is
 closed as `uncertain`. The same applies to a server that stopped mid-send. An
 `uncertain` card never reports "not sent". A plain reload does not offer that
-draft's Send again. Only the person's explicit **Review again** does, after
-the card has told them to check their Sent folder.
+draft's Send again, and no card made before the loss can send it. Only the
+person's explicit **Review again** does, with a card made after the card has
+told them to check their Sent folder. So a crashed Send blocks the older cards,
+never the draft for good.
+
+A reload after **Review again** shows the new open card, not the earlier
+**Keep as draft** or **Tell me what to change** answer for the same version.
+
+In the chat, a Send whose answer never reaches the browser (the connection
+dropped, or something other than ClawBox answered, such as a proxy's error
+page) is never shown as "nothing was sent". The card says the outcome is
+unknown and asks ClawBox, by a plain look, what it recorded. That can be sent,
+still sending, uncertain, or no longer in the mailbox. If ClawBox has no record
+of the Send claim and the card is still open, the card is offered again and
+says so. A second Send is safe there because of the per-draft claim above. If
+ClawBox cannot be asked, the card stays unknown, points to the Sent folder, and
+offers **Check again**.
 
 ### What the card shows
 
@@ -87,14 +110,25 @@ the card has told them to check their Sent folder.
   Reply-To (when present), the subject, the body and the attachments.
 - An HTML body is shown as its words, through the mail viewer's sanitiser.
   Each link is shown with its target (`Open invoice <https://…>`).
-- Characters that would make the card read differently from the mail are
-  shown as `[U+202E]`-style marks, never dropped silently, and the card warns
-  about them. These are controls, bidi overrides and isolates, and the BOM.
+- Characters that would make the card read differently from the mail, or
+  carry text nobody sees, are shown as `[U+202E]`-style marks, never dropped
+  silently, and the card warns about them. These are the C0 and C1 controls,
+  every Unicode format character (bidi marks, embeddings, overrides and
+  isolates, zero-width space, non-joiner and joiner, word joiner, invisible
+  operators, the BOM, the tag block U+E0000-U+E007F) and every other
+  default-ignorable code point (soft hyphen, Hangul fillers, variation
+  selectors). A standard emoji is left alone: the joiner in a family or
+  profession emoji, the U+FE0F of a red heart or a keycap, and the tags of the
+  England, Scotland and Wales flags. A joiner or selector outside such an emoji,
+  and any other tag run, is marked.
 - The whole body is shown, up to the backend's 1 MiB answer limit. A preview
   that ever had to be cut offers no Send.
 - **Tell me what to change** goes to the assistant only after the server has
   closed the card as `revised`. If the close fails, the request stays in the
-  box and nothing is sent to the assistant.
+  box, read-only, and nothing is sent to the assistant. When a look reopens
+  the card, the box can be edited and sent again. If the answer to the close was
+  lost and a later look finds the card closed as `revised`, the words go to the
+  assistant then, once.
 
 ## The mail send backend
 

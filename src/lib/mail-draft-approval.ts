@@ -21,7 +21,9 @@
 // (data/mail-draft-approvals.json, 0600) so it can be used once. Pressing Send
 // (`decideCard`) checks, in order: the signature, that the person pressing is
 // the person it was made for, that it has not been used, that it has not
-// expired — then re-reads the draft from the backend and refuses if a single
+// expired, that no other card of theirs has sent the draft, is sending it or
+// lost the answer to sending it — one Send per draft, not per card — then
+// re-reads the draft from the backend and refuses if a single
 // byte that decides what is sent has changed. Only then is the backend asked
 // to send it.
 //
@@ -225,8 +227,12 @@ function readLedger(): CardEntry[] {
 }
 
 function writeLedger(cards: CardEntry[], now: number): void {
+  // A claim no answer ever came back for is settled as uncertain AS OF THE
+  // MOMENT IT WAS LOST (`lostAt`), not of this write: the card that write may
+  // be minting — the person's "Review again" — is then strictly newer, and
+  // nothing reads the two the wrong way round.
   const kept = cards
-    .map((card) => (card.state === "sending" && now - card.at > SENDING_STALE_MS ? { ...card, state: "uncertain" as const, at: now } : card))
+    .map((card) => (card.state === "sending" && now - card.at > SENDING_STALE_MS ? { ...card, state: "uncertain" as const, at: card.at + SENDING_STALE_MS } : card))
     .filter((card) => (card.state === "open" ? card.exp > now - OPEN_KEEP_MS : card.at > now - SETTLED_KEEP_MS))
     .sort((a, b) => b.at - a.at)
     .slice(0, MAX_CARDS);
@@ -244,18 +250,82 @@ function writeLedger(cards: CardEntry[], now: number): void {
 }
 
 /**
+ * The time to record for a ledger event (a card made, claimed or settled):
+ * now, but always after every time already in the ledger. "Made before that
+ * Send was lost" is then a strict order, even when two events fall in one
+ * millisecond (or a test's clock stands still) — `sendBlocker` and the plain
+ * look's "lost and not asked again" read it.
+ */
+function stamp(cards: CardEntry[], now: number): number {
+  let latest = -Infinity;
+  for (const card of cards) latest = Math.max(latest, card.at, card.iat);
+  return Math.max(now, latest + 1);
+}
+
+/**
+ * When a card's Send was lost: settled `uncertain`, or claimed and never
+ * answered for longer than a Send can take (its server went away mid-call).
+ * Null for any other card.
+ */
+function lostAt(card: CardEntry, now: number): number | null {
+  if (card.state === "uncertain") return card.at;
+  if (card.state === "sending" && now - card.at > SENDING_STALE_MS) return card.at + SENDING_STALE_MS;
+  return null;
+}
+
+/**
+ * What stops `card` from sending its draft, judged across EVERY card of the
+ * same person for the same draft — one Send per draft, not one per card. Two
+ * cards for one draft exist when the first was close to expiry as the second
+ * was made, or in two tabs:
+ *
+ *   sent       another card's Send went through;
+ *   sending    another card's Send is running now;
+ *   uncertain  another card's Send lost its answer AFTER this card was made.
+ *              Only a card asked for afterwards — the person's "Review again",
+ *              once told to check the Sent folder — may send that draft, so a
+ *              crashed Send blocks the older cards and never the draft for good.
+ *
+ * Null: nothing does.
+ */
+function sendBlocker(cards: CardEntry[], card: CardEntry, now: number): "sent" | "sending" | "uncertain" | null {
+  let blocker: "sending" | "uncertain" | null = null;
+  for (const other of cards) {
+    if (other.c === card.c || other.u !== card.u || other.d !== card.d) continue;
+    if (other.state === "sent") return "sent";
+    if (other.state === "sending" && now - other.at <= SENDING_STALE_MS) {
+      blocker = "sending";
+      continue;
+    }
+    const lost = lostAt(other, now);
+    if (lost !== null && card.iat < lost && blocker === null) blocker = "uncertain";
+  }
+  return blocker;
+}
+
+/**
  * Moves one card from `from` to `to`, or does nothing and says what it found.
  * Synchronous read-modify-write: within this server process no other request
  * runs between the read and the rename, so two presses of one card cannot both
- * see it open.
+ * see it open. `blocked`, judged on that same read, can refuse the move for a
+ * reason outside the card itself (another card for the same draft); its answer
+ * is reported as the state found, and nothing is written.
  */
-function transition(cardId: string, from: CardState, to: CardState, now: number): { ok: true } | { ok: false; state: CardState | null } {
+function transition(
+  cardId: string,
+  from: CardState,
+  to: CardState,
+  now: number,
+  blocked?: (cards: CardEntry[], card: CardEntry) => CardState | null,
+): { ok: true } | { ok: false; state: CardState | null; blocked?: true } {
   const cards = readLedger();
   const card = cards.find((entry) => entry.c === cardId);
   if (!card) return { ok: false, state: null };
   if (card.state !== from) return { ok: false, state: card.state };
+  const blocker = blocked?.(cards, card) ?? null;
+  if (blocker !== null) return { ok: false, state: blocker, blocked: true };
   card.state = to;
-  card.at = now;
+  card.at = stamp(cards, now);
   writeLedger(cards, now);
   return { ok: true };
 }
@@ -266,7 +336,7 @@ function settle(cardId: string, to: CardState, now: number): void {
   const card = cards.find((entry) => entry.c === cardId);
   if (!card) return;
   card.state = to;
-  card.at = now;
+  card.at = stamp(cards, now);
   writeLedger(cards, now);
 }
 
@@ -297,30 +367,34 @@ const GONE = () =>
  * Send in flight; a Send whose answer was lost (unless the person asked to
  * review it again, having been told to check the Sent folder).
  */
-function settledAnswerIn(cards: CardEntry[], user: string, draftId: string, reopen: boolean): ApprovalAnswer | null {
+function settledAnswerIn(cards: CardEntry[], user: string, draftId: string, reopen: boolean, now: number): ApprovalAnswer | null {
   const mine = cards.filter((card) => card.u === user && card.d === draftId);
   const sent = mine.find((card) => card.state === "sent");
   if (sent) return { status: 200, body: { state: "sent", decidedAt: sent.at } };
-  const now = Date.now();
   // A claim older than a Send can take is one whose server went away mid-call.
-  const lost = (card: CardEntry) => card.state === "uncertain" || (card.state === "sending" && now - card.at > SENDING_STALE_MS);
+  const lost = (card: CardEntry) => lostAt(card, now) !== null;
   const sending = mine.find((card) => card.state === "sending" && !lost(card));
   if (sending) return { status: 200, body: { state: "sending", decidedAt: sending.at } };
   if (!reopen) {
-    const latest = [...mine].sort((a, b) => b.at - a.at)[0];
-    if (latest && lost(latest)) return { status: 200, body: { state: "uncertain", decidedAt: latest.at } };
+    // A lost Send no card has been asked for since — the same line
+    // `sendBlocker` draws: a card made at or after the loss is past it.
+    const unanswered = mine.find((card) => {
+      const at = lostAt(card, now);
+      return at !== null && !mine.some((other) => other !== card && other.iat >= at);
+    });
+    if (unanswered) return { status: 200, body: { state: "uncertain", decidedAt: unanswered.at } };
   }
   return null;
 }
 
-function settledAnswer(user: string, draftId: string, reopen: boolean): ApprovalAnswer | null {
+function settledAnswer(user: string, draftId: string, reopen: boolean, now: number): ApprovalAnswer | null {
   let cards: CardEntry[];
   try {
     cards = readLedger();
   } catch {
     return UNAVAILABLE();
   }
-  return settledAnswerIn(cards, user, draftId, reopen);
+  return settledAnswerIn(cards, user, draftId, reopen, now);
 }
 
 /**
@@ -344,7 +418,7 @@ export async function mintCard(
 
   // Answered from the ledger before the backend is asked: a draft already sent
   // is not fetched again, and one whose Send is in flight or lost is not offered.
-  const early = settledAnswer(identity.username, draftId, opts.reopen === true);
+  const early = settledAnswer(identity.username, draftId, opts.reopen === true, now);
   if (early) return early;
 
   const fetched = await fetchDraft(active.config, identity.username, draftId);
@@ -362,36 +436,43 @@ export async function mintCard(
   } catch {
     return UNAVAILABLE();
   }
-  const again = settledAnswerIn(cards, identity.username, draftId, opts.reopen === true);
+  const again = settledAnswerIn(cards, identity.username, draftId, opts.reopen === true, now);
   if (again) return again;
   const mine = cards.filter((card) => card.u === identity.username && card.d === draftId);
 
+  // The same open card when one is still good for a while, so reopening a
+  // chat does not grow the ledger by one card per draft per visit. Same
+  // claims, same key: the very same token. Not one made before another card's
+  // Send of this draft was lost: that card can no longer send (`sendBlocker`),
+  // and "Review again" must hand out one that can.
+  const ttl = tokenTtlMs();
+  const reuseMargin = Math.min(2 * 60_000, ttl / 2);
+  let card = mine.find(
+    (entry) => entry.state === "open" && entry.h === hash && entry.exp - now > reuseMargin && sendBlocker(cards, entry, now) === null,
+  );
+
   // Already answered, and nothing has changed since: show the answer, not the
   // question again. A draft the assistant has revised has a new hash and is
-  // asked about afresh.
-  if (!opts.reopen) {
+  // asked about afresh. An open card still waiting comes first: after "Review
+  // again" on a kept draft, a reload shows the new question, not the old answer.
+  if (!card && !opts.reopen) {
     const settled = mine
-      .filter((card) => card.h === hash && (card.state === "kept" || card.state === "revised"))
+      .filter((entry) => entry.h === hash && (entry.state === "kept" || entry.state === "revised"))
       .sort((a, b) => b.at - a.at)[0];
     if (settled) return { status: 200, body: { state: settled.state, decidedAt: settled.at, draft: view } };
   }
 
-  // The same open card when one is still good for a while, so reopening a
-  // chat does not grow the ledger by one card per draft per visit. Same
-  // claims, same key: the very same token.
-  const ttl = tokenTtlMs();
-  const reuseMargin = Math.min(2 * 60_000, ttl / 2);
-  let card = mine.find((entry) => entry.state === "open" && entry.h === hash && entry.exp - now > reuseMargin);
   if (!card) {
+    const made = stamp(cards, now);
     card = {
       c: randomBytes(16).toString("base64url"),
       u: identity.username,
       d: draftId,
       h: hash,
-      iat: now,
+      iat: made,
       exp: now + ttl,
       state: "open",
-      at: now,
+      at: made,
     };
     try {
       writeLedger([...cards, card], now);
@@ -475,9 +556,24 @@ export async function decideCard(
   }
 
   // SEND. Claimed first, so a second press — or a second tab — finds it taken.
+  // The claim is per DRAFT: in the same read-modify-write it refuses while any
+  // other card of this person for this draft has sent it, is sending it, or
+  // lost the answer to sending it after this card was made.
   try {
-    const claimed = transition(card.c, "open", "sending", now);
-    if (!claimed.ok) return refusal(409, "reused", "This approval was already used.", { state: claimed.state });
+    const claimed = transition(card.c, "open", "sending", now, (cards, entry) => sendBlocker(cards, entry, now));
+    if (!claimed.ok) {
+      if (!claimed.blocked) return refusal(409, "reused", "This approval was already used.", { state: claimed.state });
+      if (claimed.state === "sent") return refusal(409, "reused", "This draft was already sent.", { state: "sent" });
+      if (claimed.state === "sending") {
+        return refusal(409, "reused", "This draft is being sent from another card. Nothing more was sent.", { state: "sending" });
+      }
+      return refusal(
+        409,
+        "reused",
+        "Another Send of this draft lost the mail service's answer, so it may or may not have been sent. Check the Sent folder, then review it again.",
+        { state: "uncertain" },
+      );
+    }
   } catch {
     return UNAVAILABLE();
   }
