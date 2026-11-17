@@ -11,6 +11,7 @@ import {
   draftContentHash,
   draftView,
   fetchDraft,
+  hasInvisible,
   htmlToText,
   isDraftId,
   normalizeDraft,
@@ -173,13 +174,79 @@ describe("what a card shows", () => {
 
   it("shows, rather than hides, what would make a line read differently from what is sent", () => {
     expect(cleanLine("Pay\u202egnp.exe\u0007\r\nnow", 100)).toBe("Pay[U+202E]gnp.exe[U+0007] now");
-    expect(cleanBody("a\r\nb\u2028c\u200bd\ufeff")).toBe("a\nb\nc\u200bd[U+FEFF]");
+    expect(cleanBody("a\r\nb\u2028c\u200bd\ufeff")).toBe("a\nb\nc[U+200B]d[U+FEFF]");
     expect(draftView(draftOf({ ...BASE, subject: "Invoice \u202efdp.exe" }))).toMatchObject({
       subject: "Invoice [U+202E]fdp.exe",
       hiddenCharacters: true,
     });
     expect(draftView(draftOf({ ...BASE, to: ["a\u202e@example.com"] })).hiddenCharacters).toBe(true);
     expect(draftView(draftOf(BASE)).hiddenCharacters).toBe(false);
+  });
+
+  it("marks every format and default-ignorable character, astral ones by their real code point", () => {
+    for (const [ch, shown] of [
+      ["\u00ad", "[U+00AD]"], // soft hyphen
+      ["\u034f", "[U+034F]"], // combining grapheme joiner
+      ["\u061c", "[U+061C]"], // Arabic letter mark
+      ["\u115f", "[U+115F]"], // Hangul choseong filler
+      ["\u180e", "[U+180E]"], // Mongolian vowel separator
+      ["\u200b", "[U+200B]"], // zero-width space
+      ["\u200c", "[U+200C]"], // zero-width non-joiner
+      ["\u200d", "[U+200D]"], // zero-width joiner, between two letters
+      ["\u200e", "[U+200E]"], // left-to-right mark
+      ["\u2060", "[U+2060]"], // word joiner
+      ["\u2064", "[U+2064]"], // invisible plus
+      ["\u206f", "[U+206F]"], // nominal digit shapes
+      ["\u3164", "[U+3164]"], // Hangul filler
+      ["\ufe00", "[U+FE00]"], // variation selector 1
+      ["\ufff9", "[U+FFF9]"], // interlinear annotation anchor
+      ["\u{e0001}", "[U+E0001]"], // language tag
+      ["\u{e0041}", "[U+E0041]"], // TAG LATIN CAPITAL LETTER A
+      ["\u{e007f}", "[U+E007F]"], // cancel tag
+      ["\u{e0100}", "[U+E0100]"], // variation selector 17
+    ] as const) {
+      expect(cleanBody(`a${ch}b`), shown).toBe(`a${shown}b`);
+      expect(cleanLine(`a${ch}b`, 100), shown).toBe(`a${shown}b`);
+      expect(hasInvisible(`a${ch}b`), shown).toBe(true);
+      expect(draftView(draftOf({ ...BASE, body: `a${ch}b` })).hiddenCharacters, shown).toBe(true);
+    }
+    // ASCII smuggled in tag characters: every one of them shown.
+    expect(cleanBody("Thanks!\u{e0070}\u{e0077}\u{e0064}\u{e007f}")).toBe("Thanks![U+E0070][U+E0077][U+E0064][U+E007F]");
+  });
+
+  it("leaves a standard emoji alone, and marks what is glued to one", () => {
+    for (const emoji of [
+      "\u{1f469}\u200d\u{1f4bb}", // woman technologist: ZWJ
+      "\u{1f468}\u200d\u{1f469}\u200d\u{1f467}", // family
+      "\u2764\ufe0f", // red heart: VS16
+      "\u{1f3f3}\ufe0f\u200d\u{1f308}", // rainbow flag
+      "\u{1f3c3}\u{1f3fd}\u200d\u2640\ufe0f", // runner, skin tone, female sign
+      "1\ufe0f\u20e3", // keycap 1
+      "\u{1f44d}\u{1f3fd}", // thumbs up, skin tone
+      "\u{1f1e7}\u{1f1ec}", // a country flag
+      "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}", // Scotland
+    ]) {
+      expect(cleanBody(`Thanks ${emoji}`), emoji).toBe(`Thanks ${emoji}`);
+      expect(hasInvisible(`Thanks ${emoji}`), emoji).toBe(false);
+      expect(draftView(draftOf({ ...BASE, body: `Thanks ${emoji}` })).hiddenCharacters, emoji).toBe(false);
+    }
+    for (const [text, shown] of [
+      // Tags after an emoji that is not one of the three subdivision flags.
+      ["\u{1f44d}\u{e0041}\u{e007f}", "\u{1f44d}[U+E0041][U+E007F]"],
+      ["\u{1f3f4}\u{e0041}\u{e007f}", "\u{1f3f4}[U+E0041][U+E007F]"],
+      // A joiner with nothing to join.
+      ["\u{1f44d}\u200d", "\u{1f44d}[U+200D]"],
+      ["\u200d\u{1f44d}", "[U+200D]\u{1f44d}"],
+      // One VS16 belongs to the emoji; a second is hidden.
+      ["\u{1f44d}\ufe0f\ufe0f", "\u{1f44d}\ufe0f[U+FE0F]"],
+      // A plain digit with a VS16 and no keycap: a bit hidden in a number.
+      ["Total 1\ufe0f2", "Total 1[U+FE0F]2"],
+      // A text-style selector is not left alone either.
+      ["\u2764\ufe0e", "\u2764[U+FE0E]"],
+    ] as const) {
+      expect(cleanBody(text), text).toBe(shown);
+      expect(hasInvisible(text), text).toBe(true);
+    }
   });
 
   it("shows the whole body of anything the backend can send, and says when it could not", () => {

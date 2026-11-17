@@ -19,8 +19,9 @@
 // Everything a draft contains is text someone else may have written — on a bad
 // day, through a prompt injection. It is returned as plain strings, and the
 // characters that could make it read differently from what is sent (controls,
-// bidi overrides) are SHOWN as `[U+202E]`-style marks rather than silently
-// dropped: the card must read like the mail the recipient will get.
+// bidi overrides, zero-width and tag characters) are SHOWN as `[U+202E]`-style
+// marks rather than silently dropped: the card must read like the mail the
+// recipient will get.
 
 import { createHash, randomBytes } from "crypto";
 import type { DraftApprovalConfig } from "@/lib/mail-draft-approval-config";
@@ -109,21 +110,57 @@ export type SendDraftResult =
 // ── text hygiene ───────────────────────────────────────────────────────────
 
 /**
- * Characters that change how a line READS without being visible: C0/C1
- * controls (bar tab and newline, handled per field), DEL, the bidi embeddings,
- * overrides and isolates, and the BOM.
+ * Characters that change how a line READS without being visible, or carry text
+ * nobody sees:
+ *
+ *   - C0/C1 controls (bar tab and newline, handled per field) and DEL;
+ *   - every Unicode format character (`Cf`): the bidi embeddings, overrides,
+ *     isolates and marks (U+061C, U+200E/F, U+202A-U+202E, U+2066-U+2069), the
+ *     zero-width space, non-joiner and joiner, the word joiner and invisible
+ *     operators (U+2060-U+2064), the Mongolian vowel separator, the BOM, the
+ *     interlinear annotations, and the TAG block (U+E0000-U+E007F), which
+ *     spells ASCII no one can see;
+ *   - every other default-ignorable code point: the soft hyphen, the combining
+ *     grapheme joiner, the Hangul fillers, the variation selectors
+ *     (U+FE00-U+FE0F, U+E0100-U+E01EF) and the reserved ignorables.
+ *
+ * The `u` flag makes an astral one (a tag, a supplementary variation selector)
+ * one match, marked by its real code point, not two surrogate halves.
  */
-const INVISIBLE_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\ufeff]/g;
-const INVISIBLE_TEST_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\ufeff]/;
+const HIDDEN_CLASS = String.raw`[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\p{Cf}\p{Default_Ignorable_Code_Point}]`;
+
+/**
+ * The few places some of those characters are simply how an emoji is written,
+ * matched FIRST so their joiners are left alone: the ZWJ in a family or
+ * "woman technologist" emoji, the U+FE0F of a red heart or a keycap 1, and
+ * the tags of the three standard subdivision flags (England, Scotland,
+ * Wales). Marking those would warn about every friendly
+ * sign-off. Deliberately narrow (UTS #51's emoji sequence, cut down): a
+ * variation selector only after a pictograph or in a keycap (never after a
+ * plain digit, where it would hide a bit in an invoice total), a joiner only
+ * BETWEEN two emoji, and no tag run but those three flags. Everything else is
+ * marked, and linear: no `\p{RGI_Emoji}`, whose thousands of alternatives cost
+ * seconds on a 1 MiB body of emoji.
+ */
+const FLAG_TAGS = String.raw`\u{1F3F4}\u{E0067}\u{E0062}(?:\u{E0065}\u{E006E}\u{E0067}|\u{E0073}\u{E0063}\u{E0074}|\u{E0077}\u{E006C}\u{E0073})\u{E007F}`;
+const EMOJI_CORE = String.raw`(?:${FLAG_TAGS}|[#*0-9]\ufe0f?\u20e3|\p{Regional_Indicator}{2}|\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|\ufe0f)?|\p{Emoji_Modifier})`;
+const HIDDEN_RE = new RegExp(String.raw`(${EMOJI_CORE}(?:\u200d${EMOJI_CORE})*)|${HIDDEN_CLASS}`, "gu");
+
+function mark(ch: string): string {
+  return `[U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}]`;
+}
 
 /** Each such character as a visible mark, so the card shows that it is there. */
 function reveal(value: string): string {
-  return value.replace(INVISIBLE_RE, (ch) => `[U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}]`);
+  return value.replace(HIDDEN_RE, (match: string, emoji: string | undefined) => emoji ?? mark(match));
 }
 
 /** True when `value` holds a character `reveal` would mark. */
 export function hasInvisible(value: string): boolean {
-  return INVISIBLE_TEST_RE.test(value);
+  for (const match of value.matchAll(HIDDEN_RE)) {
+    if (match[1] === undefined) return true;
+  }
+  return false;
 }
 
 /** One line of text (an address, a subject): no line breaks of any kind, invisible characters shown. */
