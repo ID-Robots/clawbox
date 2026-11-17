@@ -155,8 +155,9 @@ STOPPED=1    # 0: it would not stop, so its folder stays
 COLLECTED=0  # its record came back and parses: only then may its folder go
 TRIED=0      # the main flow already tried (twice) to bring it back
 LOG_SAVED=0  # the board-side log is here
-# stop_board_side — SIGTERM the board script and wait (up to 150 s: it aborts
-# and deletes every session it opened first) until it is gone. Prints "gone"
+# stop_board_side — SIGTERM the board script and wait (up to 330 s: it ends
+# its turns, closes the step's record and deletes every session it opened
+# first; on a lab board that took 3-7 s) until it is gone. Prints "gone"
 # or "alive <pid>"; returns non-zero while it still runs.
 stop_board_side() {
   local out
@@ -166,7 +167,7 @@ stop_board_side() {
     case "$pid" in ""|*[!0-9]*) echo gone; exit 0 ;; esac
     [ "$pid" -gt 1 ] || { echo gone; exit 0; }
     kill -TERM "$pid" 2>/dev/null || { echo gone; exit 0; }
-    for _ in $(seq 1 150); do kill -0 "$pid" 2>/dev/null || { echo gone; exit 0; }; sleep 1; done
+    for _ in $(seq 1 330); do kill -0 "$pid" 2>/dev/null || { echo gone; exit 0; }; sleep 1; done
     echo "alive $pid"
   ' "$BOARD_DIR" 2>/dev/null | tail -n 1)
   say "board side: ${out:-no answer}"

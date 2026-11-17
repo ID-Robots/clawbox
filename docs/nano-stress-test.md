@@ -87,7 +87,10 @@ only once the record has come back and parses. Interrupted (or out of
 budget), it stops the board side first: no workload starts another turn, the
 turns in flight are stopped on the box, the step they were in is recorded as
 stopped, and only then are the sessions deleted and the partial record
-written, which `run.sh` brings back. A record that will not come back keeps
+written, which `run.sh` brings back. On a lab board the board side was gone
+3–7 s after the stop. A step that has not wound down within 240 s keeps its
+sessions (the record lists them as left) rather than have them deleted under a
+running turn; `run.sh` waits up to 330 s for the board side to go. A record that will not come back keeps
 the folder on the board, and `run.sh` names it.
 
 The board side may import Node's own modules and local files only: the board

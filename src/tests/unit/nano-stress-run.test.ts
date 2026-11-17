@@ -31,7 +31,7 @@ const RUN_SH = path.join(REPO, "scripts/nano-stress/run.sh");
 const HERMES_SESSION = "20261117_120000_abcdef";
 const tagOf = (message: string) => /STRESS-[0-9A-F]+/.exec(message)?.[0] ?? "none";
 
-type Mode = "answer" | "hang" | "eof" | "destroy" | "refuse" | "error";
+type Mode = "answer" | "hang" | "hang-stop" | "eof" | "destroy" | "refuse" | "error";
 
 /** The box's web server, as far as the stress run uses it. */
 class Dashboard {
@@ -42,6 +42,7 @@ class Dashboard {
   posts: Array<{ sessionKey: string; turnId: string; message: string }> = [];
   stops: Array<{ sessionKey: string | null; turnId: string | null }> = [];
   hanging = new Set<http.ServerResponse>();
+  heldStops = new Set<http.ServerResponse>();
   onPost: (() => void) | null = null;
 
   async start() {
@@ -55,9 +56,12 @@ class Dashboard {
     this.onPost = null;
     for (const res of this.hanging) res.end();
     this.hanging.clear();
+    for (const res of this.heldStops) res.destroy();
+    this.heldStops.clear();
   }
   close() {
     for (const res of this.hanging) res.destroy();
+    for (const res of this.heldStops) res.destroy();
     return new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
   private json(res: http.ServerResponse, status: number, body: unknown) {
@@ -75,6 +79,8 @@ class Dashboard {
       if (url.pathname !== "/setup-api/hermes/chat") return this.json(res, 404, { error: "not here" });
       if (req.method === "DELETE") {
         this.stops.push({ sessionKey: url.searchParams.get("sessionKey"), turnId: url.searchParams.get("turnId") });
+        // A Stop that never answers: the turn sending it cannot end.
+        if (this.mode === "hang-stop" && url.searchParams.get("turnId")) { this.heldStops.add(res); return; }
         for (const h of this.hanging) h.end();
         this.hanging.clear();
         return this.json(res, 200, { stopped: 1 });
@@ -110,7 +116,15 @@ class Gateway {
   });
   wss = new WebSocketServer({ server: this.server });
   port = 0;
-  mode: "answer" | "stale" | "silent" = "answer";
+  mode: "answer" | "stale" | "silent" | "drop" = "answer";
+  // "drop": the first send is acknowledged, then its socket closes mid-turn.
+  // That turn's abort opens a socket of its own (handshake 1 after the drop);
+  // the next turn must reopen the session's socket (handshake 2), which
+  // answers late.
+  dropped = false;
+  held = false;
+  private connectsAfterDrop = 0;
+  onConnectHeld: (() => void) | null = null;
   calls: Array<{ conn: number; method: string; params: Record<string, unknown> }> = [];
   onSend: (() => void) | null = null;
   private conns = 0;
@@ -122,11 +136,25 @@ class Gateway {
         const f = JSON.parse(String(data));
         if (f.type !== "req") return;
         const ok = (payload: unknown) => ws.send(JSON.stringify({ type: "res", id: f.id, ok: true, payload }));
-        if (f.method === "connect") return ok({});
+        if (f.method === "connect") {
+          if (this.mode === "drop" && this.dropped && ++this.connectsAfterDrop === 2) {
+            this.held = true;
+            this.onConnectHeld?.();
+            setTimeout(() => ok({}), 4000);
+            return;
+          }
+          return ok({});
+        }
         this.calls.push({ conn, method: f.method, params: f.params || {} });
         if (f.method === "chat.send") {
           this.onSend?.();
           if (this.mode === "silent") return; // sent, never acknowledged
+          if (this.mode === "drop" && !this.dropped) {
+            this.dropped = true;
+            ok({ runId: crypto.randomUUID() });
+            setTimeout(() => ws.close(), 50);
+            return;
+          }
           const event = (payload: unknown) => ws.send(JSON.stringify({ type: "event", event: "chat", payload }));
           const sessionKey = f.params.sessionKey;
           // The late end of an earlier run in the session, before this send's ack.
@@ -145,10 +173,14 @@ class Gateway {
     await new Promise<void>((resolve) => this.server.listen(0, "127.0.0.1", resolve));
     this.port = (this.server.address() as AddressInfo).port;
   }
-  reset(mode: "answer" | "stale" | "silent" = "answer") {
+  reset(mode: "answer" | "stale" | "silent" | "drop" = "answer") {
     this.mode = mode;
     this.calls = [];
     this.onSend = null;
+    this.dropped = false;
+    this.held = false;
+    this.connectsAfterDrop = 0;
+    this.onConnectHeld = null;
   }
   close() {
     for (const c of this.wss.clients) c.terminate();
@@ -448,5 +480,41 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     expect(raw.final).toBe(false);
     expect(raw.turns.map((t: { error?: { kind: string } }) => t.error?.kind)).toEqual(["stopped"]);
     expect(raw.cleanup).toMatchObject({ sessions: 1, deleted: 1 });
+  });
+
+  it("stopped while a turn reopens its gateway socket on OpenClaw: sends nothing after the stop", async () => {
+    dash.runtime = "openclaw";
+    gateway.reset("drop");
+    const { results, env } = fixture();
+    const { code, out } = await runSh(env, ["--results", results, "stand-in", ...STRESS], (stop) => {
+      gateway.onConnectHeld = () => stop();
+    });
+    expect(code, out).toBe(130);
+    expect(gateway.held).toBe(true);
+    // Only the first turn's send: the turn that reopened the socket saw the
+    // stop once the handshake answered, and sent nothing.
+    expect(gateway.calls.filter((c) => c.method === "chat.send").length, out).toBe(1);
+    const raw = readRaw(results, "openclaw");
+    expect(raw.turns.map((t: { error?: { kind: string } }) => t.error?.kind ?? "ok")).toEqual(["connection", "stopped"]);
+    expect(raw.steps[0].reconnects).toBe(1);
+    expect(raw.cleanup).toMatchObject({ sessions: 1, deleted: 1 });
+  });
+
+  it("a step that will not wind down keeps its sessions: none is deleted under a running turn", async () => {
+    dash.runtime = "hermes";
+    dash.reset("hang-stop");
+    const { results, env } = fixture();
+    const { code, out } = await runSh({ ...env, NANO_STRESS_WIND_DOWN_MS: "2000" }, ["--results", results, "stand-in", ...STRESS], (stop) => {
+      dash.onPost = () => setTimeout(stop, 200);
+    });
+    expect(code, out).toBe(130);
+    const key = dash.posts[0].sessionKey;
+    // The turn's own Stop (which never answers), and no cleanup Stop or delete after it.
+    expect(dash.stops).toEqual([{ sessionKey: key, turnId: dash.posts[0].turnId }]);
+    expect(fs.existsSync(path.join(root, "hermes-calls"))).toBe(false);
+    const raw = readRaw(results, "hermes");
+    expect(raw.cleanup).toEqual({ sessions: 1, deleted: 0, left: [key] });
+    expect(fs.readFileSync(path.join(results, "board-hermes.log"), "utf8")).toContain("the step in flight (ramp-1) did not end within 2 s: its sessions are left alone");
+    expect(fs.readFileSync(path.join(results, "stress-hermes.md"), "utf8")).toContain("cleanup: 1 of 1 sessions could not be deleted");
   });
 });

@@ -557,19 +557,25 @@ async function deleteHermesSession(id) {
 let cleanup = null;
 // ...and the cleanup itself: main() and shutdown() both await this one.
 let cleanupRun = null;
-function cleanupSessions() {
-  if (!cleanupRun) cleanupRun = deleteSessions();
+/** `busy(sess)`: a session whose turns may still be running, never deleted
+ *  (only a stop whose step would not wind down passes one). */
+function cleanupSessions(busy = () => false) {
+  if (!cleanupRun) cleanupRun = deleteSessions(busy);
   return cleanupRun;
 }
-async function deleteSessions() {
+async function deleteSessions(busy) {
   const result = { sessions: opened.length, deleted: 0, left: [] };
   cleanup = result;
+  const kept = opened.filter(busy);
+  for (const s of kept) result.left.push(s.key);
+  if (kept.length) log(`cleanup: ${kept.length} session(s) of the step still running are left alone`);
+  const idle = opened.filter((s) => !kept.includes(s));
   if (RUNTIME === "openclaw") {
     let gw = null;
     for (let attempt = 1; attempt <= 3 && !gw; attempt++) {
       try { gw = await Gateway.open(GW_TOKEN); } catch (e) { log(`cleanup: gateway (attempt ${attempt})`, e.message); await sleep(3000); }
     }
-    for (const s of opened) {
+    for (const s of idle) {
       if (!gw) { result.left.push(s.key); continue; }
       // A turn still running (a stop mid-turn) ends first, then the session goes.
       await gw.req("chat.abort", { sessionKey: s.key }, 10_000).catch(() => {});
@@ -583,7 +589,7 @@ async function deleteSessions() {
     }
     gw?.close();
   } else {
-    for (const s of opened) {
+    for (const s of idle) {
       await hermes.stop(s.key);
       let ok = true;
       // The route's own transcript (data/chat-transcripts/<key>.jsonl) and the
@@ -691,7 +697,11 @@ function slowChatSends(fromMs, toMs) {
 // The step running now (runStep's promise): shutdown() waits for it, so its
 // turns have ended before their sessions are deleted.
 let currentStep = null;
-const runStep = (id, kind, concurrency, body) => (currentStep = stepRecorded(id, kind, concurrency, body));
+let currentStepId = null;
+const runStep = (id, kind, concurrency, body) => {
+  currentStepId = id;
+  return (currentStep = stepRecorded(id, kind, concurrency, body));
+};
 
 async function stepRecorded(id, kind, concurrency, body) {
   log(`step ${id}: start`);
@@ -838,10 +848,15 @@ function writeOut(final) {
   fs.renameSync(tmp, final ? OUT : `${OUT}.partial`);
 }
 
-// How long a stop waits for the step in flight to end its turns (each one
-// stops its own turn on the runtime first) and close its record; run.sh
-// waits 150 s for the whole stop, session deletion included.
-const STEP_WIND_DOWN_MS = 60_000;
+// How long a stop waits for the step in flight to end its turns and close its
+// record. Once the stop signal fires every wait in a turn is bounded (the
+// abort or Stop it sends, 10-30 s), and closing the record reads systemd and
+// the journal (under ~70 s), so this is a safety net: on a lab board the step
+// was gone in 3-7 s. A step that outlives it keeps its sessions (reported as
+// left): they are never deleted under a running turn. run.sh waits 330 s for
+// the whole stop, session deletion included.
+// NANO_STRESS_WIND_DOWN_MS shortens it for a test of this path.
+const STEP_WIND_DOWN_MS = Number(process.env.NANO_STRESS_WIND_DOWN_MS) > 0 ? Number(process.env.NANO_STRESS_WIND_DOWN_MS) : 240_000;
 let shutdownRun = null;
 /** The one stop: a second signal waits for the first. */
 function shutdown(signal) {
@@ -854,14 +869,15 @@ async function stopRun(signal) {
   log(`stopping on ${signal}: ending the turns in flight, then cleaning up`);
   stopCtl.abort();
   try {
+    let wound = true;
     if (currentStep) {
       let timer;
-      const wound = await Promise.race([
+      wound = await Promise.race([
         currentStep.then(() => true, () => true),
         new Promise((res) => { timer = setTimeout(() => res(false), STEP_WIND_DOWN_MS); }),
       ]);
       clearTimeout(timer);
-      if (!wound) log(`the step in flight did not end within ${STEP_WIND_DOWN_MS / 1000} s: deleting its sessions anyway`);
+      if (!wound) log(`the step in flight (${currentStepId}) did not end within ${STEP_WIND_DOWN_MS / 1000} s: its sessions are left alone`);
     }
     stopSampler();
     const open = steps.at(-1);
@@ -869,8 +885,10 @@ async function stopRun(signal) {
       open.endedAt = rel();
       open.failure = open.failure || `the run was stopped (${signal}) during the step`;
     }
-    await cleanupSessions().catch(() => {});
-    try { fs.rmSync(cfg.workDir, { recursive: true, force: true }); } catch { /* kept */ }
+    const stillRunning = wound ? null : currentStepId;
+    await cleanupSessions((x) => stillRunning !== null && (x.label === stillRunning || x.label.startsWith(`${stillRunning}-`))).catch(() => {});
+    // The tool step's folder too stays while that step may still use it.
+    if (wound) { try { fs.rmSync(cfg.workDir, { recursive: true, force: true }); } catch { /* kept */ } }
     writeOut(false);
   } catch (e) {
     log(`stop: ${e.message}`);
