@@ -5,7 +5,7 @@ import path from "@/lib/runtime-path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import Busboy from "busboy";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { chatAttachmentDir, pruneMediaDir, type MediaRetention } from "@/lib/harness/media-root";
 import { isMediaOwnedBy, recordMediaOwner } from "@/lib/chat-media-owners";
 import { personSession } from "@/lib/owner-session";
@@ -250,6 +250,44 @@ async function readHead(file: string): Promise<Buffer> {
 /** One message for both halves of the gate: the customer's fix is the same. */
 const IMAGE_ONLY_MESSAGE = "This device can only attach images";
 
+// A file name is capped at 255 BYTES on the common filesystems, not characters.
+// The staged name is `<uuid>-<leaf>` (37 bytes of prefix), and a Cyrillic letter
+// is two bytes, so 120 Cyrillic characters would not fit.
+const MAX_LEAF_BYTES = 200;
+
+const MAX_LEAF_CHARS = 120;
+const HASH_CHARS = 8;
+
+/**
+ * `name` as-is when it fits the character and byte caps; otherwise a prefix
+ * within the caps, a short hash of the FULL original, and the extension.
+ *
+ * A plain cut makes two long names that differ only past the cut collide, and
+ * in a folder drop (where segments are not uuid-prefixed) the second upload
+ * then meets the "wx" refusal and answers 409. The hash keeps them distinct.
+ * The cut is on a character boundary, never inside a UTF-8 sequence.
+ */
+function shortenName(name: string): string {
+  if ([...name].length <= MAX_LEAF_CHARS && Buffer.byteLength(name) <= MAX_LEAF_BYTES) return name;
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 && Buffer.byteLength(name.slice(dot)) <= 12 ? name.slice(dot) : "";
+  const hash = createHash("sha256").update(name).digest("hex").slice(0, HASH_CHARS);
+  const tail = `-${hash}${ext}`;
+  const maxBytes = MAX_LEAF_BYTES - Buffer.byteLength(tail);
+  const maxChars = MAX_LEAF_CHARS - [...tail].length;
+  let out = "";
+  let bytes = 0;
+  let chars = 0;
+  for (const ch of name.slice(0, dot > 0 && ext ? dot : name.length)) {
+    const size = Buffer.byteLength(ch);
+    if (bytes + size > maxBytes || chars + 1 > maxChars) break;
+    out += ch;
+    bytes += size;
+    chars += 1;
+  }
+  return `${out}${tail}`;
+}
+
 /**
  * A filesystem-safe leaf name for an uploaded file.
  *
@@ -266,11 +304,11 @@ const IMAGE_ONLY_MESSAGE = "This device can only attach images";
  */
 function safeLeafName(raw: string): string | null {
   const base = path.basename(String(raw ?? "").trim());
-  const cleaned = base
+  const full = base
     .replace(/[\u0000-\u001f\u007f/\\]/g, "")
     .replace(/^\.+/, "")
-    .slice(0, 120)
     .trim();
+  const cleaned = full ? shortenName(full).trim() : "";
   if (!cleaned || cleaned === "." || cleaned === "..") return null;
   return cleaned;
 }
@@ -378,6 +416,10 @@ export async function POST(req: NextRequest) {
     const result = await new Promise<{ name: string; path: string; root: string | null }>((resolve, reject) => {
       const busboy = Busboy({
         headers: { "content-type": contentType },
+        // Browsers send a multipart `filename` as raw UTF-8; busboy's default
+        // `defParamCharset` is latin1, which turns a Cyrillic name into mojibake
+        // (SUP-1026). RFC 5987 `filename*` values still carry their own charset.
+        defParamCharset: "utf8",
         limits: {
           files: 1,
           fileSize: MAX_BYTES,
