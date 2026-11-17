@@ -38,7 +38,9 @@ const SINGLE_ENGINE_ROWS: ReadonlySet<BackgroundJobId> = new Set(["memoryReview"
 // jobs exist at all.
 //
 // EVERY ROW IS A HARNESS KEY, and the panel says which one. The switches write
-// `agents.defaults.heartbeat.every`, `plugins.entries.memory-core.config.
+// `agents.defaults.heartbeat.every` (from OpenClaw 2026.11.5, where that key is
+// retired, the row names and switches the heartbeat's automation job instead,
+// or says there is none), `plugins.entries.memory-core.config.
 // dreaming.enabled` and `skills.workshop.autonomous.mode` on OpenClaw, and
 // `auxiliary.background_review.enabled` / `curator.enabled` on Hermes. Naming
 // the key is not decoration on an appliance whose owner may also have a

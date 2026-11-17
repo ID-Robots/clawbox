@@ -60,8 +60,26 @@ describe("which OpenClaw core generation is installed", () => {
     await expect(installedOpenclawCoreAtLeast(2026, 10)).resolves.toBe(expected);
   });
 
+  // A boundary inside a month: 2026.11.5 retired the heartbeat config that
+  // 2026.11.3 still carried, so the month alone cannot tell them apart.
+  it.each([
+    ["2026.11.5", true],
+    ["2026.11.6", true],
+    ["2026.12.0", true],
+    ["2027.1.0", true],
+    ["2026.11.5-beta.1", true],
+    ["2026.11.4", false],
+    ["2026.11.3", false],
+    ["2026.10.9", false],
+    ["next", false],
+  ])("answers %s as at least 2026.11.5: %s", async (version, expected) => {
+    installCore(version);
+    await expect(installedOpenclawCoreAtLeast(2026, 11, 5)).resolves.toBe(expected);
+  });
+
   it("answers false when there is no manifest to read", async () => {
     await expect(installedOpenclawCoreAtLeast(2026, 10)).resolves.toBe(false);
+    await expect(installedOpenclawCoreAtLeast(2026, 11, 5)).resolves.toBe(false);
   });
 
   it.each([

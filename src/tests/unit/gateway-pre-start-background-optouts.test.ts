@@ -258,6 +258,32 @@ d("gateway-pre-start.sh — a box the previous build seeded off", () => {
     expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
   });
 
+  it("never asks a core that retired the heartbeat key to unset it, and still flips the other two", () => {
+    // OpenClaw 2026.11.5 turned the heartbeat monitor into an automation job and
+    // took `agents.defaults.heartbeat` out of its schema: `config unset` of it is
+    // refused there. The boot flag says which core this is; the cadence row is
+    // skipped, the other two rows are flipped as before, and the record is
+    // written all the same so the box is not judged again every boot.
+    writeGen1();
+    writeConfig(OPTED_OUT);
+    const r = run({ CLAWBOX_OPENCLAW_2026_11_5: "1" });
+    expect(r.status).toBe(0);
+    expect(at(DREAMING)).toBe(true);
+    expect(at(MODE)).toBe("auto");
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0]).toContain("config set --batch-json");
+    expect(calls().join("\n")).not.toContain("heartbeat");
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+
+  it("still unsets the heartbeat key on a core that has it (the flag absent or 0)", () => {
+    writeGen1();
+    writeConfig(OPTED_OUT);
+    const r = run({ CLAWBOX_OPENCLAW_2026_11_5: "0" });
+    expect(r.status).toBe(0);
+    expect(calls()).toContain(`config unset ${HEARTBEAT}`);
+  });
+
   it("leaves the one key the owner changed afterwards, and flips the rest", () => {
     writeGen1();
     writeConfig({ ...OPTED_OUT, agents: { defaults: { heartbeat: { every: "2h" } } } });

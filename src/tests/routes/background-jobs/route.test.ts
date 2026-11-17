@@ -4,11 +4,13 @@ import { saveEnv } from "@/tests/helpers/env";
 
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({
+  callGatewayRpc: vi.fn(),
   readConfigStrict: vi.fn(),
   restartGateway: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
   runOpenclawConfigUnset: vi.fn(),
 }));
+vi.mock("@/lib/openclaw-core-generation", () => ({ installedOpenclawCoreAtLeast: vi.fn() }));
 vi.mock("@/lib/hermes-config-yaml", () => ({
   patchHermesConfig: vi.fn(),
   readHermesConfigValue: vi.fn(),
@@ -34,6 +36,8 @@ let POST: (req: Request) => Promise<Response>;
 let getActiveHarness: Mock;
 let readConfigStrict: Mock;
 let restartGateway: Mock;
+let callGatewayRpc: Mock;
+let installedOpenclawCoreAtLeast: Mock;
 let runOpenclawConfigSet: Mock;
 let runOpenclawConfigUnset: Mock;
 let patchHermesConfig: Mock;
@@ -57,15 +61,20 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   ({ getActiveHarness } = (await import("@/lib/harness")) as unknown as { getActiveHarness: Mock });
-  ({ readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset } =
+  ({ callGatewayRpc, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset } =
     (await import("@/lib/openclaw-config")) as unknown as {
-      readConfigStrict: Mock; restartGateway: Mock; runOpenclawConfigSet: Mock; runOpenclawConfigUnset: Mock;
+      callGatewayRpc: Mock; readConfigStrict: Mock; restartGateway: Mock; runOpenclawConfigSet: Mock; runOpenclawConfigUnset: Mock;
     });
+  ({ installedOpenclawCoreAtLeast } =
+    (await import("@/lib/openclaw-core-generation")) as unknown as { installedOpenclawCoreAtLeast: Mock });
   ({ patchHermesConfig, readHermesConfigValue } =
     (await import("@/lib/hermes-config-yaml")) as unknown as { patchHermesConfig: Mock; readHermesConfigValue: Mock });
   ({ hasPersonSession } = (await import("@/lib/owner-session")) as unknown as { hasPersonSession: Mock });
   getActiveHarness.mockResolvedValue("openclaw");
   readConfigStrict.mockResolvedValue({});
+  // A core that still has the heartbeat key, unless a test says it retired it.
+  installedOpenclawCoreAtLeast.mockResolvedValue(false);
+  callGatewayRpc.mockRejectedValue(new Error("the key-based path must not ask the gateway"));
   restartGateway.mockResolvedValue(undefined);
   runOpenclawConfigSet.mockResolvedValue(undefined);
   runOpenclawConfigUnset.mockResolvedValue(undefined);
@@ -242,5 +251,165 @@ describe("background-jobs — the switches", () => {
     }));
     expect(r.status).toBe(400);
     expect(await r.json()).toMatchObject({ ok: false, code: "bad_request" });
+  });
+});
+
+// OpenClaw 2026.11.5 retired `agents.defaults.heartbeat`: Doctor turns the
+// monitor into an ordinary automation job and removes the key, so the config
+// says NOTHING about check-ins any more and an absent key no longer means "on".
+// Measured on a lab board updated from 2026.11.3 with the check-ins switched
+// OFF: the config lost the key, `heartbeat-main` came out DISABLED, and the
+// key-based panel answered ON. These are the properties that keep the switch
+// honest over the job.
+describe("background-jobs — OpenClaw 2026.11.5, where the heartbeat is an automation job", () => {
+  interface Job { id: string; name: string; enabled: boolean }
+  let jobs: Job[];
+
+  function gateway(opts: { pages?: Job[][] } = {}) {
+    callGatewayRpc.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "cron.list") {
+        const pages = opts.pages ?? [jobs];
+        const at = Math.floor(Number(params.offset ?? 0) / 200);
+        const more = at < pages.length - 1;
+        return { jobs: pages[at], hasMore: more, ...(more ? { nextOffset: (at + 1) * 200 } : {}) };
+      }
+      if (method === "cron.update") {
+        const patch = params.patch as { enabled: boolean };
+        const job = jobs.find((j) => j.id === params.id);
+        if (!job) throw new Error("no such job");
+        job.enabled = patch.enabled;
+        return { ok: true };
+      }
+      throw new Error(`unexpected ${method}`);
+    });
+  }
+
+  beforeEach(() => {
+    installedOpenclawCoreAtLeast.mockResolvedValue(true);
+    jobs = [
+      { id: "dream", name: "Memory Dreaming Promotion", enabled: true },
+      { id: "hb", name: "heartbeat-main", enabled: false },
+    ];
+    gateway();
+  });
+
+  it("asks the core about 2026.11.5 and reads the job, not the key: an OFF monitor reads OFF", async () => {
+    // The config has no heartbeat key at all (Doctor removed it), which the
+    // key-based reading took for the core's default, ON.
+    const checkIns = (await rows()).find((r) => r.id === "checkIns");
+    expect(installedOpenclawCoreAtLeast).toHaveBeenCalledWith(2026, 11, 5);
+    expect(checkIns).toEqual({ id: "checkIns", enabled: false, supported: true, key: "automation: heartbeat-main" });
+  });
+
+  it("reads an enabled monitor as ON, whichever name the core gave it", async () => {
+    jobs = [{ id: "p", name: "Proactive check (main)", enabled: true }];
+    expect((await rows()).find((r) => r.id === "checkIns")).toMatchObject({ enabled: true, supported: true });
+    jobs = [{ id: "h", name: "Heartbeat (main)", enabled: true }];
+    expect((await rows()).find((r) => r.id === "checkIns")).toMatchObject({ enabled: true, supported: true });
+  });
+
+  it("does not take any other automation for the monitor", async () => {
+    jobs = [
+      { id: "dream", name: "Memory Dreaming Promotion", enabled: true },
+      { id: "x", name: "Heartbeat reports to my boss", enabled: true },
+      { id: "y", name: "my heartbeat check", enabled: true },
+    ];
+    expect((await rows()).find((r) => r.id === "checkIns")).toEqual({ id: "checkIns", enabled: false, supported: false, key: null });
+  });
+
+  it("says there is no check-in job rather than drawing a switch for one", async () => {
+    jobs = [{ id: "dream", name: "Memory Dreaming Promotion", enabled: true }];
+    expect((await rows()).find((r) => r.id === "checkIns")).toEqual({ id: "checkIns", enabled: false, supported: false, key: null });
+    const r = await post({ id: "checkIns", enabled: true });
+    expect(r.status).toBe(409);
+    expect(await r.json()).toMatchObject({ code: "unsupported" });
+    expect(callGatewayRpc.mock.calls.filter(([m]) => m === "cron.update")).toEqual([]);
+  });
+
+  it("finds the monitor on a later page of a long job list", async () => {
+    const filler = Array.from({ length: 200 }, (_, i) => ({ id: `f${i}`, name: `job ${i}`, enabled: true }));
+    gateway({ pages: [filler, [{ id: "hb", name: "heartbeat-main", enabled: true }]] });
+    expect((await rows()).find((r) => r.id === "checkIns")).toMatchObject({ enabled: true, supported: true });
+  });
+
+  it("switches ON by enabling the job: no config write, no gateway restart", async () => {
+    const r = await post({ id: "checkIns", enabled: true });
+    expect(r.status).toBe(200);
+    expect(callGatewayRpc).toHaveBeenCalledWith("cron.update", { id: "hb", patch: { enabled: true } });
+    expect(jobs.find((j) => j.id === "hb")?.enabled).toBe(true);
+    // The other automation is not the monitor and is never touched.
+    expect(jobs.find((j) => j.id === "dream")?.enabled).toBe(true);
+    expect(callGatewayRpc.mock.calls.filter(([m]) => m === "cron.update")).toHaveLength(1);
+    expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+    expect(runOpenclawConfigUnset).not.toHaveBeenCalled();
+    // `null`: the edit is live, so "it takes effect when the assistant next restarts" would be untrue.
+    expect(await r.json()).toMatchObject({ ok: true, restarted: null });
+    expect(restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("switches OFF by disabling every monitor that is enabled, and only those", async () => {
+    jobs = [
+      { id: "a", name: "heartbeat-main", enabled: true },
+      { id: "b", name: "heartbeat-staff", enabled: false },
+      { id: "c", name: "Proactive check (kitchen)", enabled: true },
+    ];
+    const r = await post({ id: "checkIns", enabled: false });
+    expect(r.status).toBe(200);
+    const updates = callGatewayRpc.mock.calls.filter(([m]) => m === "cron.update").map(([, p]) => p.id);
+    expect(updates.sort()).toEqual(["a", "c"]);
+    expect(jobs.every((j) => !j.enabled)).toBe(true);
+    expect(restartGateway).not.toHaveBeenCalled();
+  });
+
+  it("reads the job back and refuses to claim a change that did not land", async () => {
+    callGatewayRpc.mockImplementation(async (method: string) => {
+      if (method === "cron.list") return { jobs, hasMore: false };
+      return { ok: true }; // cron.update says yes and changes nothing
+    });
+    const r = await post({ id: "checkIns", enabled: true });
+    expect(r.status).toBe(502);
+    expect(await r.json()).toMatchObject({ ok: false, code: "write_failed" });
+  });
+
+  it("answers write_failed when the core refuses the edit", async () => {
+    callGatewayRpc.mockImplementation(async (method: string) => {
+      if (method === "cron.list") return { jobs, hasMore: false };
+      throw new Error("automation changed under you");
+    });
+    const r = await post({ id: "checkIns", enabled: true });
+    expect(r.status).toBe(502);
+    expect(await r.json()).toMatchObject({ code: "write_failed" });
+  });
+
+  it("says degraded, and writes nothing, when the gateway cannot be asked", async () => {
+    callGatewayRpc.mockRejectedValue(new Error("gateway closed"));
+    const status = (await (await GET()).json()) as { degraded: boolean };
+    expect(status.degraded).toBe(true);
+    const r = await post({ id: "checkIns", enabled: true });
+    expect(r.status).toBe(502);
+    expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+  });
+
+  it("does not take a list that stops half way for the box's state", async () => {
+    callGatewayRpc.mockResolvedValue({ jobs: [{ id: "x", name: "job", enabled: true }], hasMore: true });
+    expect(((await (await GET()).json()) as { degraded: boolean }).degraded).toBe(true);
+  });
+
+  it("leaves the other two switches on the config: dreaming still writes its key and restarts", async () => {
+    readConfigStrict
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ plugins: { entries: { "memory-core": { config: { dreaming: { enabled: false } } } } } });
+    const r = await post({ id: "memoryReview", enabled: false });
+    expect(r.status).toBe(200);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith(["plugins.entries.memory-core.config.dreaming.enabled", "false", "--strict-json"]);
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+    expect(await r.json()).toMatchObject({ restarted: true });
+  });
+
+  it("keeps the key-based behaviour on a core that still has the key", async () => {
+    installedOpenclawCoreAtLeast.mockResolvedValue(false);
+    readConfigStrict.mockResolvedValue({ agents: { defaults: { heartbeat: { every: "0m" } } } });
+    expect((await rows()).find((r) => r.id === "checkIns")).toMatchObject({ enabled: false, key: "agents.defaults.heartbeat.every" });
+    expect(callGatewayRpc).not.toHaveBeenCalled();
   });
 });

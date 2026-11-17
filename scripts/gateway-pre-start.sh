@@ -395,6 +395,21 @@ if [ -z "${CLAWBOX_OPENCLAW_2026_10:-}" ]; then
 fi
 export CLAWBOX_OPENCLAW_2026_10
 
+# OpenClaw 2026.11.5 RETIRED the heartbeat config: `agents.defaults.heartbeat`
+# and `agents.entries.*.heartbeat` are no longer keys (a config that still holds
+# one is invalid until `openclaw doctor --fix` has turned the monitor into an
+# ordinary automation job and removed it), and a `config set` or `config unset`
+# of them is refused. Same precedence as the two flags above: an explicit value
+# wins; an unknown core is 0, which keeps the old behaviour.
+if [ -z "${CLAWBOX_OPENCLAW_2026_11_5:-}" ]; then
+  CLAWBOX_OPENCLAW_2026_11_5=0
+  if [ -n "${CLAWBOX_OPENCLAW_EFFECTIVE:-}" ] \
+     && [ "$(printf '%s\n' 2026.11.5 "$CLAWBOX_OPENCLAW_EFFECTIVE" | sort -V | head -1)" = "2026.11.5" ]; then
+    CLAWBOX_OPENCLAW_2026_11_5=1
+  fi
+fi
+export CLAWBOX_OPENCLAW_2026_11_5
+
 "${CLAWBOX_STEP:-:}" "start-loop recovery"
 
 # ── Start-loop recovery: a database the core refuses at every start ─────────
@@ -7576,7 +7591,14 @@ def at_optout(value, literal):
 batch = []
 unset_heartbeat = False
 flipped = []
+# OpenClaw 2026.11.5 retired the heartbeat key (the exported flag is set by the
+# core's own version, above): there is nothing at the opt-out literal to take
+# back, and a `config unset` of it would be refused. The monitor is an
+# automation job there, and the Settings switch drives that job.
+HEARTBEAT_RETIRED = os.environ.get("CLAWBOX_OPENCLAW_2026_11_5") == "1"
 for path, literal, default in WANTED:
+    if default is None and HEARTBEAT_RETIRED:
+        continue
     # A box whose generation 2 is recorded is here only for the single-engine
     # rows: its three keys are the owner's, and a check-in they switched off since
     # must not be switched back on by a pass that came for something else.
