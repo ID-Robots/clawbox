@@ -9,8 +9,8 @@
 // the findings (errors, OOM kills, restarts, low memory) under it.
 //
 // Latency counts every turn that got an answer, right or wrong; a turn that
-// timed out, lost its connection, was stopped, or failed with no reply text
-// has no latency and counts as an error.
+// timed out, lost its connection, was stopped, or ended in a runtime error
+// (with or without text) has no latency and counts as an error.
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -41,14 +41,20 @@ export function samplesFor(samples, startedAt, endedAt) {
   return { inside, start: before ?? inside[0] ?? null, end: inside.at(-1) ?? after ?? null };
 }
 
-/** Error kinds that mean no answer came back at all: no latency to count. */
-const NO_ANSWER = new Set(["timeout", "connection", "rpc", "http", "stopped"]);
 /**
- * A turn whose latency counts: every passed turn, and a failed one that still
- * brought reply text back (a wrong answer). A runtime error with no text — a
- * provider refusing in 200 ms — is not an answer and must not pull p50 down.
+ * Error kinds where the model DID answer, only not as asked: the reply missed
+ * the expected text, or the box's own check of what it did failed. Every
+ * other kind — no answer (timeout, connection, rpc, http, stopped) or a
+ * runtime error (agent-error, aborted; on Hermes a provider's refusal comes
+ * back as "Error: …" text) — is not an answer.
  */
-export const answeredTurn = (t) => !t.error || (!NO_ANSWER.has(t.error.kind) && (t.replyChars || 0) > 0);
+const ANSWER_KINDS = new Set(["wrong-answer", "check"]);
+/**
+ * A turn whose latency counts: every passed turn, and a failed one that is
+ * still an answer with text (a wrong answer). A provider refusing in 200 ms
+ * is not an answer and must not pull p50 down.
+ */
+export const answeredTurn = (t) => !t.error || (ANSWER_KINDS.has(t.error.kind) && (t.replyChars || 0) > 0);
 
 function latencyStats(turns) {
   const answered = turns.filter(answeredTurn);

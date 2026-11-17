@@ -236,16 +236,21 @@ describe("parseOptions", () => {
     expect(() => parseOptions(["--out", "/tmp/r.json", "--steps", ""])).toThrow(/--steps wants one or more/);
     expect(() => parseOptions(["--out", "/tmp/r.json", "--steps", " , "])).toThrow(/--steps wants one or more/);
     expect(parseOptions(["--out", "/tmp/r.json", "--steps", "tool, idle"]).cfg.steps).toEqual(["tool", "idle"]);
+    expect(() => parseOptions(["--out", "/tmp/r.json", "--steps", "ramp,idle,ramp"])).toThrow(/--steps names ramp more than once/);
+    expect(() => parseOptions(["--out", "/tmp/r.json", "--ramp", "2,4,2"])).toThrow(/--ramp names 2 more than once/);
   });
 });
 
 describe("answeredTurn", () => {
-  it("counts a passed turn and a wrong answer with text, never a failure with no reply", () => {
+  it("counts a passed turn and a wrong answer with text, never a runtime error or a failure with no reply", () => {
     expect(answeredTurn(turn("s", 1, 900))).toBe(true);
     expect(answeredTurn(turn("s", 1, 900, { ok: false, error: { kind: "wrong-answer", message: "" } }))).toBe(true);
+    expect(answeredTurn(turn("s", 1, 900, { ok: false, error: { kind: "check", message: "" } }))).toBe(true);
+    expect(answeredTurn(turn("s", 1, 900, { ok: false, replyChars: 0, error: { kind: "wrong-answer", message: "" } }))).toBe(false);
     expect(answeredTurn(turn("s", 1, 150, { ok: false, replyChars: 0, error: { kind: "agent-error", message: "429" } }))).toBe(false);
-    expect(answeredTurn(turn("s", 1, 150, { ok: false, replyChars: 40, error: { kind: "agent-error", message: "Error: …" } }))).toBe(true);
-    for (const kind of ["timeout", "connection", "rpc", "http", "stopped"]) {
+    // Hermes hands a provider's refusal back as "Error: …" text: still no answer.
+    expect(answeredTurn(turn("s", 1, 150, { ok: false, replyChars: 40, error: { kind: "agent-error", message: "Error: 401" } }))).toBe(false);
+    for (const kind of ["timeout", "connection", "rpc", "http", "stopped", "aborted"]) {
       expect(answeredTurn(turn("s", 1, 150, { ok: false, error: { kind, message: "" } }))).toBe(false);
     }
   });

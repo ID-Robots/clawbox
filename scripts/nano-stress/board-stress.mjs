@@ -94,6 +94,10 @@ export function parseOptions(argv) {
   if (c.steps.length === 0) throw new Error(`--steps wants one or more of ${STEP_NAMES.join(",")}`);
   const unknown = c.steps.filter((s) => !STEP_NAMES.includes(s));
   if (unknown.length) throw new Error(`--steps: no step called ${unknown.join(",")}; the steps are ${STEP_NAMES.join(",")}`);
+  // A step's id names its turns and sessions: one step, one id.
+  const twice = (xs) => [...new Set(xs.filter((x, i) => xs.indexOf(x) !== i))];
+  if (twice(c.steps).length) throw new Error(`--steps names ${twice(c.steps).join(",")} more than once`);
+  if (twice(c.ramp).length) throw new Error(`--ramp names ${twice(c.ramp).join(",")} more than once`);
   return { out, cfg: c };
 }
 let OUT = "";
@@ -410,6 +414,8 @@ async function openclawTurn(sess, message, timeoutMs, stopSignal) {
       r.error = { kind: "connection", message: `gateway reconnect: ${e.message}`.slice(0, 200) };
       return r;
     }
+    // The reconnect took a while: a stop that came meanwhile sends nothing.
+    if (stopSignal?.aborted) { r.error = stoppedError(); return r; }
   }
   const t0 = performance.now();
   const ms = () => Math.round(performance.now() - t0);
@@ -426,19 +432,19 @@ async function openclawTurn(sess, message, timeoutMs, stopSignal) {
     stopSignal?.addEventListener("abort", onStop, { once: true });
   });
   const toolIds = new Set();
-  const l = (f) => {
-    // A turn given up on stays given up on: the abort's own "aborted" event
-    // must not turn a timeout into an answer.
-    if (settled) return;
-    if (f.type === "closed") { r.error = r.error || { kind: "connection", message: "gateway socket closed mid-turn" }; resolveFinal(); return; }
+  // Events that come before the ack wait for it: only the ack's runId tells
+  // this turn's events from a late end of an earlier run in the session.
+  let acked = false;
+  const early = [];
+  const handle = (f, at) => {
     const p = f.payload || {};
     if (f.event === "chat") {
       if (p.sessionKey !== sess.key) return;
       if (runId && p.runId && p.runId !== runId) return;
-      if (p.state === "delta") { if (r.firstTokenMs === null) r.firstTokenMs = ms(); }
+      if (p.state === "delta") { if (r.firstTokenMs === null) r.firstTokenMs = at; }
       else if (p.state === "final" || p.state === "error" || p.state === "aborted") {
         ended = true;
-        r.latencyMs = ms();
+        r.latencyMs = at;
         r.text = messageText(p.message);
         r.model = typeof p.message?.model === "string" ? p.message.model : null;
         if (p.state !== "final") r.error = { kind: p.state === "error" ? "agent-error" : "aborted", message: String(p.errorMessage || p.error || p.state).slice(0, 200) };
@@ -450,6 +456,14 @@ async function openclawTurn(sess, message, timeoutMs, stopSignal) {
       const d = p.data || {};
       if (p.stream === "tool" && d.name) toolIds.add(d.toolCallId || d.id || `${d.name}:${toolIds.size}`);
     }
+  };
+  const l = (f) => {
+    // A turn given up on stays given up on: the abort's own "aborted" event
+    // must not turn a timeout into an answer.
+    if (settled) return;
+    if (f.type === "closed") { r.error = r.error || { kind: "connection", message: "gateway socket closed mid-turn" }; resolveFinal(); return; }
+    if (!acked) { early.push([f, ms()]); return; }
+    handle(f, ms());
   };
   sess.gw.listeners.add(l);
   let timer;
@@ -463,6 +477,8 @@ async function openclawTurn(sess, message, timeoutMs, stopSignal) {
     } else {
       r.ackMs = ms();
       runId = ack?.runId || null;
+      acked = true;
+      for (const [f, at] of early.splice(0)) handle(f, at);
       const end = await Promise.race([
         final.then(() => "final"),
         stopped,
@@ -718,6 +734,8 @@ async function stepLong(id) {
   const sess = await openSession(id);
   const word = `ORCHID-${token()}`;
   try {
+    // A stop while the session opened: no turn to record.
+    if (stopping) return;
     await checkedTurn(id, sess, 1, "remember", `Remember this code word for later in our conversation: ${word}. Reply with only OK.`, () => "OK");
     for (let k = 2; k <= cfg.longTurns && !stopping; k++) {
       if (k % 8 === 0 || k === cfg.longTurns) {

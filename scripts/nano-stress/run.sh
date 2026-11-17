@@ -153,6 +153,8 @@ STARTED=0
 ENDED=0      # the board side is no longer running: nothing to stop
 STOPPED=1    # 0: it would not stop, so its folder stays
 COLLECTED=0  # its record came back and parses: only then may its folder go
+TRIED=0      # the main flow already tried (twice) to bring it back
+LOG_SAVED=0  # the board-side log is here
 # stop_board_side — SIGTERM the board script and wait (up to 150 s: it aborts
 # and deletes every session it opened first) until it is gone. Prints "gone"
 # or "alive <pid>"; returns non-zero while it still runs.
@@ -183,11 +185,23 @@ fetch() {
 # $RESULTS. Only a collect that succeeded lets the board folder go: until then
 # it holds the only copy of the run.
 collect() {
+  local log="$RESULTS/board-$RUNTIME.log"
+  # Into a file of its own first: a failed retry must not empty a log an
+  # earlier try saved.
   # shellcheck disable=SC2016  # expanded on the board
-  board 'cat "$1/stress.log" 2>/dev/null; [ -s "$1/raw.json.error" ] && { echo "error:"; cat "$1/raw.json.error"; }; true' "$BOARD_DIR" > "$RESULTS/board-$RUNTIME.log" || return 1
+  if board 'cat "$1/stress.log" 2>/dev/null; [ -s "$1/raw.json.error" ] && { echo "error:"; cat "$1/raw.json.error"; }; true' "$BOARD_DIR" > "$log.part"; then
+    mv -f -- "$log.part" "$log"
+    LOG_SAVED=1
+  else
+    rm -f -- "$log.part"
+  fi
   fetch || return 1
   node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$RESULTS/raw-$RUNTIME.json" 2>/dev/null || return 1
+  [ "$LOG_SAVED" = 1 ] || return 1
   COLLECTED=1
+}
+summarize() {
+  node "$HERE/report.mjs" --json "$RESULTS/stress-$RUNTIME.json" --md "$RESULTS/stress-$RUNTIME.md" "$RESULTS/raw-$RUNTIME.json"
 }
 cleanup() {
   [ "$STARTED" = 1 ] || return 0
@@ -199,16 +213,21 @@ cleanup() {
     say "the board side still runs: $BOARD_DIR is kept on the board; stop it by the pid above"
     return 0
   fi
-  # Interrupted, or the transfer failed once: one more try to bring the
-  # record back before anything on the board is removed. A record that still
-  # will not come back keeps the folder (as does a board that does not
-  # answer); a run that never wrote one has nothing to keep.
-  if [ "$COLLECTED" = 0 ] && ! collect; then
+  # Interrupted: bring the partial record back (and summarise it) before
+  # anything on the board is removed.
+  if [ "$COLLECTED" = 0 ] && [ "$TRIED" = 0 ] && collect; then
+    if summarize; then say "partial summary: $RESULTS/stress-$RUNTIME.md"; fi
+  fi
+  # A record that did not come back keeps the folder (as does a board that
+  # does not answer), and so does a run whose log did not come back either:
+  # it is all that says why it died. A run that never wrote a record, whose
+  # log is here, has nothing left to keep.
+  if [ "$COLLECTED" = 0 ]; then
     local held
     # shellcheck disable=SC2016  # expanded on the board
     held=$(board 'if [ -s "$1/raw.json" ] || [ -s "$1/raw.json.partial" ]; then echo record; else echo none; fi' "$BOARD_DIR" 2>/dev/null | tail -n 1)
-    if [ "$held" != none ]; then
-      say "the record did not come back: $BOARD_DIR is kept on the board (raw.json or raw.json.partial, stress.log)"
+    if [ "$held" != none ] || [ "$LOG_SAVED" = 0 ]; then
+      say "the record or the log did not come back: $BOARD_DIR is kept on the board (raw.json or raw.json.partial, stress.log)"
       return 0
     fi
   fi
@@ -224,12 +243,21 @@ STARTED=1
 # shellcheck disable=SC2016  # expanded on the board
 started=$(board "$(declare -f unpack_payload)"'
   dir=$1; payload=$2; entry=$3; shift 3
+  # A fresh folder only: the pid file and record of an earlier run there
+  # would pass for those of this one.
+  [ -e "$dir" ] && { echo "@@exists"; exit 1; }
   unpack_payload "$dir" "$payload" || { echo "could not unpack the run into $dir"; exit 1; }
   [ -f "$dir/$entry" ] || { echo "$entry is not in the unpacked run"; exit 1; }
   setsid -f node "$dir/$entry" --out "$dir/raw.json" "$@" </dev/null >"$dir/stress.log" 2>&1
   for _ in $(seq 1 20); do [ -s "$dir/raw.json.pid" ] && break; sleep 0.5; done
   [ -s "$dir/raw.json.pid" ] && echo started || { echo "did not start:"; tail -n 5 "$dir/stress.log"; }
 ' "$BOARD_DIR" "$PAYLOAD" "$ENTRY" --runtime "$RUNTIME" "${STRESS_ARGS[@]}")
+if [ "$(printf '%s\n' "$started" | tail -n 1)" = "@@exists" ]; then
+  # Not this run's folder: nothing to stop, fetch or remove there.
+  STARTED=0
+  say "$BOARD_DIR already exists on the board: not starting over it"
+  exit 1
+fi
 if [ "$(printf '%s\n' "$started" | tail -n 1)" != started ]; then
   say "the stress run did not start on the board:"
   printf '%s\n' "$started" | sed 's/^/  /'
@@ -277,12 +305,14 @@ if [ "$STATE" = budget ]; then
 fi
 ENDED=1
 
-if ! collect; then
-  # The EXIT trap tries once more, and keeps the board folder if that fails too.
+# Two tries: a transfer that fails once (an ssh hiccup) is not the end of a
+# 30-minute run. The EXIT trap keeps the board folder if both fail.
+if ! collect && ! { say "the record did not come back: trying once more"; collect; }; then
+  TRIED=1
   say "no readable record came back (state: $STATE); the board-side log is $RESULTS/board-$RUNTIME.log"
   exit 1
 fi
-if ! node "$HERE/report.mjs" --json "$RESULTS/stress-$RUNTIME.json" --md "$RESULTS/stress-$RUNTIME.md" "$RESULTS/raw-$RUNTIME.json"; then
+if ! summarize; then
   say "report.mjs could not summarise $RESULTS/raw-$RUNTIME.json"
   exit 1
 fi

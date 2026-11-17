@@ -110,7 +110,7 @@ class Gateway {
   });
   wss = new WebSocketServer({ server: this.server });
   port = 0;
-  mode: "answer" | "silent" = "answer";
+  mode: "answer" | "stale" | "silent" = "answer";
   calls: Array<{ conn: number; method: string; params: Record<string, unknown> }> = [];
   onSend: (() => void) | null = null;
   private conns = 0;
@@ -127,10 +127,12 @@ class Gateway {
         if (f.method === "chat.send") {
           this.onSend?.();
           if (this.mode === "silent") return; // sent, never acknowledged
-          const runId = crypto.randomUUID();
-          ok({ runId });
           const event = (payload: unknown) => ws.send(JSON.stringify({ type: "event", event: "chat", payload }));
           const sessionKey = f.params.sessionKey;
+          // The late end of an earlier run in the session, before this send's ack.
+          if (this.mode === "stale") event({ sessionKey, runId: "an-earlier-run", state: "final", message: { content: [{ type: "text", text: "STALE" }] } });
+          const runId = crypto.randomUUID();
+          ok({ runId });
           event({ sessionKey, runId, state: "delta" });
           event({ sessionKey, runId, state: "final", message: { content: [{ type: "text", text: tagOf(f.params.message) }], model: "stub-model" } });
           return;
@@ -143,7 +145,7 @@ class Gateway {
     await new Promise<void>((resolve) => this.server.listen(0, "127.0.0.1", resolve));
     this.port = (this.server.address() as AddressInfo).port;
   }
-  reset(mode: "answer" | "silent" = "answer") {
+  reset(mode: "answer" | "stale" | "silent" = "answer") {
     this.mode = mode;
     this.calls = [];
     this.onSend = null;
@@ -242,6 +244,16 @@ script=\${script//REPO=\\/home\\/clawbox\\/clawbox/REPO=$FAKE_REPO}
 script=\${script//DASHBOARD=http:\\/\\/127.0.0.1/DASHBOARD=$FAKE_DASH}
 script=\${script//export HOME=\\/home\\/clawbox/export HOME=$FAKE_HOME}
 script=\${script//http:\\/\\/127.0.0.1:18789/$FAKE_GATEWAY}
+# Every board script carries lib.sh's prelude: a substitution that missed
+# would send this run to this machine's own box (port 80, /home/clawbox).
+[[ $script == *"REPO=$FAKE_REPO"* && $script == *"DASHBOARD=$FAKE_DASH"* && $script == *"export HOME=$FAKE_HOME"* ]] \
+  || { echo "stand-in nano-ci: the lib.sh prelude changed; update the substitutions" >&2; exit 97; }
+case "$script" in *"127.0.0.1:18789"*|*"/home/clawbox"*) echo "stand-in nano-ci: a board path or port was not redirected" >&2; exit 97 ;; esac
+if [ -n "\${FAKE_FETCH_FAIL_ONCE:-}" ] && [ ! -e "$FAKE_FETCH_FAIL_ONCE" ] && [[ $script == *'gzip -c "$f"'* ]]; then
+  : > "$FAKE_FETCH_FAIL_ONCE"
+  printf '@@nano-ci-output@@\\n%s\\n' 'not-a-record'
+  exit 0
+fi
 if [ -n "\${FAKE_FETCH_FAIL:-}" ] && [[ $script == *'gzip -c "$f"'* ]]; then
   printf '@@nano-ci-output@@\\n%s\\n' 'not-a-record'
   exit 0
@@ -333,6 +345,33 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     expect(out).toContain(`${boardDir} is kept on the board`);
     expect(JSON.parse(fs.readFileSync(path.join(boardDir, "raw.json"), "utf8")).final).toBe(true);
     expect(fs.existsSync(path.join(results, "board-hermes.log"))).toBe(true);
+    expect(fs.existsSync(path.join(results, "stress-hermes.md"))).toBe(false);
+  });
+
+  it("tries a failed transfer once more, and then summarises the record as usual", async () => {
+    dash.runtime = "hermes";
+    dash.reset("answer");
+    const { results, env } = fixture();
+    const { code, out } = await runSh({ ...env, FAKE_FETCH_FAIL_ONCE: path.join(root, "fetch-failed") }, ["--results", results, "stand-in", ...STRESS]);
+    expect(code, out).toBe(0);
+    expect(out).toContain("trying once more");
+    expect(readRaw(results, "hermes").final).toBe(true);
+    expect(fs.readFileSync(path.join(results, "stress-hermes.md"), "utf8")).toContain("| ramp-1 | 1 | 2/2 |");
+    expect(fs.existsSync(boardDir)).toBe(false);
+  });
+
+  it("will not start over a board folder that already exists, and leaves it alone", async () => {
+    dash.runtime = "hermes";
+    dash.reset("answer");
+    const { results, env } = fixture();
+    fs.mkdirSync(boardDir);
+    fs.writeFileSync(path.join(boardDir, "raw.json"), '{"tool":"clawbox-nano-stress","from":"an earlier run"}');
+    const { code, out } = await runSh(env, ["--results", results, "stand-in", ...STRESS]);
+    expect(code, out).toBe(1);
+    expect(out).toContain(`${boardDir} already exists on the board`);
+    expect(dash.posts).toHaveLength(0);
+    expect(fs.readdirSync(boardDir)).toEqual(["raw.json"]);
+    expect(fs.existsSync(path.join(results, "raw-hermes.json"))).toBe(false);
   });
 
   it("stopped mid-turn on Hermes: Stops that turn once, starts no other, records the step and brings the partial record back", async () => {
@@ -354,12 +393,15 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     expect(raw.turns).toHaveLength(1);
     expect(raw.turns[0].error.kind).toBe("stopped");
     expect(raw.cleanup).toMatchObject({ sessions: 1, deleted: 1 });
+    expect(fs.readFileSync(path.join(results, "stress-hermes.md"), "utf8")).toContain("## Hermes (incomplete)");
     expect(fs.existsSync(boardDir)).toBe(false);
   });
 
-  it("runs on OpenClaw through the gateway socket and deletes its sessions", async () => {
+  it("runs on OpenClaw through the gateway socket, takes no late end of an earlier run for a turn's own, and deletes its sessions", async () => {
     dash.runtime = "openclaw";
-    gateway.reset("answer");
+    // Every send is preceded by a "final" of another run in the session,
+    // before its ack: the turns must still wait for their own.
+    gateway.reset("stale");
     const { results, env } = fixture();
     const { code, out } = await runSh(env, ["--results", results, "stand-in", ...STRESS]);
     expect(code, out).toBe(0);
@@ -386,8 +428,11 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     const key = sends[0].params.sessionKey;
     const own = gateway.calls.filter((c) => c.conn === sends[0].conn && c.method === "chat.abort");
     expect(own.map((c) => c.params)).toEqual([{ sessionKey: key }]);
-    const order = gateway.calls.map((c) => c.method);
-    expect(order.indexOf("chat.abort")).toBeLessThan(order.indexOf("sessions.delete"));
+    // The turn's own abort, not the cleanup's: on the send's connection, and
+    // before the session is deleted.
+    const ownAbort = gateway.calls.findIndex((c) => c.conn === sends[0].conn && c.method === "chat.abort");
+    expect(ownAbort).toBeGreaterThanOrEqual(0);
+    expect(ownAbort).toBeLessThan(gateway.calls.findIndex((c) => c.method === "sessions.delete"));
     const raw = readRaw(results, "openclaw");
     expect(raw.final).toBe(false);
     expect(raw.turns.map((t: { error?: { kind: string } }) => t.error?.kind)).toEqual(["stopped"]);

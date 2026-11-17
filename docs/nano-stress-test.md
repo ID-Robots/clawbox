@@ -46,8 +46,9 @@ A turn whose end the runtime never reported — no answer within the turn
 timeout, a send the gateway did not acknowledge in time, a stream or socket
 that broke off, the run being stopped — is stopped on the box (`chat.abort` on
 OpenClaw, the route's Stop on Hermes) before the session's next turn, and
-counts as an error with no latency. So does a runtime error that brought no
-reply text back; a wrong answer keeps its latency.
+counts as an error with no latency. So does a runtime error (on Hermes a
+provider's refusal comes back as "Error: …" text); a wrong answer keeps its
+latency.
 
 Every 2 s the run samples: MemAvailable, swap used, CPU busy % and load, the
 hottest thermal zone, the memory of the runtime's unit (`clawbox-gateway` on
