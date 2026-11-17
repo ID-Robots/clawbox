@@ -184,6 +184,10 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
       try {
         busboy = Busboy({
           headers: { "content-type": req.headers.get("content-type") ?? "" },
+          // Browsers send a multipart `filename` as raw UTF-8; busboy's default
+          // `defParamCharset` is latin1, which turns a Cyrillic name into mojibake
+          // (SUP-1026). RFC 5987 `filename*` values still carry their own charset.
+          defParamCharset: "utf8",
           limits: {
             files: 1,
             fields: 2,
