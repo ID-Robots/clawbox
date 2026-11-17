@@ -53,12 +53,12 @@ that broke off, the run being stopped — is stopped on the box (`chat.abort` on
 OpenClaw, the route's Stop on Hermes) before the session's next turn, and
 counts as an error with no latency. On Hermes the run then asks the route
 whether the turn really ended: `GET /setup-api/hermes/chat` re-attaches to the
-key's newest turn, and only a replay carrying the turn's own end (done,
-error, stopped) counts, or a 204 (no turn on record) when the Stop did stop a
-registered turn: after a Stop that found none, the POST may still be in its
-setup and the Stop held for it expires. A stream that just closes is asked
-again. A turn whose Stop failed, or that is not confirmed within 20 s, blocks
-its session: no further turn goes to it and the cleanup leaves it alone. A
+key's newest turn, and a 204 (no turn on record) or a replay carrying the
+turn's end (done, error, stopped) counts; a stream that just closes is asked
+again. A turn whose Stop failed, whose Stop found no turn running (the POST may
+still be in its setup, the Stop held for it expires, and a replay does not say
+which turn it is), or that is not confirmed within 20 s, blocks its session:
+no further turn goes to it and the cleanup leaves it alone. A
 turn that ended before Hermes named its session, any plain error answer
 included (the CLI fallback answers 502, an expired owner session 401, a Stop
 499, all with no id), may have opened a session no id reaches: the cleanup

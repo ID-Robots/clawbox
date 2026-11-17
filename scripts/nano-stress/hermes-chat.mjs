@@ -55,16 +55,15 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
   /**
    * Whether no turn runs under `key` any more, as the route itself tells it:
    * GET re-attaches to the key's newest live turn — a running one if there is
-   * one — and replays its frames (204: no turn on record). Settled means a
-   * replayed end of that turn (a done, error or stopped frame), or a 204 when
-   * `emptyCounts` (the Stop did stop a registered turn). After a Stop that
-   * found no turn, a 204 can mean the POST is still in its setup, before it
-   * registers; the Stop held for it expires (60 s, 64 held), so only a replayed
-   * end confirms then. A stream that just closes proves nothing (a dropped
-   * connection, a session that expired, a turn that keeps running): it is
-   * asked again. Not settled by `settleMs`, or no answer by then, is not.
+   * one — and replays its frames (204: no turn on record). Settled means a 204
+   * or a replayed end of that turn (a done, error or stopped frame). A stream
+   * that just closes proves nothing (a dropped connection, a session that
+   * expired, a turn that keeps running): it is asked again. Not settled by
+   * `settleMs`, or no answer by then, is not. Asked only after a Stop that did
+   * stop a registered turn: every earlier turn on the session had settled, so
+   * that turn was this one, and it is the newest the route can replay.
    */
-  async function settled(key, emptyCounts = true) {
+  async function settled(key) {
     const deadline = Date.now() + settleMs;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), settleMs);
@@ -75,9 +74,8 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
             headers: headers({ Accept: "text/event-stream" }),
             signal: ac.signal,
           });
-          if (res.status === 204) {
-            if (emptyCounts) return true;
-          } else if (!res.ok || !res.body) {
+          if (res.status === 204) return true;
+          if (!res.ok || !res.body) {
             log(`settle ${key}: HTTP ${res.status}`);
           } else {
             const reader = res.body.getReader();
@@ -215,11 +213,16 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
     // bounded 5 s for it; whether it really ended is asked of the route.
     if (!ended) {
       r.latencyMs = null;
-      // A Stop the route took is held for this turnId even if the POST has not
-      // registered its turn yet, so a late start is stopped on arrival. A Stop
-      // that failed holds nothing: the route showing no turn proves nothing.
+      // A Stop that failed holds nothing. A Stop that found no registered turn
+      // may have come while the POST was still in its setup: the Stop held
+      // for it expires (60 s, 64 held), and the re-attach does not say which
+      // turn it replays (an earlier one ended moments ago looks the same), so
+      // nothing can confirm this turn ended. Either blocks the session.
       const stopped = await stop(sess.key, turnId);
-      const why = stopped === null ? "its Stop failed" : (await settled(sess.key, stopped > 0)) ? null : `its Stop was not confirmed within ${Math.round(settleMs / 1000)} s`;
+      const why = stopped === null ? "its Stop failed"
+        : stopped === 0 ? "its Stop found no turn running, so its end cannot be confirmed"
+        : (await settled(sess.key)) ? null
+        : `its Stop was not confirmed within ${Math.round(settleMs / 1000)} s`;
       if (why) {
         sess.blocked = true;
         r.error.message = `${r.error.message}; ${why}, so no more turns go to this session`.slice(0, 300);

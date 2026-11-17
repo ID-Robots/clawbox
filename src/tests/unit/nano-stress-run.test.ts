@@ -338,22 +338,19 @@ describe("the Hermes turn", () => {
     expect(dash.stops).toEqual([]);
   });
 
-  it("after a Stop that found no registered turn, takes only a replayed end as settled, not a 204", async () => {
-    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleMs: 1500 });
-    dash.reset("hang");
-    dash.stoppedCount = 0; // the POST may still be in its setup
-    const early = sess();
-    const r = await driver.turn(early, ask, 300);
-    expect(r.error?.message).toContain("its Stop was not confirmed within 2 s");
-    expect(early.blocked).toBe(true);
-    expect(dash.attaches).toBeGreaterThan(1);
-
-    dash.reset("hang");
-    dash.stoppedCount = 0;
-    dash.attach = "replay"; // the turn registered, was stopped on arrival, and ended
-    const late = sess();
-    await driver.turn(late, ask, 300);
-    expect(late).not.toHaveProperty("blocked");
+  it("blocks the session after a Stop that found no registered turn, whatever the route replays", async () => {
+    // The POST may still be in its setup; a 204, or a replayed end (maybe of
+    // an EARLIER turn: the replay names no turn), cannot confirm this one.
+    for (const attach of ["none", "replay"] as const) {
+      dash.reset("hang");
+      dash.stoppedCount = 0;
+      dash.attach = attach;
+      const s = sess();
+      const r = await live().turn(s, ask, 300);
+      expect(r.error?.message).toContain("its Stop found no turn running, so its end cannot be confirmed");
+      expect(s.blocked).toBe(true);
+      expect(dash.attaches).toBe(0);
+    }
   });
 
   it("ends at once, Stopped, when the run stops; starts nothing once it has", async () => {
