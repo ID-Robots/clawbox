@@ -289,8 +289,34 @@ describe("/setup-api/chat/attachments", () => {
     expect(Buffer.byteLength(path.basename(body.path))).toBeLessThanOrEqual(255);
     // Cut on a character boundary: no replacement character from a split letter.
     expect(body.name).not.toContain("�");
-    expect(body.name).toMatch(/^д+$/);
+    // Shortened with a hash of the full name, extension kept.
+    expect(body.name).toMatch(/^д+-[0-9a-f]{8}\.png$/);
+    expect([...body.name].length).toBeLessThanOrEqual(120);
     expect(fs.existsSync(body.path)).toBe(true);
+  });
+
+  // CodeRabbit on #1539: a plain byte cut made two long folder names that differ
+  // only past the cut the SAME segment, so the second upload hit "wx" -> 409.
+  it("keeps two long Cyrillic folder names that differ past the cut apart", async () => {
+    const long = "д".repeat(100);
+    const batch = "0123456789abcdef0123456789abcdef";
+    const send = (rel: string) => {
+      const b = Buffer.from(
+        `--${BOUNDARY}\r\nContent-Disposition: form-data; name="batch"\r\n\r\n${batch}\r\n`
+          + `--${BOUNDARY}\r\nContent-Disposition: form-data; name="relativePath"\r\n\r\n${rel}\r\n`,
+      );
+      return POST(request(Buffer.concat([b, multipart("readme.txt", TEXT).subarray(0)])));
+    };
+    // multipart() starts with its own boundary line, so the fields above lead it.
+    const one = await send(`root/${long}-one/readme.txt`);
+    const two = await send(`root/${long}-two/readme.txt`);
+    expect(one.status).toBe(200);
+    expect(two.status).toBe(200);
+    const a = await one.json();
+    const b = await two.json();
+    expect(path.dirname(a.path)).not.toBe(path.dirname(b.path));
+    expect(fs.readFileSync(a.path)).toEqual(TEXT);
+    expect(fs.readFileSync(b.path)).toEqual(TEXT);
   });
 
   it("creates the staging directory on a box that has never used it", async () => {
