@@ -89,7 +89,9 @@ closed as `uncertain`. The same applies to a server that stopped mid-send. An
 draft's Send again, and no card made before the loss can send it. Only the
 person's explicit **Review again** does, with a card made after the card has
 told them to check their Sent folder. So a crashed Send blocks the older cards,
-never the draft for good.
+never the draft for good. The ledger keeps at most 2000 cards, but a
+`sent`, `sending` or `uncertain` card is never dropped to make room. Those
+leave only by age (30 days).
 
 A reload after **Review again** shows the new open card, not the earlier
 **Keep as draft** or **Tell me what to change** answer for the same version.
@@ -122,7 +124,10 @@ offers **Check again**.
   England, Scotland and Wales flags. A joiner or selector outside such an emoji,
   and any other tag run, is marked.
 - The whole body is shown, up to the backend's 1 MiB answer limit. A preview
-  that ever had to be cut offers no Send.
+  that ever had to be cut offers no Send. The same applies to a subject (over
+  1000 characters) or an attachment name (over 200) that had to be cut. A
+  recipient is never cut: one over 400 characters makes the draft unreadable,
+  and ClawBox refuses it as the backend giving an answer it could not read.
 - **Tell me what to change** goes to the assistant only after the server has
   closed the card as `revised`. If the close fails, the request stays in the
   box, read-only, and nothing is sent to the assistant. When a look reopens
