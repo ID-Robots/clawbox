@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesProviderFor, readHermesVoice, speakWithHermes } from "@/lib/hermes-tts";
 import { readVoiceConfig } from "@/lib/voice-box";
-import { refuse, speakInCloud, speakLocally, withSpeechLock } from "@/lib/voice-speak";
+import { memoryRefusal, refuse, speakInCloud, speakLocally, withSpeechLock } from "@/lib/voice-speak";
 import { readLocalVoice } from "@/lib/voice-output-store";
 import { DEFAULT_CLOUD_VOICE, DEFAULT_LOCAL_VOICE, isCloudVoiceFor, SAMPLE_MAX_CHARS } from "@/lib/voice-catalog";
 
@@ -101,6 +101,9 @@ async function speakWithHermesEngine(
     }
   }
   const spoken = await speakWithHermes(text);
+  // Kokoro's memory guard, read out of Hermes' answer (TASK-2649): said with
+  // its numbers, as the same audition on an OpenClaw box says it.
+  if (!spoken.ok && spoken.shortfall) return memoryRefusal(spoken.shortfall);
   if (!spoken.ok) {
     const code = engine === "local" ? LOCAL_CODE_FOR[spoken.code] ?? spoken.code : spoken.code;
     return refuse(

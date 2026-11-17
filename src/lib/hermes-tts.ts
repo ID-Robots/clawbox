@@ -2,6 +2,7 @@ import { hermesConfigGet, hermesConfigGetMany, hermesConfigReadPending } from "@
 import { runHermesCli } from "@/lib/hermes-cli";
 import { LOCAL_TTS_PROVIDER_ID, type VoiceConfigView } from "@/lib/voice-output";
 import { isClawboxAiToken } from "@/lib/clawai-token";
+import { kokoroMemoryShortfall, type KokoroMemoryShortfall } from "@/lib/kokoro-memory-guard";
 
 /**
  * Speech on the Hermes edition, driven through Hermes' OWN TTS pipeline.
@@ -494,7 +495,33 @@ async function readBounded(res: Response, limit: number): Promise<string | null>
 
 export type HermesSpeech =
   | { ok: true; audio: Uint8Array<ArrayBuffer>; mime: string }
-  | { ok: false; code: string; status: number; reason?: string };
+  | { ok: false; code: string; status: number; reason?: string; shortfall?: KokoroMemoryShortfall };
+
+/** The most of a refusal's body worth reading for the reason in it. */
+const MAX_REFUSAL_BYTES = 64 * 1024;
+
+/**
+ * Kokoro's memory guard in a refusal from Hermes' speech route, or null.
+ *
+ * Hermes runs the box's own voice as its `clawbox-local` command and answers
+ * that command's failure with 400 and `{"detail": "… exited with code 1:
+ * stderr: …"}`, the script's stderr inside (measured on a lab board,
+ * 2026-11-17). Its memory guard is the one reason the owner can act on — the
+ * box was short of memory, not the voice refusing — so it is read out of the
+ * detail rather than reported as the transport's failure.
+ */
+async function memoryShortfallIn(res: Response): Promise<KokoroMemoryShortfall | null> {
+  const raw = await readBounded(res, MAX_REFUSAL_BYTES);
+  if (raw === null) return null;
+  let detail: unknown = raw;
+  try {
+    const body = JSON.parse(raw) as { detail?: unknown; error?: unknown } | null;
+    detail = body?.detail ?? body?.error ?? raw;
+  } catch {
+    // Not JSON: the text itself.
+  }
+  return typeof detail === "string" ? kokoroMemoryShortfall(detail) : null;
+}
 
 /**
  * Speak `text` with whatever Hermes is configured to speak with.
@@ -567,7 +594,13 @@ export async function speakWithHermes(
     return { ok: false, code: "cloud_no_answer", status: 502 };
   }
   if (!res.ok) {
-    return { ok: false, code: res.status === 401 ? "cannot_change" : "cloud_refused", status: 502 };
+    if (res.status === 401) return { ok: false, code: "cannot_change", status: 502 };
+    // The box's own voice short of memory (TASK-2649): `local_memory` with the
+    // guard's numbers, not the transport's `cloud_refused`, which the Voice
+    // panel and the chat read as "the cloud voice refused".
+    const shortfall = await memoryShortfallIn(res);
+    if (shortfall) return { ok: false, code: "local_memory", status: 502, shortfall };
+    return { ok: false, code: "cloud_refused", status: 502 };
   }
   // BOUNDED BEFORE IT IS BUFFERED. This runs on every reply on the chat path,
   // and neither the character cap on the text nor the abort deadline limits a
