@@ -283,6 +283,12 @@ rm -f "$HDR"
 # and only then is the spoken-reply leg skipped.
 LOCALV=$(printf "header = \"Cookie: clawbox_session=%s\"\n" "$(cookie)" | curl -sS --max-time 30 -K - "$DASHBOARD/setup-api/tts" 2>/dev/null | nj "v && Array.isArray(v.engines) ? v.engines.filter((e) => e.id === \"local\").map((e) => e.configured === true)[0] : null")
 say "{\"localVoice\":${LOCALV:-null}}"
+# Whether Kokoro is INSTALLED: its weights stamp and its user unit, the two facts
+# hasLocalTtsEngine() reads. Not localVoice: that is the "configured" flag of
+# the local engine, which broken wiring can leave false with Kokoro installed.
+KOKORO=false
+if [ -f "$HOME/.cache/clawbox/kokoro-installed" ] && { [ -f "$HOME/.config/systemd/user/kokoro-server.service" ] || systemctl --user cat kokoro-server.service >/dev/null 2>&1; }; then KOKORO=true; fi
+say "{\"kokoroInstalled\":$KOKORO}"
 if [ "$RUNTIME" = hermes ]; then
   say "{\"hermesAfter\":$(hermes_provider)}"
 else
@@ -357,21 +363,33 @@ else
   skip "channel voice notes through tools.media are OpenClaw's; Hermes' chat microphone was checked above"
 fi
 
-# 3. The voice reply.
-if printf '%s' "$(r '.speak.error')" | grep -q 'no_local_voice' || { printf '%s' "$(r '.speak.error')" | grep -q 'no_voice' && [ "$(r '.localVoice')" = false ]; }; then
-  skip "no voice is installed on this board (Kokoro): the spoken reply leg needs it"
+# 3. The voice reply. With Kokoro not installed the box has nothing of its own
+# to speak with, and under the lock it must refuse rather than fall back to the
+# cloud: it says so as no_local_voice, or (seen on a golden-restored board,
+# TASK-2638) as cloud_refused, depending on the voice Hermes was left on. Any
+# refusal is right then, and the leg is a skip that names it; a 200 would have
+# spoken through something other than the box and fails. With Kokoro
+# installed, a refusal fails like any other: the wiring is broken.
+SPEAK_CODE=$(printf '%s' "$(r '.speak.error')" | jq -r '.code // empty' 2>/dev/null)
+KOKORO=$(r '.kokoroInstalled')
+if [ "$KOKORO" != true ] && [ "$KOKORO" != false ]; then
+  not_ok "whether Kokoro is installed on this board could not be read (kokoroInstalled: $KOKORO): the voice reply cannot be judged"
+elif [ "$KOKORO" = false ] && [ "$(r '.speak.status')" != 200 ]; then
+  skip "Kokoro is not installed on this board: the spoken reply leg needs it (the box refused under the lock: HTTP $(r '.speak.status')${SPEAK_CODE:+, $SPEAK_CODE})"
+elif [ "$KOKORO" = false ]; then
+  not_ok "a voice reply was spoken under the lock although Kokoro is not installed, so not by the box's own voice: $(r '.speak | tojson')"
 elif [ "$(r '.speak.status')" = 200 ] && [ "$(r '.speak.bytes')" -gt 1024 ] 2>/dev/null && { [ "$RUNTIME" = hermes ] || [ "$(r '.speak.engine')" = local ]; }; then
   ok "a voice reply was spoken by the box's own voice under the lock ($(r '.speak.bytes') bytes of $(r '.speak.type')$([ -n "$(r '.speak.engine')" ] && printf ', engine %s' "$(r '.speak.engine')"))"
 else
   not_ok "the voice reply under the lock: $(r '.speak | tojson')"
 fi
 if [ "$RUNTIME" = hermes ]; then
-  if [ "$(r '.localVoice')" = false ]; then
-    # Kokoro is what Hermes is moved to: with no voice installed there is
-    # nothing to move it to, and the product rightly leaves its voice alone
-    # (TASK-2638: a golden-restored board has none). The move itself is
-    # asserted below whenever a voice is installed.
-    skip "no voice is installed on this board (Kokoro), so Hermes has no local voice to move to under the lock (its voice: before $(r '.hermesBefore'), after $(r '.hermesAfter'))"
+  if [ "$(r '.kokoroInstalled')" = false ]; then
+    # Kokoro is what Hermes is moved to: with it not installed there is nothing
+    # to move it to (TASK-2638: a golden-restored board has none). Gated on the
+    # installation, not on localVoice, so wiring that leaves an installed
+    # Kokoro unconfigured still fails the move below.
+    skip "Kokoro is not installed on this board, so Hermes has no local voice to move to under the lock (its voice: before $(r '.hermesBefore'), after $(r '.hermesAfter'))"
   elif [ "$(r '.hermesBefore')" = edge ] && [ "$(r '.hermesAfter')" = clawbox-local ]; then
     ok "Hermes' factory edge voice (Microsoft's cloud) was replaced by Kokoro under the lock (edge → clawbox-local)"
   else
