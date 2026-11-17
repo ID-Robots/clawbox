@@ -7,6 +7,9 @@
 // gateway events.
 import crypto from "node:crypto";
 
+/** The frames that end a turn on the chat route. */
+const TERMINAL_EVENTS = new Set(["done", "error", "stopped"]);
+
 /**
  * Server-sent events out of a buffer: every complete `event:`/`data:` block,
  * and what is left for the next read. `data` is parsed JSON, or null.
@@ -52,27 +55,48 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
   /**
    * Whether no turn runs under `key` any more, as the route itself tells it:
    * GET re-attaches to the key's newest live turn — a running one if there is
-   * one — replays its frames, and ends the stream only once that turn has
-   * ended (204: no turn on record). An end within `settleMs` is settled; a
-   * stream still open then, or no answer, is not.
+   * one — and replays its frames (204: no turn on record). Settled means a 204,
+   * or a replayed end of that turn (a done, error or stopped frame). A stream
+   * that just closes proves nothing (a dropped connection, a session that
+   * expired, a turn that keeps running): it is asked again. Not settled by
+   * `settleMs`, or no answer by then, is not settled.
    */
   async function settled(key) {
+    const deadline = Date.now() + settleMs;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), settleMs);
     try {
-      const res = await fetch(`${dash}/setup-api/hermes/chat?${new URLSearchParams({ sessionKey: key })}`, {
-        headers: headers({ Accept: "text/event-stream" }),
-        signal: ac.signal,
-      });
-      if (res.status === 204) return true;
-      if (!res.ok || !res.body) { log(`settle ${key}: HTTP ${res.status}`); return false; }
-      const reader = res.body.getReader();
-      for (;;) {
-        const { done } = await reader.read();
-        if (done) return true;
+      while (!ac.signal.aborted) {
+        try {
+          const res = await fetch(`${dash}/setup-api/hermes/chat?${new URLSearchParams({ sessionKey: key })}`, {
+            headers: headers({ Accept: "text/event-stream" }),
+            signal: ac.signal,
+          });
+          if (res.status === 204) return true;
+          if (!res.ok || !res.body) {
+            log(`settle ${key}: HTTP ${res.status}`);
+          } else {
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+            let buf = "";
+            for (;;) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              const taken = takeSseFrames(buf + dec.decode(value, { stream: true }));
+              buf = taken.rest;
+              if (taken.frames.some((f) => TERMINAL_EVENTS.has(f.event))) {
+                try { await reader.cancel(); } catch { /* ended */ }
+                return true;
+              }
+            }
+          }
+        } catch (e) {
+          if (ac.signal.aborted) break;
+          log(`settle ${key}: ${e.message}`);
+        }
+        if (Date.now() + 500 >= deadline) break;
+        await new Promise((res) => setTimeout(res, 500));
       }
-    } catch (e) {
-      if (!ac.signal.aborted) log(`settle ${key}: ${e.message}`);
       return false;
     } finally {
       clearTimeout(timer);
@@ -132,7 +156,10 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
         const json = await res.json().catch(() => null);
         if (res.ok && json && typeof json.text === "string") done = json;
         else {
-          refused = true;
+          // A 4xx is the route refusing before any turn ran. A 5xx can come
+          // after the CLI fallback had opened a session (it answers 502 with
+          // no id): that one may leave a session behind.
+          refused = res.status >= 400 && res.status < 500;
           error = { kind: "http", message: `HTTP ${res.status}: ${String(json?.error || "").slice(0, 160)}` };
         }
       } else {
@@ -185,11 +212,15 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
     // bounded 5 s for it; whether it really ended is asked of the route.
     if (!ended) {
       r.latencyMs = null;
-      await stop(sess.key, turnId);
-      if (!(await settled(sess.key))) {
+      // A Stop the route took is held for this turnId even if the POST has not
+      // registered its turn yet, so a late start is stopped on arrival. A Stop
+      // that failed holds nothing: the route showing no turn proves nothing.
+      const stopped = await stop(sess.key, turnId);
+      const why = stopped === null ? "its Stop failed" : (await settled(sess.key)) ? null : `its Stop was not confirmed within ${Math.round(settleMs / 1000)} s`;
+      if (why) {
         sess.blocked = true;
-        r.error.message = `${r.error.message}; its Stop was not confirmed within ${Math.round(settleMs / 1000)} s, so no more turns go to this session`.slice(0, 300);
-        log(`${sess.key}: a Stopped turn did not settle within ${Math.round(settleMs / 1000)} s: no more turns on this session`);
+        r.error.message = `${r.error.message}; ${why}, so no more turns go to this session`.slice(0, 300);
+        log(`${sess.key}: ${why}: no more turns on this session`);
       }
     }
     if (!threadedBefore && !sess.sessionId && !refused) sess.untracked = (sess.untracked || 0) + 1;

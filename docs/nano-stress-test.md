@@ -52,10 +52,14 @@ timeout, a send the gateway did not acknowledge in time, a stream or socket
 that broke off, the run being stopped — is stopped on the box (`chat.abort` on
 OpenClaw, the route's Stop on Hermes) before the session's next turn, and
 counts as an error with no latency. On Hermes the run then asks the route
-whether the turn really ended (`GET /setup-api/hermes/chat` re-attaches to the
-key's newest turn and ends once nothing runs under it); a turn not confirmed
-within 20 s blocks its session: no further turn goes to it and the cleanup
-leaves it alone. So does a runtime error (on Hermes a
+whether the turn really ended: `GET /setup-api/hermes/chat` re-attaches to the
+key's newest turn, and only a 204 (no turn on record) or a replay carrying the
+turn's own end (done, error, stopped) counts; a stream that just closes is
+asked again. A turn whose Stop failed, or that is not confirmed within 20 s,
+blocks its session: no further turn goes to it and the cleanup leaves it
+alone. A turn that ended before Hermes named its session, a 5xx answer
+included (the CLI fallback answers 502 after it may have opened one), is
+counted the same way for the cleanup. So does a runtime error (on Hermes a
 provider's refusal comes back as "Error: …" text); a wrong answer keeps its
 latency.
 

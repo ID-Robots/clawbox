@@ -31,7 +31,7 @@ const RUN_SH = path.join(REPO, "scripts/nano-stress/run.sh");
 const HERMES_SESSION = "20261117_120000_abcdef";
 const tagOf = (message: string) => /STRESS-[0-9A-F]+/.exec(message)?.[0] ?? "none";
 
-type Mode = "answer" | "hang" | "hang-stop" | "eof" | "destroy" | "refuse" | "error";
+type Mode = "answer" | "hang" | "hang-stop" | "eof" | "destroy" | "refuse" | "cli-502" | "error";
 
 /** The box's web server, as far as the stress run uses it. */
 class Dashboard {
@@ -43,9 +43,13 @@ class Dashboard {
   stops: Array<{ sessionKey: string | null; turnId: string | null }> = [];
   hanging = new Set<http.ServerResponse>();
   heldStops = new Set<http.ServerResponse>();
-  // GET re-attach: 204 (no turn on record) unless a turn is held running.
-  liveHeld = false;
+  // GET re-attach: "none" 204 (no turn on record); "held" a running turn (the
+  // stream stays open); "eof" a stream that closes with no end of the turn in
+  // it; "replay" an ended turn (its frames, then its "stopped" frame).
+  attach: "none" | "held" | "eof" | "replay" = "none";
   attaches = 0;
+  // The Stop request itself fails (HTTP 500).
+  failStop = false;
   onPost: (() => void) | null = null;
 
   async start() {
@@ -57,8 +61,9 @@ class Dashboard {
     this.posts = [];
     this.stops = [];
     this.onPost = null;
-    this.liveHeld = false;
+    this.attach = "none";
     this.attaches = 0;
+    this.failStop = false;
     for (const res of this.hanging) res.end();
     this.hanging.clear();
     for (const res of this.heldStops) res.destroy();
@@ -84,14 +89,17 @@ class Dashboard {
       if (url.pathname !== "/setup-api/hermes/chat") return this.json(res, 404, { error: "not here" });
       if (req.method === "GET") {
         this.attaches++;
-        if (!this.liveHeld) { res.writeHead(204); res.end(); return; }
+        if (this.attach === "none") { res.writeHead(204); res.end(); return; }
         res.writeHead(200, { "Content-Type": "text/event-stream" });
         res.write(`event: delta\ndata: ${JSON.stringify({ text: "…" })}\n\n`);
+        if (this.attach === "eof") { res.end(); return; }
+        if (this.attach === "replay") { res.end("event: stopped\ndata: {}\n\n"); return; }
         this.heldStops.add(res);
         return;
       }
       if (req.method === "DELETE") {
         this.stops.push({ sessionKey: url.searchParams.get("sessionKey"), turnId: url.searchParams.get("turnId") });
+        if (this.failStop) return this.json(res, 500, { error: "stop failed" });
         // A Stop that never answers: the turn sending it cannot end.
         if (this.mode === "hang-stop" && url.searchParams.get("turnId")) { this.heldStops.add(res); return; }
         for (const h of this.hanging) h.end();
@@ -102,6 +110,8 @@ class Dashboard {
       this.posts.push({ sessionKey: turn.sessionKey, turnId: turn.turnId, message: turn.message });
       this.onPost?.();
       if (this.mode === "refuse") return this.json(res, 409, { error: "a turn is already running" });
+      // The CLI fallback failing after it may have opened a session.
+      if (this.mode === "cli-502") return this.json(res, 502, { error: "hermes exited with code 1" });
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       res.write(`event: delta\ndata: ${JSON.stringify({ text: "…" })}\n\n`);
       if (this.mode === "answer") {
@@ -265,7 +275,7 @@ describe("the Hermes turn", () => {
     expect(s).not.toHaveProperty("blocked");
 
     dash.reset("hang");
-    dash.liveHeld = true; // the route still holds a running turn under the key
+    dash.attach = "held"; // the route still holds a running turn under the key
     const held = sess();
     const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleMs: 400 });
     const r2 = await driver.turn(held, ask, 300);
@@ -275,6 +285,45 @@ describe("the Hermes turn", () => {
     const next = await driver.turn(held, ask, 300);
     expect(next.error?.kind).toBe("blocked");
     expect(dash.posts).toHaveLength(1);
+  });
+
+  it("takes only a 204 or a replayed end of the turn as settled, never a bare end of stream", async () => {
+    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleMs: 1500 });
+    dash.reset("hang");
+    dash.attach = "replay";
+    const replayed = sess();
+    await driver.turn(replayed, ask, 300);
+    expect(replayed).not.toHaveProperty("blocked");
+
+    dash.reset("hang");
+    dash.attach = "eof"; // e.g. the connection dropped: proves nothing
+    const cut = sess();
+    const r = await driver.turn(cut, ask, 300);
+    expect(r.error?.message).toContain("its Stop was not confirmed within 2 s");
+    expect(cut.blocked).toBe(true);
+    expect(dash.attaches).toBeGreaterThan(1); // asked again until the deadline
+  });
+
+  it("blocks the session when the Stop itself failed, even if the route shows no turn", async () => {
+    dash.reset("hang");
+    dash.failStop = true;
+    const s = sess();
+    const r = await live().turn(s, ask, 300);
+    expect(r.error?.message).toContain("its Stop failed, so no more turns go to this session");
+    expect(s.blocked).toBe(true);
+    expect(dash.attaches).toBe(0);
+  });
+
+  it("counts a 5xx answer as a turn that may have opened a session, a 4xx refusal as none", async () => {
+    dash.reset("cli-502");
+    const failed = sess();
+    expect((await live().turn(failed, ask, 5000)).error?.kind).toBe("http");
+    expect(failed.untracked).toBe(1);
+    dash.reset("refuse");
+    const refused = sess();
+    expect((await live().turn(refused, ask, 5000)).error?.kind).toBe("http");
+    expect(refused).not.toHaveProperty("untracked");
+    expect(dash.stops).toEqual([]);
   });
 
   it("ends at once, Stopped, when the run stops; starts nothing once it has", async () => {
