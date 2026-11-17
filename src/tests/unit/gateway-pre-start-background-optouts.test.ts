@@ -237,6 +237,53 @@ d("gateway-pre-start.sh — a fresh box", () => {
   });
 });
 
+/** The shipped derivation of the heartbeat-retired flag, out of the real script. */
+function retiredFlagDerivation(): string {
+  const src = readFileSync(SCRIPT, "utf-8");
+  const from = "if [ -z \"${CLAWBOX_OPENCLAW_2026_11_5:-}\" ]; then";
+  const to = "export CLAWBOX_OPENCLAW_2026_11_5\n";
+  const start = src.indexOf(from);
+  const end = src.indexOf(to, start);
+  if (start < 0 || end < 0) throw new Error("the 2026.11.5 flag derivation is not in gateway-pre-start.sh");
+  return src.slice(start, end + to.length);
+}
+
+d("gateway-pre-start.sh — which cores have retired the heartbeat key", () => {
+  // The flag is DERIVED from the installed core's version with `sort -V`, and
+  // the cases below run that derivation itself: a broken comparison would make
+  // a 2026.11.3 box skip a row it needs, or a 2026.11.5 box try the refused write.
+  function flagFor(effective: string, explicit?: string): string {
+    const r = spawnSync("bash", ["-c", `${retiredFlagDerivation()}\nprintf %s "$CLAWBOX_OPENCLAW_2026_11_5"`], {
+      encoding: "utf-8",
+      env: testEnv({ PATH: "/usr/bin:/bin", CLAWBOX_OPENCLAW_EFFECTIVE: effective, ...(explicit === undefined ? {} : { CLAWBOX_OPENCLAW_2026_11_5: explicit }) }),
+      timeout: 30_000,
+    });
+    expect(r.status).toBe(0);
+    return r.stdout;
+  }
+
+  it.each([
+    ["2026.11.5", "1"],
+    ["2026.11.6", "1"],
+    ["2026.11.10", "1"],
+    ["2026.12.0", "1"],
+    ["2027.1.0", "1"],
+    ["2026.11.5-beta.1", "1"],
+    ["2026.11.4", "0"],
+    ["2026.11.3", "0"],
+    ["2026.10.9", "0"],
+    ["2026.9.30", "0"],
+    ["", "0"],
+  ])("takes the core %s as %s", (effective, expected) => {
+    expect(flagFor(effective)).toBe(expected);
+  });
+
+  it("lets an explicit value win, as the other core flags do", () => {
+    expect(flagFor("2026.11.3", "1")).toBe("1");
+    expect(flagFor("2026.11.5", "0")).toBe("0");
+  });
+});
+
 d("gateway-pre-start.sh — a box the previous build seeded off", () => {
   it("flips every key still at its opt-out, and writes generation 2", () => {
     writeGen1();

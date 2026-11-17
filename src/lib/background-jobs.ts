@@ -1,7 +1,7 @@
 import { getActiveHarness, type Harness } from "@/lib/harness";
 import { patchHermesConfig, readHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { callGatewayRpc, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigUnset } from "@/lib/openclaw-config";
-import { installedOpenclawCoreAtLeast } from "@/lib/openclaw-core-generation";
+import { coreVersionAtLeast, installedOpenclawCoreVersion } from "@/lib/openclaw-core-generation";
 
 // The three things the box does on its OWN initiative, and the switches for them.
 //
@@ -93,6 +93,14 @@ export interface BackgroundJobsStatus {
    */
   degraded: boolean;
   /**
+   * Set (with `degraded: true`) when only SOME rows are guesses: the check-ins
+   * row on a core where it is an automation job the gateway could not be asked
+   * about, or whose version could not be read. The rows not named here were
+   * read from the config as ever and stay switchable. Absent when every row of
+   * a degraded status is a guess (a config nobody could read).
+   */
+  unreadable?: BackgroundJobId[];
+  /**
    * TASK-2387: an OpenClaw box whose chats all share one AI engine
    * (`CLAWBOX_SINGLE_ENGINE`), where `gateway-pre-start.sh` keeps memory
    * dreaming and self-learning's background review off by default. Always
@@ -139,13 +147,19 @@ function valueAt(config: unknown, key: string): unknown {
 }
 
 /**
- * From OpenClaw 2026.11.5 the heartbeat is an automation job, not a config key
- * (see the header). Read from the installed core's manifest, like the other
- * version gates; an unreadable manifest is "no", which keeps the key-based
- * behaviour a box on an older core needs.
+ * How the heartbeat is kept on the installed core: `job` from OpenClaw 2026.11.5
+ * (an automation job, see the header), `key` before it
+ * (`agents.defaults.heartbeat.every`), `unknown` when the core's version cannot
+ * be read. NOT folded into a yes/no: on a core that retired the key an absent
+ * key reads as the core's default, ON, which is the very lie this module's
+ * switch must not tell over a disabled job, so "cannot tell" is refused rather
+ * than answered as the older core.
  */
-async function heartbeatIsAutomation(): Promise<boolean> {
-  return installedOpenclawCoreAtLeast(2026, 11, 5);
+type HeartbeatKeeping = "job" | "key" | "unknown";
+
+async function heartbeatKeeping(): Promise<HeartbeatKeeping> {
+  const retired = coreVersionAtLeast(await installedOpenclawCoreVersion(), 2026, 11, 5);
+  return retired === null ? "unknown" : retired ? "job" : "key";
 }
 
 /** One automation job the check-ins switch drives. */
@@ -156,23 +170,44 @@ interface CheckInJob {
 }
 
 /**
- * The names the heartbeat monitor's job goes by: `heartbeat-<agent>` (what a
- * 2026.11.3 box named its monitor, and what Doctor keeps when it converts
- * it), `Heartbeat (<agent>)` (the 2026.11.3 documentation's wording) and
- * `Proactive check (<agent>)` (the job the core's own setup creates). The core
- * keeps no marker on a converted job: its declaration key is dropped and the
- * ownership lives in a receipt the gateway does not publish, so the name is the
- * only thing a client can read. An owner who renames the job takes it out of
- * this switch, which then says there is none rather than guessing.
+ * The heartbeat monitor's job, or null for any other row. The core keeps no
+ * marker on a converted job (its declaration key is dropped and the ownership
+ * lives in a receipt the gateway does not publish), so three things together
+ * say it is one:
+ *   - it is an ordinary agent-turn automation (what Doctor converts a monitor
+ *     into and what the core's setup creates),
+ *   - it belongs to an agent, and
+ *   - its name is one the core gives a monitor FOR THAT AGENT: `heartbeat-<agent>`
+ *     (what a 2026.11.3 box named its monitor, kept by the conversion),
+ *     `Heartbeat (<agent>)` (the 2026.11.3 documentation's wording) or
+ *     `Proactive check (<agent>)` (the job the core's own setup creates).
+ * A job an owner called `heartbeat-report` for an agent that is not `report` is
+ * therefore not taken for the monitor and never switched by this row; one the
+ * owner renamed is not found, and the row says there is none rather than
+ * guessing.
  */
-const CHECK_IN_JOB_NAME = /^(?:heartbeat-.+|heartbeat \(.+\)|proactive check \(.+\))$/i;
-
-export function isCheckInJobName(name: unknown): boolean {
-  return typeof name === "string" && CHECK_IN_JOB_NAME.test(name.trim());
+export function checkInJobOf(raw: unknown): CheckInJob | null {
+  if (!raw || typeof raw !== "object") return null;
+  const job = raw as Record<string, unknown>;
+  if (typeof job.id !== "string" || typeof job.enabled !== "boolean") return null;
+  const name = typeof job.name === "string" ? job.name.trim() : "";
+  const agent = typeof job.agentId === "string" ? job.agentId.trim().toLowerCase() : "";
+  const payload = job.payload && typeof job.payload === "object" ? (job.payload as Record<string, unknown>) : null;
+  if (!name || !agent || payload?.kind !== "agentTurn") return null;
+  const own = [`heartbeat-${agent}`, `heartbeat (${agent})`, `proactive check (${agent})`];
+  return own.includes(name.toLowerCase()) ? { id: job.id, name, enabled: job.enabled } : null;
 }
 
 /** `cron.list` answers at most this many jobs a page. */
 const CRON_LIST_PAGE = 200;
+
+/**
+ * How long a READ of the job list may wait for the gateway. The Settings panel
+ * asks on every open, and a gateway that is restarting (the other two switches
+ * restart it) answers the call's own 20 s late: the row says it could not be
+ * read instead.
+ */
+const CRON_LIST_READ_TIMEOUT_MS = 8_000;
 
 /**
  * Every check-in job the box has, disabled ones included. Throws when the
@@ -183,20 +218,16 @@ async function listCheckInJobs(): Promise<CheckInJob[]> {
   const found: CheckInJob[] = [];
   let offset = 0;
   for (let page = 0; page < 50; page += 1) {
-    const reply = await callGatewayRpc("cron.list", {
-      includeDisabled: true,
-      includeDeliveryPreviews: false,
-      limit: CRON_LIST_PAGE,
-      offset,
-    });
+    const reply = await callGatewayRpc(
+      "cron.list",
+      { includeDisabled: true, includeDeliveryPreviews: false, limit: CRON_LIST_PAGE, offset },
+      { timeoutMs: CRON_LIST_READ_TIMEOUT_MS },
+    );
     const jobs = reply.jobs;
     if (!Array.isArray(jobs)) throw new Error("cron.list answered no job list");
     for (const raw of jobs) {
-      if (!raw || typeof raw !== "object") continue;
-      const job = raw as Record<string, unknown>;
-      if (typeof job.id === "string" && typeof job.enabled === "boolean" && isCheckInJobName(job.name)) {
-        found.push({ id: job.id, name: String(job.name).trim(), enabled: job.enabled });
-      }
+      const job = checkInJobOf(raw);
+      if (job) found.push(job);
     }
     if (reply.hasMore !== true) return found;
     const next = typeof reply.nextOffset === "number" ? reply.nextOffset : null;
@@ -242,23 +273,37 @@ async function readOpenclawJobs(): Promise<BackgroundJobsStatus> {
   const every = valueAt(config, OPENCLAW_KEYS.checkIns);
   const dreaming = valueAt(config, OPENCLAW_KEYS.memoryReview);
   const mode = valueAt(config, OPENCLAW_KEYS.skillLearning);
-  // A core that retired the heartbeat key is asked about the job instead. A
-  // throw here (the gateway cannot be asked) reaches `readBackgroundJobs`,
-  // which says `degraded`: a guess at "ON" over a monitor nobody could look at
-  // is the false success this module is written against.
-  const checkIns: BackgroundJobRow = (await heartbeatIsAutomation())
-    ? checkInRowFromJobs(await listCheckInJobs())
-    : {
-        id: "checkIns",
-        // "0m" disables the recurring cadence; anything else, including an
-        // absent key, is a cadence the core will run.
-        enabled: typeof every === "string" ? every.trim() !== "0m" : true,
-        supported: true,
-        key: OPENCLAW_KEYS.checkIns,
-      };
+  // A core that retired the heartbeat key is asked about the job instead. When
+  // that cannot be done (the gateway does not answer, or the core's version is
+  // not readable) the check-ins row alone is a guess, and says so: the other
+  // two rows come from the config as ever, and a gateway that is down must not
+  // stop them being switched. The guess is ON, like every degraded row — never
+  // a reading of an absent key, which on that core means nothing.
+  const keeping = await heartbeatKeeping();
+  let checkIns: BackgroundJobRow;
+  let unreadable = false;
+  if (keeping === "key") {
+    checkIns = {
+      id: "checkIns",
+      // "0m" disables the recurring cadence; anything else, including an
+      // absent key, is a cadence the core will run.
+      enabled: typeof every === "string" ? every.trim() !== "0m" : true,
+      supported: true,
+      key: OPENCLAW_KEYS.checkIns,
+    };
+  } else {
+    try {
+      if (keeping === "unknown") throw new Error("the installed OpenClaw's version could not be read");
+      checkIns = checkInRowFromJobs(await listCheckInJobs());
+    } catch {
+      unreadable = true;
+      checkIns = { id: "checkIns", enabled: true, supported: true, key: null };
+    }
+  }
   return {
     harness: "openclaw",
-    degraded: false,
+    degraded: unreadable,
+    ...(unreadable ? { unreadable: ["checkIns" as const] } : {}),
     singleEngine: isSingleEngineBox(),
     jobs: [
       checkIns,
@@ -341,14 +386,23 @@ export class BackgroundJobError extends Error {
  */
 async function writeOpenclawJob(id: BackgroundJobId, enabled: boolean): Promise<void> {
   const key = OPENCLAW_KEYS[id];
-  if (id === "checkIns" && (await heartbeatIsAutomation())) {
-    // The job, not a key (see the header): only the ones that are not already
-    // there, so an owner's second click on a half-switched box does not touch
-    // what is right. `cron.update` is the ordinary automation edit, live
-    // without a gateway restart.
+  const keeping = id === "checkIns" ? await heartbeatKeeping() : "key";
+  if (keeping !== "key") {
+    // The job, not a key (see the header). A core whose version cannot be read
+    // is not written to at all: the key may not exist there. Only the jobs that
+    // are not already in the wanted state are touched, so a second click on a
+    // half-switched box leaves what is right alone. `cron.update` is the
+    // ordinary automation edit, live without a gateway restart.
+    if (keeping === "unknown") throw new Error("the installed OpenClaw's version could not be read");
     for (const job of await listCheckInJobs()) {
       if (job.enabled === enabled) continue;
       await callGatewayRpc("cron.update", { id: job.id, patch: { enabled } });
+    }
+    // EVERY job, not "any": the row reads ON when any job is on, so one job the
+    // core accepted and did not change would still read back as the wanted
+    // state after a switch ON.
+    if ((await listCheckInJobs()).some((job) => job.enabled !== enabled)) {
+      throw new Error("the core did not take the change on every check-in job");
     }
     return;
   }
@@ -393,6 +447,17 @@ async function writeHermesJob(id: BackgroundJobId, enabled: boolean): Promise<vo
 }
 
 /**
+ * Whether `id`'s row in `status` is a guess. A wholly degraded status (the
+ * config could not be read) is a guess in every row; one that names its
+ * `unreadable` rows is a guess in those alone, so a gateway that cannot be asked
+ * about the check-ins does not stop dreaming or self-learning being switched.
+ */
+function cannotTrust(status: BackgroundJobsStatus, id: BackgroundJobId): boolean {
+  if (!status.degraded) return false;
+  return status.unreadable === undefined || status.unreadable.includes(id);
+}
+
+/**
  * Write one switch and read it back off the box.
  *
  * READ BACK, not exit-code: `runOpenclawConfigSet` already verifies its own
@@ -411,7 +476,7 @@ export async function setBackgroundJob(
   // degraded status carries are shaped like a working box — every job ON, every
   // one supported — so `row.supported` would wave through a write for a job
   // this edition may not even have, against a config nobody could read.
-  if (before.degraded) {
+  if (cannotTrust(before, id)) {
     throw new BackgroundJobError("write_failed", "The device could not be read.");
   }
   const row = before.jobs.find((job) => job.id === id);
@@ -433,7 +498,7 @@ export async function setBackgroundJob(
   // look, and every row in it is a fallback that happens to read as ON — which
   // would wave an "on" write straight through over a config that still says
   // otherwise.
-  if (after.degraded) {
+  if (cannotTrust(after, id)) {
     throw new BackgroundJobError("write_failed", "The device could not confirm the change.");
   }
   if (after.jobs.find((job) => job.id === id)?.enabled !== enabled) {
@@ -479,7 +544,7 @@ export async function applyBackgroundJobRestart(harness: Harness, id?: Backgroun
   // A check-in job edited through `cron.update` is in force in the running
   // gateway already: nothing was written to the config and nothing is held in
   // memory that a start would refresh. `null`, as for Hermes: none was needed.
-  if (id === "checkIns" && (await heartbeatIsAutomation())) return null;
+  if (id === "checkIns" && (await heartbeatKeeping()) === "job") return null;
   try {
     await restartGateway();
     return true;
