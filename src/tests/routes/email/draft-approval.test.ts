@@ -573,12 +573,38 @@ describe("Send", () => {
     // Past the time a Send can take, it is a lost Send: B, made before it, still cannot send...
     vi.setSystemTime(claimedAt + 121_000);
     expect((await answer(ownerCookie(), b, "send")).json).toMatchObject({ kind: "reused", state: "uncertain" });
+    // ...and A pressed again is told the same, not "sending".
+    expect((await answer(ownerCookie(), a, "send")).json).toMatchObject({ kind: "reused", state: "uncertain" });
     expect((await mint(ownerCookie())).json).toMatchObject({ state: "uncertain" });
     // ...and "Review again" makes a card that can, which a reload then shows.
     const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
     expect(reopened.json.state).toBe("open");
     expect((await mint(ownerCookie())).json).toMatchObject({ state: "open", token: reopened.json.token });
     expect((await answer(ownerCookie(), String(reopened.json.token), "send")).status).toBe(200);
+    expect(sends).toHaveLength(1);
+  });
+
+  it("never forgets a lost Send to make room: the card count cap spares sent, sending and uncertain cards", async () => {
+    sendAnswer = 503;
+    const { json } = await mint(ownerCookie());
+    expect((await answer(ownerCookie(), json.token, "send")).json.kind).toBe("send_uncertain");
+    // A busy box: 2000 newer cards for other drafts.
+    const ledgerPath = path.join(root, "data", "mail-draft-approvals.json");
+    const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as { v: 1; cards: Record<string, unknown>[] };
+    const now = Date.now();
+    for (let i = 0; i < 2000; i += 1) {
+      ledger.cards.push({ c: `filler${String(i).padStart(16, "0")}`, u: OWNER, d: `filler-${i}`, h: "0".repeat(64), iat: now + i, exp: now + 600_000, state: "kept", at: now + i });
+    }
+    fs.writeFileSync(ledgerPath, JSON.stringify(ledger));
+    // Any write trims the ledger to its cap...
+    mailbox[OWNER]["second-draft"] = { id: "second-draft", to: ["b@example.com"], cc: [], subject: "Two", body: "2" };
+    expect((await mint(ownerCookie(), "second-draft")).json.state).toBe("open");
+    const trimmed = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as { cards: { d: string; state: string }[] };
+    expect(trimmed.cards.length).toBeLessThanOrEqual(2001);
+    expect(trimmed.cards.some((c) => c.d === DRAFT_ID && c.state === "uncertain")).toBe(true);
+    // ...and the lost Send is still not offered again on a plain look.
+    sendAnswer = 200;
+    expect((await mint(ownerCookie())).json).toMatchObject({ state: "uncertain" });
     expect(sends).toHaveLength(1);
   });
 

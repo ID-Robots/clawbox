@@ -84,7 +84,7 @@ const HASH_RE = /^[0-9a-f]{64}$/;
 const CARD_ID_RE = /^[A-Za-z0-9_-]{22}$/;
 const MAX_TOKEN_LEN = 4096;
 
-/** How many cards the ledger keeps, newest first. */
+/** How many cards the ledger keeps, newest first (bar the ones `writeLedger` pins). */
 const MAX_CARDS = 2000;
 const OPEN_KEEP_MS = 24 * 3600_000;
 const SETTLED_KEEP_MS = 30 * 24 * 3600_000;
@@ -231,11 +231,16 @@ function writeLedger(cards: CardEntry[], now: number): void {
   // MOMENT IT WAS LOST (`lostAt`), not of this write: the card that write may
   // be minting — the person's "Review again" — is then strictly newer, and
   // nothing reads the two the wrong way round.
-  const kept = cards
+  const live = cards
     .map((card) => (card.state === "sending" && now - card.at > SENDING_STALE_MS ? { ...card, state: "uncertain" as const, at: card.at + SENDING_STALE_MS } : card))
     .filter((card) => (card.state === "open" ? card.exp > now - OPEN_KEEP_MS : card.at > now - SETTLED_KEEP_MS))
-    .sort((a, b) => b.at - a.at)
-    .slice(0, MAX_CARDS);
+    .sort((a, b) => b.at - a.at);
+  // The count cap never drops a card that says a draft went, is going, or may
+  // have gone: forgetting one would offer that draft's Send again without the
+  // person's "Review again". Those leave by age alone (SETTLED_KEEP_MS).
+  const pinned = (card: CardEntry) => card.state === "sending" || card.state === "uncertain" || card.state === "sent";
+  let room = MAX_CARDS - live.filter(pinned).length;
+  const kept = live.filter((card) => pinned(card) || room-- > 0);
   fs.mkdirSync(DATA_DIR, { recursive: true });
   // config-store's discipline: a fresh temp at 0600, chmod for a stale one,
   // then an atomic rename — a crash leaves the old ledger or the new one.
@@ -535,7 +540,8 @@ export async function decideCard(
     return refusal(409, "reused", "This approval can no longer be used. Nothing was sent.", { state: null });
   }
   if (card.state !== "open") {
-    return refusal(409, "reused", "This approval was already used.", { state: card.state });
+    // A claim no answer ever came back for is reported as what it is by now: lost.
+    return refusal(409, "reused", "This approval was already used.", { state: lostAt(card, now) !== null ? "uncertain" : card.state });
   }
 
   // 4. Not expired.

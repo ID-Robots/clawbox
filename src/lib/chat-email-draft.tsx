@@ -55,6 +55,8 @@ export interface EmailDraftView {
   subject: string
   body: string
   bodyTruncated: boolean
+  /** The subject or an attachment name was cut to fit: no Send, like a cut body. */
+  headerTruncated?: boolean
   attachments: { name: string; size: number | null }[]
   hiddenCharacters?: boolean
 }
@@ -102,14 +104,23 @@ function cardPhase({ status, json }: Answer): Extract<Phase, { kind: 'open' | 's
   return null
 }
 
+/** The state the server answers when it did what the person asked. */
+const DONE: Record<Action, Settled> = { send: 'sent', keep: 'kept', revise: 'revised' }
+
+/** True when the server answered that it did `action`: a 200 naming that state. */
+function answerDone(answer: Answer | null, action: Action): boolean {
+  return answer !== null && answer.status === 200 && answer.json.state === DONE[action]
+}
+
 /**
  * True when a decide answer is not ClawBox's own word on the card: no answer
- * at all (the connection dropped), or one without a refusal kind (a proxy's
- * error page, a request that crashed). For a Send that says nothing about the
- * mail — it may have gone.
+ * at all (the connection dropped), or one that neither says it was done nor
+ * names a refusal kind (a proxy's error page, a request that crashed, a page
+ * some redirect ended on — even one answered 200). For a Send that says
+ * nothing about the mail: it may have gone.
  */
-function answerLost(answer: Answer | null): boolean {
-  return answer === null || (answer.status !== 200 && typeof answer.json.kind !== 'string')
+function answerLost(answer: Answer | null, action: Action): boolean {
+  return answer === null || (!answerDone(answer, action) && typeof answer.json.kind !== 'string')
 }
 
 /** The sentence for a refusal kind the server (or the network) answered. */
@@ -271,26 +282,27 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
     } catch {
       answer = null
     }
+    const done = answerDone(answer, action)
+    // The server closed the card: only now does the change request go to the
+    // assistant, so the chat never says "revised" over a card that is still
+    // open and sendable on the next look. Sent even when the card has gone from
+    // the screen meanwhile (another chat opened): the server has closed it, and
+    // the words are the person's next message either way.
+    if (done && action === 'revise') dispatchChatMessage(revisionMessage(t, draft, changeText))
     if (!alive.current) return
 
-    if (action === 'send' && answerLost(answer)) {
+    if (action === 'send' && answerLost(answer, action)) {
       void recheck(draft)
       return
     }
-    lostRevision.current = action === 'revise' && answerLost(answer) ? changeText : null
-    const kind = answer === null ? 'network' : answer.status === 200 ? null : (typeof answer.json.kind === 'string' ? answer.json.kind : 'unavailable')
-
-    if (kind === null) {
-      // The server closed the card: only now does the change request go to
-      // the assistant, so the chat never says "revised" over a card that is
-      // still open and sendable on the next look.
-      if (action === 'revise') {
-        dispatchChatMessage(revisionMessage(t, draft, changeText))
-        setChange('')
-      }
-      setPhase({ kind: 'settled', state: action === 'send' ? 'sent' : action === 'keep' ? 'kept' : 'revised', draft })
+    lostRevision.current = action === 'revise' && answerLost(answer, action) ? changeText : null
+    if (done) {
+      if (action === 'revise') setChange('')
+      setPhase({ kind: 'settled', state: DONE[action], draft })
       return
     }
+    const kind = answer !== null && typeof answer.json.kind === 'string' ? answer.json.kind : answer === null ? 'network' : 'unavailable'
+
     // What the server says became of this draft's Send — this card's or
     // another card's for the same draft — shown as that state, with its own
     // way on: a Send in flight can be looked at again, and one whose answer
@@ -334,9 +346,9 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
   const isError = phase.kind === 'refused' || phase.kind === 'failed' || phase.kind === 'unknown'
     || (phase.kind === 'settled' && phase.state === 'uncertain')
     || (phase.kind === 'open' && phase.notice !== undefined && busy === null)
-  // A body the server could not show whole is not offered for Send: the person
-  // would approve a tail they never saw.
-  const tooLong = draft?.bodyTruncated === true
+  // A body, subject or attachment name the server could not show whole is not
+  // offered for Send: the person would approve a tail they never saw.
+  const tooLong = draft?.bodyTruncated === true || draft?.headerTruncated === true
   const reloadable = (phase.kind === 'refused' || phase.kind === 'failed') && RELOADABLE.has(phase.reason)
   const reviewable = phase.kind === 'settled' && phase.state !== 'sent'
   const reviewLabel = phase.kind === 'settled' && phase.state === 'sending' ? t('chat.emailDraft.reload') : t('chat.emailDraft.reviewAgain')

@@ -337,6 +337,65 @@ describe("EmailDraftCard", () => {
     expect(screen.getByTestId("chat-email-draft-subject").textContent).toContain("[U+202E]");
   });
 
+  it("offers no Send when the subject or an attachment name could not be shown whole", async () => {
+    cardAnswers = [{ status: 200, body: { state: "open", token: "t", expiresAt: 1, draft: { ...DRAFT, headerTruncated: true } } }];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    const send = await screen.findByTestId("chat-email-draft-send");
+    expect(send.getAttribute("aria-disabled")).toBe("true");
+    expect(screen.getByTestId("chat-email-draft-too-long")).toBeTruthy();
+    fireEvent.click(send);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calls.filter((c) => c.url === DECIDE_ROUTE)).toEqual([]);
+  });
+
+  it("a 200 that does not say the draft was sent is not taken as sent: ClawBox is asked", async () => {
+    decideAnswers = [{ status: 200, body: {} }];
+    cardAnswers = [
+      { status: 200, body: { state: "open", token: "tok-1", expiresAt: 1, draft: DRAFT } },
+      { status: 200, body: { state: "sending", decidedAt: 1 } },
+    ];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("sending"));
+    expect(calls.at(-1)).toEqual({ url: CARD_ROUTE, body: { draftId: "AAMk-1=" } });
+  });
+
+  it("a 200 that does not say the card was revised sends nothing to the assistant", async () => {
+    const sent: string[] = [];
+    const listener = (e: Event) => sent.push((e as CustomEvent<ChatMessageDetail>).detail.text);
+    window.addEventListener(CHAT_MESSAGE_EVENT, listener);
+    try {
+      decideAnswers = [{ status: 200, body: {} }];
+      render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+      fireEvent.change(await screen.findByTestId("chat-email-draft-change"), { target: { value: "shorter" } });
+      fireEvent.click(screen.getByTestId("chat-email-draft-change-submit"));
+      await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("unavailable"));
+      expect(sent).toEqual([]);
+      expect((screen.getByTestId("chat-email-draft-change") as HTMLInputElement).value).toBe("shorter");
+    } finally {
+      window.removeEventListener(CHAT_MESSAGE_EVENT, listener);
+    }
+  });
+
+  it("a change request the server closed reaches the assistant even if the card left the screen meanwhile", async () => {
+    const sent: string[] = [];
+    const listener = (e: Event) => sent.push((e as CustomEvent<ChatMessageDetail>).detail.text);
+    window.addEventListener(CHAT_MESSAGE_EVENT, listener);
+    try {
+      let answer!: () => void;
+      decideAnswers = [{ status: 200, body: { state: "revised" }, wait: new Promise<void>((resolve) => { answer = resolve; }) }];
+      const { unmount } = render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+      fireEvent.change(await screen.findByTestId("chat-email-draft-change"), { target: { value: "shorter" } });
+      fireEvent.click(screen.getByTestId("chat-email-draft-change-submit"));
+      await waitFor(() => expect(calls.filter((c) => c.url === DECIDE_ROUTE)).toHaveLength(1));
+      unmount();
+      answer();
+      await waitFor(() => expect(sent).toEqual(["chat.emailDraft.reviseMessage subject=Offer for Acme id=AAMk-1= text=shorter"]));
+    } finally {
+      window.removeEventListener(CHAT_MESSAGE_EVENT, listener);
+    }
+  });
+
   it("offers no Send for a body it could not show whole", async () => {
     cardAnswers = [{ status: 200, body: { state: "open", token: "t", expiresAt: 1, draft: { ...DRAFT, bodyTruncated: true } } }];
     render(<EmailDraftCard draftId="AAMk-1=" t={t} />);

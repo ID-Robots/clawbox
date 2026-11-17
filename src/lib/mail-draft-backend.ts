@@ -36,6 +36,7 @@ export const BACKEND_MAX_BYTES = 1024 * 1024;
 const MAX_RECIPIENTS = 500;
 const MAX_SUBJECT_CHARS = 1_000;
 const MAX_ADDRESS_CHARS = 400;
+const MAX_ATTACHMENT_NAME_CHARS = 200;
 const MAX_ATTACHMENTS = 100;
 /**
  * What the card is given of the body. Above the backend's own 1 MiB answer
@@ -90,6 +91,12 @@ export interface DraftView {
   subject: string;
   body: string;
   bodyTruncated: boolean;
+  /**
+   * The subject or an attachment name was too long to show whole (it ends in
+   * "…"). Like a cut body, such a card offers no Send. A recipient is never
+   * cut: one too long to show is refused as unreadable.
+   */
+  headerTruncated: boolean;
   attachments: DraftAttachment[];
   /** Something in it would read differently from what is sent; shown as `[U+…]`. */
   hiddenCharacters: boolean;
@@ -163,10 +170,15 @@ export function hasInvisible(value: string): boolean {
   return false;
 }
 
+/** `cleanLine`, saying whether the line had to be cut to `max`. */
+function lineOf(value: string, max: number): { line: string; cut: boolean } {
+  const line = reveal(value.replace(/[\r\n\t\u2028\u2029]+/g, " ")).trim();
+  return line.length > max ? { line: `${line.slice(0, max)}…`, cut: true } : { line, cut: false };
+}
+
 /** One line of text (an address, a subject): no line breaks of any kind, invisible characters shown. */
 export function cleanLine(value: string, max: number): string {
-  const line = reveal(value.replace(/[\r\n\t\u2028\u2029]+/g, " ")).trim();
-  return line.length > max ? `${line.slice(0, max)}…` : line;
+  return lineOf(value, max).line;
 }
 
 /** A body: line breaks kept, every other invisible character shown. */
@@ -222,19 +234,25 @@ function record(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
-/** One recipient: `"a@b"`, `"Name <a@b>"`, `{address, name}` or Graph's `{emailAddress: {...}}`. */
+/**
+ * One recipient: `"a@b"`, `"Name <a@b>"`, `{address, name}` or Graph's
+ * `{emailAddress: {...}}`. Null when unreadable — and when too long to show
+ * whole: a cut address would show the person part of where the mail goes.
+ */
 function recipient(value: unknown): string | null {
   if (typeof value === "string") {
-    const line = cleanLine(value, MAX_ADDRESS_CHARS);
-    return line || null;
+    const { line, cut } = lineOf(value, MAX_ADDRESS_CHARS);
+    return line && !cut ? line : null;
   }
   const outer = record(value);
   if (!outer) return null;
   const inner = record(outer.emailAddress) ?? outer;
-  const address = typeof inner.address === "string" ? cleanLine(inner.address, MAX_ADDRESS_CHARS) : "";
-  const name = typeof inner.name === "string" ? cleanLine(inner.name, MAX_ADDRESS_CHARS) : "";
-  if (!address) return null;
-  return name && name.toLowerCase() !== address.toLowerCase() ? `${name} <${address}>` : address;
+  const address = typeof inner.address === "string" ? lineOf(inner.address, MAX_ADDRESS_CHARS) : { line: "", cut: false };
+  const named = typeof inner.name === "string" ? lineOf(inner.name, MAX_ADDRESS_CHARS) : { line: "", cut: false };
+  if (address.cut || named.cut) return null;
+  const name = named.line;
+  if (!address.line) return null;
+  return name && name.toLowerCase() !== address.line.toLowerCase() ? `${name} <${address.line}>` : address.line;
 }
 
 /**
@@ -247,10 +265,9 @@ function recipients(...candidates: unknown[]): string[] | null {
   if (raw === undefined) return [];
   if (typeof raw === "string") {
     // A comma- or semicolon-separated line, the shape a simple backend sends.
-    const list = raw
-      .split(/[,;]/)
-      .map((part) => cleanLine(part, MAX_ADDRESS_CHARS))
-      .filter(Boolean);
+    const parts = raw.split(/[,;]/).map((part) => lineOf(part, MAX_ADDRESS_CHARS));
+    if (parts.some((part) => part.cut)) return null;
+    const list = parts.map((part) => part.line).filter(Boolean);
     return list.length > MAX_RECIPIENTS ? null : list;
   }
   if (!Array.isArray(raw) || raw.length > MAX_RECIPIENTS) return null;
@@ -271,7 +288,7 @@ function attachments(value: unknown): DraftAttachment[] | null {
     const item = record(entry);
     if (!item || typeof item.name !== "string") return null;
     const size = typeof item.size === "number" && Number.isFinite(item.size) && item.size >= 0 ? Math.floor(item.size) : null;
-    list.push({ name: cleanLine(item.name, 200) || "attachment", size });
+    list.push({ name: cleanLine(item.name, MAX_ATTACHMENT_NAME_CHARS) || "attachment", size });
   }
   return list;
 }
@@ -357,6 +374,7 @@ export function draftView(draft: MailDraft): DraftView {
   const words = draft.bodyType === "html" ? htmlToText(draft.body) : draft.body;
   const text = cleanBody(words).trim();
   const bodyTruncated = text.length > MAX_PREVIEW_CHARS;
+  const subject = lineOf(draft.subject, MAX_SUBJECT_CHARS);
   const shown = [draft.from ?? "", ...draft.to, ...draft.cc, ...draft.bcc, ...draft.replyTo, draft.subject, words, ...draft.attachments.map((a) => a.name)];
   return {
     id: draft.id,
@@ -365,9 +383,11 @@ export function draftView(draft: MailDraft): DraftView {
     cc: draft.cc,
     bcc: draft.bcc,
     replyTo: draft.replyTo,
-    subject: cleanLine(draft.subject, MAX_SUBJECT_CHARS),
+    subject: subject.line,
     body: bodyTruncated ? text.slice(0, MAX_PREVIEW_CHARS) : text,
     bodyTruncated,
+    // A name `cleanLine` cut is one character over its cap (the "…").
+    headerTruncated: subject.cut || draft.attachments.some((a) => a.name.length > MAX_ATTACHMENT_NAME_CHARS),
     attachments: draft.attachments,
     // Addresses were revealed when they were read; the marks are what to look for there.
     hiddenCharacters: shown.some((part) => hasInvisible(part) || /\[U\+[0-9A-F]{4,6}\]/.test(part)),

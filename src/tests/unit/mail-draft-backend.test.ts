@@ -249,6 +249,29 @@ describe("what a card shows", () => {
     }
   });
 
+  it("never shows part of a recipient: one too long to show whole makes the draft unreadable", () => {
+    const long = `${"a".repeat(400)}@evil.example`;
+    expect(normalizeDraft({ ...BASE, to: [long] }, "d1")).toBeNull();
+    expect(normalizeDraft({ ...BASE, to: `ivan@example.com, ${long}` }, "d1")).toBeNull();
+    expect(normalizeDraft({ ...BASE, cc: [{ address: long }] }, "d1")).toBeNull();
+    expect(normalizeDraft({ ...BASE, bcc: [{ emailAddress: { address: "ivan@example.com", name: "x".repeat(401) } }] }, "d1")).toBeNull();
+    expect(normalizeDraft({ ...BASE, from: long }, "d1")).toBeNull();
+    // Right at the cap is still shown whole.
+    expect(draftOf({ ...BASE, to: ["a".repeat(400)] }).to).toEqual(["a".repeat(400)]);
+  });
+
+  it("offers no Send when the subject or an attachment name had to be cut", () => {
+    expect(draftView(draftOf(BASE)).headerTruncated).toBe(false);
+    const subject = draftView(draftOf({ ...BASE, subject: "s".repeat(1001) }));
+    expect(subject.subject.endsWith("…")).toBe(true);
+    expect(subject.headerTruncated).toBe(true);
+    expect(draftView(draftOf({ ...BASE, subject: "s".repeat(1000) })).headerTruncated).toBe(false);
+    const file = draftView(draftOf({ ...BASE, attachments: [{ name: `${"n".repeat(201)}.pdf`, size: 1 }] }));
+    expect(file.attachments[0].name.endsWith("…")).toBe(true);
+    expect(file.headerTruncated).toBe(true);
+    expect(draftView(draftOf({ ...BASE, attachments: [{ name: "n".repeat(200), size: 1 }] })).headerTruncated).toBe(false);
+  });
+
   it("shows the whole body of anything the backend can send, and says when it could not", () => {
     const big = draftView(draftOf({ ...BASE, body: "x".repeat(900_000) }));
     expect(big.bodyTruncated).toBe(false);
