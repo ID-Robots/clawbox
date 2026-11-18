@@ -109,6 +109,47 @@ describe("derived file names", () => {
     expect(second.extracted).toBe(0);
     expect(second.skipped).toBe(0);
   });
+
+  it("tells its caller about the entries it walks, folders and hidden ones included (TASK-2431)", async () => {
+    for (let i = 0; i < 70; i += 1) {
+      fs.mkdirSync(path.join(source, `empty-${i}`));
+      fs.mkdirSync(path.join(source, `.hidden-${i}`));
+    }
+    let beats = 0;
+    await extractDocuments(source, undefined, () => { beats += 1; });
+    expect(beats).toBe(2);
+  });
+
+  it("never publishes a conversion that ends after its pass was given up on", async () => {
+    // TASK-2431: a pass the stall watchdog or a stop gave up on can still be
+    // inside a conversion, and a newer pass may have written the derived file
+    // since. The late conversion must not land over it.
+    const pdf = path.join(source, "lease.pdf");
+    fs.writeFileSync(pdf, "%PDF-1.4 old revision\n");
+    runChild.mockImplementationOnce(async (_cmd: string, args: string[]) => {
+      fs.writeFileSync(args[4], "first conversion\n");
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    const first = await extractDocuments(source);
+    expect(first.extracted).toBe(1);
+    const [outName] = fs.readdirSync(first.derived!);
+    const out = path.join(first.derived!, outName);
+    // A newer revision of the document, and a newer pass's text already in place.
+    fs.writeFileSync(pdf, "%PDF-1.4 new revision\n");
+    fs.utimesSync(pdf, new Date(Date.now() + 60_000), new Date(Date.now() + 60_000));
+    fs.writeFileSync(out, "the newer pass's text\n");
+    const controller = new AbortController();
+    runChild.mockImplementationOnce(async (_cmd: string, args: string[]) => {
+      // Given up on while converting; the conversion still finishes.
+      controller.abort();
+      fs.writeFileSync(args[4], "the late conversion\n");
+      return { code: 0, stdout: "", stderr: "" };
+    });
+    await expect(extractDocuments(source, controller.signal)).rejects.toThrow();
+    expect(fs.readFileSync(out, "utf8")).toBe("the newer pass's text\n");
+    // And nothing of the late conversion is left beside it.
+    expect(fs.readdirSync(first.derived!)).toEqual([outName]);
+  });
 });
 
 describe("the walk's entry budget", () => {

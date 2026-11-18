@@ -154,7 +154,10 @@ export function memoryReindexAdvice(s: MemoryStatusFacts, arm: MemoryIndexArm): 
   // Only a pass that was incremental: a stopped FULL pass is completed by
   // another full one, and what it left behind already says so (an empty
   // store or a missing identity, above; OpenClaw keeps its old index whole).
-  if (s.run?.status === "failed" && s.run.mode !== "full" && (s.run.errorCode === "interrupted" || s.run.errorCode === "timed_out") && !empty) {
+  // A pass the stall watchdog ended (TASK-2431) is one of these too: it
+  // committed every file it finished, like any other stopped pass.
+  const stopped = s.run?.errorCode === "interrupted" || s.run?.errorCode === "timed_out" || s.run?.errorCode === "stalled";
+  if (s.run?.status === "failed" && s.run.mode !== "full" && stopped && !empty) {
     reasons.push({
       code: "last_pass_stopped",
       mode: "incremental",

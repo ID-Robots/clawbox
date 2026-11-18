@@ -1,0 +1,491 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { existsSync, promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { settledMemoryRun } from "@/tests/helpers/memory-run-state";
+
+/**
+ * TASK-2431 on the OpenClaw arm, with real processes: `openclaw memory index`
+ * is a stand-in that behaves like the CLI where it matters — counts on a
+ * terminal only, a SIGTERM it ends on, the error and the sign-off lines it
+ * prints when memory-core's workspace lock is held.
+ *
+ * The stall window is shortened through CLAWKEEP_MEMORY_INDEX_STALL_MS, the
+ * same knob a board check uses, so these run in seconds of real time. The
+ * fake-clock half (three hours of progress, thirty minutes of silence) is
+ * memory-index-stall.test.ts.
+ */
+
+// Starts real processes: vitest's 5 s default is not enough on a loaded runner.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+const { shard } = vi.hoisted(() => ({ shard: { enabled: true } }));
+vi.mock("@/lib/memory-shard", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/memory-shard")>(),
+  getMemoryShardEnabled: async () => shard.enabled,
+}));
+// The OpenClaw arm, whatever edition the machine running the test calls itself.
+vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/openclaw-config")>(),
+  openclawIsAbsent: () => false,
+}));
+// The gateway a pass runs without (OpenClaw 2026.11.3 indexes offline): no
+// unit is up here, its stop and start are recorded, and a test may make the
+// start after the pass slow.
+const { gateway } = vi.hoisted(() => ({
+  gateway: { stops: 0, starts: 0, startDelayMs: 0, gate: null as Promise<void> | null, stopGate: null as Promise<void> | null },
+}));
+vi.mock("@/lib/openclaw-auth-ops", () => ({
+  askOpenclawGateway: async () => ({ answered: false }),
+  openclawGatewayRuns: async () => false,
+  stopOpenclawGatewayForOffline: async () => {
+    gateway.stops += 1;
+    if (gateway.stopGate) await gateway.stopGate;
+  },
+  startOpenclawGatewayAfterOffline: async () => {
+    gateway.starts += 1;
+    if (gateway.startDelayMs) await new Promise((resolve) => setTimeout(resolve, gateway.startDelayMs));
+    if (gateway.gate) await gateway.gate;
+  },
+}));
+
+const ENV = [
+  "CLAWKEEP_DATA_DIR",
+  "CLAWKEEP_MEMORY_EMBED_LOCK",
+  "CLAWKEEP_MEMORY_OPENCLAW_BIN",
+  "CLAWKEEP_MEMORY_AGENT_DB",
+  "CLAWKEEP_MEMORY_PTY_HOST",
+  "CLAWKEEP_MEMORY_INDEX_STALL_MS",
+  "CLAWKEEP_MEMORY_LOCK_RETRY_MS",
+] as const;
+
+let tmpDir = "";
+
+beforeEach(async () => {
+  shard.enabled = true;
+  gateway.stops = 0;
+  gateway.starts = 0;
+  gateway.startDelayMs = 0;
+  gateway.gate = null;
+  gateway.stopGate = null;
+  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "memory-stall-openclaw-"));
+  process.env.CLAWKEEP_DATA_DIR = tmpDir;
+  process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+  process.env.CLAWKEEP_MEMORY_AGENT_DB = path.join(tmpDir, "agents", "main", "agent", "openclaw-agent.sqlite");
+  vi.resetModules();
+});
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  // Join the status refresh behind a finished pass before its directory goes.
+  await (await import("@/lib/clawkeep-memory")).memoryPassSettled();
+  for (const name of ENV) delete process.env[name];
+  await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+});
+
+const noTerminal = () => { process.env.CLAWKEEP_MEMORY_PTY_HOST = path.join(tmpDir, "no-such-script"); };
+
+interface FakeIndexer {
+  /** Touched when `memory index` starts, once per attempt. */
+  started: string;
+  /** Holds "TERM" once the indexer was sent SIGTERM. */
+  termed: string;
+  /** How many times `memory index` ran. */
+  attempts: () => Promise<number>;
+}
+
+/**
+ * A stand-in for the installed `openclaw`.
+ *
+ * - `memory status` fails at once: the plan runs what was asked, and the
+ *   status refresh behind a finished pass touches nothing.
+ * - `memory index` prints `steps` counts on a terminal (`--verbose` only, as the
+ *   real reporter does), `stepMs` apart, then either finishes or hangs
+ *   (`steps: 0` with `hang`) until SIGTERM, which it ends on with 143.
+ * - `lockHeldTimes`: its first N attempts fail the way memory-core does when
+ *   the workspace lock is held by a dead pass — the error, then the sign-off
+ *   lines the CLI prints whatever happened.
+ */
+async function fakeIndexer(
+  { steps = 0, stepMs = 400, hang = false, lockHeldTimes = 0, chunks = false, replace = false, holdPipe = "" }:
+  { steps?: number; stepMs?: number; hang?: boolean; lockHeldTimes?: number; chunks?: boolean; replace?: boolean; holdPipe?: string } = {},
+): Promise<FakeIndexer> {
+  const db = process.env.CLAWKEEP_MEMORY_AGENT_DB!;
+  await fs.mkdir(path.dirname(db), { recursive: true });
+  const script = path.join(tmpDir, "fake-openclaw.mjs");
+  const started = path.join(tmpDir, "started");
+  const termed = path.join(tmpDir, "termed");
+  const counter = path.join(tmpDir, "attempts");
+  await fs.writeFile(script, [
+    `#!${process.execPath}`,
+    "import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';",
+    "if (process.argv.slice(2, 4).join(' ') !== 'memory index') process.exit(1);",
+    `appendFileSync(${JSON.stringify(counter)}, 'x');`,
+    `const attempt = readFileSync(${JSON.stringify(counter)}, 'utf8').length;`,
+    `writeFileSync(${JSON.stringify(started)}, String(attempt));`,
+    `process.on('SIGTERM', () => { writeFileSync(${JSON.stringify(termed)}, 'TERM'); process.exit(143); });`,
+    `if (attempt <= ${lockHeldTimes}) {`,
+    "  process.stderr.write('Memory index failed (main): Timed out waiting for memory workspace lock at plugin-state:memory-core/short-term-locks/c85dd886 (held by 4242:00000000-0000-4000-8000-000000000000)\\n');",
+    "  process.stderr.write('[state/agent-db] agent database clean-close receipt: active-leases\\n');",
+    "  process.stderr.write('09:49:46 [state/agent-db] agent database clean-close receipt: active-leases\\n');",
+    "  process.exit(1);",
+    "}",
+    // `chunks`: a full pass's scratch index, a row more at every step, the
+    // only progress there is to see off a terminal.
+    `const scratch = ${JSON.stringify(chunks)} ? new (await import('node:sqlite')).DatabaseSync(${JSON.stringify(db)} + '.memory-reindex-' + crypto.randomUUID()) : null;`,
+    "scratch?.exec('CREATE TABLE memory_index_chunks (id TEXT PRIMARY KEY)');",
+    // `replace`: every step rewrites the same chunk, so the count never moves.
+    `const write = ${replace ? "(done) => scratch?.prepare('INSERT OR REPLACE INTO memory_index_chunks VALUES (?)').run('c0')" : "(done) => scratch?.prepare('INSERT INTO memory_index_chunks VALUES (?)').run('c' + done)"};`,
+    "const say = (done) => { write(done); if (process.stderr.isTTY && process.argv.includes('--verbose')) process.stderr.write(`\\r\\x1b[2KIndexing memory files\\u2026 ${done}/" + `${Math.max(steps, 1)}` + " \\u00b7 elapsed 0:0${done % 10} 50%`); };",
+    "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));",
+    `for (let done = 0; done <= ${steps}; done += 1) { say(done); if (done < ${steps}) await sleep(${stepMs}); }`,
+    `if (${JSON.stringify(hang)}) { setInterval(() => {}, 1000); } else {`,
+    "  process.stderr.write('\\r\\x1b[2KMemory index updated (main): 3 files indexed.\\r\\n');",
+    "  process.stderr.write('[state/agent-db] agent database clean-close receipt: active-leases\\r\\n');",
+    // `holdPipe`: a descendant that inherits stderr and outlives the indexer,
+    // its pid written to that file so the test can end it.
+    `  if (${JSON.stringify(holdPipe)}) { const { spawn } = await import('node:child_process'); const d = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: ['ignore', 'ignore', 'inherit'] }); writeFileSync(${JSON.stringify(holdPipe)}, String(d.pid)); d.unref(); }`,
+    "}",
+    "",
+  ].join("\n"), { mode: 0o755 });
+  process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+  return {
+    started,
+    termed,
+    attempts: async () => (await fs.readFile(counter, "utf8").catch(() => "")).length,
+  };
+}
+
+async function waitFor(file: string): Promise<void> {
+  for (let i = 0; i < 500 && !existsSync(file); i += 1) await new Promise((r) => setTimeout(r, 20));
+  expect(existsSync(file), `${path.basename(file)} never appeared`).toBe(true);
+}
+
+/** The lock goes just after the settled record is written, not with it. */
+async function lockGone(): Promise<boolean> {
+  const lock = path.join(tmpDir, "memory-index.lock");
+  for (let i = 0; i < 250 && existsSync(lock); i += 1) await new Promise((r) => setTimeout(r, 20));
+  return !existsSync(lock);
+}
+
+function deviceLog(warn: { mock: { calls: unknown[][] } }): string {
+  return warn.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+}
+
+describe("an OpenClaw pass that stops moving", () => {
+  it("is stopped as `stalled` on a terminal, though `script` answers the SIGTERM with exit 0", async () => {
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1500";
+    const fake = await fakeIndexer({ steps: 1, hang: true });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    const run = await settledMemoryRun(tmpDir, { tries: 1_000 });
+    expect(run).toMatchObject({ status: "failed", errorCode: "stalled" });
+    expect(run.error).toBe("Indexing made no progress for a long time and was stopped. Run it again.");
+    expect(await fs.readFile(fake.termed, "utf8")).toBe("TERM");
+    expect(await lockGone()).toBe(true);
+    expect(deviceLog(warn)).toMatch(/full index run failed \(stalled, [^)]*\): no progress for 1 min/);
+  });
+
+  it("is stopped as `stalled` off a terminal, where it has no counts at all", async () => {
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1500";
+    noTerminal();
+    const fake = await fakeIndexer({ hang: true });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    await waitFor(fake.started);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "failed", errorCode: "stalled" });
+    expect(await fs.readFile(fake.termed, "utf8")).toBe("TERM");
+  });
+
+  it("is never stopped while its counts keep moving, for longer than the window", async () => {
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "4000";
+    const fake = await fakeIndexer({ steps: 15, stepMs: 400 });
+    const { startMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    // Six seconds of a pass against a four-second window.
+    const run = await settledMemoryRun(tmpDir, { tries: 1_500 });
+    expect(run).toMatchObject({ status: "succeeded", errorCode: "" });
+    expect(existsSync(fake.termed)).toBe(false);
+    expect((await readMemoryRunState()).durationMs).toBeGreaterThan(4_000);
+  });
+});
+
+describe("the gateway an OpenClaw pass runs without", () => {
+  it("is stopped before a pass the watchdog ends, and started again after it", async () => {
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1500";
+    noTerminal();
+    await fakeIndexer({ hang: true });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "failed", errorCode: "stalled" });
+    expect(gateway).toMatchObject({ stops: 1, starts: 1 });
+  });
+
+  it("is started again after the pass without the watchdog reading that start as a stall", async () => {
+    // The pass is over and moves nothing while the gateway comes back; a
+    // start slower than the window must not turn a finished pass `stalled`.
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1000";
+    gateway.startDelayMs = 3_000;
+    const fake = await fakeIndexer({ steps: 2, stepMs: 200 });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_500 })).toMatchObject({ status: "succeeded", errorCode: "" });
+    expect(existsSync(fake.termed)).toBe(false);
+    expect(gateway.starts).toBe(1);
+  });
+});
+
+describe("a claim this process is still starting", () => {
+  it("is not taken for lost while the gateway stops, even when the clock went back", async () => {
+    // The record names this process as supervisor and no pass yet; a clock
+    // that went back makes it look younger than zero, which skipped the
+    // start grace and read the live claim as lost.
+    let release = () => {};
+    gateway.stopGate = new Promise<void>((resolve) => { release = resolve; });
+    noTerminal();
+    await fakeIndexer({ steps: 1, stepMs: 100 });
+    const { startMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
+    const started = startMemoryIndex("full", "manual");
+    // The gate is released on every way out of here, the failed assertions included.
+    try {
+      for (let i = 0; i < 500 && gateway.stops === 0; i += 1) await new Promise((r) => setTimeout(r, 20));
+      expect(gateway.stops).toBe(1);
+      const realNow = Date.now.bind(Date);
+      const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() - 60 * 60_000);
+      try {
+        expect((await readMemoryRunState()).status).toBe("running");
+        expect(existsSync(path.join(tmpDir, "memory-index.lock"))).toBe(true);
+      } finally {
+        clock.mockRestore();
+      }
+    } finally {
+      release();
+    }
+    expect((await started).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
+  });
+});
+
+describe("an OpenClaw pass off a terminal, under a short stall window", () => {
+  it("is read often enough to be seen moving: its chunks are sampled inside the window", async () => {
+    // Off a terminal the chunk count is the only progress there is, read on a
+    // 15 s clock — longer than a window this short, which ended a pass that
+    // was writing chunks all along before its first reading.
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "2000";
+    noTerminal();
+    const fake = await fakeIndexer({ steps: 16, stepMs: 300, chunks: true });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
+    expect(existsSync(fake.termed)).toBe(false);
+  });
+});
+
+describe("an OpenClaw pass off a terminal that rewrites chunks without adding any", () => {
+  it("is never taken for stalled while it writes, though its chunk count stays the same", async () => {
+    // An incremental pass over edited notes replaces chunks one for one: the
+    // count is the only figure off a terminal, and it does not move.
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "2000";
+    noTerminal();
+    const fake = await fakeIndexer({ steps: 16, stepMs: 300, chunks: true, replace: true });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
+    expect(existsSync(fake.termed)).toBe(false);
+  });
+
+  it("is still stopped as `stalled` once it stops writing, though it wrote to its index first", async () => {
+    // The write mark only moves on a commit: an index left as it was after a
+    // few writes is a pass that stopped moving.
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1500";
+    noTerminal();
+    const fake = await fakeIndexer({ steps: 3, stepMs: 200, chunks: true, replace: true, hang: true });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "failed", errorCode: "stalled" });
+    expect(await fs.readFile(fake.termed, "utf8")).toBe("TERM");
+  });
+});
+
+describe("an OpenClaw pass whose descendant keeps its pipe open", () => {
+  it("ends once the indexer has exited, without waiting for the descendant — and not as stalled", async () => {
+    // `close` waits for the pipes; a helper that inherited stderr held the
+    // attempt (and the lock, and the offline gateway) for as long as it lived.
+    // A stall window shorter than the drain must not turn the exit 0 into
+    // `stalled` while the pipes are let go.
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "4000";
+    noTerminal();
+    const holder = path.join(tmpDir, "holder.pid");
+    await fakeIndexer({ steps: 1, stepMs: 100, holdPipe: holder });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    const startedAt = Date.now();
+    try {
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      expect(await settledMemoryRun(tmpDir, { tries: 1_500 })).toMatchObject({ status: "succeeded", errorCode: "" });
+      expect(Date.now() - startedAt).toBeLessThan(25_000);
+      // The descendant really was there, and is still alive now: the run did
+      // not settle because it went away.
+      const pid = Number(await fs.readFile(holder, "utf8"));
+      expect(pid).toBeGreaterThan(0);
+      expect(() => process.kill(pid, 0)).not.toThrow();
+    } finally {
+      const pid = Number(await fs.readFile(holder, "utf8").catch(() => "0"));
+      if (pid > 0) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+    }
+  });
+});
+
+describe("an OpenClaw pass the owner stops", () => {
+  it("is not stopped once its work has ended and the gateway is being started again", async () => {
+    // Nothing is left to stop; taking the stop would record a finished pass
+    // as a stopped one.
+    // The start is held open until the stop has been asked, so the stop
+    // certainly lands while the gateway is being started.
+    let release = () => {};
+    gateway.gate = new Promise<void>((resolve) => { release = resolve; });
+    noTerminal();
+    await fakeIndexer({ steps: 1, stepMs: 100 });
+    const { startMemoryIndex, stopMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    try {
+      for (let i = 0; i < 500 && gateway.starts === 0; i += 1) await new Promise((r) => setTimeout(r, 20));
+      expect(gateway.starts).toBe(1);
+      expect((await readMemoryRunState()).status).toBe("running");
+      expect((await stopMemoryIndex()).stopped).toBe(false);
+      // …and the lock is still the run's while the gateway starts.
+      expect(existsSync(path.join(tmpDir, "memory-index.lock"))).toBe(true);
+    } finally {
+      release();
+    }
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
+  });
+
+  it("is never recorded as succeeded on a terminal, where `script` exits 0 for it", async () => {
+    // Before TASK-2431 the run read the pty host's exit 0 as success.
+    const fake = await fakeIndexer({ hang: true });
+    const { startMemoryIndex, stopMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    await waitFor(fake.started);
+    expect((await stopMemoryIndex()).stopped).toBe(true);
+    const run = await settledMemoryRun(tmpDir, { tries: 1_000 });
+    expect(run).toMatchObject({ status: "failed", errorCode: "interrupted" });
+    expect(run.error).toMatch(/stopped before it finished/);
+  });
+});
+
+describe("the pass after one that died holding OpenClaw's memory workspace lock", () => {
+  it("runs again once the lock can be taken over, and succeeds", async () => {
+    process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS = "200";
+    noTerminal();
+    const fake = await fakeIndexer({ lockHeldTimes: 1 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
+    expect(await fake.attempts()).toBe(2);
+    expect(deviceLog(warn)).toMatch(/memory workspace lock held .*running it again in 0 s \(1\/2\)/);
+  });
+
+  it("gives up after two more tries, and the device log names the lock, not the sign-off receipt", async () => {
+    process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS = "100";
+    noTerminal();
+    const fake = await fakeIndexer({ lockHeldTimes: 99 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "failed", errorCode: "index_failed" });
+    expect(await fake.attempts()).toBe(3);
+    const failed = deviceLog(warn).split("\n").find((line) => line.includes("index run failed")) ?? "";
+    expect(failed).toMatch(/incremental index run failed \(index_failed, exit 1\): Memory index failed \(main\): Timed out waiting for memory workspace lock/);
+    expect(failed).not.toMatch(/clean-close receipt/);
+  });
+
+  it("is not taken for stalled while it waits, even with a window shorter than the wait", async () => {
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "2000";
+    process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS = "4000";
+    noTerminal();
+    const fake = await fakeIndexer({ lockHeldTimes: 1 });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
+    expect(await fake.attempts()).toBe(2);
+  });
+
+  it("is settled, and its lock freed, when the next attempt cannot even be spawned", async () => {
+    // `spawn` throws at once for some failures (E2BIG, ENOMEM) instead of
+    // emitting "error". Unhandled, the run said "running" until a restart.
+    process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS = "100";
+    noTerminal();
+    const fake = await fakeIndexer({ lockHeldTimes: 99 });
+    const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+    let indexSpawns = 0;
+    vi.doMock("node:child_process", () => ({
+      ...actual,
+      spawn: (cmd: string, args: readonly string[], opts: object) => {
+        if (args.includes("index") && ++indexSpawns === 2) {
+          throw Object.assign(new Error("spawn E2BIG"), { code: "E2BIG" });
+        }
+        return actual.spawn(cmd, args, opts);
+      },
+    }));
+    vi.resetModules();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { startMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
+      expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+      expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "failed", errorCode: "index_failed" });
+      expect(indexSpawns).toBe(2);
+      expect(await fake.attempts()).toBe(1);
+      expect(await lockGone()).toBe(true);
+      expect((await readMemoryRunState()).status).toBe("failed");
+    } finally {
+      vi.doUnmock("node:child_process");
+    }
+  });
+
+  it("keeps its supervisor on the record through the wait, for a reader elsewhere", async () => {
+    // The record names the attempt that exited on the lock until the next one
+    // starts; `supervisorPid` is what tells another process the run is going.
+    process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS = "1500";
+    noTerminal();
+    const fake = await fakeIndexer({ lockHeldTimes: 1 });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    const waiting = () => vi.mocked(console.warn).mock.calls.some((c) => String(c[0]).includes("memory workspace lock held"));
+    for (let i = 0; i < 250 && !waiting(); i += 1) await new Promise((r) => setTimeout(r, 20));
+    expect(waiting()).toBe(true);
+    const during = JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8")) as { status: string; supervisorPid: number };
+    expect(during).toMatchObject({ status: "running", supervisorPid: process.pid });
+    const settled = await settledMemoryRun(tmpDir, { tries: 1_000 });
+    expect(settled).toMatchObject({ status: "succeeded" });
+    expect((settled as unknown as { supervisorPid: number }).supervisorPid).toBe(0);
+    expect(await fake.attempts()).toBe(2);
+  });
+
+  it("is stopped at once while it waits to try again, and does not try again", async () => {
+    process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS = "60000";
+    noTerminal();
+    const fake = await fakeIndexer({ lockHeldTimes: 99 });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex, stopMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
+    const startedAt = Date.now();
+    expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
+    await waitFor(fake.started);
+    // The first attempt has failed and the pass is waiting out the lock: the
+    // stop below must land in that wait, not on the first attempt.
+    const waiting = () => vi.mocked(console.warn).mock.calls.some((c) => String(c[0]).includes("memory workspace lock held"));
+    for (let i = 0; i < 250 && !waiting(); i += 1) await new Promise((r) => setTimeout(r, 20));
+    expect(waiting()).toBe(true);
+    expect((await readMemoryRunState()).status).toBe("running");
+    expect((await stopMemoryIndex()).stopped).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "failed", errorCode: "interrupted" });
+    expect(Date.now() - startedAt).toBeLessThan(30_000);
+    expect(await fake.attempts()).toBe(1);
+  });
+});
