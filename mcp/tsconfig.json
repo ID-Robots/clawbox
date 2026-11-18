@@ -22,7 +22,9 @@
     "../src/lib/hermes-providers.ts",
     "../src/lib/prime-radiant/schema.ts",
     "../src/lib/prime-radiant/claims.ts",
-    "../src/lib/task-title.ts"
+    "../src/lib/task-title.ts",
+    "../vault/src/mcp/tools.ts",
+    "../vault/src/shared/card.ts"
   ],
   "exclude": []
 }

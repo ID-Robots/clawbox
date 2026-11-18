@@ -1,6 +1,6 @@
-# Setup API routes and middleware
+# Setup API routes and the request proxy
 
-The `/setup-api/*` route families no feature file owns (WiFi, System, Preferences, KV, Gateway) and the middleware (captive portal, authentication, the update lock). Read it when you add or change a route under `src/app/setup-api/` or touch `src/middleware.ts`; a feature's own routes are in its area file.
+The `/setup-api/*` route families no feature file owns (WiFi, System, Preferences, KV, Gateway) and the middleware (captive portal, authentication, the update lock). Read it when you add or change a route under `src/app/setup-api/` or touch `src/proxy.ts`; a feature's own routes are in its area file.
 
 The other route families are written up with their feature: `ai-models/*`, `providers/*` and `ollama/*` in [ai-providers.md](ai-providers.md); `tts` and `stt` in [voice.md](voice.md); `embed/*` in [memory-shard.md](memory-shard.md); `prime-radiant/*` in [prime-radiant.md](prime-radiant.md); `apps/*`, `code/` and `webapps/` in [apps-and-webapps.md](apps-and-webapps.md); `files/` in [files.md](files.md); `system/battery`, `desktop/state` and `monitors` in [desktop.md](desktop.md); `browser/` in [browser.md](browser.md); `harness/*` in [harness-swap.md](harness-swap.md); `hermes/plugins/reload` in [harness-hermes.md](harness-hermes.md); `telegram/*` and `discord/*` in [channels.md](channels.md); `email/*` in [email.md](email.md); `setup/*` in [setup-wizard.md](setup-wizard.md); `update/*` and `whats-new` in [update-and-install.md](update-and-install.md); `coding-agent/*` in [coding-agent.md](coding-agent.md); users in [multi-user.md](multi-user.md).
 
@@ -16,7 +16,9 @@ The other route families are written up with their feature: `ai-models/*`, `prov
 
 All dynamic API routes use `export const dynamic = "force-dynamic"` to prevent caching.
 
-## Middleware (`src/middleware.ts`)
+## The request proxy (`src/proxy.ts`, formerly `src/middleware.ts`)
+
+Next 16 renamed the `middleware` file convention to `proxy` (TASK-2517, done with `npx @next/codemod@canary middleware-to-proxy .` and reviewed by hand): the file is `src/proxy.ts`, its function is `export async function proxy`, and its `config` has the same matcher but no `runtime` key, because a proxy always runs on the Node.js runtime and Next refuses the option there. The tests are `src/tests/proxy/`. Behaviour is unchanged; the prose across the tree still calls this layer "the middleware" in places, and both words mean this file. Next still names the build artefacts `middleware-manifest.json` and the `x-middleware-*` headers internally.
 
 Handles three concerns (plus one carve-out: `UI_LANGUAGE_READ` — a GET of `/setup-api/preferences?keys=ui_language`, path and query byte for byte — is answered with no session, because `/login` renders inside the same I18nProvider as the desktop and asks for the box's language on mount; answered 401 it fell back to the browser's language, so a box set to German greeted its owner in English (the sweep of 2026-09-07); the preferences route makes the same cut on its own side, `ANONYMOUS_READABLE_KEYS`, so nothing wider is ever told to an anonymous caller):
 1. **Captive portal detection** — intercepts OS-specific detection URLs (Android, Apple, Windows, Firefox) and redirects to `http://10.42.0.1/`

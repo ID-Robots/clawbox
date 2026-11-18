@@ -29,7 +29,7 @@
  *
  * SEGMENT-BOUNDARY MATCHING IS LOAD-BEARING. `/setup-api` also starts with
  * `/setup`; a bare `startsWith` on the roots below would fold one into the
- * other, which is the original auth-bypass `src/middleware.ts` still carries a
+ * other, which is the original auth-bypass `src/proxy.ts` still carries a
  * comment about. `isUnderRoot` matches the root exactly or the root plus a
  * separator, and never `/setupsomething`.
  */
@@ -69,7 +69,7 @@ export const CLAWBOX_PAGE_ROOTS = [
  * (src/app/api/[...path]/route.ts says so in as many words). `/assets` is the
  * Control UI's static tree (src/lib/gateway-static.ts). The two favicons are
  * the gateway's too: `public/` has no copy, their handlers proxy, and
- * `src/middleware.ts` lists them in `GATEWAY_ONLY_EXACT`.
+ * `src/proxy.ts` lists them in `GATEWAY_ONLY_EXACT`.
  *
  * `/apps` IS ClawBox's below the root and the GATEWAY'S at it, which is why
  * claiming it would be wrong in both directions:
@@ -100,7 +100,7 @@ export const CLAWBOX_PAGE_ROOTS = [
  * `/login-api` are all absent, so every root claimed above is genuinely free.
  *
  * SIBLINGS: adding a gateway-owned root here is not the whole job —
- * `GATEWAY_ONLY_EXACT` / `GATEWAY_ONLY_PREFIXES` in src/middleware.ts decide
+ * `GATEWAY_ONLY_EXACT` / `GATEWAY_ONLY_PREFIXES` in src/proxy.ts decide
  * the Hermes 404 gate for the same paths, and src/lib/gateway-static.ts decides
  * which are served as bytes. Nothing cross-checks the three lists yet.
  */
@@ -115,7 +115,7 @@ export const UNCLAIMED_ROOTS = [
 /**
  * `/a` matches `/a` and `/a/b`, never `/ab`.
  *
- * Case-SENSITIVE, deliberately, because `src/middleware.ts` feeds it an
+ * Case-SENSITIVE, deliberately, because `src/proxy.ts` feeds it an
  * already-lower-cased pathname and three of its allow-gates depend on that
  * exact comparison. The catch-all route lower-cases at its own call site
  * instead — see the note there.

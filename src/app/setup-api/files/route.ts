@@ -10,12 +10,12 @@ import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
 import { filesBrowseRoot } from "@/lib/file-guard";
 import { openInMemberView, unlinkInMemberView, type FilesFence } from "@/lib/files-scope";
 import { filesFenceFor } from "@/lib/files-scope-server";
-import { MAX_MOVE_ITEMS, moveEntries, type MoveConflictPolicy } from "@/lib/files-move";
+import { MAX_MOVE_ITEMS, moveEntries, type MoveConflictPolicy, type MoveResult } from "@/lib/files-move";
 import { summarizeSelectionForZip, zipSelectionStream } from "@/lib/zip-stream";
 import { issueZipTicket, redeemZipTicket, uniqueArchiveNames } from "@/lib/zip-tickets";
 import { contentDisposition } from "@/lib/content-disposition";
-import { memberHomeChanged, moveQuotaCheck, uploadWritingUnder, userUploadGuard, type UploadBound, type UploadGuard } from "@/lib/user-upload-guard";
-import { commitUploadTemp, isUploadTempName, uploadTempPath } from "@/lib/upload-temp";
+import { guardedMove, memberHomeChanged, type GuardedMove, noteLanded, uploadWritingUnder, userUploadGuard, type UploadBound, type UploadGuard } from "@/lib/user-upload-guard";
+import { isUploadTempName, uploadTempPath } from "@/lib/upload-temp";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -150,16 +150,6 @@ function discardUploadTemp(fence: FilesFence, created: string): void {
   }
   if (fence.resolve(fence.relOf(target)) !== target) return;
   try { fs.unlinkSync(/* turbopackIgnore: true */ target); } catch { /* best effort */ }
-}
-
-/** The size of the file an upload wrote (0 when there was none, or it is gone). */
-function landedSize(abs: string): number {
-  if (!abs) return 0;
-  try {
-    return fs.statSync(/* turbopackIgnore: true */ abs).size;
-  } catch {
-    return 0;
-  }
 }
 
 export const dynamic = "force-dynamic";
@@ -371,43 +361,31 @@ async function moveAction(fence: FilesFence, destAbs: string | null, body: Recor
     );
   }
   // What a move brings into a member's home from Shared counts against their
-  // quota, and is held against it until the move has run.
-  const quota = await moveQuotaCheck({ limitedUser, fence, destAbs, sources: sources.map((s) => s.abs) });
-  if (quota && "refusal" in quota) return NextResponse.json(quota.refusal.body, { status: quota.refusal.status });
-  // Both asked again with nothing awaited between these answers and the
-  // rename below. An upload may have begun writing into a source while the
-  // quota check was awaited — with no quota (or for the owner) there is no
-  // hold to ask, so every source is asked directly; and one that began
-  // writing a source while the check measured it would keep growing it in
-  // the home. Either way the move is called off and its hold released.
-  if (sources.some((s) => s.abs !== null && uploadWritingUnder(s.abs))) {
-    quota?.hold.done(false);
-    return NextResponse.json(
-      { error: "Something in this selection is still being uploaded. Move it once the upload has finished.", code: "upload_in_progress" },
-      { status: 409 },
-    );
-  }
-  if (quota?.hold.writerStarted()) {
-    quota.hold.done(false);
-    return NextResponse.json(
-      { error: "This file is still being uploaded. Move it into your home folder once the upload has finished.", code: "upload_in_progress" },
-      { status: 409 },
-    );
-  }
-  let result: ReturnType<typeof moveEntries>;
+  // quota: it is measured and moved under the home's lock, and every source is
+  // asked again — still being uploaded? changed since it was measured? — with
+  // nothing awaited between those answers and the renames
+  // (src/lib/user-upload-guard.ts).
+  let guarded: GuardedMove<MoveResult>;
   try {
-    result = moveEntries({
-      root: fence.scope.kind === "owner" ? fence.scope.base : BASE_DIR,
-      destAbs,
-      conflict,
-      sources,
-      isRoot: fence.isRoot,
-      relOfTarget: fence.relOf,
+    guarded = await guardedMove({ limitedUser, fence, destAbs, sources: sources.map((s) => s.abs) }, () => {
+      const moved = moveEntries({
+        root: fence.scope.kind === "owner" ? fence.scope.base : BASE_DIR,
+        destAbs,
+        conflict,
+        sources,
+        isRoot: fence.isRoot,
+        relOfTarget: fence.relOf,
+      });
+      // Where each item landed, before anything else runs: a move into a
+      // member's home that measured the folder one landed in measures again.
+      if (moved.ok && destAbs) for (const item of moved.outcome.moved) noteLanded(path.join(destAbs, item.name));
+      return moved;
     });
   } finally {
-    quota?.hold.done();
     memberHomeChanged(fence);
   }
+  if ("refusal" in guarded) return NextResponse.json(guarded.refusal.body, { status: guarded.refusal.status });
+  const result = guarded.value;
   if (!result.ok) return NextResponse.json(result.refusal.body, { status: result.refusal.status });
   const { moved, skipped, failed } = result.outcome;
   return NextResponse.json({ ok: failed.length === 0, moved, skipped, failed });
@@ -697,6 +675,7 @@ export async function POST(req: NextRequest) {
               fail(new UploadRefused("Invalid destination", 400, "invalid_destination"));
               return;
             }
+            guard.staging(member.real);
           }
           const ws = member === null ? fs.createWriteStream(temp, { flags: "wx" }) : fs.createWriteStream(temp, { fd: member.fd });
           activeWrite = ws;
@@ -725,16 +704,17 @@ export async function POST(req: NextRequest) {
         });
         source.pipe(busboy);
       });
-      // The whole part was accepted: only now does it replace the destination.
-      let landed = 0;
-      let replacedAtCommit = 0;
+      // The whole part was accepted: only now does it replace the destination
+      // — into a limited home under the home's lock, and only if the home
+      // still has room for it net of the file the rename really replaces. A
+      // refusal there leaves `written` as it is, for the cleanup below.
       if (staged) {
-        const committed = commitUploadTemp(staged.temp, staged.dest);
+        if (!(await guard.commit(staged.temp, staged.dest))) throw boundRefusal(guard, "quota");
         written.length = 0;
-        landed = landedSize(committed.target);
-        replacedAtCommit = committed.replacedBytes;
+      } else {
+        // No file part: nothing landed.
+        guard.finish(null);
       }
-      guard.finish(landed, replacedAtCommit);
       return NextResponse.json({ ok: true, name: result.name, path: result.path });
     } catch (err) {
       // A refused upload must not leave a partial file behind: the caller is
@@ -854,8 +834,6 @@ export async function PUT(req: NextRequest) {
   // The temporary file this upload created, by the path it is taken back at;
   // null once it has been renamed into place, or when nothing was created.
   let created = null as string | null;
-  let landed: number | null = null;
-  let replacedAtCommit: number | undefined;
   try {
     const nodeReadable = Readable.fromWeb(bounded.stream as unknown as import("stream/web").ReadableStream);
     let ws: fs.WriteStream;
@@ -864,6 +842,7 @@ export async function PUT(req: NextRequest) {
       const member = openInMemberView(fence, temp, "write");
       if (member === null) return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
       created = member.real;
+      guard.staging(member.real);
       ws = fs.createWriteStream(temp, { fd: member.fd });
     } else {
       // "wx": never a file that was already there.
@@ -871,11 +850,11 @@ export async function PUT(req: NextRequest) {
       ws.once("open", () => { created = temp; });
     }
     await pipeline(nodeReadable, ws);
-    // The whole body was accepted: only now does it replace the destination.
-    const committed = commitUploadTemp(created ?? temp, destPath);
+    // The whole body was accepted: only now does it replace the destination —
+    // into a limited home under the home's lock, and only if the home still
+    // has room for it net of the file the rename really replaces.
+    if (!(await guard.commit(created ?? temp, destPath))) throw boundRefusal(guard, "quota");
     created = null;
-    landed = landedSize(committed.target);
-    replacedAtCommit = committed.replacedBytes;
   } catch (err) {
     // The temporary file comes off the disk either way and the destination
     // is untouched; only the STATUS differs, and it is decided by the meter's
@@ -887,7 +866,8 @@ export async function PUT(req: NextRequest) {
     const { status, body } = refusal(bounded.overflowed() ? boundRefusal(guard, guard.lastBound()) : err);
     return NextResponse.json(body, { status });
   } finally {
-    guard.finish(landed, replacedAtCommit);
+    // Nothing landed unless the commit said so (it finished the upload then).
+    guard.finish(null);
   }
   return NextResponse.json({ ok: true, name });
 }

@@ -28,7 +28,7 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 SETTINGS_BEFORE=
-# shellcheck disable=SC2317  # run by the EXIT trap
+# shellcheck disable=SC2317,SC2329  # run by the EXIT trap
 cleanup() {
   if [ -n "$SETTINGS_BEFORE" ]; then
     board_api POST /setup-api/coding-agent/settings "$SETTINGS_BEFORE"

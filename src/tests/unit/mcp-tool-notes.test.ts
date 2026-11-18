@@ -53,6 +53,7 @@ import { registerOrientationTools } from "../../../mcp/tools/orientation";
 import { registerPrimeRadiantTools } from "../../../mcp/tools/prime-radiant";
 import { registerSkillTools } from "../../../mcp/tools/skills";
 import { registerSystemTools } from "../../../mcp/tools/system";
+import { registerVaultTools } from "../../../mcp/tools/vault";
 import { saveEnv } from "../helpers/env";
 import { captureRegistrar, type CaptureHarness } from "../helpers/mcp-registrar";
 
@@ -125,6 +126,7 @@ function server(p: Posture): CaptureHarness {
     registerSystemTools(h.reg, c);
     registerDesktopTools(h.reg, c);
     registerBrowserTools(h.reg);
+    registerVaultTools(h.reg);
     registerMediaTools(h.reg);
     registerEmailTools(h.reg, c);
     registerCodingTools(h.reg);

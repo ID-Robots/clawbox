@@ -127,6 +127,7 @@ const MEMORY_KEYS = [
   "clawkeep.memory.error.providerMismatch",
   "clawkeep.memory.error.providerDegraded",
   "clawkeep.memory.error.statusUnavailable",
+  "clawkeep.memory.runError.stalled",
   "clawkeep.memory.runError.timedOut",
   "clawkeep.memory.runError.interrupted",
   "clawkeep.memory.runError.migrationBusy",

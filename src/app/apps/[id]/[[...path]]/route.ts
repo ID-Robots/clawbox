@@ -60,7 +60,7 @@ function plain(text: string, status: number): NextResponse {
  * A window loading the app's page — a document the middleware let through
  * only with a session (the caller checks it is the OWNER's) — as opposed to
  * one of the app's own fetches, which reach this route with no session at all
- * (src/middleware.ts, step 2b): those, and anything from the sandbox's opaque
+ * (src/proxy.ts, step 2b): those, and anything from the sandbox's opaque
  * origin, never get the page, whose lines are the app's own output.
  */
 function ownerWindow(request: NextRequest): boolean {

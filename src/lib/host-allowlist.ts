@@ -15,7 +15,7 @@ import { readNamedTunnelHostnameSync } from "@/lib/named-tunnel";
  * rebinding record — would be an origin an attacker's page shares with the
  * owner's desktop. The Hermes dashboard proxy (scripts/hermes-dashboard-proxy.js)
  * has refused such names since it shipped; this is the same allow-list for the
- * app itself, applied by src/middleware.ts and, for WebSocket upgrades that
+ * app itself, applied by src/proxy.ts and, for WebSocket upgrades that
  * never reach Next, by production-server.js through scripts/host-allowlist.js
  * (a CommonJS mirror of this file — src/tests/unit/host-allowlist-parity.test.ts
  * runs one table over both).

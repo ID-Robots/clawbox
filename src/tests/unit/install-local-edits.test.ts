@@ -651,3 +651,62 @@ d("the checkout's .git is handed over with the checkout whole, never by its name
     expect(landed()).toEqual([]);
   });
 });
+
+d("an update from a middleware build leaves no middleware file beside the proxy (TASK-2517)", () => {
+  // Next 16 refuses a build that has both `middleware.ts` and `proxy.ts`
+  // ("Both middleware file … and proxy file … are detected"), and a refused
+  // build keeps the box on its old version. Step 1's sync is what takes the
+  // old file away: the reset deletes it as a tracked file the target dropped,
+  // an owner's edit to it is saved first, and `clean -fd` removes a stray
+  // untracked copy (at the root, where Next would also look).
+  function moveToProxy(): string {
+    git(origin, "checkout", "-q", "beta");
+    git(origin, "mv", "src/middleware.ts", "src/proxy.ts");
+    write(path.join(origin, "src", "proxy.ts"), "export async function proxy() {}\n");
+    git(origin, "add", "-A");
+    git(origin, "commit", "-q", "-m", "middleware -> proxy");
+    git(origin, "checkout", "-q", "main");
+    return git(origin, "rev-parse", "beta");
+  }
+
+  beforeEach(() => {
+    if (!CAN_RUN) return;
+    // The box's version: the request gate is still src/middleware.ts.
+    git(origin, "checkout", "-q", "beta");
+    write(path.join(origin, "src", "middleware.ts"), "export async function middleware() {}\n");
+    git(origin, "add", "-A");
+    git(origin, "commit", "-q", "-m", "the middleware build");
+    git(origin, "checkout", "-q", "main");
+    git(checkout, "pull", "-q", "--ff-only");
+  });
+
+  it("removes src/middleware.ts as the target's proxy.ts arrives", () => {
+    const target = moveToProxy();
+    const r = runStep1();
+    expect(r.status, r.out).toBe(0);
+    expect(git(checkout, "rev-parse", "HEAD")).toBe(target);
+    expect(fs.existsSync(path.join(checkout, "src", "middleware.ts"))).toBe(false);
+    expect(fs.readFileSync(path.join(checkout, "src", "proxy.ts"), "utf-8")).toContain("export async function proxy");
+  });
+
+  it("saves an owner's edit to the old middleware, then removes it all the same", () => {
+    write(path.join(checkout, "src", "middleware.ts"), "export async function middleware() { /* tuned */ }\n");
+    moveToProxy();
+    const r = runStep1();
+    expect(r.status, r.out).toBe(0);
+    expect(fs.existsSync(path.join(checkout, "src", "middleware.ts"))).toBe(false);
+    const dirs = savedDirs();
+    expect(dirs).toHaveLength(1);
+    expect(fs.readFileSync(path.join(saves, dirs[0], "tracked.patch"), "utf-8")).toContain("tuned");
+  });
+
+  it("cleans a stray untracked middleware.ts at the project root", () => {
+    write(path.join(checkout, "middleware.ts"), "export function middleware() {}\n");
+    moveToProxy();
+    const r = runStep1();
+    expect(r.status, r.out).toBe(0);
+    expect(fs.existsSync(path.join(checkout, "middleware.ts"))).toBe(false);
+    expect(fs.existsSync(path.join(checkout, "src", "middleware.ts"))).toBe(false);
+    expect(git(checkout, "status", "--porcelain")).toBe("");
+  });
+});

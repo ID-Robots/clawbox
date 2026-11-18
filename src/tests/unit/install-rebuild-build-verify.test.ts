@@ -156,6 +156,8 @@ interface Scenario {
   entry?: "do_rebuild" | "step_build";
   /** Call `do_rebuild --reboot-follows`, as step_rebuild_reboot's real arm does. */
   rebootFollows?: boolean;
+  /** Call `do_rebuild --gateway-to-update`, step_rebuild_reboot's restart arm (TASK-2517). */
+  gatewayToUpdate?: boolean;
   /**
    * `CLAWBOX_RESTORE_PROBE_WAIT_S` — how long restore_previous_build watches for
    * the dashboard before reporting it DOWN. Cut to seconds a test can afford to
@@ -412,6 +414,7 @@ function run(scenario: Scenario = {}): Run {
     buildLog = "writable",
     entry = "do_rebuild",
     rebootFollows = false,
+    gatewayToUpdate = false,
     probeWindow = "2",
     previousCache = false,
     ptyBrokenByBuild = false,
@@ -689,6 +692,11 @@ function run(scenario: Scenario = {}): Run {
     // bun install had already run, which is the ordering it exists for.
     'pause_gateway_if_build_needs_room() { echo "GATEWAY-ROOM-JUDGED"; }',
     'report_gateway_build_pause() { echo "GATEWAY-PAUSE-REPORTED"; }',
+    // TASK-2517's hand-off of a paused gateway to the update's second half,
+    // and the fallback start every rebuild cancels first: observable, so a
+    // test can tell which arm handed the gateway over.
+    'disarm_gateway_handback() { echo "HANDBACK-DISARMED"; }',
+    'hand_paused_gateway_to_update() { echo "GATEWAY-HANDED-TO-UPDATE"; }',
     // Stubbed unconditionally, like the pair above: unstubbed it would read
     // the kernel log of whatever machine runs the suite, so a box that really
     // had OOM-killed something in the last fifteen minutes would flip the
@@ -726,7 +734,7 @@ function run(scenario: Scenario = {}): Run {
     ...(checkout ? checkoutLines(checkout) : []),
     shellFunction(entry),
     "",
-    rebootFollows ? `${entry} --reboot-follows` : entry,
+    rebootFollows ? `${entry} --reboot-follows` : gatewayToUpdate ? `${entry} --gateway-to-update` : entry,
     "",
   ];
 
@@ -1390,6 +1398,35 @@ describe("do_rebuild keeps the box serving when the build fails", () => {
     const withoutReboot = run({ build: "succeeds" });
     expect(withoutReboot.status).toBe(0);
     expect(withoutReboot.stdout + withoutReboot.stderr).toMatch(/RESUMED/);
+  });
+
+  it("hands a gateway paused for the build to the update's second half on the restart arm, and only on success (TASK-2517)", () => {
+    // step_rebuild_reboot's restart arm: post_update stops the gateway again
+    // first thing and gateway_verify starts it, so the rebuild leaves it to them
+    // — before resuming the other engines, which still come back here.
+    const ok = run({ build: "succeeds", gatewayToUpdate: true });
+    expect(ok.status).toBe(0);
+    const out = ok.stdout + ok.stderr;
+    expect(out).toContain("GATEWAY-HANDED-TO-UPDATE");
+    expect(out.indexOf("GATEWAY-HANDED-TO-UPDATE")).toBeLessThan(out.indexOf("RESUMED"));
+    // A failed build is the end of the update: nothing follows to start the
+    // gateway, so the failure arm resumes everything exactly as before.
+    const failed = run({ build: "oom-killed", gatewayToUpdate: true });
+    expect(failed.status).not.toBe(0);
+    expect(failed.stdout + failed.stderr).not.toContain("GATEWAY-HANDED-TO-UPDATE");
+    expect(failed.stdout + failed.stderr).toMatch(/RESUMED/);
+    // Every other caller resumes the gateway with the rest.
+    const plain = run({ build: "succeeds" });
+    expect(plain.stdout + plain.stderr).not.toContain("GATEWAY-HANDED-TO-UPDATE");
+    const reboot = run({ build: "succeeds", rebootFollows: true });
+    expect(reboot.stdout + reboot.stderr).not.toContain("GATEWAY-HANDED-TO-UPDATE");
+  });
+
+  it("cancels a fallback gateway start an earlier update armed before it pauses anything (TASK-2517)", () => {
+    const r = run({ build: "succeeds" });
+    const out = r.stdout + r.stderr;
+    expect(out.indexOf("HANDBACK-DISARMED")).toBeGreaterThan(-1);
+    expect(out.indexOf("HANDBACK-DISARMED")).toBeLessThan(out.indexOf("FREED:"));
   });
 
   it("judges the gateway's room just before the build on a routine rebuild, and only there (TASK-1197)", () => {

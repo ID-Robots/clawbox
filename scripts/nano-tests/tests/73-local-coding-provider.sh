@@ -45,7 +45,7 @@ note "agent runtime: $RUNTIME"
 # saying where the copy is.
 #
 # SC2016: the board script expands on the board; SC2317: run by the EXIT trap.
-# shellcheck disable=SC2016,SC2317
+# shellcheck disable=SC2016,SC2317,SC2329
 cleanup() {
   local out rc=0
   out=$(board '

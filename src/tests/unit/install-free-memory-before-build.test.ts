@@ -315,23 +315,27 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
   const pidFile = () => path.join(tmp, "data", "llamacpp", "server.pid");
 
   /**
-   * Start a process whose argv[0] IS `name`, so /proc/<pid>/cmdline says what
-   * the harness needs it to say. `llama-server` is the engine; anything else
-   * stands in for the process that inherited a recycled pid.
+   * Start a process whose /proc/<pid>/cmdline carries `name`, which is all the
+   * identity check under test reads (`grep -qa llama-server` over it).
+   * `llama-server` is the engine; anything else stands in for the process that
+   * inherited a recycled pid.
    *
-   * A copy of `sleep` spawned directly, not a shell script: a script that
-   * `exec`s sleep replaces its own argv, so cmdline would read "sleep" and the
-   * identity check under test would never see the name it is looking for.
+   * `/bin/sh <tmp>/bin/<name>`, the shape the SIGKILL case below already has —
+   * not a copy of `sleep` renamed to `name`. Where coreutils is one multi-call
+   * binary (uutils, the default from Ubuntu 25.10, so on GitHub's
+   * ubuntu-26.04 runners) that copy picks its applet by argv[0], answers
+   * "unknown program 'llama-server'" and exits at once: the engine was gone
+   * before the code under test looked, and the innocent bystander was not
+   * alive to be spared. Nor `exec -a <name> sleep`, for the same reason.
+   *
+   * The script exits on SIGTERM, as the engine does, and waits on a
+   * background `sleep` so the trap runs at once rather than after it.
    * Detached and unref'd so it outlives the call rather than dying with it.
    */
-  const SLEEP_BIN = ["/bin/sleep", "/usr/bin/sleep"].find((p) => fs.existsSync(p));
-
   function startFakeProcess(name: string): number {
-    if (!SLEEP_BIN) throw new Error("no sleep binary to copy");
-    const bin = path.join(tmp, "bin", name);
-    fs.copyFileSync(SLEEP_BIN, bin);
-    fs.chmodSync(bin, 0o755);
-    const child = spawn(bin, ["120"], { detached: true, stdio: "ignore" });
+    const script = path.join(tmp, "bin", name);
+    fs.writeFileSync(script, `trap 'exit 0' TERM${NL}while :; do sleep 1 & wait $!; done${NL}`);
+    const child = spawn("/bin/sh", [script], { detached: true, stdio: "ignore" });
     child.unref();
     strays.push(child.pid!);
     return child.pid!;
@@ -1067,7 +1071,10 @@ describe("both stops an update performs have a start", () => {
     // already waiting through. Only that arm has a reboot reason, and test mode
     // never asks for one, so every other arm takes the resuming call.
     const STEP = shellCode(extractShellFunction("step_rebuild_reboot"));
-    expect(STEP).toMatch(/if \[ -n "\$reboot_reasons" \]; then\s*\n\s*do_rebuild --reboot-follows\s*\n\s*else\s*\n\s*do_rebuild\s*\n/);
+    // The restart arm outside test mode hands a gateway paused for the build to
+    // the update's second half (TASK-2517); every other engine is still
+    // resumed there. Test mode keeps the plain resuming call.
+    expect(STEP).toMatch(/if \[ -n "\$reboot_reasons" \]; then\s*\n\s*do_rebuild --reboot-follows\s*\n\s*elif ! is_test_mode; then\s*\n\s*do_rebuild --gateway-to-update\s*\n\s*else\s*\n\s*do_rebuild\s*\n/);
     const decision = STEP.slice(0, STEP.indexOf("do_rebuild --reboot-follows"));
     expect(decision, "test mode does not reboot, so it never asks for a reason")
       .toMatch(/if ! is_test_mode; then\s*\n\s*reboot_reasons="\$\(update_reboot_reasons\)"/);

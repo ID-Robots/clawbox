@@ -1,0 +1,10 @@
+<!doctype html>
+<html><body>
+  <h1>Checkout</h1>
+  <form id="checkout">
+    <label for="holder">Cardholder name</label><input id="holder" name="cardholder" autocomplete="cc-name">
+    <iframe id="stripe" title="Secure card payment input frame" src="https://js.stripe.com/v3/elements-inner-card.html"></iframe>
+    <iframe id="foreign" title="Card widget" src="https://pay.widget-unknown.example/card"></iframe>
+    <button type="submit">Pay</button>
+  </form>
+</body></html>
