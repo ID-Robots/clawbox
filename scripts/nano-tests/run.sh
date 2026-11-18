@@ -51,7 +51,13 @@
 # NANO_RUN_ID (names the folders a test creates on the board), NANO_CI (the
 # helper, default `nano-ci`), NANO_RESULTS_DIR, NANO_TEST_NAME, NANO_TEST_TIMEOUT.
 # NANO_BRANCH (the branch the commit under test is the head of; the update
-# tests hand it to the box's own updater), NANO_TESTS_LONG.
+# tests hand it to the box's own updater), NANO_TESTS_LONG, NANO_STOP_FILE.
+#
+# NANO_STOP_FILE: a test that leaves the box unfit for any test after it (93-:
+# an owner's update it could not wait out, so a rebuild would race it) writes
+# one line saying so into that file; every test still to start is then
+# reported as a skip "not run: <that line>" instead of judging that box. The
+# test itself still fails, so the run does too.
 #
 # A test whose first 20 lines hold `# tier: long` takes tens of minutes (it
 # rebuilds the box, more than once): it runs only with NANO_TESTS_LONG=1 and is
@@ -149,7 +155,7 @@ NANO_SHA=${NANO_SHA:-$(git -C "$HERE" rev-parse HEAD 2>/dev/null || true)}
 NANO_RUN_ID=${NANO_RUN_ID:-local-$(date -u +%Y%m%d%H%M%S)-$$}
 NANO_RUN_ID=$(printf '%s' "$NANO_RUN_ID" | tr -c 'A-Za-z0-9._-' '-')
 export NANO_SERIAL=$SERIAL NANO_IP=${NANO_IP:-} NANO_LAB=${NANO_LAB:-} NANO_SHA NANO_RUN_ID \
-  NANO_CI NANO_RESULTS_DIR=$RESULTS_DIR
+  NANO_CI NANO_RESULTS_DIR=$RESULTS_DIR NANO_STOP_FILE=$WORK/stop-suite
 STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # Redact what must never reach a log or the uploaded artifact: bearer tokens,
@@ -485,6 +491,9 @@ FAILED=0
 COUNT=${#TESTS[@]}
 i=0
 while [ "$i" -lt "$COUNT" ]; do
+  if [ -z "${PRESKIP[i]}" ] && [ -s "$NANO_STOP_FILE" ]; then
+    PRESKIP[i]="not run: $(head -n 1 "$NANO_STOP_FILE" | tr -d '\r' | cut -c1-200)"
+  fi
   if [ -n "${PRESKIP[i]}" ]; then
     report_skip "$i"
     i=$((i + 1))

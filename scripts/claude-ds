@@ -362,6 +362,36 @@ autocompact_window_for() {
   esac
 }
 
+# A READ THAT CANNOT REFILL A 200k WINDOW IN ONE TURN (TASK-2638).
+#
+# A model Claude Code does not know compacts at ~167k of the 200k it believes.
+# Its Read tool takes a file up to 25,000 tokens whole and a model reads several
+# in one message, so a delegated run over ~24 files of ~20k tokens added ~70k a
+# turn: it was back at the compaction line two turns after each compact, and
+# Claude Code stopped it ("Autocompact is thrashing: the context refilled to
+# the limit within 3 turns of the previous compact, 3 times in a row") on four
+# runs out of four, the last at 763k tokens used. The auto-compact window cannot
+# help — it only ever lowers the line — so the size of one read is cut instead:
+# CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS, which Claude Code answers with "use
+# offset and limit" and the model then reads in ranges. A 25th of the window
+# (8,000 tokens of 200k): four reads in a message are 32k, and a run gets four
+# turns or more out of every compact. A `[1m]` model has room for the default.
+#
+# CLAUDE_DS_READ_CAP overrides it: a number of tokens, or `off` for Claude
+# Code's own default. On a 200k model a smaller value inherited from the runner
+# stays; on a `[1m]` one an inherited value is dropped.
+CLAUDE_DS_200K_WINDOW=200000
+read_cap_for() {
+  case "${CLAUDE_DS_READ_CAP:-}" in
+    off) return 0 ;;
+    ?*) printf '%s' "$CLAUDE_DS_READ_CAP"; return 0 ;;
+  esac
+  case "$1" in
+    *"[1m]") ;;
+    *) printf '%s' $(( CLAUDE_DS_200K_WINDOW / 25 )) ;;
+  esac
+}
+
 # EVERY Anthropic credential the environment may be carrying goes, in BOTH
 # branches and before either sets its own. Inherited, one of these outranks
 # what this script exports: on the ClawBox AI branch a stray ANTHROPIC_API_KEY
@@ -559,6 +589,21 @@ else
     export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$AUTOCOMPACT_WINDOW"
   else
     unset CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  fi
+  case "${CLAUDE_DS_READ_CAP:-}" in
+    ""|off) ;;
+    0*|*[!0-9]*) die "CLAUDE_DS_READ_CAP must be a number of tokens or 'off', not: $CLAUDE_DS_READ_CAP" ;;
+  esac
+  READ_CAP="$(read_cap_for "$MODEL")"
+  if [ -n "$READ_CAP" ]; then
+    case "${CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS:-}" in
+      ""|0*|*[!0-9]*) export CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS="$READ_CAP" ;;
+      *) [ "$CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS" -le "$READ_CAP" ] || export CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS="$READ_CAP" ;;
+    esac
+  else
+    # A `[1m]` model, or `off`: Claude Code's own default. An inherited value is
+    # dropped — it can only be the 8,000 an outer 200k session exported.
+    unset CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS
   fi
 
   HARNESS_CONFIG_FILE="$CLAUDE_CONFIG_DIR/.claude.json"
