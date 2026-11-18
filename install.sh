@@ -4163,7 +4163,10 @@ ensure_vault_packages() {
     dpkg_installed "$pkg" || missing="$missing $pkg"
   done
   [ -n "$missing" ] || return 0
-  wait_for_apt
+  if ! wait_for_apt; then
+    echo "  Warning: ClawBox Vault packages not installed:$missing (apt is busy or dpkg could not be recovered)" >&2
+    return 1
+  fi
   # shellcheck disable=SC2086  # a list of package names, split on purpose
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $missing || true
   missing=""
@@ -4187,23 +4190,58 @@ ensure_vault_packages() {
 # vault is restarted. One the updater has already restarted onto this build is
 # left alone. Idempotent; a failure is a warning.
 ensure_vault_service() {
-  local rc=0
+  local rc=0 old_pid
   ensure_vault_packages || rc=1
   [ "$(systemctl is-enabled clawbox-vault.service 2>/dev/null || true)" = enabled ] || return "$rc"
   if ! systemctl is-active --quiet clawbox-vault.service 2>/dev/null; then
     echo "  Starting clawbox-vault.service: enabled and not running"
-    systemctl start --no-block clawbox-vault.service || {
+    if ! systemctl start --no-block clawbox-vault.service; then
       echo "  Warning: could not start clawbox-vault.service" >&2
       rc=1
-    }
+    elif ! vault_came_up 0; then
+      echo "  Warning: clawbox-vault.service did not stay up after its start (journalctl -u clawbox-vault.service)" >&2
+      rc=1
+    fi
   elif vault_runs_previous_build; then
     echo "  Restarting clawbox-vault.service: it is still running the previous build"
-    systemctl restart --no-block clawbox-vault.service || {
+    old_pid="$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)"
+    if ! systemctl restart --no-block clawbox-vault.service; then
       echo "  Warning: could not restart clawbox-vault.service" >&2
       rc=1
-    }
+    elif ! vault_came_up "${old_pid:-0}"; then
+      echo "  Warning: clawbox-vault.service did not stay up after its restart (journalctl -u clawbox-vault.service)" >&2
+      rc=1
+    fi
   fi
   return "$rc"
+}
+
+# vault_came_up OLD_PID — after a --no-block start or restart: within
+# VAULT_UP_WAIT_S (30) seconds the unit is active on a MainPID other than
+# OLD_PID (0 for a start), and is still active on that same pid
+# VAULT_UP_STEADY_S (3) seconds later, so a launcher that exits at once is
+# reported here instead of only in the journal. It only watches: the unit's
+# own Restart=on-failure retries are left to systemd either way.
+vault_came_up() {
+  local old=${1:-0} waited=0 limit=${VAULT_UP_WAIT_S:-30} steady=${VAULT_UP_STEADY_S:-3} pid
+  while [ "$waited" -lt "$limit" ]; do
+    if systemctl is-active --quiet clawbox-vault.service 2>/dev/null; then
+      pid="$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)"
+      case "$pid" in
+        '' | 0 | *[!0-9]* | "$old") ;;
+        *)
+          sleep "$steady"
+          systemctl is-active --quiet clawbox-vault.service 2>/dev/null \
+            && [ "$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)" = "$pid" ] \
+            && return 0
+          waited=$((waited + steady))
+          ;;
+      esac
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  return 1
 }
 
 # Whether the running vault started before the build on disk: its working

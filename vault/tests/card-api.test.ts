@@ -4,7 +4,7 @@
 // the human's confirmation, and nothing secret reaches the MCP replies, the
 // audit log, the request log, the state files or the catalog cache.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { callTool, type VaultCall } from "../src/mcp/tools";
 import { createTempStore, passShow, passShowExitCode, type TempStore } from "./helpers/tempstore";
@@ -44,7 +44,9 @@ const mcpCall: VaultCall = async (method, path, body) => {
 };
 
 /** Plays the extension and the human for the next card command. */
-async function humanAnswers(decision: "confirm" | "decline" | "ignore"): Promise<{ command: Record<string, unknown> | undefined; secretStatusBeforeConfirm?: number }> {
+async function humanAnswers(
+  decision: "confirm" | "decline" | "ignore",
+): Promise<{ command: Record<string, unknown> | undefined; secretStatusBeforeConfirm?: number; secretStatusAfterDecline?: number }> {
   const polled = await asExt("/api/ext/commands?wait=2000");
   const command = (polled.body.commands as Array<Record<string, unknown>>)[0];
   if (!command) return { command };
@@ -61,8 +63,11 @@ async function humanAnswers(decision: "confirm" | "decline" | "ignore"): Promise
     const again = await asExt("/api/ext/card-secret", { body: { commandId: command.id } }, { secret: true });
     expect(again.status).toBe(404); // released once
     await asExt("/api/ext/result", { body: { id: command.id, status: "filled", detail: "filled number, expiry, name" } });
+    return { command, secretStatusBeforeConfirm: early.status };
   }
-  return { command, secretStatusBeforeConfirm: early.status };
+  // Declined: asking for the card now must still be refused.
+  const after = await asExt("/api/ext/card-secret", { body: { commandId: command.id } }, { secret: true });
+  return { command, secretStatusBeforeConfirm: early.status, secretStatusAfterDecline: after.status };
 }
 
 beforeAll(async () => {
@@ -160,9 +165,15 @@ describe("metadata only", () => {
   });
 
   test("cards never appear in login lists, matches or fills, and login routes refuse card names", async () => {
-    for (const path of ["/api/ui/entries"]) expect(JSON.stringify((await asUi(path)).body)).not.toContain("cards/");
-    for (const path of ["/api/ext/entries", "/api/ext/match?url=https%3A%2F%2Fshop.example.com%2F"]) expect(JSON.stringify((await asExt(path)).body)).not.toContain("cards/");
-    expect(JSON.stringify((await asAgent("/api/agent/entries")).body)).not.toContain("cards/");
+    // Each list answers 200 (an error body holds no "cards/" either) and holds the seeded login.
+    for (const list of [await asUi("/api/ui/entries"), await asExt("/api/ext/entries"), await asAgent("/api/agent/entries")]) {
+      expect(list.status).toBe(200);
+      expect(JSON.stringify(list.body)).toContain("shop.example.com/jane");
+      expect(JSON.stringify(list.body)).not.toContain("cards/");
+    }
+    const match = await asExt("/api/ext/match?url=https%3A%2F%2Fshop.example.com%2F");
+    expect(match.status).toBe(200);
+    expect(JSON.stringify(match.body)).not.toContain("cards/");
     expect((await asExt("/api/ext/secret", { body: { name: "cards/travel-visa", purpose: "copy" } })).status).toBe(400);
     expect((await asExt("/api/ext/secret", { body: { name: "cards/travel-visa", purpose: "fill", pageUrl: "https://shop.example.com/" } })).status).toBe(400);
     expect((await asUi("/api/ui/reveal", { body: { name: "cards/travel-visa" } })).status).toBe(400);
@@ -231,6 +242,7 @@ describe("agent card fill: only after the human confirms", () => {
     expect(human.command).toMatchObject({ kind: "card", card: { label: "Travel Visa", brand: "visa", last4: "4242", exp: "11/33" } });
     expect(JSON.stringify(human.command)).not.toContain(NUMBER);
     expect(human.secretStatusBeforeConfirm).toBe(404);
+    expect(human.secretStatusAfterDecline).toBe(404);
     expect(result.body).toMatchObject({ status: "declined", card: { label: "Travel Visa", last4: "4242" } });
     expect(result.body.name).toBeUndefined();
   });
@@ -351,6 +363,14 @@ describe("audit and logs", () => {
       for (const dir of [store.configDir, store.storeDir]) {
         expect(Bun.spawnSync(["grep", "-rF", "--", s, dir]).exitCode).toBe(1);
       }
+    }
+    // CVVs apart from the numbers: only in the plaintext files, where a CVV
+    // field or a fixture CVV as a JSON value would be readable. The store's
+    // ciphertext can hold any run of digits, so it is not searched for these.
+    for (const name of ["state.json", "audit.jsonl"]) {
+      const text = readFileSync(join(store.configDir, name), "utf8");
+      expect({ name, cvvField: /cvv"?\s*[:=]\s*"?\d{3,4}/i.test(text) }).toEqual({ name, cvvField: false });
+      for (const c of [CVV, AMEX_CVV, "321"]) expect({ name, c, found: text.includes(`"${c}"`) }).toEqual({ name, c, found: false });
     }
     const files = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((d) => (d.isDirectory() ? files(join(dir, d.name)) : [d.name]));
     expect(files(store.configDir).sort()).toEqual(["agent-token", "audit.jsonl", "state.json"]);

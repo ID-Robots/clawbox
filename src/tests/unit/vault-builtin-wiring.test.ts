@@ -132,7 +132,7 @@ describe("the service: installed and started on every box, loopback only", () =>
     expect(ensure).toContain("ensure_vault_packages || rc=1");
     expect(ensure).toContain("systemctl start --no-block clawbox-vault.service");
     // …and a running vault left on the previous build by that road is restarted onto this one.
-    expect(ensure).toMatch(/elif vault_runs_previous_build; then\s+echo[^\n]*\n\s+systemctl restart --no-block clawbox-vault\.service/);
+    expect(ensure).toMatch(/elif vault_runs_previous_build; then\s+echo[^\n]*\n[^\n]*MainPID[^\n]*\n\s+if ! systemctl restart --no-block clawbox-vault\.service/);
     // The one runtime package comes with the app's own install.
     const pkg = JSON.parse(read("package.json")) as { dependencies: Record<string, string> };
     expect(pkg.dependencies.tldts).toBeTruthy();
@@ -182,6 +182,69 @@ describe("the service: installed and started on every box, loopback only", () =>
       expect(ask(pid)).toBe("previous");
     } finally {
       child.kill();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("says so when a vault it started or restarted does not stay up, and tries no apt it cannot have", () => {
+    // The real functions, a systemctl stand-in that tells what the unit does
+    // after the --no-block call, and no waiting worth the name.
+    const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "vault-up-")));
+    const bin = path.join(tmp, "bin");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(
+      path.join(bin, "systemctl"),
+      [
+        "#!/bin/sh",
+        'case "$1" in',
+        "  is-enabled) echo enabled ;;",
+        '  is-active) if [ -f "$FAKE_DIR/called" ]; then s=$FAKE_AFTER; else s=$FAKE_BEFORE; fi; [ "$s" = up ] ;;',
+        '  show) if [ -f "$FAKE_DIR/called" ] && [ "$FAKE_NEW_PID" = 1 ]; then echo 2222; else echo 1111; fi ;;',
+        '  start|restart) echo "$1" >> "$FAKE_DIR/called" ;;',
+        "esac",
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    fs.writeFileSync(path.join(bin, "apt-get"), '#!/bin/sh\necho "$*" >> "$FAKE_DIR/apt"\n', { mode: 0o755 });
+    const fns = ["ensure_vault_service", "vault_came_up", "ensure_vault_packages"].map((n) => `${shellFunction(INSTALL_SH, n)}\n}\n`).join("");
+    const run = (stubs: string, env: Record<string, string>) => {
+      const dir = fs.mkdtempSync(path.join(tmp, "case-"));
+      const r = spawnSync("bash", ["-c", `${fns}${stubs}\nensure_vault_service; echo "rc=$?"`], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, FAKE_DIR: dir, VAULT_UP_WAIT_S: "2", VAULT_UP_STEADY_S: "0", ...env },
+        encoding: "utf8",
+      });
+      const calls = fs.existsSync(path.join(dir, "called")) ? fs.readFileSync(path.join(dir, "called"), "utf8").trim() : "";
+      return { out: `${r.stdout}${r.stderr}`, calls, apt: fs.existsSync(path.join(dir, "apt")) };
+    };
+    const installed = "dpkg_installed() { return 0; }\nvault_runs_previous_build() { return 0; }";
+    try {
+      // A start that comes up: no warning.
+      let r = run(installed, { FAKE_BEFORE: "down", FAKE_AFTER: "up", FAKE_NEW_PID: "1" });
+      expect(r.calls).toBe("start");
+      expect(r.out).toContain("rc=0");
+      expect(r.out).not.toContain("Warning");
+      // A start whose launcher exits: the update says so, and the step is not "ok".
+      r = run(installed, { FAKE_BEFORE: "down", FAKE_AFTER: "down", FAKE_NEW_PID: "1" });
+      expect(r.out).toContain("Warning: clawbox-vault.service did not stay up after its start");
+      expect(r.out).toContain("rc=1");
+      // A restart onto this build: up only counts on a NEW process.
+      r = run(installed, { FAKE_BEFORE: "up", FAKE_AFTER: "up", FAKE_NEW_PID: "1" });
+      expect(r.calls).toBe("restart");
+      expect(r.out).toContain("rc=0");
+      r = run(installed, { FAKE_BEFORE: "up", FAKE_AFTER: "up", FAKE_NEW_PID: "0" });
+      expect(r.out).toContain("Warning: clawbox-vault.service did not stay up after its restart");
+      expect(r.out).toContain("rc=1");
+      // The packages are missing and apt cannot be had: no apt-get run, a warning, rc 1.
+      r = run("dpkg_installed() { return 1; }\nwait_for_apt() { return 1; }\nvault_runs_previous_build() { return 1; }", {
+        FAKE_BEFORE: "up",
+        FAKE_AFTER: "up",
+        FAKE_NEW_PID: "0",
+      });
+      expect(r.apt).toBe(false);
+      expect(r.out).toContain("Warning: ClawBox Vault packages not installed: pass gnupg (apt is busy");
+      expect(r.out).toContain("rc=1");
+    } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
