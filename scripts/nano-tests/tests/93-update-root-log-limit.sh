@@ -294,7 +294,7 @@ else
   finish
 fi
 REBUILD_SEEN=0
-# shellcheck disable=SC2317  # called by wait_app_update as its tick
+# shellcheck disable=SC2317,SC2329  # called by wait_app_update as its tick
 rebuild_tick() {
   local shown why
   [ "$REBUILD_SEEN" = 1 ] && return 0
