@@ -162,11 +162,24 @@ const FASTER_WHISPER_STUB = [
   "    def __init__(self, text):",
   "        self.text = text",
   "",
+  // A load that fails comes up through several frames, as a real one does
+  // (download_model → huggingface_hub → …), so its cause is the last line of
+  // a traceback longer than the report keeps — on every Python, not only on
+  // those (3.13+) that also print the worker's own `-c` source line.
+  "def _download_model(name):",
+  "    return _snapshot_download(name)",
+  "",
+  "def _snapshot_download(name):",
+  "    return _hf_hub_download(name)",
+  "",
+  "def _hf_hub_download(name):",
+  '    raise RuntimeError("stub: no weights for " + name)',
+  "",
   "class WhisperModel:",
   '    def __init__(self, model_size_or_path, device="cpu", compute_type="default", **kwargs):',
   '        _record({"load": model_size_or_path, "device": device, "compute_type": compute_type})',
   '        if model_size_or_path in CFG.get("fail_models", []):',
-  '            raise RuntimeError("stub: no weights for " + model_size_or_path)',
+  "            _download_model(model_size_or_path)",
   '        time.sleep(CFG.get("load_delay", 0.0))',
   // The harness reads the device back off the loaded model rather than
   // trusting what it asked for, so the stub gets to disagree with the request.
@@ -507,6 +520,9 @@ describe.skipIf(!hasPython3)("scripts/bench/stt-bench.py", () => {
     const report = readReport(out);
     const small = report.variants.find((v) => v.model === "small")!;
     expect(small.skipped).toContain("no weights for small");
+    // The cause leads, ahead of the frames: the line a reader sees first, and
+    // what is left when the reason is cut short.
+    expect(String(small.skipped).split("\n")[0]).toContain("no weights for small");
     expect(small.rows).toHaveLength(0);
     // The variant that did work is still measured and still reported.
     expect(report.variants.find((v) => v.model === "tiny")!.rows).toHaveLength(1);

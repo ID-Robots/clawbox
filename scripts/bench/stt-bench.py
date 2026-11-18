@@ -595,6 +595,23 @@ def is_english_only(model: str) -> bool:
     return model.endswith(".en") or model in ENGLISH_ONLY_EXTRA
 
 
+def cause_first(stderr: str) -> str:
+    """A worker's last words with the line that says why moved to the front.
+
+    A Python traceback names its cause on its LAST line, and every reader of
+    these messages keeps the front: the report's `skipped` is cut to 300
+    characters, and a log line is read from the left. Led by "Traceback (most
+    recent call last):" the cause is the part that gets cut — and how many
+    frames come before it depends on the interpreter (3.13 began printing the
+    source lines of `-c` code, the worker's own frame included). So the last
+    line leads, and the frames follow for whoever needs them.
+    """
+    lines = stderr.strip().splitlines()
+    if len(lines) < 2:
+        return stderr.strip()
+    return "\n".join([lines[-1].strip(), *lines[:-1]])
+
+
 def read_tagged_line(proc: subprocess.Popen, name: str, what: str, timeout: float, stderr_tail) -> dict:
     """Return the next tagged line from `proc`, stepping over library banners.
 
@@ -710,7 +727,7 @@ class Variant:
             data = Path(self._stderr_file.name).read_bytes()
         except OSError:
             return ""
-        return data[-limit:].decode("utf-8", "replace").strip()
+        return cause_first(data[-limit:].decode("utf-8", "replace"))
 
     def start(self) -> subprocess.Popen:
         if self.proc is not None:
