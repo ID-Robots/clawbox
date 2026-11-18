@@ -756,6 +756,18 @@ async function resetSystemPasswordToDefault(): Promise<void> {
   }
 }
 
+/** Whether a factory reset is running in this process — one flag for every route bundle's copy. */
+function resetFlight(): { running: boolean } {
+  const g = globalThis as unknown as Record<symbol, { running: boolean } | undefined>;
+  const key = Symbol.for("clawbox.factoryReset.running");
+  let state = g[key];
+  if (!state) {
+    state = { running: false };
+    g[key] = state;
+  }
+  return state;
+}
+
 function scheduleReboot(): void {
   setTimeout(async () => {
     try {
@@ -826,6 +838,23 @@ export async function POST(request: Request) {
 
   const refused = await reproveOwnerPassword(body.password ?? "", buckets, startedAt);
   if (refused) return refused;
+
+  // One reset at a time. A second one overlapping the first would find the
+  // audit log the first sealed (src/lib/audit-log.ts) and could release it at
+  // its own failure gate while the first is on its way to the reboot — a
+  // sign-in that resolved the previous owner could then write them back — and
+  // two wipes of one disk at once are no better. Held until the process ends
+  // after a reset that went through; any other ending lets the next one start.
+  const flight = resetFlight();
+  if (flight.running) {
+    await padResponseTime(startedAt);
+    return NextResponse.json(
+      { error: "A factory reset is already running on this ClawBox.", code: "reset_in_progress" },
+      { status: 409 },
+    );
+  }
+  flight.running = true;
+  let wentThrough = false;
 
   try {
     await maskAndStopGateway();
@@ -966,6 +995,7 @@ export async function POST(request: Request) {
     }
 
     scheduleReboot();
+    wentThrough = true;
 
     const response = NextResponse.json({ success: true });
     response.cookies.set("clawbox_session", "", {
@@ -989,5 +1019,7 @@ export async function POST(request: Request) {
       { error },
       { status: 500 },
     );
+  } finally {
+    if (!wentThrough) flight.running = false;
   }
 }

@@ -144,6 +144,9 @@ describe("POST /setup-api/setup/reset", () => {
     // The audit log's seal lives on globalThis for the life of the process
     // (src/lib/audit-log.ts): every case starts unsealed.
     (await import("@/lib/audit-log")).unsealAuditLog();
+    // So does the one-reset-at-a-time flag: a reset that went through keeps
+    // it set until the process ends.
+    (globalThis as unknown as Record<symbol, unknown>)[Symbol.for("clawbox.factoryReset.running")] = { running: false };
     const mod = await import("@/app/setup-api/setup/reset/route");
     // The handler requires a session, the owner's password and the typed word
     // (TASK-443), so every call in this file carries all three. The gate itself
@@ -480,6 +483,46 @@ describe("POST /setup-api/setup/reset", () => {
 
     // systemctl reboot should have been called
     expect(mockExecFile).toHaveBeenCalled();
+  });
+
+  it("admits one reset at a time, so an overlapping one can never release the seal of one still running (TASK-2446)", async () => {
+    const audit = await import("@/lib/audit-log");
+    // Reset A is held after it cleared and sealed the log: at the Ollama step.
+    let releaseA: () => void = () => {};
+    const heldA = new Promise<void>((r) => { releaseA = r; });
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      await heldA;
+      return { ok: true, json: () => Promise.resolve({ models: [] }) };
+    }));
+    const a = resetPost();
+    await vi.waitFor(() => expect(audit.auditLogSealed()).toBe(true));
+    // Reset B arrives meanwhile — one that would fail at its gate: refused
+    // before it wipes anything, so it never reaches the gate that unseals.
+    mockFs.readdir.mockResolvedValueOnce(["file1.json"] as unknown as ReaddirResult);
+    mockFs.rm.mockRejectedValueOnce(new Error("Permission denied"));
+    const b = await resetPost();
+    expect(b.status).toBe(409);
+    expect((await b.json()).code).toBe("reset_in_progress");
+    expect(audit.auditLogSealed()).toBe(true);
+    // So the log stays sealed while A runs: a late sign-in of the previous
+    // owner writes nothing (src/tests/routes/login-api-audit-reset.test.ts).
+    releaseA();
+    expect((await a).status).toBe(200);
+    expect(audit.auditLogSealed()).toBe(true);
+    // A reset that went through keeps the next one out until the process ends.
+    expect((await resetPost()).status).toBe(409);
+  });
+
+  it("lets the next reset start after one that failed", async () => {
+    mockFs.readdir
+      .mockResolvedValueOnce(["file1.json", "file2.json"] as unknown as ReaddirResult)
+      .mockResolvedValue([] as unknown as ReaddirResult);
+    mockFs.rm
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("Permission denied"));
+    expect((await resetPost()).status).toBe(500);
+    mockFs.rm.mockResolvedValue();
+    expect((await resetPost()).status).toBe(200);
   });
 
   it("ends the web server when the reboot fails, so the audit log's seal ends with the process (TASK-2446)", async () => {
@@ -927,6 +970,9 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     // The audit log's seal lives on globalThis for the life of the process
     // (src/lib/audit-log.ts): every case starts unsealed.
     (await import("@/lib/audit-log")).unsealAuditLog();
+    // So does the one-reset-at-a-time flag: a reset that went through keeps
+    // it set until the process ends.
+    (globalThis as unknown as Record<symbol, unknown>)[Symbol.for("clawbox.factoryReset.running")] = { running: false };
     const mod = await import("@/app/setup-api/setup/reset/route");
     // The handler requires a session, the owner's password and the typed word
     // (TASK-443), so every call in this file carries all three. The gate itself
@@ -1189,6 +1235,9 @@ describe("POST /setup-api/setup/reset — a non-directory where a directory belo
     // The audit log's seal lives on globalThis for the life of the process
     // (src/lib/audit-log.ts): every case starts unsealed.
     (await import("@/lib/audit-log")).unsealAuditLog();
+    // So does the one-reset-at-a-time flag: a reset that went through keeps
+    // it set until the process ends.
+    (globalThis as unknown as Record<symbol, unknown>)[Symbol.for("clawbox.factoryReset.running")] = { running: false };
     const mod = await import("@/app/setup-api/setup/reset/route");
     resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
       method: "POST",
@@ -1421,6 +1470,9 @@ describe("POST /setup-api/setup/reset — ~/Projects and loose files in the home
     // The audit log's seal lives on globalThis for the life of the process
     // (src/lib/audit-log.ts): every case starts unsealed.
     (await import("@/lib/audit-log")).unsealAuditLog();
+    // So does the one-reset-at-a-time flag: a reset that went through keeps
+    // it set until the process ends.
+    (globalThis as unknown as Record<symbol, unknown>)[Symbol.for("clawbox.factoryReset.running")] = { running: false };
     const mod = await import("@/app/setup-api/setup/reset/route");
     resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
       method: "POST",
