@@ -82,7 +82,9 @@ restore() {
       echo "ENV untouched"
     fi
     if [ -e "$DIR/env.touched" ]; then
-      if sudo -n /usr/bin/systemctl restart clawbox-setup.service; then
+      sudo -n /usr/bin/systemctl restart clawbox-setup.service
+      restarted=$?
+      if [ "$restarted" = 0 ]; then
         echo "RESTART ok"
       else
         echo "RESTART_FAIL the web server could not be restarted onto the restored .env"; env_ok=0
@@ -99,11 +101,15 @@ restore() {
         sleep 5
       done
       code=$(owner_api DELETE /setup-api/users "{\"username\":\"$name\"}" | head -n1)
-      if [ "$code" = 200 ] || [ "$code" = 404 ]; then
-        echo "USER removed ($code)"
+      # 404 is "not in the ClawBox user list", which a half-made account can
+      # also be: the Linux account must be gone too (getent: 2 = no such entry).
+      getent passwd "$name" >/dev/null 2>&1
+      linux=$?
+      if { [ "$code" = 200 ] || [ "$code" = 404 ]; } && [ "$linux" = 2 ]; then
+        echo "USER removed ($code; no Linux account left)"
         rm -f "$DIR/user" "$DIR/user-cookie"
       else
-        echo "USER_FAIL removing the second account answered $code; its name is kept in $DIR/user"
+        echo "USER_FAIL removing the second account answered $code and its Linux account check answered $linux; its name is kept in $DIR/user"
         user_ok=0
       fi
     fi
@@ -141,7 +147,7 @@ USER_OUT=$(board '
   code=$(printf "%s\n" "$r" | head -n1)
   if [ "$code" != 201 ]; then printf "FAIL create %s %s\n" "$code" "$(printf "%s\n" "$r" | tail -n +2 | head -c 200)"; exit 0; fi
   jar=$(mktemp)
-  login=$(printf "%s" "{\"username\":\"$NAME\",\"password\":\"$PASS\",\"duration\":3000}" \
+  login=$(printf "%s" "{\"username\":\"$NAME\",\"password\":\"$PASS\",\"duration\":1200}" \
     | curl -sS -c "$jar" -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" --max-time 60 --data-binary @- "$DASHBOARD/login-api")
   cookie=$(awk "\$6 == \"clawbox_session\" { print \$7 }" "$jar"); rm -f "$jar"
   if [ "$login" != 200 ] || [ -z "$cookie" ]; then printf "FAIL login %s\n" "$login"; exit 0; fi
@@ -202,7 +208,10 @@ call_as owner "/setup-api/system/cluster?availability=1"
 if [ "$CALL_STATUS" = 200 ] && [ "$(body_json '.enabled')" = false ]; then
   ok "a box that is not a Workstation: the availability API answers enabled: false"
 else
+  # A box that already has a cluster turned on would read its peers and its
+  # saved engine on the full request below: nothing more is asked.
   not_ok "availability on a box with no cluster answered $CALL_STATUS: $(printf '%s' "$CALL_BODY" | head -c 200)"
+  finish
 fi
 call_as owner "/setup-api/system/cluster"
 if [ "$CALL_STATUS" = 200 ] && [ "$(body_json '.enabled')" = false ] && [ "$(body_json 'has("sparks")')" = false ]; then
@@ -304,8 +313,12 @@ if [ ! -e "$DIR/env.orig" ] && [ ! -e "$DIR/env.absent" ]; then
 fi
 base="$DIR/env.orig"
 [ -e "$DIR/env.absent" ] && base=/dev/null
-grep -v -E "^[[:space:]]*(export[[:space:]]+)?CLAWBOX_CLUSTER_(PEERS|VIEW|ENGINE_URL)=" "$base" > "$DIR/env.new"
-[ $? -le 1 ] || { echo "FAIL could not read the .env backup"; exit 0; }
+# awk, not grep: it answers 0 whether or not a line was dropped, so any
+# non-zero status (an unreadable backup, a failed redirection) is a failure.
+if ! awk '"'"'!/^[[:space:]]*(export[[:space:]]+)?CLAWBOX_CLUSTER_(PEERS|VIEW|ENGINE_URL)=/'"'"' "$base" > "$DIR/env.new"; then
+  echo "FAIL could not read the .env backup"
+  exit 0
+fi
 if ! {
   { [ -z "$peers" ] || printf "CLAWBOX_CLUSTER_PEERS=\"%s\"\n" "$peers"; } \
   && { [ -z "$mode" ] || printf "CLAWBOX_CLUSTER_VIEW=%s\n" "$mode"; } \
@@ -314,9 +327,12 @@ if ! {
   echo "FAIL could not write the new .env"
   exit 0
 fi
-: > "$DIR/env.touched"
+# The cleanup restarts the web server only where this marker is: no marker, no change.
+if ! : > "$DIR/env.touched"; then echo "FAIL could not mark the .env as changed; it was not changed"; exit 0; fi
 if ! cat "$DIR/env.new" > "$ENV_FILE"; then echo "FAIL could not write $ENV_FILE"; exit 0; fi
-if ! sudo -n /usr/bin/systemctl restart clawbox-setup.service; then echo "FAIL could not restart the web server"; exit 0; fi
+sudo -n /usr/bin/systemctl restart clawbox-setup.service
+restarted=$?
+if [ "$restarted" != 0 ]; then echo "FAIL could not restart the web server"; exit 0; fi
 echo OK
 '
 # restart_with MODE PEERS — write the .env and wait for the NEW web server to

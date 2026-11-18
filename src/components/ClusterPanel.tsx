@@ -213,7 +213,7 @@ function SparkCardView({ spark, locale }: { spark: SparkCard; locale: string }) 
     <section className={CARD} data-testid={`cluster-spark-${spark.id}`} aria-label={spark.hostname}>
       <div className="flex items-center gap-2 mb-4">
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">dns</span>
-        <h3 className="text-sm font-semibold font-mono text-[var(--text-primary)] min-w-0 truncate">{spark.hostname}</h3>
+        <h3 className="text-sm font-semibold font-mono text-[var(--text-primary)] min-w-0 truncate" title={spark.hostname}>{spark.hostname}</h3>
         {spark.local && (
           <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--coral-bright)]/80 bg-orange-500/10 px-1.5 py-0.5 rounded-md shrink-0" data-testid={`cluster-spark-${spark.id}-local`}>
             {tr("cluster.thisBox", "This Spark")}
