@@ -10,6 +10,7 @@ import {
   noteHomeChange,
   openQuotaWrite,
   resetHomeUsageForTests,
+  withHomeLock,
 } from "@/lib/home-usage";
 
 /**
@@ -165,14 +166,103 @@ describe("one figure per home while writes are open", () => {
     expect((await homeUsage(HOME))?.bytes).toBe(5000 + 3000);
   });
 
-  it("holds a reservation against the quota until it finishes", async () => {
-    const move = (await openQuotaWrite(HOME, 10_000))!;
-    move.reserve(3000);
-    const other = (await openQuotaWrite(HOME, 10_000))!;
-    expect(other.ceiling(0)).toBe(1000);
-    move.finish(0);
-    expect(other.ceiling(0)).toBe(4000);
-    other.finish(0);
+});
+
+describe("the last check before a write lands (TASK-2663)", () => {
+  it("is against what the home holds now and the size the landing really replaces, not the credit the write began with", async () => {
+    // A write began replacing a 3000-byte file, so it was metered with 3000 back.
+    const w = (await openQuotaWrite(HOME, 10_000, 3000))!;
+    expect(w.ceiling(6000)).toBe(7000);
+    // Meanwhile another write of the same name landed 500 bytes over it.
+    const other = (await openQuotaWrite(HOME, 10_000, 3000))!;
+    other.finish(500 - 3000);
+    expect(w.usedBytes).toBe(3500);
+    // Landing 6000 in place of the 500 now there would hold 9000, and 7000
+    // exactly the quota: both fit; a byte more does not. (Against the 3000 it
+    // began with, 9500 would have looked as if it fitted.)
+    expect(w.admits(6000, 500)).toBe(true);
+    expect(w.admits(7000, 500)).toBe(true);
+    expect(w.admits(7001, 500)).toBe(false);
+    expect(w.ceiling(6000)).toBe(9500);
+    // What other open writes have passed is held back too.
+    const third = (await openQuotaWrite(HOME, 10_000))!;
+    third.ceiling(1000);
+    expect(w.admits(6000, 500)).toBe(true);
+    expect(w.admits(6001, 500)).toBe(false);
+    third.finish(0);
+    w.finish(0);
+  });
+
+  it("walks a figure a delete left stale again first, leaving out the open writes' temporary files", async () => {
+    expect((await homeUsage(HOME))?.bytes).toBe(6000);
+    const w = (await openQuotaWrite(HOME, 10_000, 1000))!;
+    // Its bytes so far, in its temporary file: counted when it lands, not now.
+    const temp = path.join(HOME, ".clawbox-upload-0123456789abcdef.part");
+    fs.writeFileSync(temp, Buffer.alloc(4000));
+    w.staging(temp);
+    // The file it overwrites is deleted meanwhile: the figure is only marked.
+    fs.unlinkSync(path.join(HOME, "a.txt"));
+    noteHomeChange(HOME);
+    expect(w.usedBytes).toBe(6000);
+    expect(w.admits(4000, 0)).toBe(true);
+    expect(w.admits(5000, 0)).toBe(false);
+    await w.settle();
+    expect(w.usedBytes).toBe(5000);
+    expect(w.admits(5000, 0)).toBe(true);
+    w.finish(0);
+  });
+
+  it("grants nothing in a home that could only be measured as a floor", async () => {
+    // The walk's clock runs out before it reaches the first sub-folder.
+    const t0 = Date.now();
+    let calls = 0;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => (calls++ === 0 ? t0 : t0 + 60_000));
+    let w: Awaited<ReturnType<typeof openQuotaWrite>>;
+    try {
+      w = await openQuotaWrite(HOME, 10_000);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(w?.truncated).toBe(true);
+    expect(w!.admits(1, 0)).toBe(false);
+    // A landing that adds nothing is no write past the quota.
+    expect(w!.admits(0, 5000)).toBe(true);
+    w!.finish(0);
+  });
+});
+
+describe("one commit at a time per home (TASK-2663)", () => {
+  it("runs the tasks for one home one after another, in the order they asked, whatever each awaits", async () => {
+    const order: string[] = [];
+    let releaseFirst: () => void = () => {};
+    const gate = new Promise<void>((r) => { releaseFirst = r; });
+    const first = withHomeLock(HOME, async () => {
+      order.push("first:start");
+      await gate;
+      order.push("first:end");
+      return 1;
+    });
+    const second = withHomeLock(`${HOME}/`, () => {
+      order.push("second");
+      return 2;
+    });
+    // Another home is not held up.
+    const elsewhere = await withHomeLock(path.join(ROOT, "home", "maria"), () => "maria");
+    expect(elsewhere).toBe("maria");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(order).toEqual(["first:start"]);
+    releaseFirst();
+    expect(await Promise.all([first, second])).toEqual([1, 2]);
+    expect(order).toEqual(["first:start", "first:end", "second"]);
+  });
+
+  it("lets the next task run when one throws", async () => {
+    const failed = withHomeLock(HOME, async () => {
+      throw new Error("the rename failed");
+    });
+    const next = withHomeLock(HOME, () => "ran");
+    await expect(failed).rejects.toThrow("the rename failed");
+    expect(await next).toBe("ran");
   });
 });
 

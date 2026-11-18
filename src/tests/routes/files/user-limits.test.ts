@@ -52,6 +52,14 @@ function setLimits(limits: Record<string, number> | undefined) {
   fs.writeFileSync(path.join(DATA, "config.json"), JSON.stringify(limits ? { user_limits: limits } : {}));
 }
 
+/** Ivan's own Files view on the organisation box: his home and Shared. */
+async function ivanFence() {
+  const { fenceFor, memberRoots } = await import("@/lib/files-scope");
+  const roots = memberRoots(IVAN, OWNER);
+  if (!roots.ok) throw new Error("no member roots");
+  return fenceFor({ kind: "member", username: "ivan", roots: roots.roots });
+}
+
 function putFile(dir: string, name: string, bytes: number, { declare = true }: { declare?: boolean } = {}) {
   const body = Buffer.alloc(bytes, 0x61);
   const headers: Record<string, string> = { "Content-Type": "application/octet-stream" };
@@ -286,64 +294,101 @@ describe("the home quota", () => {
     expect(kept[0]).toBe(0x6b);
   });
 
-  it("holds each move's bytes until it has run, so two moves checked at once cannot share the same room", async () => {
-    // Asked of the check itself: two requests through the route at once meet
+  it("measures and moves one move at a time per home, so two moves at once cannot share the same room", async () => {
+    // Asked of the guard itself: two requests through the route at once meet
     // vitest's uneven handling of a mocked module's concurrent imports.
     // Room for one 600 KB move (about 800 KB left of the 3 MB quota), not two.
     fs.writeFileSync(path.join(IVAN, "old.bin"), Buffer.alloc(Math.round(2.2 * MB)));
     fs.writeFileSync(path.join(OWNER, "Shared", "one.bin"), Buffer.alloc(600 * KB));
     fs.writeFileSync(path.join(OWNER, "Shared", "two.bin"), Buffer.alloc(600 * KB));
-    const { moveQuotaCheck } = await import("@/lib/user-upload-guard");
-    const { fenceFor, memberRoots } = await import("@/lib/files-scope");
-    const roots = memberRoots(IVAN, OWNER);
-    if (!roots.ok) throw new Error("no member roots");
-    const fence = fenceFor({ kind: "member", username: "ivan", roots: roots.roots });
-    const check = (name: string) => moveQuotaCheck({ limitedUser: "ivan", fence, destAbs: IVAN, sources: [path.join(OWNER, "Shared", name)] });
-    const [a, b] = await Promise.all([check("one.bin"), check("two.bin")]);
-    const outcomes = [a, b].map((r) => (r && "refusal" in r ? r.refusal.body.code : r && "hold" in r ? "held" : "none")).sort();
-    expect(outcomes).toEqual(["held", "quota_exceeded"]);
-    for (const r of [a, b]) if (r && "hold" in r) r.hold.done();
+    const { guardedMove } = await import("@/lib/user-upload-guard");
+    const fence = await ivanFence();
+    const move = (name: string) => guardedMove(
+      { limitedUser: "ivan", fence, destAbs: IVAN, sources: [path.join(OWNER, "Shared", name)] },
+      () => {
+        fs.renameSync(path.join(OWNER, "Shared", name), path.join(IVAN, name));
+        return name;
+      },
+    );
+    const [a, b] = await Promise.all([move("one.bin"), move("two.bin")]);
+    const outcomes = [a, b].map((r) => ("refusal" in r ? r.refusal.body.code : "moved")).sort();
+    expect(outcomes).toEqual(["moved", "quota_exceeded"]);
+    expect(["one.bin", "two.bin"].filter((n) => fs.existsSync(path.join(IVAN, n)))).toHaveLength(1);
   });
 
-  it("refuses to move a file into the home while an upload is still writing it", async () => {
-    fs.writeFileSync(path.join(OWNER, "Shared", "growing.bin"), Buffer.alloc(100 * KB));
-    const { moveQuotaCheck, userUploadGuard, uploadWritingUnder } = await import("@/lib/user-upload-guard");
-    const { fenceFor, memberRoots } = await import("@/lib/files-scope");
-    const roots = memberRoots(IVAN, OWNER);
-    if (!roots.ok) throw new Error("no member roots");
-    const fence = fenceFor({ kind: "member", username: "ivan", roots: roots.roots });
+  it("does not move a file into the home while an upload is still writing it, and measures again what landed in it meanwhile", async () => {
     const growing = path.join(OWNER, "Shared", "growing.bin");
+    fs.writeFileSync(growing, Buffer.alloc(100 * KB));
+    const { guardedMove, userUploadGuard, uploadWritingUnder } = await import("@/lib/user-upload-guard");
+    const fence = await ivanFence();
+    const moveIn = (sources: string[] = [growing]) => guardedMove(
+      { limitedUser: "ivan", fence, destAbs: IVAN, sources },
+      () => {
+        fs.renameSync(growing, path.join(IVAN, "growing.bin"));
+        return "moved";
+      },
+    );
     // An upload into Shared is still writing the file (by anyone: the owner's too).
     const upload = await userUploadGuard({ limitedUser: null, fence, destPath: growing, disk: () => Infinity });
     upload.destination(growing);
     expect(uploadWritingUnder(path.join(OWNER, "Shared"))).toBe(true);
-    const check = (sources: string[]) => moveQuotaCheck({ limitedUser: "ivan", fence, destAbs: IVAN, sources });
     for (const sources of [[growing], [path.join(OWNER, "Shared")]]) {
-      const refused = await check(sources);
-      expect(refused && "refusal" in refused ? refused.refusal : null).toMatchObject({ status: 409, body: { code: "upload_in_progress" } });
+      const refused = await moveIn(sources);
+      expect("refusal" in refused ? refused.refusal : null).toMatchObject({ status: 409, body: { code: "upload_in_progress" } });
     }
     upload.finish(100 * KB);
     expect(uploadWritingUnder(growing)).toBe(false);
-    const allowed = await check([growing]);
-    expect(allowed && "hold" in allowed).toBe(true);
-    if (!allowed || !("hold" in allowed)) return;
-    expect(allowed.hold.writerStarted()).toBe(false);
-    // An upload begins writing the source after the check: asked again right
-    // before the rename, the move is called off.
-    const late = await userUploadGuard({ limitedUser: null, fence, destPath: growing, disk: () => Infinity });
-    late.destination(growing);
-    expect(allowed.hold.writerStarted()).toBe(true);
-    allowed.hold.done(false);
-    late.finish(null);
-    // An upload that replaces the source and FINISHES while the move is still
-    // measuring leaves its old size counted: the move is called off too.
-    const again = await check([growing]);
-    if (!again || !("hold" in again)) throw new Error("the move should be admitted");
-    const quick = await userUploadGuard({ limitedUser: null, fence, destPath: growing, disk: () => Infinity });
-    quick.destination(growing);
-    quick.finish(500 * KB);
-    expect(again.hold.writerStarted()).toBe(true);
-    again.hold.done(false);
+
+    // What runs while the move measures the source.
+    const during: { run: null | (() => Promise<void>) } = { run: null };
+    const realLstat = fs.promises.lstat.bind(fs.promises);
+    const spy = vi.spyOn(fs.promises, "lstat").mockImplementation(async (p, ...rest) => {
+      if (String(p) === growing && during.run) {
+        const run = during.run;
+        during.run = null;
+        await run();
+      }
+      return realLstat(p as string, ...(rest as []));
+    });
+    try {
+      // An upload begins writing the source while it is measured: asked again
+      // right before the rename, the move is called off.
+      let late: Awaited<ReturnType<typeof userUploadGuard>> | null = null;
+      during.run = async () => {
+        late = await userUploadGuard({ limitedUser: null, fence, destPath: growing, disk: () => Infinity });
+        late.destination(growing);
+      };
+      const called = await moveIn();
+      expect("refusal" in called ? called.refusal : null).toMatchObject({ status: 409, body: { code: "upload_in_progress" } });
+      expect(fs.existsSync(growing)).toBe(true);
+      late!.finish(null);
+
+      // An upload replaces the source with 3.5 MB and FINISHES while it is
+      // measured: measured again at its new size, it no longer fits.
+      during.run = async () => {
+        const quick = await userUploadGuard({ limitedUser: null, fence, destPath: growing, disk: () => Infinity });
+        quick.destination(growing);
+        fs.writeFileSync(growing, Buffer.alloc(Math.round(3.5 * MB)));
+        quick.finish(Math.round(3.5 * MB));
+      };
+      const refused = await moveIn();
+      expect("refusal" in refused ? refused.refusal : null).toMatchObject({ status: 507, body: { code: "quota_exceeded" } });
+      expect(fs.statSync(growing).size).toBe(Math.round(3.5 * MB));
+      expect(fs.existsSync(path.join(IVAN, "growing.bin"))).toBe(false);
+
+      // One that lands 200 KB: measured again, it fits and moves.
+      during.run = async () => {
+        const quick = await userUploadGuard({ limitedUser: null, fence, destPath: growing, disk: () => Infinity });
+        quick.destination(growing);
+        fs.writeFileSync(growing, Buffer.alloc(200 * KB));
+        quick.finish(200 * KB);
+      };
+      const moved = await moveIn();
+      expect(moved).toEqual({ value: "moved" });
+      expect(fs.statSync(path.join(IVAN, "growing.bin")).size).toBe(200 * KB);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("does not apply to the owner, nor without a quota", async () => {

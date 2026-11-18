@@ -10,12 +10,18 @@
  * `quota_exceeded` names what the home holds and its quota, and the disk's own
  * 507 `disk_full` is the route's. A refusal is decided by the numbers, never
  * by an error's text.
+ *
+ * The bytes a write is metered against while they arrive can go stale before
+ * it lands (TASK-2663): so an upload into a limited home is checked once more
+ * at its commit, under the home's lock (`UploadGuard.commit`), and a move into
+ * one measures and moves under that lock too (`guardedMove`).
  */
 
 import fs from "fs";
 import path from "@/lib/runtime-path";
 import { MEMBER_HOME_ENTRY, type FilesFence } from "@/lib/files-scope";
-import { insideHome, measureHomeUsage, noteHomeChange, openQuotaWrite, type QuotaWrite } from "@/lib/home-usage";
+import { insideHome, measureHomeUsage, noteHomeChange, openQuotaWrite, withHomeLock, type QuotaWrite } from "@/lib/home-usage";
+import { commitUploadTemp } from "@/lib/upload-temp";
 import { quotaExceededMessage, quotaUnmeasuredMessage, uploadTooLargeMessage } from "@/lib/user-limits";
 import { homeQuotaBytes, readUserLimits, uploadLimitBytes } from "@/lib/user-limits-server";
 
@@ -45,6 +51,12 @@ export interface UploadGuard {
   quotaCeiling(passed: number): number;
   /** The upload writes `destPath` (a multipart part named it): a file there gives its room back. */
   destination(destPath: string): void;
+  /**
+   * Its bytes go to the temporary file `tempPath` (by the path its descriptor
+   * was judged at) until the commit: a walk of the home while it is open
+   * leaves that file out, since its bytes are counted when it lands.
+   */
+  staging(tempPath: string): void;
   /** Which bound the last `ceiling` came from. */
   lastBound(): UploadBound;
   /**
@@ -56,11 +68,24 @@ export interface UploadGuard {
   /** The refusal for an upload stopped at `bound`; null for the disk's (the route words that). */
   refusalFor(bound: UploadBound): { status: number; body: UploadRefusalBody } | null;
   /**
+   * Put the whole accepted upload in place: its temporary file `tempReal` is
+   * renamed over `destPath` (src/lib/upload-temp.ts) and the upload finishes.
+   * Into a limited home this happens under the home's lock, and only when the
+   * home still has room for it NOW — net of the file the rename really
+   * replaces, read right before it — and the figure moves before the lock is
+   * let go. False when the quota refused it at this last check: nothing was
+   * renamed, the old file is untouched, and the caller removes the temporary
+   * file, answers `refusalFor("quota")` and calls `finish(null)`. A rename
+   * that fails throws, as `commitUploadTemp` does.
+   */
+  commit(tempReal: string, destPath: string): Promise<boolean>;
+  /**
    * The upload ended: `landedBytes` is the size of the file it wrote, or null
    * when it failed (the file it would have replaced is untouched then).
    * `replacedBytes` is the size of the file the commit actually replaced, read
    * right before its rename: the home's figure moves by the difference, so it
    * matches the disk even when another upload of the same name landed first.
+   * Only the first call counts (`commit` makes it for a write it landed).
    */
   finish(landedBytes: number | null, replacedBytes?: number): void;
 }
@@ -139,6 +164,17 @@ export async function userUploadGuard(opts: {
     return null;
   };
 
+  let finished = false;
+  const finish = (landedBytes: number | null, replacedAtCommit?: number) => {
+    if (finished) return;
+    finished = true;
+    if (writing) endWriting(writing);
+    writing = null;
+    if (!quota) return;
+    const gaveBack = replacedAtCommit !== undefined && Number.isFinite(replacedAtCommit) ? Math.max(0, replacedAtCommit) : replaced;
+    quota.finish(landedBytes === null ? 0 : landedBytes - gaveBack);
+  };
+
   return {
     initialMax: first.max,
     initialBound: first.bound,
@@ -170,13 +206,30 @@ export async function userUploadGuard(opts: {
       return null;
     },
     refusalFor,
-    finish(landedBytes: number | null, replacedBytes?: number) {
-      if (writing) endWriting(writing);
-      writing = null;
-      if (!quota) return;
-      const gaveBack = replacedBytes !== undefined && Number.isFinite(replacedBytes) ? Math.max(0, replacedBytes) : replaced;
-      quota.finish(landedBytes === null ? 0 : landedBytes - gaveBack);
+    async commit(tempReal: string, destPath: string) {
+      // Only a write into the limited user's own home is the quota's: the
+      // check, the rename and the figure's move are one step under its lock.
+      const home = quota && quotaHome && insideHome(quotaHome, destPath) ? quotaHome : null;
+      const land = (admit?: (sizes: { landedBytes: number; replacedBytes: number }) => boolean): boolean => {
+        const committed = commitUploadTemp(tempReal, destPath, admit);
+        if (!committed) return false;
+        finish(committed.landedBytes, committed.replacedBytes);
+        return true;
+      };
+      if (!home || !quota) return land();
+      const write = quota;
+      return withHomeLock(home, async () => {
+        // A figure a delete or a move left stale is measured again first, so
+        // the check below is against what the home really holds.
+        await write.settle();
+        // Nothing awaited from here: the check, the rename and the figure's move.
+        return land(({ landedBytes, replacedBytes }) => write.admits(landedBytes, replacedBytes));
+      });
     },
+    staging(tempPath: string) {
+      quota?.staging(tempPath);
+    },
+    finish,
   };
 }
 
@@ -256,42 +309,73 @@ function endWriting(abs: string): void {
   const n = (map.get(k) ?? 0) - 1;
   if (n > 0) map.set(k, n);
   else map.delete(k);
-  noteWritten(k);
+  noteLanded(k);
 }
 
-// When each file last finished being written, by a sequence number: a move
-// that measured a source before an upload replaced it (and finished) must
-// not move it at the old size. Entries older than a move can take are pruned.
-const WRITTEN_KEY = Symbol.for("clawbox.userUploadGuard.written");
-const WRITTEN_KEEP_MS = 10 * 60_000;
-function writtenState(): { seq: number; at: Map<string, { seq: number; ms: number }> } {
-  const g = globalThis as unknown as Record<symbol, { seq: number; at: Map<string, { seq: number; ms: number }> } | undefined>;
-  let state = g[WRITTEN_KEY];
+// What landed where while a move was measuring, by a sequence number: a move
+// that measured a source before something landed in it — an upload that
+// finished writing a file there, another move or a rename into it — must not
+// move it at the size it measured (TASK-2663). Every landing is noted
+// (`noteLanded`); a move notes the sequence when it starts measuring and asks,
+// right before it moves, whether anything landed under a source since.
+//
+// An entry matters only to a measurement that was already running when it was
+// noted, so entries are kept exactly as long as one is: none once the last
+// running measurement has ended, however long it took.
+interface LandedState {
+  seq: number;
+  /** Path → the sequence of the last landing there. */
+  at: Map<string, number>;
+  /** Each running measurement → the sequence it started at. */
+  measuring: Map<symbol, number>;
+}
+const LANDED_KEY = Symbol.for("clawbox.userUploadGuard.landed");
+function landedState(): LandedState {
+  const g = globalThis as unknown as Record<symbol, LandedState | undefined>;
+  let state = g[LANDED_KEY];
   if (!state) {
-    state = { seq: 0, at: new Map() };
-    g[WRITTEN_KEY] = state;
+    state = { seq: 0, at: new Map(), measuring: new Map() };
+    g[LANDED_KEY] = state;
   }
   return state;
 }
 
-function noteWritten(k: string): void {
-  const state = writtenState();
-  const now = Date.now();
-  for (const [p, v] of state.at) if (now - v.ms > WRITTEN_KEEP_MS) state.at.delete(p);
-  state.at.set(k, { seq: ++state.seq, ms: now });
+/** Forget every entry no running measurement can ask about. */
+function pruneLanded(state: LandedState): void {
+  let oldest = Infinity;
+  for (const since of state.measuring.values()) oldest = Math.min(oldest, since);
+  for (const [p, seq] of state.at) if (seq <= oldest) state.at.delete(p);
 }
 
-/** The current write sequence: what `writtenUnderSince` compares against. */
-function writeSequence(): number {
-  return writtenState().seq;
+/**
+ * Something landed at `abs` — an upload's file, or a file or folder a move or
+ * a rename put there: a move that measured a folder it is in measures again.
+ */
+export function noteLanded(abs: string): void {
+  const state = landedState();
+  if (state.measuring.size === 0) return;
+  state.at.set(path.resolve(abs), ++state.seq);
 }
 
-/** Did an upload finish writing `abs`, or a file under it, after sequence `since`? */
-function writtenUnderSince(abs: string, since: number): boolean {
-  const k = path.resolve(abs);
-  for (const [p, v] of writtenState().at) if (v.seq > since && (p === k || p.startsWith(k + path.sep))) return true;
-  return false;
+/** A measurement starts: `landedUnder` answers for what lands from now until `end()`. */
+function startMeasuring(): { landedUnder: (abs: string) => boolean; end: () => void } {
+  const state = landedState();
+  const token = Symbol("measuring");
+  const since = state.seq;
+  state.measuring.set(token, since);
+  return {
+    landedUnder(abs: string) {
+      const k = path.resolve(abs);
+      for (const [p, seq] of state.at) if (seq > since && (p === k || p.startsWith(k + path.sep))) return true;
+      return false;
+    },
+    end() {
+      state.measuring.delete(token);
+      pruneLanded(state);
+    },
+  };
 }
+
 
 /** Is an upload writing `abs`, or a file under it right now? */
 export function uploadWritingUnder(abs: string): boolean {
@@ -300,89 +384,109 @@ export function uploadWritingUnder(abs: string): boolean {
   return false;
 }
 
-/** A move's claim on a home's quota: released once the move has run, whatever it moved. */
-export interface MoveQuotaHold {
-  /**
-   * Has an upload begun writing one of the sources since the check? Asked
-   * synchronously right before the (synchronous) rename, so no upload can
-   * begin between this answer and the move.
-   */
-  writerStarted(): boolean;
-  /** The move ran (`moved`, the default) or was called off before it did. */
-  done(moved?: boolean): void;
-}
+type MoveRefusalOf = { status: number; body: UploadRefusalBody };
+
+/** What `guardedMove` answers: the move's own answer, or why it did not run. */
+export type GuardedMove<T> = { refusal: MoveRefusalOf } | { value: T };
+
+/** Something a move would carry is still being uploaded: it would go on growing wherever it lands. */
+const MOVE_UPLOAD_IN_PROGRESS: MoveRefusalOf = {
+  status: 409,
+  body: { error: "Something in this selection is still being uploaded. Move it once the upload has finished.", code: "upload_in_progress" },
+};
+
+/** What a move would carry kept changing while it was measured. */
+const MOVE_SOURCES_CHANGED: MoveRefusalOf = {
+  status: 409,
+  body: { error: "Something in this selection changed while it was being moved. Try the move again.", code: "move_sources_changed" },
+};
+
+/** How often a move measures again what changed under it before it gives up (409 `move_sources_changed`). */
+export const MOVE_MEASURE_ATTEMPTS = 3;
 
 /**
- * A move into a limited user's home from outside it (their Shared folder)
- * adds what it carries. Refused 507 `quota_exceeded` when that would take the
- * home past its quota, and `quota_unmeasured` when the size of what it
- * carries — or of the home — could not be established within the walk's
- * bounds. When it may go ahead, the bytes it carries are HELD against the
- * quota until `done()` (after the move ran), so two moves checked at once
- * cannot each be granted the same room. Null for the owner, a move within one
- * folder tree, no quota, or a home that cannot be read at all.
+ * Run `move` — the Files route's synchronous batch of renames — unless it may
+ * not run now. Answers `{ value }` with what `move` answered, or `{ refusal }`
+ * when it did not run:
+ *
+ * - 409 `upload_in_progress`: an upload is still writing one of `sources` (or
+ *   a file under one), asked synchronously right before `move`, for anyone.
+ * - A limited user's move from outside their home (their Shared folder) into
+ *   it adds what it carries, and runs under the home's lock
+ *   (`withHomeLock`): no other write lands in the home while the move is
+ *   measured and moved. 507 `quota_exceeded` when what it carries would take
+ *   the home past its quota (asked with nothing awaited between the answer
+ *   and the move), `quota_unmeasured` when the size of what it carries — or
+ *   of the home — could not be established within the walk's bounds.
+ * - Something landed under a source while it was measured (an upload, another
+ *   person's move or rename into it — `noteLanded`): it is measured again, up
+ *   to `MOVE_MEASURE_ATTEMPTS` times, then 409 `move_sources_changed`.
+ *
+ * The owner, a move within one home, no quota or a home that cannot be read
+ * at all: only the first rule applies.
  */
-export async function moveQuotaCheck(opts: {
-  limitedUser: string | null;
-  fence: FilesFence;
-  destAbs: string | null;
-  sources: ReadonlyArray<string | null>;
-}): Promise<{ refusal: { status: number; body: UploadRefusalBody } } | { hold: MoveQuotaHold } | null> {
+export async function guardedMove<T>(
+  opts: {
+    limitedUser: string | null;
+    fence: FilesFence;
+    destAbs: string | null;
+    sources: ReadonlyArray<string | null>;
+  },
+  move: () => T,
+): Promise<GuardedMove<T>> {
   const { limitedUser, fence, destAbs, sources } = opts;
-  if (!limitedUser || !destAbs) return null;
+  const uploading = () => sources.some((s) => s !== null && uploadWritingUnder(s));
+  const plain = (): GuardedMove<T> => (uploading() ? { refusal: MOVE_UPLOAD_IN_PROGRESS } : { value: move() });
+  if (!limitedUser || !destAbs) return plain();
   const home = memberHome(fence);
-  if (!home || !insideHome(home, destAbs)) return null;
+  if (!home || !insideHome(home, destAbs)) return plain();
   const incoming = sources.filter((s): s is string => typeof s === "string" && !insideHome(home, s));
-  if (incoming.length === 0) return null;
-  // Taken before anything is measured: an upload that replaces a source and
-  // finishes while the others are measured leaves its old size counted.
-  const measuredFrom = writeSequence();
-  // A file an upload is still writing would keep growing once in the home.
-  if (incoming.some(uploadWritingUnder)) {
-    return {
-      refusal: {
-        status: 409,
-        body: { error: "This file is still being uploaded. Move it into your home folder once the upload has finished.", code: "upload_in_progress" },
-      },
-    };
-  }
+  if (incoming.length === 0) return plain();
   const quotaBytes = homeQuotaBytes(await readUserLimits());
-  if (quotaBytes === null) return null;
-  const write = await openQuotaWrite(home, quotaBytes);
-  if (!write) return null;
-  let bytes = 0;
-  let unmeasured = false;
-  for (const abs of incoming) {
-    const at = await bytesAt(abs);
-    bytes += at.bytes;
-    if (at.truncated) unmeasured = true;
-  }
-  if (unmeasured) {
-    write.finish(0);
-    return {
-      refusal: {
-        status: 507,
-        body: { error: quotaUnmeasuredMessage(quotaBytes), code: "quota_unmeasured", usedBytes: write.usedBytes, quotaBytes },
-      },
-    };
-  }
-  if (bytes > write.ceiling(0)) {
-    write.finish(0);
-    return { refusal: quotaRefusal(write) };
-  }
-  write.reserve(bytes);
-  return {
-    hold: {
-      writerStarted: () => incoming.some((s) => uploadWritingUnder(s) || writtenUnderSince(s, measuredFrom)),
-      done(moved = true) {
+  if (quotaBytes === null) return plain();
+
+  return withHomeLock(home, async () => {
+    for (let attempt = 1; ; attempt++) {
+      // Started before anything is measured: whatever lands under a source
+      // from here on was not in what this attempt counts.
+      const measuring = startMeasuring();
+      let write: QuotaWrite | null = null;
+      let bytes = 0;
+      let ran = false;
+      try {
+        if (uploading()) return { refusal: MOVE_UPLOAD_IN_PROGRESS };
+        write = await openQuotaWrite(home, quotaBytes);
+        if (!write) return plain();
+        await write.settle();
+        let unmeasured = false;
+        for (const abs of incoming) {
+          const at = await bytesAt(abs);
+          bytes += at.bytes;
+          if (at.truncated) unmeasured = true;
+        }
+        // ── Nothing is awaited from here to the move. ──
+        if (uploading()) return { refusal: MOVE_UPLOAD_IN_PROGRESS };
+        if (incoming.some(measuring.landedUnder)) {
+          if (attempt < MOVE_MEASURE_ATTEMPTS) continue;
+          return { refusal: MOVE_SOURCES_CHANGED };
+        }
+        if (unmeasured) {
+          return { refusal: { status: 507, body: { error: quotaUnmeasuredMessage(quotaBytes), code: "quota_unmeasured", usedBytes: write.usedBytes, quotaBytes } } };
+        }
+        if (!write.admits(bytes, 0)) return { refusal: quotaRefusal(write) };
+        ran = true;
+        return { value: move() };
+      } finally {
         // Counted whole at once — a write that opens before the next walk
         // must not be granted these bytes again — and then measured anew, so
-        // a move that ran only in part is not counted whole for long.
-        write.finish(moved ? bytes : 0);
-        if (moved) noteHomeChange(home);
-      },
-    },
-  };
+        // a move that ran only in part is not counted whole for long. Both
+        // before the lock is let go.
+        write?.finish(ran ? bytes : 0);
+        if (ran) noteHomeChange(home);
+        measuring.end();
+      }
+    }
+  });
 }
 
 /** Something under a member's view changed by other means (a move, a delete): measure the home again next time. */

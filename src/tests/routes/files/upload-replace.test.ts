@@ -41,17 +41,17 @@ vi.mock("@/lib/clawbox-users", () => ({
   grantHomeAccess: vi.fn(async () => "ok" as const),
 }));
 
-// A window inside a move's quota check: what runs here runs after the check
-// has answered and before the move handler has read that answer.
+// A window between the move handler's first look at its sources and the
+// guarded move (src/lib/user-upload-guard.ts `guardedMove`), which must ask
+// every source again right before it moves anything.
 const moveWindow = vi.hoisted(() => ({ during: null as null | (() => Promise<void>) }));
 vi.mock("@/lib/user-upload-guard", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/user-upload-guard")>();
   return {
     ...real,
-    moveQuotaCheck: async (opts: Parameters<typeof real.moveQuotaCheck>[0]) => {
-      const answer = await real.moveQuotaCheck(opts);
+    guardedMove: async <T,>(opts: Parameters<typeof real.guardedMove>[0], move: () => T) => {
       if (moveWindow.during) await moveWindow.during();
-      return answer;
+      return real.guardedMove(opts, move);
     },
   };
 });
@@ -331,7 +331,7 @@ describe("a folder an upload is still writing into", () => {
     expect(fs.existsSync(path.join(OWNER, "Shared", "archive", "pack", "file.bin"))).toBe(true);
   });
 
-  it("is not moved when the upload begins while the move's quota check is awaited, with the quota off", async () => {
+  it("is not moved when the upload begins after the move first looked, with the quota off", async () => {
     setLimits({ uploadMaxMb: 0, homeQuotaMb: 0 });
     const pack = path.join(OWNER, "Shared", "pack");
     for (const [as, to] of [[{ username: "owner", isOwner: true }, "Shared/archive"], [{ username: "ivan", isOwner: false }, "Home"]] as const) {
