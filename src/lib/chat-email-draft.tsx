@@ -84,8 +84,11 @@ type Phase =
   // e.g. why a card whose Send got no answer is offered again.
   | { kind: 'open'; draft: EmailDraftView; token: string; busy: Action | null; notice?: string }
   // `notice`: a sentence shown instead of the state's own, e.g. a Send the
-  // backend confirmed that ClawBox could not record on disk.
-  | { kind: 'settled'; state: Settled; draft: EmailDraftView | null; notice?: string }
+  // backend confirmed that ClawBox could not record on disk. `uncertainty`:
+  // on `uncertain`, the identifier of the lost Send this card warns about —
+  // its "Review again" names it back, so the server hands out a card that can
+  // send only for the warning the person actually saw.
+  | { kind: 'settled'; state: Settled; draft: EmailDraftView | null; notice?: string; uncertainty?: number }
   | { kind: 'refused'; reason: string; draft: EmailDraftView | null }
   | { kind: 'failed'; reason: string }
   // A Send whose answer never arrived: it may have gone. `checking` while the
@@ -101,9 +104,16 @@ function cardPhase({ status, json }: Answer): Extract<Phase, { kind: 'open' | 's
     return { kind: 'open', draft, token: json.token, busy: null }
   }
   if (status === 200 && typeof json.state === 'string' && SETTLED.includes(json.state)) {
-    return { kind: 'settled', state: json.state as Settled, draft }
+    return { kind: 'settled', state: json.state as Settled, draft, ...uncertaintyOf(json) }
   }
   return null
+}
+
+/** An `uncertain` answer's warning identifier, as a phase field — nothing when it names none. */
+function uncertaintyOf(json: Record<string, unknown>): { uncertainty?: number } {
+  return json.state === 'uncertain' && typeof json.uncertainty === 'number' && Number.isFinite(json.uncertainty)
+    ? { uncertainty: json.uncertainty }
+    : {}
 }
 
 /** The state the server answers when it did what the person asked. */
@@ -226,11 +236,20 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
   const tRef = useRef(t)
   useEffect(() => { tRef.current = t }, [t])
 
-  const load = useCallback(async (reopen: boolean) => {
+  /**
+   * Reads the card. `reopen` is the person's "Review again"; `acknowledged`,
+   * the lost-Send warning this card showed, which that Review again answers.
+   * A reopen naming no warning, or an older one, is answered `uncertain` with
+   * the current warning, never with a card that can send.
+   */
+  const load = useCallback(async (reopen: boolean, acknowledged?: number) => {
     setPhase({ kind: 'loading' })
     let answer: Answer
     try {
-      answer = await post(CARD_ROUTE, reopen ? { draftId, reopen: true } : { draftId })
+      answer = await post(
+        CARD_ROUTE,
+        !reopen ? { draftId } : acknowledged === undefined ? { draftId, reopen: true } : { draftId, reopen: true, acknowledged },
+      )
     } catch {
       if (alive.current) setPhase({ kind: 'failed', reason: 'network' })
       return
@@ -322,7 +341,13 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
     // was lost offers "Review again" once the person has checked Sent.
     const state = answer?.json.state
     if (kind === 'send_uncertain' || (kind === 'reused' && state === 'uncertain')) {
-      setPhase({ kind: 'settled', state: 'uncertain', draft })
+      const uncertainty = answer?.json.uncertainty
+      setPhase({
+        kind: 'settled',
+        state: 'uncertain',
+        draft,
+        ...(typeof uncertainty === 'number' && Number.isFinite(uncertainty) ? { uncertainty } : {}),
+      })
       return
     }
     if (kind === 'reused' && state === 'sending') {
@@ -579,10 +604,16 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
             data-testid="chat-email-draft-reload"
             // Asking again about an ANSWERED draft is the explicit reopen; a
             // refusal's "current version", a retry and a check after a Send
-            // with no answer are a plain look.
+            // with no answer are a plain look. A reopen names the lost-Send
+            // warning this card showed, if it showed one.
             onClick={() => {
               if (phase.kind === 'unknown') void recheck(phase.draft)
-              else void load(reviewable && !(phase.kind === 'settled' && phase.state === 'sending'))
+              else {
+                void load(
+                  reviewable && !(phase.kind === 'settled' && phase.state === 'sending'),
+                  phase.kind === 'settled' && phase.state === 'uncertain' ? phase.uncertainty : undefined,
+                )
+              }
             }}
             style={button(false, false)}
           >

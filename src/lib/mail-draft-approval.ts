@@ -94,7 +94,8 @@ const SENDING_STALE_MS = 2 * 60_000;
 /**
  * `uncertain`: a Send reached the backend and its answer was lost — the mail
  * may have gone. A plain reload never offers that draft's Send again; only the
- * person's explicit "Review again", after being told to check the Sent folder.
+ * person's explicit "Review again", after being told to check the Sent folder,
+ * naming the warning it was shown (`unansweredLoss`).
  */
 export type CardState = "open" | "sending" | "sent" | "kept" | "revised" | "changed" | "failed" | "uncertain";
 export type DecisionAction = "send" | "keep" | "revise";
@@ -440,11 +441,42 @@ const GONE = () =>
   refusal(404, "gone", "This draft is no longer in the mailbox: it was sent or deleted.");
 
 /**
- * What the ledger alone says about a draft, when that settles it: sent; a
- * Send in flight; a Send whose answer was lost (unless the person asked to
- * review it again, having been told to check the Sent folder).
+ * The lost Send of this person's draft that a card must warn about before it
+ * may offer Send again: the newest loss NO CARD HAS BEEN MADE SINCE — the same
+ * line `sendBlocker` draws, a card made at or after the loss is past it. Null
+ * when there is none.
+ *
+ * Its moment is the warning's identifier (`uncertainty` in every answer that
+ * says `uncertain`). "Review again" hands out a card that can send only when
+ * it names that very identifier back (`acknowledged`), so it is bound to the
+ * warning the person was SHOWN: a card still saying "Kept" or "Revised", or
+ * one warned about an earlier loss, asks about a newer loss first. Every card
+ * made after a loss is made that way, so a card made since a loss means the
+ * person was warned about it.
  */
-function settledAnswerIn(cards: CardEntry[], user: string, draftId: string, reopen: boolean, now: number): ApprovalAnswer | null {
+function unansweredLoss(cards: CardEntry[], user: string, draftId: string, now: number): number | null {
+  const mine = cards.filter((card) => card.u === user && card.d === draftId);
+  let newest: number | null = null;
+  for (const card of mine) {
+    const at = lostAt(card, now);
+    if (at === null || mine.some((other) => other !== card && other.iat >= at)) continue;
+    if (newest === null || at > newest) newest = at;
+  }
+  return newest;
+}
+
+/** The fields an `uncertain` answer carries: the warning's identifier, when the ledger has one. */
+function uncertainty(loss: number | null): Record<string, unknown> {
+  return loss === null ? {} : { uncertainty: loss };
+}
+
+/**
+ * What the ledger alone says about a draft, when that settles it: sent; a
+ * Send in flight; a Send whose answer was lost, unless `acknowledged` is that
+ * very loss — the person's "Review again" after the card warned them about it
+ * and told them to check the Sent folder.
+ */
+function settledAnswerIn(cards: CardEntry[], user: string, draftId: string, acknowledged: number | null, now: number): ApprovalAnswer | null {
   const mine = cards.filter((card) => card.u === user && card.d === draftId);
   const sent = mine.find((card) => card.state === "sent");
   if (sent) return { status: 200, body: { state: "sent", decidedAt: sent.at } };
@@ -452,32 +484,16 @@ function settledAnswerIn(cards: CardEntry[], user: string, draftId: string, reop
   const lost = (card: CardEntry) => lostAt(card, now) !== null;
   const sending = mine.find((card) => card.state === "sending" && !lost(card));
   if (sending) return { status: 200, body: { state: "sending", decidedAt: sending.at } };
-  if (!reopen) {
-    // A lost Send no card has been asked for since — the same line
-    // `sendBlocker` draws: a card made at or after the loss is past it.
-    const unanswered = mine.find((card) => {
-      const at = lostAt(card, now);
-      return at !== null && !mine.some((other) => other !== card && other.iat >= at);
-    });
-    if (unanswered) return { status: 200, body: { state: "uncertain", decidedAt: unanswered.at } };
+  const loss = unansweredLoss(cards, user, draftId, now);
+  if (loss !== null && loss !== acknowledged) {
+    return { status: 200, body: { state: "uncertain", decidedAt: loss, ...uncertainty(loss) } };
   }
   return null;
 }
 
-/**
- * The newest Send of this person's draft whose answer was lost, by the moment
- * it was lost — null when none was. Read once BEFORE the draft is fetched and
- * once after: a loss that appeared in between is one the person has not been
- * warned about, whatever they asked for before it.
- */
-function latestLoss(cards: CardEntry[], user: string, draftId: string, now: number): number | null {
-  let latest: number | null = null;
-  for (const card of cards) {
-    if (card.u !== user || card.d !== draftId) continue;
-    const lost = lostAt(card, now);
-    if (lost !== null && (latest === null || lost > latest)) latest = lost;
-  }
-  return latest;
+/** What a card route's `acknowledged` names: a warning's identifier, or nothing. */
+function acknowledgedLoss(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 /**
@@ -485,12 +501,15 @@ function latestLoss(cards: CardEntry[], user: string, draftId: string, now: numb
  *
  * `reopen` asks again about a draft the person already kept or sent back for
  * changes — the card's "Review again". A draft already SENT is never offered
- * again: the card says so.
+ * again: the card says so. After a lost Send, "Review again" must also name
+ * the warning it answers (`acknowledged`, the `uncertainty` the card was
+ * shown): a reopen that names none, or an older one, is answered `uncertain`
+ * with the current identifier instead of a card.
  */
 export async function mintCard(
   identity: SessionIdentity,
   draftId: unknown,
-  opts: { reopen?: boolean; now?: number } = {},
+  opts: { reopen?: boolean; acknowledged?: unknown; now?: number } = {},
 ): Promise<ApprovalAnswer> {
   const now = opts.now ?? Date.now();
   if (!isDraftId(draftId)) return refusal(400, "invalid_draft", "That is not a draft id.");
@@ -499,20 +518,20 @@ export async function mintCard(
   const key = await approvalKey();
   if (!key) return UNAVAILABLE();
   const reopen = opts.reopen === true;
+  // Only an explicit Review again answers a warning; a plain look never does.
+  const acknowledged = reopen ? acknowledgedLoss(opts.acknowledged) : null;
 
   // Answered from the ledger before the backend is asked: a draft already sent
-  // is not fetched again, and one whose Send is in flight or lost is not offered.
+  // is not fetched again, and one whose Send is in flight, or lost and not
+  // acknowledged, is not offered.
   let before: CardEntry[];
   try {
     before = readLedger();
   } catch {
     return UNAVAILABLE();
   }
-  const early = settledAnswerIn(before, identity.username, draftId, reopen, now);
+  const early = settledAnswerIn(before, identity.username, draftId, acknowledged, now);
   if (early) return early;
-  // What "Review again" is an answer TO: the loss this person has been warned
-  // about. Anything newer, below, is a loss they have not seen.
-  const lossBefore = latestLoss(before, identity.username, draftId, now);
 
   const fetched = await fetchDraft(active.config, identity.username, draftId);
   if (!fetched.ok) return fetched.reason === "not_found" ? GONE() : backendRefusal(fetched.reason);
@@ -529,16 +548,13 @@ export async function mintCard(
   } catch {
     return UNAVAILABLE();
   }
-  const again = settledAnswerIn(cards, identity.username, draftId, reopen, now);
+  // Judged again on the fresh read: a Send of this draft whose answer was lost
+  // WHILE this card was loading is a newer loss than the one `acknowledged`
+  // names, so the card says uncertain — with that loss's identifier — and only
+  // a Review again after that warning may send. Newer is by the moment of the
+  // loss, the order `stamp` keeps strict.
+  const again = settledAnswerIn(cards, identity.username, draftId, acknowledged, now);
   if (again) return again;
-  // A Send of this draft whose answer was lost WHILE this card was loading.
-  // `reopen` answered an EARLIER loss, so it does not cover this one: the card
-  // says uncertain, and only a Review again after that warning may send. Newer
-  // is by the moment of the loss, the order `stamp` keeps strict.
-  const lossNow = latestLoss(cards, identity.username, draftId, now);
-  if (lossNow !== null && (lossBefore === null || lossNow > lossBefore)) {
-    return { status: 200, body: { state: "uncertain", decidedAt: lossNow } };
-  }
   const mine = cards.filter((card) => card.u === identity.username && card.d === draftId);
 
   // The same open card when one is still good for a while, so reopening a
@@ -635,18 +651,26 @@ export async function decideCard(
   // 3. Issued and still unused. A signed token the ledger has no matching card
   //    for is refused the same way: it cannot be used.
   const now = opts.now ?? Date.now();
-  let card: CardEntry | undefined;
+  let ledger: CardEntry[];
   try {
-    card = readLedger().find((entry) => entry.c === claims.c);
+    ledger = readLedger();
   } catch {
     return UNAVAILABLE();
   }
+  const card = ledger.find((entry) => entry.c === claims.c);
   if (!card || card.u !== claims.u || card.d !== claims.d || card.h !== claims.h || card.exp !== claims.e) {
     return refusal(409, "reused", "This approval can no longer be used. Nothing was sent.", { state: null });
   }
   if (card.state !== "open") {
-    // A claim no answer ever came back for is reported as what it is by now: lost.
-    return refusal(409, "reused", "This approval was already used.", { state: lostAt(card, now) !== null ? "uncertain" : card.state });
+    // A claim no answer ever came back for is reported as what it is by now:
+    // lost — with the identifier a Review again must name.
+    if (lostAt(card, now) !== null) {
+      return refusal(409, "reused", "This approval was already used.", {
+        state: "uncertain",
+        ...uncertainty(unansweredLoss(ledger, card.u, card.d, now)),
+      });
+    }
+    return refusal(409, "reused", "This approval was already used.", { state: card.state });
   }
 
   // 4. Not expired.
@@ -671,15 +695,22 @@ export async function decideCard(
       // open), so "kept" or "revised" would confirm a decline the Send is about
       // to make untrue. Judged in the same read-modify-write as the move, and
       // answered as `sending` — nothing was changed.
+      //
+      // Nor once another card's Send of this draft WENT, whatever version it
+      // sent: a Send closes only the card it was pressed on, so this card is
+      // still open, and "kept" (or a change request to the assistant) would be
+      // confirmed over mail that has already left. Answered as `sent`, the
+      // outcome the ledger holds — nothing was changed.
       moved = transition(
         card.c,
         "open",
         to,
         now,
-        (cards, entry) =>
-          cards.some((other) => other.c !== entry.c && other.u === entry.u && other.d === entry.d && other.h === entry.h && sendingNow(other, now))
-            ? "sending"
-            : null,
+        (cards, entry) => {
+          const others = cards.filter((other) => other.c !== entry.c && other.u === entry.u && other.d === entry.d);
+          if (others.some((other) => other.state === "sent")) return "sent";
+          return others.some((other) => other.h === entry.h && sendingNow(other, now)) ? "sending" : null;
+        },
         (cards, entry) =>
           cards.filter((other) => other.state === "open" && other.u === entry.u && other.d === entry.d && other.h === entry.h),
       );
@@ -687,6 +718,9 @@ export async function decideCard(
       return UNAVAILABLE();
     }
     if (!moved.ok) {
+      if (moved.blocked && moved.state === "sent") {
+        return refusal(409, "reused", "This draft was already sent from another card, so it cannot be kept or changed. Nothing was changed.", { state: "sent" });
+      }
       if (moved.blocked) {
         return refusal(409, "reused", "This draft is being sent from another card, so it cannot be kept or changed now. Nothing was changed.", { state: "sending" });
       }
@@ -700,7 +734,12 @@ export async function decideCard(
   // other card of this person for this draft has sent it, is sending it, or
   // lost the answer to sending it after this card was made.
   try {
-    const claimed = transition(card.c, "open", "sending", now, (cards, entry) => sendBlocker(cards, entry, now));
+    // The list the claim was judged on: an `uncertain` refusal names its loss from it.
+    let judged: CardEntry[] = [];
+    const claimed = transition(card.c, "open", "sending", now, (cards, entry) => {
+      judged = cards;
+      return sendBlocker(cards, entry, now);
+    });
     if (!claimed.ok) {
       if (!claimed.blocked) return refusal(409, "reused", "This approval was already used.", { state: claimed.state });
       if (claimed.state === "sent") return refusal(409, "reused", "This draft was already sent.", { state: "sent" });
@@ -711,7 +750,7 @@ export async function decideCard(
         409,
         "reused",
         "Another Send of this draft lost the mail service's answer, so it may or may not have been sent. Check the Sent folder, then review it again.",
-        { state: "uncertain" },
+        { state: "uncertain", ...uncertainty(unansweredLoss(judged, card.u, card.d, now)) },
       );
     }
   } catch {
@@ -789,13 +828,24 @@ export async function decideCard(
     case "refused":
       close("failed");
       return refusal(502, "send_refused", "The mail service refused to send this draft. It is still in the Drafts folder.");
-    default:
+    default: {
       close("uncertain");
+      // The warning's identifier, as the ledger now holds it: this loss when
+      // it was recorded. When it was not (the card still says `sending`), there
+      // is none yet, and a Review again is answered with one before any card.
+      let loss: number | null = null;
+      try {
+        loss = unansweredLoss(readLedger(), card.u, card.d, Date.now());
+      } catch {
+        loss = null;
+      }
       return refusal(
         502,
         "send_uncertain",
         "ClawBox lost the mail service's answer, so this draft may or may not have been sent. Check the Sent folder before trying again.",
+        uncertainty(loss),
       );
+    }
   }
 }
 

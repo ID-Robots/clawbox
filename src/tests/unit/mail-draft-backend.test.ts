@@ -441,6 +441,47 @@ describe("talking to the backend", () => {
     expect(await sendDraft(CONFIG, "u", "d", "h")).toEqual({ ok: false, reason: "uncertain" });
   });
 
+  it("keeps a Send the backend answered 202 as sent when the body breaks off after the status", async () => {
+    // The status arrived; the body then fails mid-stream (a dropped socket),
+    // or never ends. Neither may turn a confirmed Send into "may have gone".
+    let cancelled = 0;
+    const breaking = () => new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"queu'));
+        controller.error(new TypeError("terminated"));
+      },
+    });
+    const stalling = () => new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => undefined),
+      cancel: () => { cancelled += 1; },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(breaking(), { status: 202 })));
+    expect(await sendDraft(CONFIG, "u", "d", "h")).toEqual({ ok: true });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(stalling(), { status: 202 })));
+    expect(await sendDraft(CONFIG, "u", "d", "h")).toEqual({ ok: true });
+    // The unread body is let go, not left holding the connection.
+    await vi.waitFor(() => expect(cancelled).toBe(1));
+    // The status alone decides the other answers too, body or no body.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(breaking(), { status: 409 })));
+    expect(await sendDraft(CONFIG, "u", "d", "h")).toEqual({ ok: false, reason: "changed" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(breaking(), { status: 500 })));
+    expect(await sendDraft(CONFIG, "u", "d", "h")).toEqual({ ok: false, reason: "uncertain" });
+    // No status at all is still a lost answer.
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
+    expect(await sendDraft(CONFIG, "u", "d", "h")).toEqual({ ok: false, reason: "uncertain" });
+  });
+
+  it("still reads a draft's body in full, and a read whose body breaks off is not a draft", async () => {
+    const breaking = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"to":["x@example.com"],'));
+        controller.error(new TypeError("terminated"));
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(breaking, { status: 200 })));
+    expect(await fetchDraft(CONFIG, "u", "d")).toEqual({ ok: false, reason: "unreachable" });
+  });
+
   it("probes with an id nobody has", async () => {
     stub(404, {}, (url) => expect(url).toMatch(/\/drafts\/clawbox-probe-[0-9a-f]{12}\?user=u$/));
     expect(await probeBackend(CONFIG, "u")).toBe("ok");

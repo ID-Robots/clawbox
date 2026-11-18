@@ -459,11 +459,11 @@ describe("Send", () => {
     const { json } = await mint(ownerCookie());
     expect((await answer(ownerCookie(), json.token, "send")).json.kind).toBe("send_uncertain");
     const look = await mint(ownerCookie());
-    expect(look.json).toMatchObject({ state: "uncertain" });
+    expect(look.json).toMatchObject({ state: "uncertain", uncertainty: expect.any(Number) });
     expect(look.json.token).toBeUndefined();
-    // Only the person's explicit "Review again" asks again.
+    // Only the person's explicit "Review again" asks again — naming the warning it was shown.
     sendAnswer = 200;
-    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true, acknowledged: look.json.uncertainty });
     expect(reopened.json.state).toBe("open");
     expect((await answer(ownerCookie(), reopened.json.token, "send")).status).toBe(200);
     expect(sends).toHaveLength(2);
@@ -583,15 +583,20 @@ describe("Send", () => {
   it("a Send whose answer was lost blocks every card made before it, and Review again makes one that may send", async () => {
     const { a, b } = await twoCards();
     sendAnswer = 503;
-    expect((await answer(ownerCookie(), a, "send")).json.kind).toBe("send_uncertain");
+    const lost = await answer(ownerCookie(), a, "send");
+    expect(lost.json.kind).toBe("send_uncertain");
+    // Every answer that says uncertain names the same lost Send.
+    const loss = lost.json.uncertainty;
+    expect(loss).toEqual(expect.any(Number));
     sendAnswer = 200;
     const older = await answer(ownerCookie(), b, "send");
     expect(older.status).toBe(409);
-    expect(older.json).toMatchObject({ kind: "reused", state: "uncertain" });
+    expect(older.json).toMatchObject({ kind: "reused", state: "uncertain", uncertainty: loss });
+    expect((await answer(ownerCookie(), a, "send")).json).toMatchObject({ kind: "reused", state: "uncertain", uncertainty: loss });
     expect(sends).toHaveLength(1);
     // A plain look does not offer it; "Review again" hands out a NEW card, not B.
-    expect((await mint(ownerCookie())).json).toMatchObject({ state: "uncertain" });
-    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect((await mint(ownerCookie())).json).toMatchObject({ state: "uncertain", uncertainty: loss });
+    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true, acknowledged: loss });
     expect(reopened.json.state).toBe("open");
     expect(reopened.json.token).not.toBe(b);
     expect((await answer(ownerCookie(), String(reopened.json.token), "send")).status).toBe(200);
@@ -613,10 +618,10 @@ describe("Send", () => {
     vi.setSystemTime(claimedAt + 121_000);
     expect((await answer(ownerCookie(), b, "send")).json).toMatchObject({ kind: "reused", state: "uncertain" });
     // ...and A pressed again is told the same, not "sending".
-    expect((await answer(ownerCookie(), a, "send")).json).toMatchObject({ kind: "reused", state: "uncertain" });
-    expect((await mint(ownerCookie())).json).toMatchObject({ state: "uncertain" });
+    expect((await answer(ownerCookie(), a, "send")).json).toMatchObject({ kind: "reused", state: "uncertain", uncertainty: claimedAt + 120_000 });
+    expect((await mint(ownerCookie())).json).toMatchObject({ state: "uncertain", uncertainty: claimedAt + 120_000 });
     // ...and "Review again" makes a card that can, which a reload then shows.
-    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true, acknowledged: claimedAt + 120_000 });
     expect(reopened.json.state).toBe("open");
     expect((await mint(ownerCookie())).json).toMatchObject({ state: "open", token: reopened.json.token });
     expect((await answer(ownerCookie(), String(reopened.json.token), "send")).status).toBe(200);
@@ -849,15 +854,96 @@ describe("Send", () => {
     // The card that was loading cannot send: that loss came after the person
     // asked, so they have not been warned about it.
     const late = await reviewing;
-    expect(late.json).toMatchObject({ state: "uncertain" });
+    expect(late.json).toMatchObject({ state: "uncertain", uncertainty: expect.any(Number) });
     expect(late.json.token).toBeUndefined();
-    expect((await answer(ownerCookie(), b, "send")).json).toMatchObject({ kind: "reused", state: "uncertain" });
+    expect((await answer(ownerCookie(), b, "send")).json).toMatchObject({ kind: "reused", state: "uncertain", uncertainty: late.json.uncertainty });
     // Asked again, now that the card has said so, a card that may send.
     sendAnswer = 200;
-    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true, acknowledged: late.json.uncertainty });
     expect(reopened.json.state).toBe("open");
     expect((await answer(ownerCookie(), String(reopened.json.token), "send")).status).toBe(200);
     expect(sends).toHaveLength(2);
+  });
+
+  it("Review again from a card still saying Kept is answered with a Send lost meanwhile, never with a card that can send", async () => {
+    // Tab 1: the person keeps the draft; the card says "Kept" with a Review again.
+    const first = await mint(ownerCookie());
+    expect((await answer(ownerCookie(), first.json.token, "keep")).json.state).toBe("kept");
+    // Tab 2: Review again, then a Send whose answer is lost.
+    const tab2 = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect(tab2.json.state).toBe("open");
+    sendAnswer = 503;
+    const lost = await answer(ownerCookie(), tab2.json.token, "send");
+    expect(lost.json).toMatchObject({ kind: "send_uncertain", uncertainty: expect.any(Number) });
+    sendAnswer = 200;
+    // Tab 1 never showed that warning: its Review again names no loss, so it
+    // is shown the warning — no token — and nothing more is sent.
+    const fromKept = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect(fromKept.json).toMatchObject({ state: "uncertain", uncertainty: lost.json.uncertainty });
+    expect(fromKept.json.token).toBeUndefined();
+    // A warning older than the current one, or anything that is not one, is no answer to it either.
+    for (const acknowledged of [Number(lost.json.uncertainty) - 1, String(lost.json.uncertainty), null, "x"]) {
+      const stale = await mint(ownerCookie(), DRAFT_ID, { reopen: true, acknowledged });
+      expect(stale.json, String(acknowledged)).toMatchObject({ state: "uncertain", uncertainty: lost.json.uncertainty });
+      expect(stale.json.token, String(acknowledged)).toBeUndefined();
+    }
+    // A plain look naming it is not a Review again.
+    expect((await mint(ownerCookie(), DRAFT_ID, { acknowledged: lost.json.uncertainty })).json).toMatchObject({ state: "uncertain" });
+    expect(sends).toHaveLength(1);
+    // Once the card has shown it, its Review again names it and gets a card that can send.
+    const reviewed = await mint(ownerCookie(), DRAFT_ID, { reopen: true, acknowledged: fromKept.json.uncertainty });
+    expect(reviewed.json.state).toBe("open");
+    expect((await answer(ownerCookie(), String(reviewed.json.token), "send")).status).toBe(200);
+    expect(sends).toHaveLength(2);
+  });
+
+  it("Review again from Kept or Revised opens a card as before once every lost Send has been answered", async () => {
+    sendAnswer = 503;
+    const first = await mint(ownerCookie());
+    const lost = await answer(ownerCookie(), first.json.token, "send");
+    expect(lost.json.kind).toBe("send_uncertain");
+    sendAnswer = 200;
+    // The person was warned, reviewed it again, and kept it this time.
+    const reviewed = await mint(ownerCookie(), DRAFT_ID, { reopen: true, acknowledged: lost.json.uncertainty });
+    expect(reviewed.json.state).toBe("open");
+    expect((await answer(ownerCookie(), reviewed.json.token, "keep")).json.state).toBe("kept");
+    expect((await mint(ownerCookie())).json.state).toBe("kept");
+    // That loss has had its card: Review again from Kept needs no warning now.
+    const again = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect(again.json.state).toBe("open");
+    expect((await answer(ownerCookie(), again.json.token, "revise")).json.state).toBe("revised");
+    const fromRevised = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect(fromRevised.json.state).toBe("open");
+    expect((await answer(ownerCookie(), String(fromRevised.json.token), "send")).status).toBe(200);
+    expect(sends).toHaveLength(2);
+  });
+
+  it("neither Keep nor Revise is confirmed once another card's Send of the draft went", async () => {
+    const { a, b } = await twoCards();
+    // Card A sends; card B, open in another tab for the same version, is not closed by it.
+    expect((await answer(ownerCookie(), a, "send")).json).toEqual({ state: "sent" });
+    for (const action of ["keep", "revise"]) {
+      const declined = await answer(ownerCookie(), b, action);
+      expect(declined.status, action).toBe(409);
+      expect(declined.json, action).toMatchObject({ kind: "reused", state: "sent" });
+    }
+    // Nothing was changed: B is still open in the ledger, and every look says sent.
+    const ledger = JSON.parse(fs.readFileSync(path.join(root, "data", "mail-draft-approvals.json"), "utf8")) as { cards: { c: string; state: string }[] };
+    expect(ledger.cards.find((entry) => entry.c === cardIdOf(b))?.state).toBe("open");
+    expect((await mint(ownerCookie())).json.state).toBe("sent");
+    expect((await answer(ownerCookie(), b, "send")).json).toMatchObject({ kind: "reused", state: "sent" });
+    expect(sends).toHaveLength(1);
+  });
+
+  it("a Send of another version that went also stops Keep and Revise", async () => {
+    const { a } = await twoCards();
+    // A revised draft: a new hash, and its own card, which sends.
+    mailbox[OWNER][DRAFT_ID].body = "Hello Ivan, a shorter offer.";
+    const newer = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect((await answer(ownerCookie(), String(newer.json.token), "send")).status).toBe(200);
+    // Card A was for the older version, but the mail has left all the same.
+    expect((await answer(ownerCookie(), a, "keep")).json).toMatchObject({ kind: "reused", state: "sent" });
+    expect(sends).toHaveLength(1);
   });
 });
 

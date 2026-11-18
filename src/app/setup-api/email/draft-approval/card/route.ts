@@ -1,9 +1,12 @@
 // POST /setup-api/email/draft-approval/card — the approval card for one draft.
 //
-// Body: {"draftId": "<id>", "reopen"?: true}. Answers the draft as the mail send
-// backend holds it (to, cc, bcc, subject, body preview) and, while it waits for
-// an answer, a one-time approval token bound to the signed-in person, the draft
-// id and the draft's content hash — src/lib/mail-draft-approval.ts.
+// Body: {"draftId": "<id>", "reopen"?: true, "acknowledged"?: <number>}.
+// Answers the draft as the mail send backend holds it (to, cc, bcc, subject,
+// body preview) and, while it waits for an answer, a one-time approval token
+// bound to the signed-in person, the draft id and the draft's content hash —
+// src/lib/mail-draft-approval.ts. `acknowledged` is the `uncertainty` of the
+// lost-Send warning a "Review again" answers; without the current one, a
+// draft whose Send was lost is answered `uncertain`, never with a token.
 //
 // A PERSON ONLY. The MCP bearer middleware admits elsewhere gets the same 403 as
 // no credential at all: a token minted here is half of a Send, and the assistant
@@ -31,6 +34,9 @@ export async function POST(request: Request) {
   const parsed = await readJsonObject(request, MAX_BODY_BYTES);
   if (!parsed.ok) return refusal("Invalid request body.", "invalid", 400);
 
-  const answer = await mintCard(identity, parsed.body.draftId, { reopen: parsed.body.reopen === true });
+  const answer = await mintCard(identity, parsed.body.draftId, {
+    reopen: parsed.body.reopen === true,
+    acknowledged: parsed.body.acknowledged,
+  });
   return NextResponse.json(answer.body, { status: answer.status, headers: { "cache-control": "no-store" } });
 }

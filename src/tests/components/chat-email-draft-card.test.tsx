@@ -326,7 +326,7 @@ describe("EmailDraftCard", () => {
   });
 
   it("a Send the server answered as uncertain settles as uncertain, with Review again", async () => {
-    decideAnswers = [{ status: 502, body: { kind: "send_uncertain" } }];
+    decideAnswers = [{ status: 502, body: { kind: "send_uncertain", uncertainty: 41 } }];
     render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
     fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
     await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("uncertain"));
@@ -334,7 +334,39 @@ describe("EmailDraftCard", () => {
     cardAnswers = [{ status: 200, body: { state: "open", token: "tok-3", expiresAt: 1, draft: DRAFT } }];
     fireEvent.click(screen.getByTestId("chat-email-draft-reload"));
     await screen.findByTestId("chat-email-draft-send");
+    // Review again names the warning this card showed.
+    expect(calls.at(-1)).toEqual({ url: CARD_ROUTE, body: { draftId: "AAMk-1=", reopen: true, acknowledged: 41 } });
+  });
+
+  it("another card's lost Send, as a refusal, is the warning the Review again names", async () => {
+    decideAnswers = [{ status: 409, body: { kind: "reused", state: "uncertain", uncertainty: 52 } }];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("uncertain"));
+    cardAnswers = [{ status: 200, body: { state: "open", token: "tok-4", expiresAt: 1, draft: DRAFT } }];
+    fireEvent.click(screen.getByTestId("chat-email-draft-reload"));
+    await screen.findByTestId("chat-email-draft-send");
+    expect(calls.at(-1)).toEqual({ url: CARD_ROUTE, body: { draftId: "AAMk-1=", reopen: true, acknowledged: 52 } });
+  });
+
+  it("Review again from Kept shows a Send lost meanwhile before offering Send, then names it", async () => {
+    decideAnswers = [{ status: 200, body: { state: "kept" } }];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    fireEvent.click(await screen.findByTestId("chat-email-draft-keep"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("kept"));
+    // Another tab's Send lost its answer meanwhile: the server answers the
+    // Kept card's Review again (which names no warning) with that warning.
+    cardAnswers = [{ status: 200, body: { state: "uncertain", decidedAt: 63, uncertainty: 63 } }];
+    fireEvent.click(screen.getByTestId("chat-email-draft-reload"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("uncertain"));
     expect(calls.at(-1)).toEqual({ url: CARD_ROUTE, body: { draftId: "AAMk-1=", reopen: true } });
+    expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.error.sendUncertain");
+    expect(screen.queryByTestId("chat-email-draft-send")).toBeNull();
+    // Shown it, the person's Review again names it.
+    cardAnswers = [{ status: 200, body: { state: "open", token: "tok-5", expiresAt: 1, draft: DRAFT } }];
+    fireEvent.click(screen.getByTestId("chat-email-draft-reload"));
+    await screen.findByTestId("chat-email-draft-send");
+    expect(calls.at(-1)).toEqual({ url: CARD_ROUTE, body: { draftId: "AAMk-1=", reopen: true, acknowledged: 63 } });
   });
 
   for (const [state, shown, button] of [
@@ -435,14 +467,14 @@ describe("EmailDraftCard", () => {
   });
 
   it("a Send whose answer was lost is not offered again without the person asking", async () => {
-    cardAnswers = [{ status: 200, body: { state: "uncertain", decidedAt: 1 } }];
+    cardAnswers = [{ status: 200, body: { state: "uncertain", decidedAt: 7, uncertainty: 7 } }];
     render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
     await waitFor(() => expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.error.sendUncertain"));
     expect(screen.queryByTestId("chat-email-draft-send")).toBeNull();
     cardAnswers = [{ status: 200, body: { state: "open", token: "tok-9", expiresAt: 1, draft: DRAFT } }];
     fireEvent.click(screen.getByTestId("chat-email-draft-reload"));
     await screen.findByTestId("chat-email-draft-send");
-    expect(calls.at(-1)).toEqual({ url: CARD_ROUTE, body: { draftId: "AAMk-1=", reopen: true } });
+    expect(calls.at(-1)).toEqual({ url: CARD_ROUTE, body: { draftId: "AAMk-1=", reopen: true, acknowledged: 7 } });
   });
 
   it("after a refusal, Show the current version is a plain look, never a reopen", async () => {

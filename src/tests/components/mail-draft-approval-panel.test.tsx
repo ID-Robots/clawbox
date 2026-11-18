@@ -7,7 +7,8 @@
 
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { deferred } from "@/tests/helpers/deferred";
 import MailDraftApprovalPanel from "@/components/MailDraftApprovalPanel";
 
 vi.mock("@/lib/i18n", () => ({
@@ -62,11 +63,30 @@ describe("MailDraftApprovalPanel", () => {
   });
 
   it("draws nothing at all when the route refuses the person asking", async () => {
-    for (const status of [401, 403, 404]) {
-      stubReads([code(status)]);
+    // The panel is absent while the read is pending too, so "absent" proves
+    // nothing until the answer has been handled: each answer is released from
+    // a deferred inside an awaited act, which runs the read to its end. The
+    // 503 beside the refusals is the control — the same flow DOES draw the
+    // failed-read note and its Retry, so the empty space after a refusal is
+    // the refusal's doing, not a read that never finished.
+    for (const status of [401, 403, 404, 503]) {
+      const answer = deferred<Response>();
+      const fetchMock = vi.fn(() => answer.promise);
+      vi.stubGlobal("fetch", fetchMock);
       const { container, unmount } = render(<MailDraftApprovalPanel />);
-      await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalled());
-      expect(container.querySelector("[data-testid='settings-email-draft-approval']"), String(status)).toBeNull();
+      expect(fetchMock, String(status)).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        answer.resolve(code(status));
+      });
+      const panel = container.querySelector("[data-testid='settings-email-draft-approval']");
+      const retry = container.querySelector("[data-testid='settings-email-draft-approval-retry']");
+      if (status === 503) {
+        expect(panel, String(status)).not.toBeNull();
+        expect(retry, String(status)).not.toBeNull();
+      } else {
+        expect(panel, String(status)).toBeNull();
+        expect(retry, String(status)).toBeNull();
+      }
       unmount();
     }
   });

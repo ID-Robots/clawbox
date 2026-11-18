@@ -483,7 +483,19 @@ async function readBounded(response: Response): Promise<string | null> {
   return Buffer.concat(chunks.map((c) => Buffer.from(c))).toString("utf8");
 }
 
-async function call(config: DraftApprovalConfig, path: string, init: { method: "GET" | "POST"; body?: unknown }): Promise<Raw> {
+/**
+ * One request to the backend. `statusOnly`: the caller decides by the status
+ * alone (a Send), so the answer's body is never read — it is cancelled
+ * unread. A Send the backend has ANSWERED 202 is confirmed by that status; a
+ * body that breaks off after it must not turn the confirmed Send into a lost
+ * one ("may have gone", and a Review again over mail already in Sent). Only
+ * a request that never got a status back is a lost answer.
+ */
+async function call(
+  config: DraftApprovalConfig,
+  path: string,
+  init: { method: "GET" | "POST"; body?: unknown; statusOnly?: boolean },
+): Promise<Raw> {
   if (!config.endpoint) return { ok: false, reason: "unreachable" };
   const headers: Record<string, string> = { accept: "application/json" };
   if (config.authValue) headers[config.authHeader] = config.authValue;
@@ -503,6 +515,16 @@ async function call(config: DraftApprovalConfig, path: string, init: { method: "
   } catch (err) {
     const name = (err as { name?: string } | null)?.name;
     return { ok: false, reason: name === "TimeoutError" || name === "AbortError" ? "timeout" : "unreachable" };
+  }
+  if (init.statusOnly) {
+    // Not awaited: a body that stalls or fails cannot hold up, or undo, the
+    // status already in hand. Cancelling frees the connection.
+    try {
+      void response.body?.cancel().catch(() => undefined);
+    } catch {
+      // A body already locked or gone needs no cancelling.
+    }
+    return { ok: true, status: response.status, json: null };
   }
   let text: string | null;
   try {
@@ -547,9 +569,12 @@ export async function sendDraft(
   draftId: string,
   contentHash: string,
 ): Promise<SendDraftResult> {
+  // Decided by the status alone (`statusOnly`): once one arrives the answer is
+  // known, whatever becomes of the body after it.
   const raw = await call(config, `${draftPath(draftId)}/send`, {
     method: "POST",
     body: { user, draftId, contentHash },
+    statusOnly: true,
   });
   if (!raw.ok) return { ok: false, reason: "uncertain" };
   if (raw.status >= 200 && raw.status < 300) return { ok: true };

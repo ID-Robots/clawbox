@@ -75,7 +75,7 @@ following, in order, and refuses if any check fails:
 | The card is still open (not sent, kept, revised or claimed by a parallel press) | 409 `reused` |
 | Send only: no other card of this person has sent this draft, is sending it, or lost the answer to sending it after this card was made | 409 `reused`, with `state` `sent`, `sending` or `uncertain` |
 | The token has not expired | 410 `expired` |
-| Keep or Revise only: no other card for the same draft version is sending it right now | 409 `reused`, with `state` `sending` (nothing is changed) |
+| Keep or Revise only: no other card of this person has sent this draft (any version), and no other card for the same draft version is sending it right now | 409 `reused`, with `state` `sent` or `sending` (nothing is changed) |
 | Send only: the draft re-read from the backend still has the approved hash | 409 `changed` |
 | Send only: the preview of that draft was shown whole (see below) | 409 `too_long`, the card stays open |
 
@@ -97,10 +97,28 @@ closed as `uncertain`. The same applies to a server that stopped mid-send. An
 `uncertain` card never reports "not sent". A plain reload does not offer that
 draft's Send again, and no card made before the loss can send it. Only the
 person's explicit **Review again** does, with a card made after the card has
-told them to check their Sent folder. A **Review again** that was already
-loading when a Send of the same draft lost its answer is not that card: the
-loss appeared after the person asked, so they have not been warned about it, and
-the card says `uncertain` and waits for another **Review again**. So a crashed
+told them to check their Sent folder.
+
+That **Review again** is bound to the warning the card showed. An answer that
+says `uncertain` (from the card route, and the decide route's `send_uncertain`
+and `reused` refusals) carries `uncertainty` whenever the ledger holds a lost
+Send that no card has been made since: the moment of the newest such loss. The
+card route's `uncertain` always carries it. A decide refusal can lack it: when
+the loss could not be written to the ledger (the card still says `sending`
+until it is settled as lost), or when every loss already has a card made since
+it. The card's **Review again** sends `uncertainty` back as `acknowledged`
+(`{draftId, reopen: true, acknowledged}`), or sends a plain reopen when it has
+none. The card route hands out a card that can send only when no lost Send is
+outstanding, or when `acknowledged` names the newest one. Otherwise it answers
+`uncertain` with the current `uncertainty` and no token, and the card shows
+that warning first. This
+covers a card that still says **Kept** or **Revised** when a Send from another
+tab loses its answer: its **Review again** names no loss, so it is answered
+with the warning, never with a sendable card. It also covers a **Review again**
+that was already loading when a Send of the same draft lost its answer: that
+loss is newer than the one it acknowledged, so the card says `uncertain` and
+waits for another **Review again**. A **Review again** with no loss outstanding
+(every loss has had a card made since) opens a card as before. So a crashed
 Send blocks the older cards, never the draft for good.
 
 A Send the backend **confirmed** is recorded in the ledger with retries, and the
@@ -132,7 +150,12 @@ untouched, and an explicit **Review again** opens a card that can send. While a
 Send of that version is running from another card, neither answer is confirmed:
 that Send may still go out, or, if its read of the draft fails, put its card back
 to open. The server answers `reused` with `state: "sending"` and changes nothing;
-the person can answer again once the Send has finished.
+the person can answer again once the Send has finished. Once a Send of the
+draft from another card has gone (whatever version it sent), neither answer is
+confirmed either: a Send closes only the card it was pressed on, so the other
+card is still open, and "kept" or a change request to the assistant would be
+confirmed over mail that has already left. The server answers `reused` with
+`state: "sent"`, changes nothing, and the card says the draft was already sent.
 
 In the chat, a Send whose answer never reaches the browser (the connection
 dropped, or something other than ClawBox answered, such as a proxy's error
@@ -311,12 +334,21 @@ Two limits apply to members of staff today:
 
 - Their assistants have no ClawBox MCP tools (`config/org-staff-policy.json`
   denies `clawbox__*`), so they cannot call `email_draft_card`.
-- The staff MCP relay offers no tool whose name contains a write verb (`create`,
-  `update`, `send`, …; `src/lib/staff-mcp.ts`), so a granted mail server's
-  draft tools are not offered to them.
+- The staff MCP relay (`staffToolAllowed` in `src/lib/staff-mcp.ts`) offers no
+  tool whose name contains a write verb (`create`, `update`, `send`, …), so a
+  granted mail server's draft tools are not offered to them — unless the owner
+  ticks "tools that create or edit" (`writeTools`) for that server. With the
+  tick, tools whose names carry only a create or edit verb (`create`, `update`,
+  `edit`, `compose`, …) are offered, so a draft-writing tool such as
+  `create_draft` can be. Names with `send`, `delete` or any other write verb
+  stay refused, as do names with a who-may-do-what noun (`member`,
+  `permission`, …) and tools the server marks `destructiveHint: true`. The
+  relay judges a tool by its name and annotations; it does not know what a tool
+  does beyond them.
 
-Letting a member's assistant prepare drafts needs both widened. That is an owner
-policy decision, and this change does not make it.
+Letting a member's assistant prepare drafts and show their cards needs the
+first limit widened, and the tick for the second. That is an owner policy
+decision, and this change does not make it.
 
 ## What this does not cover
 
