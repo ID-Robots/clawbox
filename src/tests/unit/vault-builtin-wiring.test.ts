@@ -196,7 +196,7 @@ describe("the service: installed and started on every box, loopback only", () =>
    * is-active, a show of one property) is written to "stray": a look made of
    * two calls is what lets a stop begin between them. FAKE_SLOW_FIRST makes
    * the first look take that many seconds; "finished" lists the looks that ran
-   * to their end.
+   * to their end, and "order" the looks and the sleeps asked for, in sequence.
    */
   function vaultUpHarness() {
     const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "vault-up-")));
@@ -215,7 +215,7 @@ describe("the service: installed and started on every box, loopback only", () =>
         "  show)",
         '    if [ ! -f "$FAKE_DIR/called" ]; then echo 1111; exit 0; fi',
         '    case "$*" in *ActiveState*SubState*MainPID*) ;; *) echo "$*" >> "$FAKE_DIR/stray"; exit 0 ;; esac',
-        '    n=$(( $(cat "$FAKE_DIR/n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$FAKE_DIR/n"',
+        '    n=$(( $(cat "$FAKE_DIR/n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$FAKE_DIR/n"; echo "look $n" >> "$FAKE_DIR/order"',
         '    if [ "$n" = 1 ] && [ -n "$FAKE_SLOW_FIRST" ]; then sleep "$FAKE_SLOW_FIRST"; fi',
         "    t=$(tok)",
         '    case "${t%%:*}" in up) st=active; sub=running ;; stopping) st=deactivating; sub=stop-sigterm ;; *) st=inactive; sub=dead ;; esac',
@@ -228,6 +228,13 @@ describe("the service: installed and started on every box, loopback only", () =>
       { mode: 0o755 },
     );
     fs.writeFileSync(path.join(bin, "apt-get"), '#!/bin/sh\necho "$*" >> "$FAKE_DIR/apt"\n', { mode: 0o755 });
+    // Every sleep the functions ask for lands in "order" beside the looks. With
+    // FAKE_SLEEP_INSTANT it also returns at once; without, it is the real one.
+    fs.writeFileSync(
+      path.join(bin, "sleep"),
+      ["#!/bin/sh", 'echo "sleep $*" >> "$FAKE_DIR/order"', '[ -n "$FAKE_SLEEP_INSTANT" ] && exit 0', 'exec /bin/sleep "$@"', ""].join("\n"),
+      { mode: 0o755 },
+    );
     const fns = ["ensure_vault_service", "vault_came_up", "vault_active_pid", "ensure_vault_packages"].map((n) => `${shellFunction(INSTALL_SH, n)}\n}\n`).join("");
     const installed = "dpkg_installed() { return 0; }\nvault_runs_previous_build() { return 0; }";
     const run = (stubs: string, before: "up" | "down", after: string, extra: Record<string, string> = {}) => {
@@ -250,6 +257,7 @@ describe("the service: installed and started on every box, loopback only", () =>
         calls: seen("called"),
         apt: fs.existsSync(path.join(dir, "apt")),
         looks: Number(seen("n") || 0),
+        order: seen("order").split("\n").filter(Boolean),
         finished: seen("finished").split("\n").filter(Boolean),
         ms,
       };
@@ -266,6 +274,11 @@ describe("the service: installed and started on every box, loopback only", () =>
       expect(r.calls).toBe("start");
       expect(r.status).toBe(0);
       expect(r.out).not.toContain("Warning");
+      // The settle between its two looks is the configured one, and falls between them
+      // (sleep stood in, so a 5 s settle costs nothing).
+      r = run(installed, "down", "up:2222", { VAULT_UP_STEADY_S: "5", FAKE_SLEEP_INSTANT: "1" });
+      expect(r.status).toBe(0);
+      expect(r.order).toEqual(["look 1", "sleep 5", "look 2"]);
       // A start whose launcher never comes up: the update says so, and the step is not "ok".
       r = run(installed, "down", "down:0");
       expect(r.status).toBe(1);
