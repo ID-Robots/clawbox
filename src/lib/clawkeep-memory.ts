@@ -3375,9 +3375,18 @@ export async function startMemoryIndex(
     // end (SIGKILLed TERMINATE_GRACE_MS after the SIGTERM at the latest), and
     // the lock is held until that start is over: a next pass taking it
     // earlier would have its offline hold cleared by this start.
-    if (!localArm) await pass.ended.catch(() => undefined);
-    endStartClaim();
+    // Bounded like any pass given up on: an attempt whose pipes never close
+    // is counted as ended ABANDON_SETTLE_MS on, and the gateway started.
+    if (!localArm) {
+      const bound = setTimeout(() => settleAbandoned?.({ kind: "exit", code: null, signal: null }), ABANDON_SETTLE_MS);
+      bound.unref?.();
+      await pass.ended.catch(() => undefined);
+      clearTimeout(bound);
+    }
+    // The claim ends in the same turn as the lock: a reader queued before it
+    // still sees the claim and declines, one queued after finds no lock.
     await runRecordSection(async () => {
+      endStartClaim();
       for (const pid of passPids) settlingPasses().delete(pid);
       await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
     });
