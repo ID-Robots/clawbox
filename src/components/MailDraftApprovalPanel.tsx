@@ -42,6 +42,7 @@ export default function MailDraftApprovalPanel() {
   const [authValue, setAuthValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<Note>(null);
+  const [unread, setUnread] = useState(false);
 
   const adopt = useCallback((next: Snapshot) => {
     setSnapshot(next);
@@ -50,20 +51,55 @@ export default function MailDraftApprovalPanel() {
     setAuthValue("");
   }, []);
 
+  /**
+   * Reads the setting, and says whether the panel can be drawn from the answer.
+   *
+   * A REFUSAL AND A FAILURE ARE NOT THE SAME THING. 401, 403 and 404 mean this
+   * is not this person's panel (a member of staff) or this box has no such
+   * route: nothing to show and nothing to retry, so the panel stays away. Any
+   * other answer — a 503 from a box still starting, a dropped connection, a
+   * body that is not the setting — is a read that FAILED, and the owner is
+   * shown that with a Retry rather than an empty space where the setting was.
+   */
+  const read = useCallback(async (live: () => boolean = () => true) => {
+    try {
+      const res = await fetch(ROUTE, { cache: "no-store" });
+      if (res.status === 401 || res.status === 403 || res.status === 404) {
+        if (live()) setUnread(false);
+        return;
+      }
+      if (!res.ok) {
+        if (live()) setUnread(true);
+        return;
+      }
+      const json: unknown = await res.json();
+      if (!live()) return;
+      if (isSnapshot(json)) {
+        adopt(json);
+        setUnread(false);
+      } else {
+        setUnread(true);
+      }
+    } catch {
+      if (live()) setUnread(true);
+    }
+  }, [adopt]);
+
   useEffect(() => {
     let live = true;
-    void (async () => {
-      try {
-        const res = await fetch(ROUTE, { cache: "no-store" });
-        if (!res.ok) return;
-        const json: unknown = await res.json();
-        if (live && isSnapshot(json)) adopt(json);
-      } catch {
-        // No panel without an answer: a member of staff, or a box without the route.
-      }
-    })();
+    void read(() => live);
     return () => { live = false; };
-  }, [adopt]);
+  }, [read]);
+
+  /** The same read again, on the owner's press: what it answers replaces the panel. */
+  const retry = useCallback(async () => {
+    setBusy(true);
+    try {
+      await read();
+    } finally {
+      setBusy(false);
+    }
+  }, [read]);
 
   const send = useCallback(async (method: "POST" | "DELETE", body?: Record<string, unknown>) => {
     setBusy(true);
@@ -118,7 +154,30 @@ export default function MailDraftApprovalPanel() {
     if (json && isSnapshot(json)) adopt(json);
   }, [send, adopt]);
 
-  if (!snapshot) return null;
+  if (!snapshot) {
+    // Nothing read, and nothing to retry: not this person's panel.
+    if (!unread) return null;
+    return (
+      <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-draft-approval">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">outgoing_mail</span>
+          <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.email.draftApproval.title")}</h3>
+        </div>
+        <p role="status" data-testid="settings-email-draft-approval-note" className="text-xs text-red-300/90 mb-3">
+          {t("settings.email.draftApproval.readFailed")}
+        </p>
+        <button
+          type="button"
+          data-testid="settings-email-draft-approval-retry"
+          onClick={() => { void retry(); }}
+          disabled={busy}
+          className="px-4 py-2 rounded-lg bg-white/[0.06] hover:bg-white/[0.1] disabled:opacity-50 disabled:cursor-not-allowed text-sm text-[var(--text-primary)] transition-colors border border-white/[0.1] cursor-pointer"
+        >
+          {t("settings.email.draftApproval.readRetry")}
+        </button>
+      </div>
+    );
+  }
 
   // Locked while a request is on its way: the answer to a save or a remove
   // replaces these fields with what the server holds, so a word typed

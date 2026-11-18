@@ -152,6 +152,32 @@ const DRAFT_LINE_RE = /^email_draft:([\s\S]*)$/i;
 const DRAFT_ID_RE = /^(?!\.+$)[A-Za-z0-9._~+/=:@-]{1,512}$/;
 const MAX_DRAFT_REFS = 5;
 
+/**
+ * A line of fence markers and the rest of the line after them. A fence is
+ * closed only by its OWN marker character, in a run at least as long and alone
+ * on its line, so `~~~` inside a backtick fence is content and not a closer.
+ * `FENCE_RE` above stays as the `EMAIL:` grammar's, which is pinned to its own
+ * case table.
+ */
+const DRAFT_FENCE_RE = /^(`{3,}|~{3,})([\s\S]*)$/;
+
+/** The fence `trimmed` opens, as `{marker, length}`, or null. */
+function opensFence(trimmed) {
+  const match = DRAFT_FENCE_RE.exec(trimmed);
+  if (!match) return null;
+  const marker = match[1][0];
+  // A backtick fence's info string may not hold a backtick (CommonMark).
+  if (marker === "`" && match[2].includes("`")) return null;
+  return { marker, length: match[1].length };
+}
+
+/** Whether `trimmed` closes `fence`. */
+function closesFence(trimmed, fence) {
+  const match = DRAFT_FENCE_RE.exec(trimmed);
+  if (!match) return false;
+  return match[1][0] === fence.marker && match[1].length >= fence.length && match[2].trim() === "";
+}
+
 /** `raw` without the `EMAIL_DRAFT:` lines a ClawBox chat would have turned into cards. */
 export function stripDraftDirectives(raw) {
   return splitDraftRefs(raw).text;
@@ -163,16 +189,22 @@ export function splitDraftRefs(raw) {
   if (!/email_draft:/i.test(raw)) return { text: raw, draftIds: [] };
   const draftIds = [];
   const kept = [];
-  let inFence = false;
+  let fence = null;
   const lines = raw.split("\n");
   for (const line of lines) {
     const trimmed = line.trim();
-    if (FENCE_RE.test(trimmed)) {
-      inFence = !inFence;
+    if (fence !== null) {
+      if (closesFence(trimmed, fence)) fence = null;
       kept.push(line);
       continue;
     }
-    const match = inFence ? null : DRAFT_LINE_RE.exec(unwrapQuoted(trimmed));
+    const opened = opensFence(trimmed);
+    if (opened !== null) {
+      fence = opened;
+      kept.push(line);
+      continue;
+    }
+    const match = DRAFT_LINE_RE.exec(unwrapQuoted(trimmed));
     const id = match ? parseDraftId(match[1]) : null;
     if (id === null) {
       kept.push(line);

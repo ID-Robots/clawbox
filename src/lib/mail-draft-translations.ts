@@ -55,6 +55,7 @@ const en = {
   "chat.emailDraft.sendUnknown": "ClawBox lost the answer to your Send, so this draft may or may not have been sent. Check your Sent folder, or check again what ClawBox recorded.",
   "chat.emailDraft.sendNotRecorded": "ClawBox lost the answer to your Send, but it has no record of the draft going out. It is still in your Drafts folder.",
   "chat.emailDraft.checkAgain": "Check again",
+  "chat.emailDraft.sentNotRecorded": "Sent. ClawBox could not record that on disk, so this card may ask about this draft again.",
 
   "settings.email.draftApproval.title": "Send approved drafts",
   "settings.email.draftApproval.desc": "When the assistant prepares an email as a draft in your mailbox, the chat shows it with Send, Keep as draft and Tell me what to change. Only a person's press sends it, through a send service on this ClawBox that holds the mailbox's send permission.",
@@ -73,6 +74,8 @@ const en = {
   "settings.email.draftApproval.testBad": "The send service gave an unexpected answer.",
   "settings.email.draftApproval.remove": "Remove",
   "settings.email.draftApproval.failed": "Could not save: {error}",
+  "settings.email.draftApproval.readFailed": "ClawBox could not read this setting.",
+  "settings.email.draftApproval.readRetry": "Try again",
 };
 
 type Table = Record<keyof typeof en, string>;
@@ -124,6 +127,7 @@ const bg: Table = {
   "chat.emailDraft.sendUnknown": "ClawBox загуби отговора на изпращането, затова не е ясно дали черновата е изпратена. Проверете папка „Изпратени“ или проверете отново какво е записал ClawBox.",
   "chat.emailDraft.sendNotRecorded": "ClawBox загуби отговора на изпращането, но няма запис черновата да е изпратена. Тя все още е в папка „Чернови“.",
   "chat.emailDraft.checkAgain": "Провери отново",
+  "chat.emailDraft.sentNotRecorded": "Изпратено. ClawBox не успя да запише това на диска, затова картата може да попита отново за тази чернова.",
 
   "settings.email.draftApproval.title": "Изпращане на одобрени чернови",
   "settings.email.draftApproval.desc": "Когато асистентът подготви имейл като чернова в пощенската ви кутия, чатът я показва с „Изпрати“, „Запази като чернова“ и „Кажете ми какво да променя“. Изпраща я само натискане от човек, чрез услуга за изпращане на този ClawBox, която има правото да изпраща от пощенската кутия.",
@@ -142,6 +146,8 @@ const bg: Table = {
   "settings.email.draftApproval.testBad": "Услугата за изпращане даде неочакван отговор.",
   "settings.email.draftApproval.remove": "Премахни",
   "settings.email.draftApproval.failed": "Не може да се запази: {error}",
+  "settings.email.draftApproval.readFailed": "ClawBox не успя да прочете тази настройка.",
+  "settings.email.draftApproval.readRetry": "Опитай отново",
 };
 
 const de: Table = {
@@ -191,6 +197,7 @@ const de: Table = {
   "chat.emailDraft.sendUnknown": "ClawBox hat die Antwort auf das Senden verloren, daher ist offen, ob dieser Entwurf gesendet wurde. Prüfen Sie den Ordner „Gesendet“ oder prüfen Sie erneut, was ClawBox festgehalten hat.",
   "chat.emailDraft.sendNotRecorded": "ClawBox hat die Antwort auf das Senden verloren, hat aber nicht festgehalten, dass der Entwurf gesendet wurde. Er liegt weiterhin im Ordner „Entwürfe“.",
   "chat.emailDraft.checkAgain": "Erneut prüfen",
+  "chat.emailDraft.sentNotRecorded": "Gesendet. ClawBox konnte das nicht auf der Festplatte vermerken, daher fragt diese Karte möglicherweise erneut nach diesem Entwurf.",
 
   "settings.email.draftApproval.title": "Freigegebene Entwürfe senden",
   "settings.email.draftApproval.desc": "Wenn der Assistent eine E-Mail als Entwurf in Ihrem Postfach vorbereitet, zeigt der Chat sie mit Senden, Als Entwurf behalten und Sagen Sie mir, was ich ändern soll. Gesendet wird sie nur auf den Druck eines Menschen, über einen Sendedienst auf dieser ClawBox, der die Senderechte des Postfachs hält.",
@@ -209,6 +216,8 @@ const de: Table = {
   "settings.email.draftApproval.testBad": "Der Sendedienst gab eine unerwartete Antwort.",
   "settings.email.draftApproval.remove": "Entfernen",
   "settings.email.draftApproval.failed": "Speichern fehlgeschlagen: {error}",
+  "settings.email.draftApproval.readFailed": "ClawBox konnte diese Einstellung nicht lesen.",
+  "settings.email.draftApproval.readRetry": "Erneut versuchen",
 };
 
 const es: Table = {
@@ -258,6 +267,7 @@ const es: Table = {
   "chat.emailDraft.sendUnknown": "ClawBox perdió la respuesta al envío, así que este borrador puede haberse enviado o no. Revisa la carpeta Enviados o vuelve a comprobar lo que registró ClawBox.",
   "chat.emailDraft.sendNotRecorded": "ClawBox perdió la respuesta al envío, pero no tiene constancia de que el borrador saliera. Sigue en la carpeta Borradores.",
   "chat.emailDraft.checkAgain": "Volver a comprobar",
+  "chat.emailDraft.sentNotRecorded": "Enviado. ClawBox no pudo registrarlo en el disco, así que esta tarjeta puede volver a preguntar por este borrador.",
 
   "settings.email.draftApproval.title": "Enviar borradores aprobados",
   "settings.email.draftApproval.desc": "Cuando el asistente prepara un correo como borrador en tu buzón, el chat lo muestra con Enviar, Guardar como borrador y Dime qué cambiar. Solo lo envía la pulsación de una persona, a través de un servicio de envío en este ClawBox que tiene el permiso de envío del buzón.",
@@ -276,6 +286,8 @@ const es: Table = {
   "settings.email.draftApproval.testBad": "El servicio de envío dio una respuesta inesperada.",
   "settings.email.draftApproval.remove": "Quitar",
   "settings.email.draftApproval.failed": "No se pudo guardar: {error}",
+  "settings.email.draftApproval.readFailed": "ClawBox no pudo leer esta configuración.",
+  "settings.email.draftApproval.readRetry": "Reintentar",
 };
 
 const fr: Table = {
@@ -325,6 +337,7 @@ const fr: Table = {
   "chat.emailDraft.sendUnknown": "ClawBox a perdu la réponse à l'envoi : ce brouillon a peut-être été envoyé, peut-être pas. Vérifiez le dossier Envoyés, ou vérifiez à nouveau ce que ClawBox a enregistré.",
   "chat.emailDraft.sendNotRecorded": "ClawBox a perdu la réponse à l'envoi, mais n'a aucune trace de son départ. Le brouillon est toujours dans le dossier Brouillons.",
   "chat.emailDraft.checkAgain": "Vérifier à nouveau",
+  "chat.emailDraft.sentNotRecorded": "Envoyé. ClawBox n'a pas pu l'enregistrer sur le disque, cette carte peut donc redemander à propos de ce brouillon.",
 
   "settings.email.draftApproval.title": "Envoyer les brouillons approuvés",
   "settings.email.draftApproval.desc": "Quand l'assistant prépare un courriel en brouillon dans votre boîte aux lettres, le chat l'affiche avec Envoyer, Garder en brouillon et Dites-moi quoi modifier. Seul l'appui d'une personne l'envoie, via un service d'envoi sur cette ClawBox qui détient le droit d'envoi de la boîte.",
@@ -343,6 +356,8 @@ const fr: Table = {
   "settings.email.draftApproval.testBad": "Le service d'envoi a donné une réponse inattendue.",
   "settings.email.draftApproval.remove": "Supprimer",
   "settings.email.draftApproval.failed": "Échec de l'enregistrement : {error}",
+  "settings.email.draftApproval.readFailed": "ClawBox n'a pas pu lire ce réglage.",
+  "settings.email.draftApproval.readRetry": "Réessayer",
 };
 
 const it: Table = {
@@ -392,6 +407,7 @@ const it: Table = {
   "chat.emailDraft.sendUnknown": "ClawBox ha perso la risposta all'invio, quindi questa bozza potrebbe essere stata inviata o no. Controlla la cartella Inviati o verifica di nuovo ciò che ClawBox ha registrato.",
   "chat.emailDraft.sendNotRecorded": "ClawBox ha perso la risposta all'invio, ma non risulta che la bozza sia partita. È ancora nella cartella Bozze.",
   "chat.emailDraft.checkAgain": "Verifica di nuovo",
+  "chat.emailDraft.sentNotRecorded": "Inviato. ClawBox non è riuscito a registrarlo su disco, quindi questa scheda potrebbe richiedere di nuovo questa bozza.",
 
   "settings.email.draftApproval.title": "Invia le bozze approvate",
   "settings.email.draftApproval.desc": "Quando l'assistente prepara un'email come bozza nella tua casella, la chat la mostra con Invia, Tieni come bozza e Dimmi cosa cambiare. La invia solo la pressione di una persona, tramite un servizio di invio su questo ClawBox che ha il permesso di invio della casella.",
@@ -410,6 +426,8 @@ const it: Table = {
   "settings.email.draftApproval.testBad": "Il servizio di invio ha dato una risposta inattesa.",
   "settings.email.draftApproval.remove": "Rimuovi",
   "settings.email.draftApproval.failed": "Impossibile salvare: {error}",
+  "settings.email.draftApproval.readFailed": "ClawBox non è riuscito a leggere questa impostazione.",
+  "settings.email.draftApproval.readRetry": "Riprova",
 };
 
 const ja: Table = {
@@ -459,6 +477,7 @@ const ja: Table = {
   "chat.emailDraft.sendUnknown": "ClawBox は送信への応答を受け取れなかったため、この下書きが送信されたかどうかわかりません。「送信済み」フォルダーを確認するか、ClawBox の記録をもう一度確認してください。",
   "chat.emailDraft.sendNotRecorded": "ClawBox は送信への応答を受け取れませんでしたが、この下書きが送信された記録はありません。下書きは「下書き」フォルダーに残っています。",
   "chat.emailDraft.checkAgain": "もう一度確認",
+  "chat.emailDraft.sentNotRecorded": "送信しました。ClawBox はディスクに記録できなかったため、このカードがこの下書きについて再度確認することがあります。",
 
   "settings.email.draftApproval.title": "承認済みの下書きを送信",
   "settings.email.draftApproval.desc": "アシスタントがメールボックスにメールの下書きを用意すると、チャットに「送信」「下書きのまま保存」「変更してほしい点を教えてください」と一緒に表示されます。送信されるのは人が押したときだけで、メールボックスの送信権限を持つこの ClawBox 上の送信サービスを通して送られます。",
@@ -477,6 +496,8 @@ const ja: Table = {
   "settings.email.draftApproval.testBad": "送信サービスが予期しない応答を返しました。",
   "settings.email.draftApproval.remove": "削除",
   "settings.email.draftApproval.failed": "保存できませんでした: {error}",
+  "settings.email.draftApproval.readFailed": "ClawBox はこの設定を読み取れませんでした。",
+  "settings.email.draftApproval.readRetry": "再試行",
 };
 
 const nl: Table = {
@@ -526,6 +547,7 @@ const nl: Table = {
   "chat.emailDraft.sendUnknown": "ClawBox is het antwoord op het verzenden kwijtgeraakt, dus dit concept is misschien wel, misschien niet verzonden. Kijk in de map Verzonden of controleer opnieuw wat ClawBox heeft vastgelegd.",
   "chat.emailDraft.sendNotRecorded": "ClawBox is het antwoord op het verzenden kwijtgeraakt, maar heeft niet vastgelegd dat het concept is verzonden. Het staat nog in de map Concepten.",
   "chat.emailDraft.checkAgain": "Opnieuw controleren",
+  "chat.emailDraft.sentNotRecorded": "Verzonden. ClawBox kon dit niet op schijf vastleggen, dus deze kaart kan opnieuw naar dit concept vragen.",
 
   "settings.email.draftApproval.title": "Goedgekeurde concepten verzenden",
   "settings.email.draftApproval.desc": "Als de assistent een e-mail als concept in uw mailbox klaarzet, toont de chat die met Verzenden, Bewaren als concept en Vertel me wat ik moet aanpassen. Alleen de druk op de knop door een mens verzendt hem, via een verzenddienst op deze ClawBox die het verzendrecht van de mailbox heeft.",
@@ -544,6 +566,8 @@ const nl: Table = {
   "settings.email.draftApproval.testBad": "De verzenddienst gaf een onverwacht antwoord.",
   "settings.email.draftApproval.remove": "Verwijderen",
   "settings.email.draftApproval.failed": "Opslaan mislukt: {error}",
+  "settings.email.draftApproval.readFailed": "ClawBox kon deze instelling niet lezen.",
+  "settings.email.draftApproval.readRetry": "Opnieuw proberen",
 };
 
 const sv: Table = {
@@ -593,6 +617,7 @@ const sv: Table = {
   "chat.emailDraft.sendUnknown": "ClawBox tappade svaret på skickandet, så utkastet kan ha skickats eller inte. Titta i mappen Skickat eller kontrollera igen vad ClawBox har registrerat.",
   "chat.emailDraft.sendNotRecorded": "ClawBox tappade svaret på skickandet, men har inget som visar att utkastet skickades. Det ligger kvar i mappen Utkast.",
   "chat.emailDraft.checkAgain": "Kontrollera igen",
+  "chat.emailDraft.sentNotRecorded": "Skickat. ClawBox kunde inte registrera det på disken, så det här kortet kan fråga om det här utkastet igen.",
 
   "settings.email.draftApproval.title": "Skicka godkända utkast",
   "settings.email.draftApproval.desc": "När assistenten förbereder ett e-postmeddelande som utkast i din brevlåda visar chatten det med Skicka, Behåll som utkast och Berätta vad jag ska ändra. Bara en människas tryck skickar det, via en sändtjänst på den här ClawBoxen som har brevlådans sändbehörighet.",
@@ -611,6 +636,8 @@ const sv: Table = {
   "settings.email.draftApproval.testBad": "Sändtjänsten gav ett oväntat svar.",
   "settings.email.draftApproval.remove": "Ta bort",
   "settings.email.draftApproval.failed": "Kunde inte spara: {error}",
+  "settings.email.draftApproval.readFailed": "ClawBox kunde inte läsa den här inställningen.",
+  "settings.email.draftApproval.readRetry": "Försök igen",
 };
 
 const zh: Table = {
@@ -660,6 +687,7 @@ const zh: Table = {
   "chat.emailDraft.sendUnknown": "ClawBox 没有收到发送的答复，因此无法确定此草稿是否已发送。请查看“已发送”文件夹，或再次查看 ClawBox 的记录。",
   "chat.emailDraft.sendNotRecorded": "ClawBox 没有收到发送的答复，但没有该草稿已发出的记录。它仍在“草稿”文件夹中。",
   "chat.emailDraft.checkAgain": "再次检查",
+  "chat.emailDraft.sentNotRecorded": "已发送。ClawBox 未能把这条记录写入磁盘，因此这张卡片可能会再次询问该草稿。",
 
   "settings.email.draftApproval.title": "发送已批准的草稿",
   "settings.email.draftApproval.desc": "当助手在你的邮箱中准备好一封邮件草稿时，聊天会显示它，并提供“发送”“保留为草稿”和“告诉我要改什么”。只有人按下按钮才会发送，并通过这台 ClawBox 上持有邮箱发送权限的发送服务发出。",
@@ -678,6 +706,8 @@ const zh: Table = {
   "settings.email.draftApproval.testBad": "发送服务返回了意外的答复。",
   "settings.email.draftApproval.remove": "移除",
   "settings.email.draftApproval.failed": "无法保存：{error}",
+  "settings.email.draftApproval.readFailed": "ClawBox 无法读取此设置。",
+  "settings.email.draftApproval.readRetry": "重试",
 };
 
 export const mailDraftTranslations: Record<Locale, Record<string, string>> = { en, bg, de, es, fr, it, ja, nl, sv, zh };

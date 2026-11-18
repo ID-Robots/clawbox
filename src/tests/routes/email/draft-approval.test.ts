@@ -236,19 +236,29 @@ describe("the card", () => {
   it("hands the same approval back to a second look, not a new one each time", async () => {
     const first = await mint(ownerCookie());
     const second = await mint(ownerCookie());
+    // Both looks must have SUCCEEDED with a token: two refusals would make the
+    // reuse check below compare undefined with undefined and pass on nothing.
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(typeof first.json.token).toBe("string");
+    expect(String(first.json.token).length).toBeGreaterThan(0);
     expect(second.json.token).toBe(first.json.token);
   });
 });
 
 describe("Send", () => {
   it("sends exactly the approved draft, once, from the approver's mailbox", async () => {
+    // The answer the card was built from, hashed the way the docs describe: the
+    // Send must forward THAT hash, not merely something hash-shaped.
+    const approved = structuredClone(mailbox[OWNER][DRAFT_ID]);
+    const { draftContentHash } = await import("@/lib/mail-draft-backend");
     const { json } = await mint(ownerCookie());
     const sent = await answer(ownerCookie(), json.token, "send");
     expect(sent.status).toBe(200);
     expect(sent.json.state).toBe("sent");
     expect(sends).toHaveLength(1);
     expect(sends[0]).toMatchObject({ user: OWNER, draftId: DRAFT_ID, auth: BACKEND_AUTH });
-    expect(sends[0].contentHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(sends[0].contentHash).toBe(draftContentHash(approved));
     // Re-read right before the send, not trusted from the card.
     expect(backendCalls.map((c) => c.method)).toEqual(["GET", "GET", "POST"]);
     // A later look at the same draft says it went, and offers nothing to press.
@@ -614,6 +624,137 @@ describe("Send", () => {
     const res = await answer(ownerCookie(), json.token, "send");
     expect(res.status).toBe(503);
     expect(sends).toEqual([]);
+  });
+
+  it("refuses the whole ledger when one entry cannot be read, rather than sending past it", async () => {
+    const { json } = await mint(ownerCookie());
+    const ledgerPath = path.join(root, "data", "mail-draft-approvals.json");
+    const open = (JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as { cards: Record<string, unknown>[] }).cards[0];
+    const at = Date.now();
+    // The record that would block this Send, written in a way this build cannot
+    // read. Dropping it and judging the Send on what is left would SEND.
+    const blocking = { c: "x".repeat(22), u: OWNER, d: DRAFT_ID, h: "0".repeat(64), iat: at, exp: at + 1000, state: "sent" };
+    fs.writeFileSync(ledgerPath, JSON.stringify({ v: 1, cards: [{ ...blocking, at: "recently" }, open] }));
+    expect((await answer(ownerCookie(), json.token, "send")).status).toBe(503);
+    // A timestamp that is a number but not a finite one is no timestamp either:
+    // Infinity compares false against every deadline the checks apply.
+    fs.writeFileSync(ledgerPath, `{"v":1,"cards":[${JSON.stringify(open).replace(/"at":-?\d+(\.\d+)?/, '"at":1e999')}]}`);
+    expect((await answer(ownerCookie(), json.token, "send")).status).toBe(503);
+    expect(sends).toEqual([]);
+  });
+
+  it("refuses a new card, rather than issuing a token the ledger has no room for", async () => {
+    // A ledger full of records the count cap may never drop: every one of them
+    // says a draft went, is going, or may have gone.
+    const ledgerPath = path.join(root, "data", "mail-draft-approvals.json");
+    const now = Date.now();
+    const cards = Array.from({ length: 2000 }, (_, i) => ({
+      c: `pinned${String(i).padStart(16, "0")}`, u: OWNER, d: `pinned-${i}`, h: "0".repeat(64),
+      iat: now + i, exp: now + 600_000, state: "sent", at: now + i,
+    }));
+    fs.writeFileSync(ledgerPath, JSON.stringify({ v: 1, cards }));
+    const full = await mint(ownerCookie());
+    expect(full.status).toBe(503);
+    expect(full.json.kind).toBe("no_room");
+    expect(full.json.token).toBeUndefined();
+    // The pinned records are all still there, and nothing was sent.
+    const after = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as { cards: { state: string }[] };
+    expect(after.cards.filter((c) => c.state === "sent")).toHaveLength(2000);
+    expect(sends).toEqual([]);
+  });
+
+  it("records a confirmed Send even when the first ledger write fails, and says so when none works", async () => {
+    const ledgerPath = path.join(root, "data", "mail-draft-approvals.json");
+    const { json } = await mint(ownerCookie());
+    const realWrite = fs.writeFileSync;
+    let failures = 2;
+    let recording = cardIdOf(String(json.token));
+    // Only the write that RECORDS THIS CARD as sent fails; the claim before the
+    // Send goes through, so the backend really is asked to send.
+    const spy = vi.spyOn(fs, "writeFileSync").mockImplementation(((file: unknown, data: unknown, ...rest: unknown[]) => {
+      const records = new RegExp(`"c":"${recording}"[^}]*"state":"sent"`).test(String(data));
+      if (String(file).startsWith(ledgerPath) && failures > 0 && records) {
+        failures -= 1;
+        throw Object.assign(new Error("EIO"), { code: "EIO" });
+      }
+      return (realWrite as (...args: unknown[]) => void)(file, data, ...rest);
+    }) as typeof fs.writeFileSync);
+    try {
+      const sent = await answer(ownerCookie(), json.token, "send");
+      expect(sent.status).toBe(200);
+      expect(sent.json.state).toBe("sent");
+      // The retry wrote it; the backend was asked to send exactly once.
+      expect(sent.json.recorded).toBeUndefined();
+      expect(sends).toHaveLength(1);
+      const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as { cards: { state: string }[] };
+      expect(ledger.cards.some((c) => c.state === "sent")).toBe(true);
+
+      // And when no write works: still sent, and the answer says the record is not.
+      mailbox[OWNER]["second-draft"] = { id: "second-draft", to: ["b@example.com"], cc: [], subject: "Two", body: "2" };
+      const second = await mint(ownerCookie(), "second-draft");
+      recording = cardIdOf(String(second.json.token));
+      failures = 99;
+      const lost = await answer(ownerCookie(), second.json.token, "send");
+      expect(lost.status).toBe(200);
+      expect(lost.json).toMatchObject({ state: "sent", recorded: false });
+      expect(String(lost.json.warning)).toContain("sent");
+      expect(sends).toHaveLength(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // Keep or Revise, checked here because what it must stop is a SEND: the
+  // twoCards helper above is what makes two approvals for one version.
+  it("Keep closes every approval for the version it declines, not only the card pressed", async () => {
+    const { a, b } = await twoCards();
+    expect((await answer(ownerCookie(), a, "keep")).json.state).toBe("kept");
+    // Card B held an approval for the very version the person just declined.
+    const other = await answer(ownerCookie(), b, "send");
+    expect(other.status).toBe(409);
+    expect(other.json).toMatchObject({ kind: "reused", state: "kept" });
+    expect(sends).toEqual([]);
+    // An explicit Review again still opens a card that may send.
+    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect(reopened.json.state).toBe("open");
+    expect((await answer(ownerCookie(), String(reopened.json.token), "send")).status).toBe(200);
+    expect(sends).toHaveLength(1);
+  });
+
+  it("Keep leaves the approvals for another version of the draft alone", async () => {
+    const { a } = await twoCards();
+    // A revised draft: a new hash, so the card made for it is another version's.
+    mailbox[OWNER][DRAFT_ID].body = "Hello Ivan, a shorter offer.";
+    const newer = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect(newer.json.state).toBe("open");
+    expect((await answer(ownerCookie(), a, "keep")).json.state).toBe("kept");
+    expect((await answer(ownerCookie(), String(newer.json.token), "send")).status).toBe(200);
+    expect(sends).toHaveLength(1);
+  });
+
+  it("a Send lost while Review again was loading needs another Review again", async () => {
+    const { a, b } = await twoCards();
+    let release!: () => void;
+    gate = { id: DRAFT_ID, hit: false, wait: new Promise<void>((resolve) => { release = resolve; }) };
+    // The person's "Review again" is reading the draft...
+    const reviewing = mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    await vi.waitFor(() => expect(gate?.hit).toBe(true));
+    // ...while card A's Send loses the mail service's answer.
+    sendAnswer = 503;
+    expect((await answer(ownerCookie(), a, "send")).json.kind).toBe("send_uncertain");
+    release();
+    // The card that was loading cannot send: that loss came after the person
+    // asked, so they have not been warned about it.
+    const late = await reviewing;
+    expect(late.json).toMatchObject({ state: "uncertain" });
+    expect(late.json.token).toBeUndefined();
+    expect((await answer(ownerCookie(), b, "send")).json).toMatchObject({ kind: "reused", state: "uncertain" });
+    // Asked again, now that the card has said so, a card that may send.
+    sendAnswer = 200;
+    const reopened = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect(reopened.json.state).toBe("open");
+    expect((await answer(ownerCookie(), String(reopened.json.token), "send")).status).toBe(200);
+    expect(sends).toHaveLength(2);
   });
 });
 

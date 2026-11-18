@@ -44,7 +44,10 @@ cannot see gets a card saying the draft is not in their mailbox.
   is the answer re-serialised with every object's keys sorted. The hash is not
   limited to the fields the card shows. A Reply-To, a From, a header or an
   attachment's bytes or digest, when the backend includes them, are bound as
-  firmly as the recipients and the body;
+  firmly as the recipients and the body. An answer nested more than 64 levels
+  deep is refused as an answer ClawBox could not read, rather than hashed down
+  to that depth: a hash that cannot tell two answers apart would not bind
+  either of them;
 - an expiry: 30 minutes, or `CLAWBOX_MAIL_DRAFT_TOKEN_TTL_S` seconds (10 s to
   24 h).
 
@@ -52,7 +55,11 @@ The token is HMAC-SHA256 signed. The key is derived from the session-signing
 secret under a label of its own, so a token is never a valid session cookie and
 a cookie is never a valid token. Every card is recorded in
 `data/mail-draft-approvals.json` (mode 0600, written by atomic rename), which is
-what makes a token one-time.
+what makes a token one-time. The file is read **fail-closed**: a missing file is
+an empty ledger (a box's first use), and a file whose JSON, or any single entry
+in it, cannot be read refuses the whole ledger — every decision is then refused
+with 503 rather than taken against records that may be missing the one that
+should block a Send.
 
 `POST /setup-api/email/draft-approval/decide` with `{token, action}` checks the
 following, in order, and refuses if any check fails:
@@ -88,13 +95,34 @@ closed as `uncertain`. The same applies to a server that stopped mid-send. An
 `uncertain` card never reports "not sent". A plain reload does not offer that
 draft's Send again, and no card made before the loss can send it. Only the
 person's explicit **Review again** does, with a card made after the card has
-told them to check their Sent folder. So a crashed Send blocks the older cards,
-never the draft for good. The ledger keeps at most 2000 cards, but a
-`sent`, `sending` or `uncertain` card is never dropped to make room. Those
-leave only by age (30 days).
+told them to check their Sent folder. A **Review again** that was already
+loading when a Send of the same draft lost its answer is not that card: the
+loss appeared after the person asked, so they have not been warned about it, and
+the card says `uncertain` and waits for another **Review again**. So a crashed
+Send blocks the older cards, never the draft for good.
+
+A Send the backend **confirmed** is recorded in the ledger with retries, and the
+retries repeat the ledger write alone — the backend is never asked to send
+twice. If no write succeeds, the answer is still `sent`, with `recorded: false`
+and a sentence saying the mail went and the record of it did not; the card shows
+that rather than only "Sent."
+
+The ledger keeps at most 2000 cards, but a `sent`, `sending` or `uncertain` card
+is never dropped to make room. Those leave only by age (30 days). When they fill
+the ledger there is no room for a new open card, and the card route refuses with
+503 `no_room` instead of handing out an approval the ledger does not hold (which
+every press would refuse as `reused`, saying the wrong thing about why). Nothing
+can be sent without an approval, so the refusal is fail-closed as well.
 
 A reload after **Review again** shows the new open card, not the earlier
 **Keep as draft** or **Tell me what to change** answer for the same version.
+
+**Keep as draft** and **Tell me what to change** close every approval
+outstanding for the draft version they decline — that person, that draft, that
+hash — not only the card they were pressed on. Two cards for one version exist
+in two tabs, or across an expiry, and the second must not be able to send the
+version the person has just asked to change. Approvals for other versions are
+untouched, and an explicit **Review again** opens a card that can send.
 
 In the chat, a Send whose answer never reaches the browser (the connection
 dropped, or something other than ClawBox answered, such as a proxy's error
@@ -124,7 +152,11 @@ offers **Check again**.
   England, Scotland and Wales flags. A joiner or selector outside such an emoji,
   and any other tag run, is marked.
 - The whole body is shown, up to the backend's 1 MiB answer limit. A preview
-  that ever had to be cut offers no Send. The same applies to a subject (over
+  that ever had to be cut offers no Send — including a cut the HTML sanitiser
+  made rather than the preview limit: a body with more nodes than it keeps
+  (12 000) or one run of text longer than it keeps (40 000 characters) is
+  reported as truncated, however short the words that came out of it are. The
+  same applies to a subject (over
   1000 characters) or an attachment name (over 200) that had to be cut. A
   recipient is never cut: one over 400 characters makes the draft unreadable,
   and ClawBox refuses it as the backend giving an answer it could not read.
@@ -150,7 +182,11 @@ in **Settings → Email → Send approved drafts**:
 - **Show send approval cards in the chat**: off by default.
 
 Only the owner's signed-in browser can read or change this setting
-(`/setup-api/email/draft-approval`). The **Test connection** button reads a
+(`/setup-api/email/draft-approval`). A browser the route refuses (401, 403, or
+404 on a box without it) is shown no panel at all; any other failed read — a
+503, a dropped connection, an answer that is not the setting — is shown as a
+failed read with a **Try again** that reads it once more, so the setting is
+never silently absent. The **Test connection** button reads a
 draft id nobody has, so a healthy backend answers 404 and nothing is touched.
 
 ### Contract
@@ -190,8 +226,9 @@ The second shape is a Microsoft Graph `message` passed straight through:
 `{emailAddress: {name, address}}`), `subject`, and
 `body: {contentType, content}`. Recipients may also be plain strings or
 `{address, name}`. If `id` is present it must equal the id asked for. Any
-answer ClawBox cannot read whole is refused rather than shown in part. An HTML
-body is shown as text, through the same sanitiser the mail viewer uses.
+answer ClawBox cannot read whole — including one nested more than 64 levels
+deep, which it cannot hash whole — is refused rather than shown in part. An
+HTML body is shown as text, through the same sanitiser the mail viewer uses.
 
 Draft ids are one word of letters, digits and `. _ ~ + / = : @ -`, never only
 dots, and are percent-encoded into the path.

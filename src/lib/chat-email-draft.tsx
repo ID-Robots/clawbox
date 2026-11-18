@@ -83,7 +83,9 @@ type Phase =
   // `notice`: a sentence shown instead of the usual "nothing is sent until…",
   // e.g. why a card whose Send got no answer is offered again.
   | { kind: 'open'; draft: EmailDraftView; token: string; busy: Action | null; notice?: string }
-  | { kind: 'settled'; state: Settled; draft: EmailDraftView | null }
+  // `notice`: a sentence shown instead of the state's own, e.g. a Send the
+  // backend confirmed that ClawBox could not record on disk.
+  | { kind: 'settled'; state: Settled; draft: EmailDraftView | null; notice?: string }
   | { kind: 'refused'; reason: string; draft: EmailDraftView | null }
   | { kind: 'failed'; reason: string }
   // A Send whose answer never arrived: it may have gone. `checking` while the
@@ -298,7 +300,11 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
     lostRevision.current = action === 'revise' && answerLost(answer, action) ? changeText : null
     if (done) {
       if (action === 'revise') setChange('')
-      setPhase({ kind: 'settled', state: DONE[action], draft })
+      // `recorded: false` on a Send: the mail went and the ledger says it did
+      // not. Said as both halves, because a later look at this draft may ask
+      // about it again until that record is written.
+      const notice = action === 'send' && answer?.json.recorded === false ? 'chat.emailDraft.sentNotRecorded' : undefined
+      setPhase({ kind: 'settled', state: DONE[action], draft, notice })
       return
     }
     const kind = answer !== null && typeof answer.json.kind === 'string' ? answer.json.kind : answer === null ? 'network' : 'unavailable'
@@ -335,7 +341,8 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
       case 'loading': return t('chat.emailDraft.loading')
       case 'open': return busy === 'send' ? t('chat.emailDraft.sending') : busy ? t('chat.emailDraft.saving') : t(phase.notice ?? 'chat.emailDraft.onlyYou')
       case 'settled':
-        return phase.state === 'uncertain' ? t('chat.emailDraft.error.sendUncertain')
+        return phase.notice !== undefined ? t(phase.notice)
+          : phase.state === 'uncertain' ? t('chat.emailDraft.error.sendUncertain')
           : phase.state === 'sending' ? t('chat.emailDraft.sending')
           : t(`chat.emailDraft.${phase.state}`)
       case 'refused': return phase.reason === 'already_sent' ? t('chat.emailDraft.error.alreadySent') : t(refusalKey(phase.reason))
@@ -344,7 +351,7 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
     }
   })()
   const isError = phase.kind === 'refused' || phase.kind === 'failed' || phase.kind === 'unknown'
-    || (phase.kind === 'settled' && phase.state === 'uncertain')
+    || (phase.kind === 'settled' && (phase.state === 'uncertain' || phase.notice !== undefined))
     || (phase.kind === 'open' && phase.notice !== undefined && busy === null)
   // A body, subject or attachment name the server could not show whole is not
   // offered for Send: the person would approve a tail they never saw.

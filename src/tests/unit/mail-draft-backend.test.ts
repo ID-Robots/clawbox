@@ -280,6 +280,45 @@ describe("what a card shows", () => {
     expect(huge.body).toHaveLength(MAX_PREVIEW_CHARS);
     expect(huge.bodyTruncated).toBe(true);
   });
+
+  it("offers no Send when the HTML sanitiser had to drop part of the body", () => {
+    // One run of text past the sanitiser's ceiling: the words that come out are
+    // far under the preview cap, so only the sanitiser can say it was cut.
+    const oneLongRun = draftView(draftOf({ ...BASE, bodyType: "html", body: `<p>${"x".repeat(100_000)}</p>` }));
+    expect(oneLongRun.body.length).toBeLessThan(MAX_PREVIEW_CHARS);
+    expect(oneLongRun.bodyTruncated).toBe(true);
+    // The node ceiling, reached by absurd nesting of tables, says the same.
+    const manyNodes = draftView(draftOf({ ...BASE, bodyType: "html", body: "<p>a</p>".repeat(20_000) }));
+    expect(manyNodes.bodyTruncated).toBe(true);
+    // An ordinary HTML body is shown whole and stays sendable.
+    const ordinary = draftView(draftOf({ ...BASE, bodyType: "html", body: "<p>Hello Ivan,</p><p>the offer is attached.</p>" }));
+    expect(ordinary.body).toBe("Hello Ivan,\n\nthe offer is attached.");
+    expect(ordinary.bodyTruncated).toBe(false);
+  });
+});
+
+describe("an answer too deep to hash", () => {
+  function nested(depth: number, leaf: unknown): unknown {
+    let value: unknown = leaf;
+    for (let i = 0; i < depth; i += 1) value = { deeper: value };
+    return value;
+  }
+
+  it("is refused, rather than hashed as if the depths were all null", () => {
+    // Two answers that differ only past the limit used to hash alike, so a
+    // Send bound to one would have accepted the other.
+    expect(normalizeDraft({ ...BASE, extra: nested(65, "a") }, "d1")).toBeNull();
+    expect(normalizeDraft({ ...BASE, extra: nested(65, "b") }, "d1")).toBeNull();
+    expect(() => canonicalJson(nested(65, "a"))).toThrow();
+  });
+
+  it("leaves every answer a mailbox really gives alone, key order and all", () => {
+    const deep = { ...BASE, extra: nested(60, { a: 1, b: 2 }) };
+    expect(draftOf(deep).hash).toBe(draftContentHash(deep));
+    const reversed = Object.fromEntries(Object.entries(deep).reverse());
+    expect(draftContentHash(reversed)).toBe(draftContentHash(deep));
+    expect(draftContentHash({ ...deep, extra: nested(60, { a: 1, b: 3 }) })).not.toBe(draftContentHash(deep));
+  });
 });
 
 describe("draft ids", () => {

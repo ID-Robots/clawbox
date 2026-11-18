@@ -22,6 +22,13 @@ describe("splitDraftRefs", () => {
     expect(splitDraftRefs(raw)).toEqual({ text: raw, draftIds: [] });
   });
 
+  it("closes a fence only with its own marker, so a tilde example keeps its directive", () => {
+    const raw = "Like this:\n```markdown\n~~~\nEMAIL_DRAFT:example\n~~~\n```";
+    expect(splitDraftRefs(raw)).toEqual({ text: raw, draftIds: [] });
+    // And a fence that really closes still ends.
+    expect(splitDraftRefs("```\nEMAIL_DRAFT:example\n```\nEMAIL_DRAFT:d1").draftIds).toEqual(["d1"]);
+  });
+
   it("only at the start of a line", () => {
     const raw = "I wrote EMAIL_DRAFT:abc for you";
     expect(splitDraftRefs(raw)).toEqual({ text: raw, draftIds: [] });
@@ -55,11 +62,29 @@ describe("splitDraftRefs", () => {
 
 describe("streamingDraftRefsText", () => {
   it("never shows the directive while it is still arriving", () => {
-    for (const tail of ["EMAIL_", "EMAIL_D", "EMAIL_DRAF", "EMAIL_DRAFT:", "EMAIL_DRAFT:AAM", "EMAIL_DRAFT:`AAMk"]) {
+    for (const tail of [
+      "EMAIL_", "EMAIL_D", "EMAIL_DRAF", "EMAIL_DRAFT", "EMAIL_DRAFT:", "EMAIL_DRAFT:AAM", "EMAIL_DRAFT:`AAMk",
+      // The whole-line backtick wrapper, still unfinished: neither the keyword
+      // nor the id it already names may flash on screen.
+      "`EMAIL_DR", "`EMAIL_DRAFT", "`EMAIL_DRAFT:", "`EMAIL_DRAFT:d1",
+    ]) {
       expect(streamingDraftRefsText(`Ready.\n${tail}`), tail).toBe("Ready.");
     }
     expect(streamingDraftRefsText("Ready.\nEMAIL_DRAFT:x\nMore")).toBe("Ready.\nMore");
+    // A finished wrapper is a card's directive, not a tail.
+    expect(streamingDraftRefsText("Ready.\n`EMAIL_DRAFT:d1`")).toBe("Ready.");
     expect(streamingDraftRefsText("Plain text")).toBe("Plain text");
+  });
+
+  it("keeps ordinary text and a finished fenced example", () => {
+    for (const raw of [
+      "Ready.\nemail_drama",
+      "Ready.\n`code`",
+      "Ready.\nEMAIL_DRAFTS",
+      "Show it:\n```\nEMAIL_DRAFT:example\n```",
+    ]) {
+      expect(streamingDraftRefsText(raw), raw).toBe(raw);
+    }
   });
 
   it("stays linear on a long line of spaces", () => {

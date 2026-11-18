@@ -49,6 +49,14 @@ const CASES: [string, string][] = [
   ["Done.\nemail_draft: \"x1\"\nEmail_Draft:x1", "Done."],
   ["Two.\nEMAIL:4471\nEMAIL_DRAFT:d-9", "Two."],
   ["```\nEMAIL_DRAFT:example\n```", "```\nEMAIL_DRAFT:example\n```"],
+  // A tilde run INSIDE a backtick fence is content, not that fence's closer:
+  // the directive stays inside the example and never becomes a card.
+  ["```markdown\n~~~\nEMAIL_DRAFT:example\n~~~\n```", "```markdown\n~~~\nEMAIL_DRAFT:example\n~~~\n```"],
+  // The same the other way round, and a longer closer than its opener.
+  ["~~~\n```\nEMAIL_DRAFT:example\n```\n~~~", "~~~\n```\nEMAIL_DRAFT:example\n```\n~~~"],
+  ["````\nEMAIL_DRAFT:example\n```\nEMAIL_DRAFT:example\n````", "````\nEMAIL_DRAFT:example\n```\nEMAIL_DRAFT:example\n````"],
+  // A fence that closes still ends: the line after it is a directive again.
+  ["```\nEMAIL_DRAFT:example\n```\nEMAIL_DRAFT:d1", "```\nEMAIL_DRAFT:example\n```"],
   ["Use EMAIL_DRAFT:abc inline", "Use EMAIL_DRAFT:abc inline"],
   ["EMAIL_DRAFT:not an id", "EMAIL_DRAFT:not an id"],
   ["EMAIL_DRAFT:", "EMAIL_DRAFT:"],

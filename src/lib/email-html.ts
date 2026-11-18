@@ -306,6 +306,28 @@ export function sanitizeEmailHtml(
   html: string,
   resolveImage: ImageResolver = blockRemoteImages,
 ): EmailNode[] {
+  return sanitizeEmailHtmlReporting(html, resolveImage).nodes;
+}
+
+/** What the sanitiser built, and whether a ceiling dropped part of the message. */
+export interface SanitizedEmailHtml {
+  nodes: EmailNode[];
+  /**
+   * True when `MAX_NODES` or `MAX_TEXT_RUN` cut content out of the tree. A
+   * reader that must not show a message in part without saying so (the e-mail
+   * draft send-approval card, which offers no Send for a body it could not show
+   * whole) asks for this; the chat's message view ignores it and renders what
+   * there is.
+   */
+  truncated: boolean;
+}
+
+/** `sanitizeEmailHtml`, saying whether a ceiling dropped any content. */
+export function sanitizeEmailHtmlReporting(
+  html: string,
+  resolveImage: ImageResolver = blockRemoteImages,
+): SanitizedEmailHtml {
+  let truncated = false;
   const root: EmailElementNode = { type: "element", tag: "div", children: [] };
   // The open-element stack. `root` is never popped, so a message with more
   // closing tags than opening ones cannot unwind past the top.
@@ -316,13 +338,17 @@ export function sanitizeEmailHtml(
   const top = (): EmailElementNode => stack[stack.length - 1];
 
   const pushNode = (node: EmailNode): void => {
-    if (nodes >= MAX_NODES) return;
+    if (nodes >= MAX_NODES) {
+      truncated = true;
+      return;
+    }
     nodes += 1;
     top().children.push(node);
   };
 
   const pushText = (raw: string): void => {
     if (!raw) return;
+    if (raw.length > MAX_TEXT_RUN) truncated = true;
     const text = decodeEntities(raw.length > MAX_TEXT_RUN ? raw.slice(0, MAX_TEXT_RUN) : raw);
     // Whitespace between block tags is layout, not content, and a tree full of
     // whitespace-only nodes renders as a column of blank lines.
@@ -425,7 +451,11 @@ export function sanitizeEmailHtml(
     if (!tag.selfClosing && stack.length < MAX_DEPTH) stack.push(element);
   }
 
-  return root.children;
+  // The loop itself stops at the node ceiling: whatever markup is left after it
+  // never became nodes, even when no `pushNode` was refused to say so.
+  if (i < html.length && nodes >= MAX_NODES) truncated = true;
+
+  return { nodes: root.children, truncated };
 }
 
 /**

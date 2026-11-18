@@ -25,7 +25,7 @@
 
 import { createHash, randomBytes } from "crypto";
 import type { DraftApprovalConfig } from "@/lib/mail-draft-approval-config";
-import { sanitizeEmailHtml, type EmailNode } from "@/lib/email-html";
+import { sanitizeEmailHtmlReporting, type EmailNode } from "@/lib/email-html";
 import { DRAFT_ID_RE } from "@/lib/chat-email-draft-refs";
 
 /** How long one call to the backend may take. */
@@ -192,6 +192,18 @@ const BLOCK_TAGS = new Set([
 
 /** The words of an HTML body, through the same sanitiser the mail viewer uses. */
 export function htmlToText(html: string): string {
+  return htmlToTextReporting(html).text;
+}
+
+/**
+ * `htmlToText`, saying whether the sanitiser had to drop part of the message
+ * (absurdly many nodes, or one run of text past its ceiling). A card that shows
+ * a body in part offers no Send, so the cut has to be reported rather than
+ * guessed at from the length of what came out: 100,000 characters of text in
+ * one run come back as 40,000, far under the preview cap, and the person would
+ * have approved a mail they saw the first third of.
+ */
+export function htmlToTextReporting(html: string): { text: string; truncated: boolean } {
   const out: string[] = [];
   const walk = (nodes: EmailNode[]): void => {
     for (const node of nodes) {
@@ -224,8 +236,12 @@ export function htmlToText(html: string): string {
       }
     }
   };
-  walk(sanitizeEmailHtml(html));
-  return out.join("").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const sanitized = sanitizeEmailHtmlReporting(html);
+  walk(sanitized.nodes);
+  return {
+    text: out.join("").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(),
+    truncated: sanitized.truncated,
+  };
 }
 
 // ── reading a backend's answer ─────────────────────────────────────────────
@@ -339,15 +355,45 @@ export function normalizeDraft(json: unknown, requestedId: string): MailDraft | 
   const files = attachments(draft.attachments);
   if (!files) return null;
 
-  return { id: requestedId, from, to, cc, bcc, replyTo, subject, bodyType, body, attachments: files, hash: draftContentHash(json) };
+  // The hash binds the whole answer or there is no card: an answer too deep to
+  // canonicalise is refused here, before one is made for it.
+  let hash: string;
+  try {
+    hash = draftContentHash(json);
+  } catch {
+    return null;
+  }
+
+  return { id: requestedId, from, to, cc, bcc, replyTo, subject, bodyType, body, attachments: files, hash };
+}
+
+/**
+ * How deep canonicalisation reads. A draft is a flat record with a few lists in
+ * it, so this is far past any answer a mailbox gives; it is here to bound the
+ * recursion on a stranger's JSON.
+ */
+export const MAX_CANONICAL_DEPTH = 64;
+
+/** An answer nested deeper than `canonicalJson` reads. Refused, never hashed in part. */
+export class TooDeepToHash extends Error {
+  constructor() {
+    super("the backend's answer nests deeper than ClawBox canonicalises");
+    this.name = "TooDeepToHash";
+  }
 }
 
 /**
  * JSON with every object's keys in sorted order, so the same draft always
  * serialises to the same text however the backend ordered its fields.
+ *
+ * PAST THE DEPTH LIMIT IT THROWS, and `normalizeDraft` refuses the answer. It
+ * used to write `null` in place of everything deeper, which gave two answers
+ * that differ only down there the same hash — and the approval is bound to the
+ * backend's WHOLE answer, so a difference the hash cannot see is a difference
+ * the Send would not refuse. Key order stays as invariant as it ever was.
  */
 export function canonicalJson(value: unknown, depth = 0): string {
-  if (depth > 64) return JSON.stringify(null);
+  if (depth > MAX_CANONICAL_DEPTH) throw new TooDeepToHash();
   if (Array.isArray(value)) return `[${value.map((v) => canonicalJson(v, depth + 1)).join(",")}]`;
   if (value !== null && typeof value === "object") {
     const keys = Object.keys(value as Record<string, unknown>).sort();
@@ -371,9 +417,12 @@ export function draftContentHash(raw: unknown): string {
 
 /** The draft as a card shows it: plain text, capped, with nothing invisible left in it. */
 export function draftView(draft: MailDraft): DraftView {
-  const words = draft.bodyType === "html" ? htmlToText(draft.body) : draft.body;
+  const converted = draft.bodyType === "html" ? htmlToTextReporting(draft.body) : { text: draft.body, truncated: false };
+  const words = converted.text;
   const text = cleanBody(words).trim();
-  const bodyTruncated = text.length > MAX_PREVIEW_CHARS;
+  // Cut by the preview cap, or by a sanitiser ceiling on the way here. Either
+  // way the card has only part of the body, and `tooLong` offers no Send.
+  const bodyTruncated = converted.truncated || text.length > MAX_PREVIEW_CHARS;
   const subject = lineOf(draft.subject, MAX_SUBJECT_CHARS);
   const shown = [draft.from ?? "", ...draft.to, ...draft.cc, ...draft.bcc, ...draft.replyTo, draft.subject, words, ...draft.attachments.map((a) => a.name)];
   return {
@@ -384,7 +433,7 @@ export function draftView(draft: MailDraft): DraftView {
     bcc: draft.bcc,
     replyTo: draft.replyTo,
     subject: subject.line,
-    body: bodyTruncated ? text.slice(0, MAX_PREVIEW_CHARS) : text,
+    body: text.length > MAX_PREVIEW_CHARS ? text.slice(0, MAX_PREVIEW_CHARS) : text,
     bodyTruncated,
     // A name `cleanLine` cut is one character over its cap (the "…").
     headerTruncated: subject.cut || draft.attachments.some((a) => a.name.length > MAX_ATTACHMENT_NAME_CHARS),

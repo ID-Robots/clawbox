@@ -79,16 +79,33 @@ describe("EmailDraftCard", () => {
     expect((await screen.findByTestId("chat-email-draft-bcc")).textContent).toContain("hidden@example.net");
   });
 
-  it("Send hands the approval back and says it went", async () => {
-    decideAnswers = [{ status: 200, body: { state: "sent" } }];
+  it("Send hands the approval back and says it went — and pressing twice is one request", async () => {
+    let release!: () => void;
+    // The decide answer is HELD, so the second press lands while the first
+    // request is still running: that is when a card could send twice.
+    decideAnswers = [{ status: 200, body: { state: "sent" }, wait: new Promise<void>((resolve) => { release = resolve; }) }];
     render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
-    fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
+    const send = await screen.findByTestId("chat-email-draft-send");
+    fireEvent.click(send);
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.sending"));
+    fireEvent.click(send);
+    expect(calls.filter((c) => c.url === DECIDE_ROUTE)).toHaveLength(1);
+    release();
     await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("sent"));
     expect(calls[1]).toEqual({ url: DECIDE_ROUTE, body: { token: "tok-1", action: "send" } });
     expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.sent");
     expect(screen.queryByTestId("chat-email-draft-send")).toBeNull();
-    // Pressing twice is one request.
     expect(calls.filter((c) => c.url === DECIDE_ROUTE)).toHaveLength(1);
+  });
+
+  it("says a Send went through that ClawBox could not record", async () => {
+    decideAnswers = [{ status: 200, body: { state: "sent", recorded: false, warning: "sent, not recorded" } }];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("sent"));
+    // Sent, and the card says the record of it is missing rather than only "Sent."
+    expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.sentNotRecorded");
+    expect(screen.queryByTestId("chat-email-draft-send")).toBeNull();
   });
 
   it("Keep as draft sends nothing and says where the draft is", async () => {
