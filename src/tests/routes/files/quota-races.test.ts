@@ -51,10 +51,25 @@ vi.mock("@/lib/clawbox-users", () => ({
 // A window inside a move's measurement of a folder it would carry: what runs
 // here runs after the move has started measuring and before it moves.
 const measureWindow = vi.hoisted(() => ({ folder: "", during: null as null | (() => Promise<void>) }));
+// Every last check before a write lands (`QuotaWrite.admits`, where the code
+// has one): what it was asked and what it answered.
+const commitChecks = vi.hoisted(() => [] as Array<{ landed: number; replaced: number; admitted: boolean }>);
 vi.mock("@/lib/home-usage", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/home-usage")>();
   return {
     ...real,
+    openQuotaWrite: async (...args: Parameters<typeof real.openQuotaWrite>) => {
+      const write = await real.openQuotaWrite(...args);
+      const admits = (write as { admits?: (landed: number, replaced: number) => boolean } | null)?.admits;
+      if (write && typeof admits === "function") {
+        write.admits = (landed: number, replaced: number) => {
+          const admitted = admits.call(write, landed, replaced);
+          commitChecks.push({ landed, replaced, admitted });
+          return admitted;
+        };
+      }
+      return write;
+    },
     measureHomeUsage: async (dir: string, opts?: Parameters<typeof real.measureHomeUsage>[1]) => {
       const usage = await real.measureHomeUsage(dir, opts);
       if (measureWindow.during && path.resolve(dir) === measureWindow.folder) {
@@ -78,6 +93,15 @@ let figure: (home: string) => Promise<{ bytes: number } | null>;
 
 const url = (p: string) => new URL(`http://localhost${p}`);
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Wait until `ready()` holds (a barrier, not a guess at timing); fail the test if it never does. */
+async function until(ready: () => boolean, what: string) {
+  for (let i = 0; i < 500; i++) {
+    if (ready()) return;
+    await sleep(10);
+  }
+  throw new Error(`never happened: ${what}`);
+}
 
 /** A body of `bytes` of `fill`, sent in 64 KB chunks; it waits for `hold` once it has sent `holdAt` bytes. */
 function body(bytes: number, { fill = 0x6e, hold, holdAt = bytes / 2 }: { fill?: number; hold?: Promise<void>; holdAt?: number } = {}) {
@@ -211,12 +235,15 @@ describe("A: two overwrites of one file at once", () => {
       expect((await homeNow()).figure).toBe(MB);
       const a = gate();
       const b = gate();
+      commitChecks.length = 0;
       const first = putStream("Home", "doc.txt", body(128 * KB, { fill: 0x41, hold: a.shut, holdAt: 64 * KB }));
-      await sleep(100);
+      await until(() => temps(IVAN).length === 1, "the first overwrite staging its bytes");
       const second = kind === "raw"
         ? putStream("Home", "doc.txt", body(Math.round(1.6 * MB), { fill: 0x42, hold: b.shut, holdAt: 512 * KB }))
         : multipartStream("Home", "doc.txt", Math.round(1.6 * MB), { fill: 0x42, hold: b.shut, holdAt: 512 * KB });
-      await sleep(100);
+      // Both are on their way, each begun while doc.txt still held 1 MB — so
+      // each was metered with 1 MB of credit — before the first may land.
+      await until(() => temps(IVAN).length === 2, "the second overwrite staging its bytes");
       a.open();
       const ra = await first;
       b.open();
@@ -233,6 +260,10 @@ describe("A: two overwrites of one file at once", () => {
       expect(temps(IVAN)).toEqual([]);
       expect(now.onDisk).toBeLessThanOrEqual(MB);
       expect(now.figure).toBe(now.onDisk);
+      // Refused at the last check before its rename — whole, against the
+      // 128 KB file it would really have replaced — not by the body meter.
+      expect(commitChecks).toContainEqual({ landed: Math.round(1.6 * MB), replaced: 128 * KB, admitted: false });
+      expect(commitChecks).toContainEqual({ landed: 128 * KB, replaced: MB, admitted: true });
     });
   }
 
@@ -242,9 +273,9 @@ describe("A: two overwrites of one file at once", () => {
     const a = gate();
     const b = gate();
     const first = putStream("Home", "doc.txt", body(128 * KB, { fill: 0x41, hold: a.shut, holdAt: 64 * KB }));
-    await sleep(100);
+    await until(() => temps(IVAN).length === 1, "the first overwrite staging its bytes");
     const second = putStream("Home", "doc.txt", body(Math.round(1.6 * MB), { fill: 0x42, hold: b.shut, holdAt: 512 * KB }));
-    await sleep(100);
+    await until(() => temps(IVAN).length === 2, "the second overwrite staging its bytes");
     a.open();
     expect((await first).status).toBe(200);
     b.open();
