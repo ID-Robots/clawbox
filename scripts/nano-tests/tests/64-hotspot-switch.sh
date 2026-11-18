@@ -35,7 +35,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 RUNTIME=$(board_runtime)
 note "runtime: $RUNTIME"
-TAG="hotspot-$(printf '%s' "$NANO_RUN_ID" | tr -c 'A-Za-z0-9._-' '-')"
+# Where the board's own hotspot settings are kept while the test runs. A fixed
+# name, not a per-run one: a run that was killed before it put them back
+# leaves them here, and the next run restores them before it looks.
+SAVE_DIR_NAME=hotspot-switch-saved
 
 # One line about the radio and the wired uplink, from the board:
 #   iface=<wifi iface> nm_ap=<yes|no> iw=<type|none> client=<yes|no> wired=<dev>/<addr>
@@ -69,11 +72,15 @@ echo "${flag:--} ${cfg:-?}"
 '
 stored() { board "$STORED" | tail -n 1; }
 
-# GET /setup-api/system/hotspot as the owner -> "<enabled> <active>"; "" when it did not answer 200.
+# GET /setup-api/system/hotspot as the owner; sets HS to "<enabled> <active>"
+# ("" and status 1 when it did not answer 200) and leaves API_BODY for the
+# caller. Not called in $(…): API_BODY would stay in the subshell.
+HS=""
 hotspot_state() {
+  HS=""
   API_MAX_TIME=30 board_owner_api GET /setup-api/system/hotspot
   [ "$API_STATUS" = 200 ] || return 1
-  printf '%s %s' "$(api_json '.enabled')" "$(api_json '.active')"
+  HS="$(api_json '.enabled') $(api_json '.active')"
 }
 
 # POST the switch as Settings does ({ssid, enabled}); sets AP_ACTION to the
@@ -93,10 +100,20 @@ switch_hotspot() {
   AP_ACTION=$(api_json '.apAction')
 }
 
+# wired_same PROBE_LINE STEP [device] — the wired default route is the one the
+# test started with: device and address, or (after the reboot, where DHCP may
+# hand out another lease) the device, with an address change noted.
 wired_same() {
   local now
   now=$(field "$1" wired)
-  if [ "$now" = "$WIRED0" ]; then ok "$2: the wired uplink is untouched ($now)"; else not_ok "$2: the wired uplink changed: $WIRED0 -> ${now:-?}"; fi
+  if [ "$now" = "$WIRED0" ]; then
+    ok "$2: the wired uplink is untouched ($now)"
+  elif [ "${3:-}" = device ] && [ "${now%%/*}" = "${WIRED0%%/*}" ] && [ "${now#*/}" != none ]; then
+    ok "$2: the wired uplink is still ${now%%/*}"
+    note "$2: its address changed across the reboot: $WIRED0 -> $now"
+  else
+    not_ok "$2: the wired uplink changed: $WIRED0 -> ${now:-?}"
+  fi
 }
 
 # ---- preconditions --------------------------------------------------------------
@@ -123,59 +140,27 @@ case "$WIRED0" in none/*|*/none)
   not_ok "no wired default route with an address: refusing to touch the radio of a board reached over the network"
   finish ;;
 esac
-STATE0=$(hotspot_state) || { not_ok "GET /setup-api/system/hotspot answered $API_STATUS before the test"; finish; }
+hotspot_state || { not_ok "GET /setup-api/system/hotspot answered $API_STATUS before the test"; finish; }
+STATE0=$HS
 SSID=$(api_json '.ssid')
 INIT_UP=no
 ap_up "$P0" && INIT_UP=yes
 note "found: switch enabled=${STATE0% *} active=${STATE0#* }, AP up=$INIT_UP, stored $(stored)"
 
-# Keep what the board had: data/hotspot.env and config's hotspot_* keys, in a
-# 0700 directory of the clawbox home (it holds the WPA key; never printed).
+# Put the board's hotspot back from the kept copy: the radio first, through
+# the route (switch_hotspot), to the AP state that was found, then
+# data/hotspot.env and config's hotspot_* keys byte for byte. Prints one line:
+# "restored <found AP up: yes|no>", or why not.
 # shellcheck disable=SC2016  # expanded on the board
-SAVED=$(board '
+PUT_BACK='
   d="$HOME/.cache/clawbox-nano-tests/$1"
-  rm -rf -- "$d" && mkdir -p "$d" && chmod 700 "$d" || exit 1
-  if [ -f "$REPO/data/hotspot.env" ] && [ ! -L "$REPO/data/hotspot.env" ]; then
-    cp -p "$REPO/data/hotspot.env" "$d/hotspot.env" || exit 1
+  [ -f "$d/config-keys.json" ] || { echo "nothing kept"; exit 1; }
+  if [ -f "$d/hotspot.env" ]; then
+    cp -p "$d/hotspot.env" "$REPO/data/hotspot.env.nano-restore" && mv -f "$REPO/data/hotspot.env.nano-restore" "$REPO/data/hotspot.env" || exit 1
+  else
+    rm -f -- "$REPO/data/hotspot.env"
   fi
   python3 -I - "$REPO/data/config.json" "$d/config-keys.json" <<"PY" || exit 1
-import json, os, sys
-cfg = json.load(open(sys.argv[1]))
-keys = {k: cfg[k] for k in ("hotspot_enabled", "hotspot_ssid", "hotspot_password") if k in cfg}
-fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-with os.fdopen(fd, "w") as f:
-    json.dump(keys, f)
-PY
-  echo saved
-' "$TAG" | tail -n 1)
-if [ "$SAVED" != saved ]; then
-  not_ok "could not keep a copy of the board's hotspot settings: not touching them"
-  finish
-fi
-
-RESTORED=0
-restore() {
-  [ "$RESTORED" = 0 ] || return 0
-  RESTORED=1
-  local p back
-  p=$(probe)
-  if [ "$INIT_UP" = yes ] && ! ap_up "$p"; then
-    switch_hotspot true || true
-    note "restore: switched back on (${AP_ACTION:-no answer})"
-  elif [ "$INIT_UP" = no ] && ! ap_down "$p"; then
-    switch_hotspot false || true
-    note "restore: switched back off (${AP_ACTION:-no answer})"
-  fi
-  # shellcheck disable=SC2016  # expanded on the board
-  back=$(board '
-    d="$HOME/.cache/clawbox-nano-tests/$1"
-    [ -f "$d/config-keys.json" ] || { echo "nothing kept"; exit 1; }
-    if [ -f "$d/hotspot.env" ]; then
-      cp -p "$d/hotspot.env" "$REPO/data/hotspot.env.nano-restore" && mv -f "$REPO/data/hotspot.env.nano-restore" "$REPO/data/hotspot.env" || exit 1
-    else
-      rm -f -- "$REPO/data/hotspot.env"
-    fi
-    python3 -I - "$REPO/data/config.json" "$d/config-keys.json" <<"PY" || exit 1
 import json, os, sys
 path = sys.argv[1]
 cfg = json.load(open(path))
@@ -195,12 +180,87 @@ if changed:
         json.dump(cfg, f, indent=2)
     os.replace(tmp, path)
 PY
-    rm -rf -- "$d"
-    echo restored
-  ' "$TAG" | tail -n 1)
+  up=$(cat "$d/ap-up" 2>/dev/null)
+  rm -rf -- "$d"
+  echo "restored ${up:-unknown}"
+'
+# put_back WANT_UP — the radio to WANT_UP (yes|no) through the route, then the
+# kept bytes. Sets PUT_BACK_LINE.
+PUT_BACK_LINE=""
+put_back() {
+  local p
+  p=$(probe)
+  if [ "$1" = yes ] && ! ap_up "$p"; then
+    switch_hotspot true || true
+    note "restore: switched back on (${AP_ACTION:-no answer})"
+  elif [ "$1" = no ] && ! ap_down "$p"; then
+    switch_hotspot false || true
+    note "restore: switched back off (${AP_ACTION:-no answer})"
+  fi
+  PUT_BACK_LINE=$(board "$PUT_BACK" "$SAVE_DIR_NAME" | tail -n 1)
+}
+
+# An earlier run killed before it put the board back left its copy: that copy,
+# not today's state, is what the board had.
+# shellcheck disable=SC2016  # expanded on the board
+LEFT=$(board 'cat "$HOME/.cache/clawbox-nano-tests/$1/ap-up" 2>/dev/null || { [ -d "$HOME/.cache/clawbox-nano-tests/$1" ] && echo unknown; }' "$SAVE_DIR_NAME" | tail -n 1)
+if [ -n "$LEFT" ]; then
+  note "an earlier run left the board's hotspot settings kept aside (AP up then: $LEFT): putting them back first"
+  [ "$LEFT" = unknown ] && LEFT=yes
+  put_back "$LEFT"
+  note "earlier copy: $PUT_BACK_LINE; now $(probe)"
+  case "$PUT_BACK_LINE" in restored*) ;; *) not_ok "could not put back what an earlier run kept aside: not touching the hotspot"; finish ;; esac
+  P0=$(probe)
+  hotspot_state || { not_ok "GET /setup-api/system/hotspot answered $API_STATUS"; finish; }
+  STATE0=$HS
+  SSID=$(api_json '.ssid')
+  INIT_UP=no
+  ap_up "$P0" && INIT_UP=yes
+fi
+
+# Keep what the board has: data/hotspot.env and config's hotspot_* keys and
+# whether the AP is up, in a 0700 directory of the clawbox home (it holds the
+# WPA key; never printed). A symlinked env file is not ours to replace: skip.
+# shellcheck disable=SC2016  # expanded on the board
+SAVED=$(board '
+  d="$HOME/.cache/clawbox-nano-tests/$1"
+  if [ -L "$REPO/data/hotspot.env" ]; then echo symlink; exit 0; fi
+  rm -rf -- "$d" && mkdir -p "$d" && chmod 700 "$d" || exit 1
+  if [ -f "$REPO/data/hotspot.env" ]; then
+    cp -p "$REPO/data/hotspot.env" "$d/hotspot.env" || exit 1
+  fi
+  python3 -I - "$REPO/data/config.json" "$d/config-keys.json" <<"PY" || exit 1
+import json, os, sys
+cfg = json.load(open(sys.argv[1]))
+keys = {k: cfg[k] for k in ("hotspot_enabled", "hotspot_ssid", "hotspot_password") if k in cfg}
+fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(keys, f)
+PY
+  printf "%s\n" "$2" > "$d/ap-up" || exit 1
+  echo saved
+' "$SAVE_DIR_NAME" "$INIT_UP" | tail -n 1)
+if [ "$SAVED" = symlink ]; then
+  skip "data/hotspot.env is a symlink on this board: not replacing it"
+  finish
+fi
+if [ "$SAVED" != saved ]; then
+  not_ok "could not keep a copy of the board's hotspot settings: not touching them"
+  finish
+fi
+
+RESTORED=0
+restore() {
+  [ "$RESTORED" = 0 ] || return 0
+  RESTORED=1
+  local p
+  put_back "$INIT_UP"
   p=$(probe)
   note "after restore: $p, stored $(stored)"
-  if [ "$back" = restored ]; then ok "data/hotspot.env and config's hotspot keys are back as found"; else not_ok "could not put the hotspot settings back (${back:-no answer})"; fi
+  case "$PUT_BACK_LINE" in
+    restored*) ok "data/hotspot.env and config's hotspot keys are back as found" ;;
+    *) not_ok "could not put the hotspot settings back (${PUT_BACK_LINE:-no answer}); the next run restores them from the kept copy" ;;
+  esac
   if { [ "$INIT_UP" = yes ] && ap_up "$p"; } || { [ "$INIT_UP" = no ] && ap_down "$p"; }; then
     ok "the hotspot is left as found (AP up=$INIT_UP)"
   else
@@ -208,6 +268,8 @@ PY
   fi
 }
 trap restore EXIT
+# run.sh ends a test past its deadline with TERM: exit through the EXIT trap.
+trap 'exit 143' TERM INT HUP
 
 # ---- 1. off -----------------------------------------------------------------------
 switch_hotspot false || { not_ok "switching the hotspot off failed"; finish; }
@@ -215,7 +277,7 @@ if [ "$AP_ACTION" = stopped ]; then ok "off: the route stopped the AP (apAction 
 P1=$(probe)
 note "after off: $P1"
 if ap_down "$P1"; then ok "off: no AP on $IFACE (nmcli no active ClawBox-Setup, iw type $(field "$P1" iw))"; else not_ok "off: the AP is still up: $P1"; fi
-S1=$(hotspot_state)
+hotspot_state; S1=$HS
 if [ "$S1" = "false false" ]; then ok "off: Settings reads enabled:false active:false"; else not_ok "off: Settings reads '${S1:-no answer}' (enabled active)"; fi
 ST1=$(stored)
 if [ "$ST1" = "1 False" ]; then ok "off: HOTSPOT_DISABLED=1 in data/hotspot.env, hotspot_enabled false in config"; else not_ok "off: stored '$ST1' (env flag, config), expected '1 False'"; fi
@@ -251,8 +313,7 @@ ok "board back after a real reboot ($(( $(date +%s) - START ))s)"
 # The web server, then clawbox-ap.service having made its boot-time decision.
 S2=""
 until [ $(( $(date +%s) - START )) -ge 480 ]; do
-  S2=$(hotspot_state) && break
-  S2=""
+  hotspot_state && { S2=$HS; break; }
   sleep 5
 done
 [ -n "$S2" ] || { not_ok "Settings did not answer within 8 min of the reboot"; finish; }
@@ -269,9 +330,9 @@ sleep 30
 P2=$(probe)
 note "after reboot: $P2"
 if ap_down "$P2"; then ok "reboot: still no AP on $IFACE"; else not_ok "reboot: the AP came back: $P2"; fi
-S2=$(hotspot_state)
+hotspot_state; S2=$HS
 if [ "$S2" = "false false" ]; then ok "reboot: Settings still reads enabled:false active:false"; else not_ok "reboot: Settings reads '${S2:-no answer}' (enabled active)"; fi
-wired_same "$P2" "reboot"
+wired_same "$P2" "reboot" device
 
 # ---- 3. on ------------------------------------------------------------------------
 switch_hotspot true || { not_ok "switching the hotspot on failed"; finish; }
@@ -284,7 +345,7 @@ for _ in $(seq 1 24); do
 done
 note "after on: $P3"
 if ap_up "$P3"; then ok "on: the AP is back on $IFACE (nmcli active ClawBox-Setup, iw type AP)"; else not_ok "on: no AP 2 min after switching on: $P3"; fi
-S3=$(hotspot_state)
+hotspot_state; S3=$HS
 if [ "$S3" = "true true" ]; then ok "on: Settings reads enabled:true active:true"; else not_ok "on: Settings reads '${S3:-no answer}' (enabled active)"; fi
 ST3=$(stored)
 if [ "$ST3" = "- True" ]; then ok "on: no HOTSPOT_DISABLED in data/hotspot.env, hotspot_enabled true in config"; else not_ok "on: stored '$ST3' (env flag, config), expected '- True'"; fi

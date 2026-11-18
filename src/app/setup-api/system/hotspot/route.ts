@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { get } from "@/lib/config-store";
-import { readHotspotSettings, writeHotspotSettings } from "@/lib/hotspot-env";
+import { getKnown } from "@/lib/config-store";
+import { HAS_CONTROL_CHAR, readHotspotSettings, writeHotspotSettings } from "@/lib/hotspot-env";
 import { parseNmcliTerseLine, RESTART_AP_TIMEOUT_MS } from "@/lib/network";
 import { startRootStep } from "@/lib/root-step-runner";
 
@@ -12,6 +12,9 @@ export const dynamic = "force-dynamic";
 
 let getCache: { body: unknown; at: number } | null = null;
 const GET_TTL_MS = 3_000;
+// Bumped by every save: a GET that started before one must not cache what it
+// read for the next 3 s.
+let saveGeneration = 0;
 
 /**
  * What the save did to the access point, as one word.
@@ -29,6 +32,7 @@ export async function GET() {
   if (getCache && Date.now() - getCache.at < GET_TTL_MS) {
     return NextResponse.json(getCache.body);
   }
+  const generation = saveGeneration;
   // `enabled` is the switch as the AP scripts read it (src/lib/hotspot-env.ts);
   // `active` is the radio, whatever the switch says. Settings shows both, so a
   // switch that reads off over a live AP says so instead of looking fine.
@@ -56,7 +60,7 @@ export async function GET() {
   }
 
   const body = { ssid, hasPassword, enabled, active, blockedBy };
-  getCache = { body, at: Date.now() };
+  if (generation === saveGeneration) getCache = { body, at: Date.now() };
   return NextResponse.json(body);
 }
 
@@ -99,12 +103,31 @@ export async function POST(request: Request) {
       );
     }
 
+    // data/hotspot.env is one KEY=value per line: a newline in either value
+    // would start a line of its own (the disable flag, say).
+    if (HAS_CONTROL_CHAR.test(ssid) || (typeof password === "string" && HAS_CONTROL_CHAR.test(password))) {
+      return NextResponse.json(
+        { error: "Hotspot name and password cannot contain control characters" },
+        { status: 400 }
+      );
+    }
+
     // Preserve the stored WPA key when a request omits `password`. The Settings
     // toggle and SSID-rename actions POST only {ssid, enabled} (the GET handler
     // returns hasPassword, not the value, so the client can't resend it) — with
     // the old `password || undefined`, setMany would DELETE the key and the AP
     // would come back up OPEN. Only clear it if the caller explicitly asks.
-    const storedPassword = await get("hotspot_password");
+    // A STRICT read: config-store's forgiving `get` answers "nothing stored"
+    // for a config.json it cannot read, and the save would then write an env
+    // file without the key, so an open AP at the next start.
+    const stored = await getKnown("hotspot_password");
+    if (!stored.known) {
+      return NextResponse.json(
+        { error: "The hotspot settings could not be read, so nothing was changed." },
+        { status: 500 }
+      );
+    }
+    const storedPassword = stored.value;
     const existingPassword = typeof storedPassword === "string" && storedPassword.length >= 8
       ? storedPassword
       : undefined;
@@ -116,6 +139,8 @@ export async function POST(request: Request) {
 
     // data/hotspot.env (what start-ap.sh, ap-watchdog.sh and wifi-failover.sh
     // read) and config, in one call, so they cannot disagree.
+    saveGeneration++;
+    getCache = null;
     await writeHotspotSettings({
       ssid: ssid.trim(),
       password: effectivePassword || undefined,
@@ -165,7 +190,9 @@ export async function POST(request: Request) {
     }
 
     // The GET handler caches for 3s, which is long enough to answer the reload
-    // that follows this save with the settings it just replaced.
+    // that follows this save with the settings it just replaced, or with a
+    // radio read while the AP was still going down or coming up.
+    saveGeneration++;
     getCache = null;
 
     // apRestarted tells the wizard whether the connection was actually dropped

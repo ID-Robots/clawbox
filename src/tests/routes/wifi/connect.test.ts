@@ -40,6 +40,10 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(applyToStore),
   get: vi.fn(async (key: string) => store[key]),
   getAll: vi.fn(async () => ({ ...store })),
+  getKnownMany: vi.fn(async (keys: string[]) => ({
+    values: Object.fromEntries(keys.filter((k) => k in store).map((k) => [k, store[k]])),
+    known: true,
+  })),
 }));
 
 import { switchToClient, setConnectStatus, WifiAuthError } from "@/lib/network";

@@ -16,11 +16,21 @@ import path from "node:path";
 // Runs bash: vitest's 5 s default is not enough on a loaded runner.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
-const config: Record<string, unknown> = {};
+const { config, configState } = vi.hoisted(() => ({
+  config: {} as Record<string, unknown>,
+  /** `unreadable`: config.json cannot be read (strict readers and writes fail). */
+  configState: { unreadable: false },
+}));
 vi.mock("@/lib/config-store", () => ({
-  get: vi.fn(async (key: string) => config[key]),
-  getAll: vi.fn(async () => ({ ...config })),
+  get: vi.fn(async (key: string) => (configState.unreadable ? undefined : config[key])),
+  getAll: vi.fn(async () => (configState.unreadable ? {} : { ...config })),
+  getKnownMany: vi.fn(async (keys: string[]) => configState.unreadable
+    ? { values: {}, known: false }
+    : { values: Object.fromEntries(keys.filter((k) => k in config).map((k) => [k, config[k]])), known: true }),
   setMany: vi.fn(async (entries: Record<string, unknown>) => {
+    if (configState.unreadable) throw new Error("data/config.json could not be read");
+    // Like the real store: yield before the write lands, so interleaving shows.
+    await new Promise((r) => setTimeout(r, 5));
     for (const [k, v] of Object.entries(entries)) {
       if (v === undefined) delete config[k];
       else config[k] = v;
@@ -53,6 +63,7 @@ let mod: typeof import("@/lib/hotspot-env");
 
 beforeEach(async () => {
   for (const k of Object.keys(config)) delete config[k];
+  configState.unreadable = false;
   root = mkdtempSync(path.join(tmpdir(), "clawbox-hotspot-env-"));
   mkdirSync(path.join(root, "data"), { recursive: true });
   envFile = path.join(root, "data", "hotspot.env");
@@ -208,5 +219,49 @@ describe("switchHotspotOffAfterWifiJoin (POST /setup-api/wifi/connect)", () => {
     expect(config.hotspot_enabled).toBe(false);
     // ...and the wizard's hotspot step still defaults to off, as before.
     await expect(mod.readHotspotSettings()).resolves.toMatchObject({ enabled: false });
+  });
+});
+
+describe("what the scripts read back is exactly what was saved (review of #1517)", () => {
+  it("a key with a single quote reaches the radio as typed, not shell-escaped", async () => {
+    await mod.writeHotspotSettings({ ssid: "Bob's AP", password: "it's-a-key'", enabled: true });
+    expect(scriptReads(envFile, "HOTSPOT_SSID")).toBe("Bob's AP");
+    expect(scriptReads(envFile, "HOTSPOT_PASSWORD")).toBe("it's-a-key'");
+    // ...and stays so however often the switch is flipped after it.
+    Object.assign(config, { setup_complete: true });
+    await mod.setHotspotEnabled(false);
+    await mod.setHotspotEnabled(true);
+    expect(scriptReads(envFile, "HOTSPOT_PASSWORD")).toBe("it's-a-key'");
+    expect(scriptReads(envFile, "HOTSPOT_SSID")).toBe("Bob's AP");
+  });
+
+  it("refuses a newline (it would start a HOTSPOT_DISABLED line of its own) and writes nothing", async () => {
+    await expect(mod.writeHotspotSettings({ ssid: "Box", password: "key-12345\nHOTSPOT_DISABLED=1", enabled: true }))
+      .rejects.toThrow(/control characters/);
+    expect(() => lstatSync(envFile)).toThrow();
+    expect(config).toEqual({});
+  });
+
+  it("an unreadable config.json changes nothing: no env file without its key", async () => {
+    writeFileSync(envFile, "HOTSPOT_SSID='Box'\nHOTSPOT_PASSWORD='kept-key-1'\n");
+    configState.unreadable = true;
+
+    await expect(mod.setHotspotEnabled(false)).rejects.toThrow(/could not be read/);
+    await expect(mod.writeHotspotSettings({ ssid: "Box", password: undefined, enabled: false })).rejects.toThrow();
+
+    expect(readFileSync(envFile, "utf8")).toBe("HOTSPOT_SSID='Box'\nHOTSPOT_PASSWORD='kept-key-1'\n");
+  });
+
+  it("two saves at once end with the env file and config agreeing", async () => {
+    Object.assign(config, { setup_complete: true });
+    await Promise.all([
+      mod.writeHotspotSettings({ ssid: "First", password: "first-key-1", enabled: true }),
+      mod.setHotspotEnabled(false),
+      mod.writeHotspotSettings({ ssid: "Second", password: "second-key", enabled: true }),
+    ]);
+    expect(scriptReads(envFile, "HOTSPOT_SSID")).toBe(config.hotspot_ssid);
+    expect(scriptReads(envFile, "HOTSPOT_PASSWORD")).toBe(config.hotspot_password);
+    expect(scriptReads(envFile, "HOTSPOT_DISABLED") === "1").toBe(config.hotspot_enabled === false);
+    expect(config).toMatchObject({ hotspot_ssid: "Second", hotspot_enabled: true });
   });
 });

@@ -1296,8 +1296,11 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // (a stop that failed), and the card shows both. Re-read after every toggle,
   // because the radio's answer is the one that counts (#1517).
   const loadHotspotStatus = useCallback((withSsidInput: boolean) => {
-    fetch("/setup-api/system/hotspot").then(r => r.json()).then(d => {
-      setHotspotEnabled(d.enabled ?? true);
+    // Only a 200 is an answer: an error body has no `enabled`, and reading it
+    // as "on" with the default name would let the next toggle rename the AP.
+    fetch("/setup-api/system/hotspot").then(r => (r.ok ? r.json() : null)).then(d => {
+      if (!d || typeof d.enabled !== "boolean") return;
+      setHotspotEnabled(d.enabled);
       if (d.ssid) {
         setHotspotSSID(d.ssid);
         if (withSsidInput) setHotspotSSIDInput(d.ssid);
@@ -1414,10 +1417,11 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       // control that says it stopped.
       setHotspotEnabled(newEnabled);
       setHotspotApWarning(await readHotspotVerdict(res));
-      // What the radio did is read back, not assumed from the switch.
-      loadHotspotStatus(false);
-    } catch { /* leave state unchanged */ } finally {
+    } catch { /* the re-read below shows what is real */ } finally {
       setHotspotToggling(false);
+      // What the switch and the radio did is read back, not assumed: after a
+      // save that failed half-way too.
+      loadHotspotStatus(false);
     }
   };
 

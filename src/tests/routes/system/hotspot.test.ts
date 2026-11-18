@@ -27,14 +27,20 @@ const { store, applyToStore } = vi.hoisted(() => {
 });
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(async (key: string) => store[key]),
+  getKnown: vi.fn(async (key: string) => ({ value: store[key], known: true })),
+  getKnownMany: vi.fn(async (keys: string[]) => ({
+    values: Object.fromEntries(keys.filter((k) => k in store).map((k) => [k, store[k]])),
+    known: true,
+  })),
   setMany: vi.fn(applyToStore),
   getAll: vi.fn(async () => ({ ...store })),
 }));
 
-import { setMany } from "@/lib/config-store";
+import { getKnown, setMany } from "@/lib/config-store";
 import { startRootStep } from "@/lib/root-step-runner";
 
 const mockSetMany = vi.mocked(setMany);
+const mockGetKnown = vi.mocked(getKnown);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockStartRootStep = vi.mocked(startRootStep);
 
@@ -476,6 +482,26 @@ describe("/setup-api/system/hotspot", () => {
 
       expect(res.status).toBe(500);
       expect(body.error).toBe("Config write failed");
+    });
+
+    it("an unreadable config.json answers 500 and changes nothing (no env file without the key)", async () => {
+      writeFileSync(envFile(), "HOTSPOT_SSID='ClawBox-Setup'\nHOTSPOT_PASSWORD='kept-key-1'\n");
+      mockGetKnown.mockResolvedValueOnce({ value: undefined, known: false });
+
+      const res = await hotspotPost(jsonRequest({ ssid: "ClawBox-Setup", enabled: false }));
+
+      expect(res.status).toBe(500);
+      expect(readEnv()).toBe("HOTSPOT_SSID='ClawBox-Setup'\nHOTSPOT_PASSWORD='kept-key-1'\n");
+      expect(mockSetMany).not.toHaveBeenCalled();
+      expect(mockExecFile).not.toHaveBeenCalled();
+    });
+
+    it("refuses control characters in the name or key: a newline would add a line to the env file", async () => {
+      const a = await hotspotPost(jsonRequest({ ssid: "Box\nHOTSPOT_DISABLED=1", enabled: true }));
+      const b = await hotspotPost(jsonRequest({ ssid: "Box", password: "key-12345\r", enabled: true }));
+
+      expect([a.status, b.status]).toEqual([400, 400]);
+      expect(mockSetMany).not.toHaveBeenCalled();
     });
 
     it("trims SSID whitespace", async () => {
