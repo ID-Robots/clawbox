@@ -391,6 +391,35 @@ describe("the home quota", () => {
     }
   });
 
+  it("grants no room in a home whose usage cannot be read at all (TASK-2663)", async () => {
+    fs.writeFileSync(path.join(OWNER, "Shared", "one.bin"), Buffer.alloc(100 * KB));
+    fs.mkdirSync(path.join(OWNER, "Shared", "empty"));
+    const { guardedMove, userUploadGuard } = await import("@/lib/user-upload-guard");
+    const fence = await ivanFence();
+    const realOpendir = fs.promises.opendir.bind(fs.promises);
+    const spy = vi.spyOn(fs.promises, "opendir").mockImplementation(async (p, ...rest) => {
+      if (String(p) === IVAN) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+      return realOpendir(p as string, ...(rest as []));
+    });
+    try {
+      const upload = await userUploadGuard({ limitedUser: "ivan", fence, destPath: path.join(IVAN, "x.bin"), disk: () => Infinity });
+      expect(upload.precheck(100)).toMatchObject({ status: 507, body: { code: "quota_unmeasured" } });
+      expect(upload.ceiling(0)).toBe(0);
+      expect(upload.lastBound()).toBe("quota");
+      upload.finish(null);
+      const move = (name: string) => guardedMove(
+        { limitedUser: "ivan", fence, destAbs: IVAN, sources: [path.join(OWNER, "Shared", name)] },
+        () => "moved",
+      );
+      const refused = await move("one.bin");
+      expect("refusal" in refused ? refused.refusal : null).toMatchObject({ status: 507, body: { code: "quota_unmeasured" } });
+      // A move that carries no bytes adds none.
+      expect(await move("empty")).toEqual({ value: "moved" });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("does not apply to the owner, nor without a quota", async () => {
     fs.writeFileSync(path.join(IVAN, "old.bin"), Buffer.alloc(Math.round(2.9 * MB)));
     setLimits({ uploadMaxMb: 1, homeQuotaMb: 0 });

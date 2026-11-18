@@ -121,11 +121,21 @@ function figureHeld(k: string): boolean {
   return writesOpen(k) || (opening.get(k) ?? 0) > 0;
 }
 
+/** Did a filesystem call fail because what it named is no longer there? */
+function gone(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
 /**
  * Walk `dir` (a home, or a folder a move would bring into one) and add up
  * its regular files. Null when the folder itself cannot be opened (no such
  * folder, or this account may not list it); a folder inside it that cannot
- * be read is skipped.
+ * be read is not skipped silently (TASK-2663): only something that is GONE
+ * (ENOENT, ENOTDIR — removed or moved away while the walk ran) is passed
+ * over; any other error opening or reading a folder, or stating a file, means
+ * the walk could not account for what is there, and the answer is a floor
+ * (`truncated`), which grants no room.
  *
  * Links are never followed: an entry is descended into only when it was
  * listed as a folder AND an `lstat` of it just before it is opened still says
@@ -157,12 +167,17 @@ export async function measureHomeUsage(
   }
   const queue: string[] = [];
   let visited = 0;
+  // Something the walk could not account for (not merely gone): a floor.
+  const unaccounted = (err: unknown) => {
+    if (!gone(err)) out.truncated = true;
+    return null;
+  };
 
   /** Read one folder a batch at a time, stat its files, queue its folders. False: a bound was hit. */
   const walkOne = async (handle: fs.Dir, at: string): Promise<boolean> => {
     let files: string[] = [];
     const flush = async () => {
-      const stats = await Promise.all(files.map((f) => fs.promises.lstat(/* turbopackIgnore: true */ f).catch(() => null)));
+      const stats = await Promise.all(files.map((f) => fs.promises.lstat(/* turbopackIgnore: true */ f).catch(unaccounted)));
       for (const st of stats) if (st?.isFile()) out.bytes += st.size;
       files = [];
     };
@@ -184,9 +199,10 @@ export async function measureHomeUsage(
       }
       await flush();
       return true;
-    } catch {
-      // A folder that went away or turned unreadable while being read: what
-      // was counted of it stands.
+    } catch (err) {
+      // A folder that went away while being read: what was counted of it
+      // stands. One that turned unreadable: the answer is a floor.
+      unaccounted(err);
       await flush();
       return true;
     } finally {
@@ -206,9 +222,9 @@ export async function measureHomeUsage(
       break;
     }
     const next = queue.pop()!;
-    const st = await fs.promises.lstat(/* turbopackIgnore: true */ next).catch(() => null);
+    const st = await fs.promises.lstat(/* turbopackIgnore: true */ next).catch(unaccounted);
     if (!st?.isDirectory()) continue;
-    const handle = await fs.promises.opendir(/* turbopackIgnore: true */ next, { bufferSize: STAT_BATCH }).catch(() => null);
+    const handle = await fs.promises.opendir(/* turbopackIgnore: true */ next, { bufferSize: STAT_BATCH }).catch(unaccounted);
     if (!handle) continue;
     if (!(await walkOne(handle, next))) {
       out.truncated = true;
@@ -403,9 +419,10 @@ export async function openQuotaWrite(home: string, quotaBytes: number, replacing
   const held = () => cache.get(k)?.bytes ?? usage.bytes;
   // Set when the walk before the last check could not be trusted (`settle`).
   let unsettled = false;
-  // A floor grants no room: the figure this write opened on, the figure as it
-  // is now (a walk before a check that stopped short), or one never settled.
-  const unmeasured = () => usage.truncated || cache.get(k)?.truncated === true || unsettled;
+  // A floor grants no room: the home's figure as it is now (the one this write
+  // opened on while no other is kept), or a walk before the check that never
+  // settled.
+  const unmeasured = () => (cache.get(k)?.truncated ?? usage.truncated) || unsettled;
   const room = (replacedBytes: number) => (unmeasured() ? 0 : Math.max(0, quotaBytes - held() - others() + replacedBytes));
   return {
     get usedBytes() {
@@ -430,6 +447,7 @@ export async function openQuotaWrite(home: string, quotaBytes: number, replacing
       mine.temp = path.resolve(tempPath);
     },
     async settle() {
+      unsettled = false;
       if (!open || !cache.get(k)?.stale) return;
       // Asked file by file as the walk goes: a write that opens its temporary
       // file while the home is walked is left out as well.
@@ -442,20 +460,27 @@ export async function openQuotaWrite(home: string, quotaBytes: number, replacing
         const fresh = await measureHomeUsage(k, { skip: openTemp });
         const now = cache.get(k);
         if (!now) return;
-        if (!fresh || fresh.truncated) {
-          // Not measurable whole: a floor, which grants no room — to this
-          // write and to every other until the home is measured again — and
-          // is not walked again at every check meanwhile.
-          cache.set(k, { ...now, truncated: true, stale: false });
+        if (!fresh) {
+          // The home cannot be read now: nothing is proven. This write is
+          // granted no room; the figure stays marked, and is walked again.
+          unsettled = true;
           return;
         }
-        if ((changes.get(k) ?? 0) === asked) {
-          cache.set(k, { bytes: fresh.bytes, truncated: false, measuredAt: fresh.measuredAt });
+        if ((changes.get(k) ?? 0) !== asked) {
+          // A delete or a move in the home ran while it was walked: a file it
+          // moved into a folder the walk had already read was missed. Never
+          // used for a check; walked again.
+          continue;
+        }
+        if (fresh.truncated) {
+          // Not measurable whole: what this walk counted is a floor, which
+          // grants no room — to this write and every other until the home is
+          // measured again — and is not walked again at every check meanwhile.
+          cache.set(k, { bytes: fresh.bytes, truncated: true, measuredAt: fresh.measuredAt });
           return;
         }
-        // A delete or a move in the home ran while it was walked: a file it
-        // moved into a folder the walk had already read was missed. Never
-        // used for a check; walked again.
+        cache.set(k, { bytes: fresh.bytes, truncated: false, measuredAt: fresh.measuredAt });
+        return;
       }
       // The home kept changing under every walk: no figure here is proven,
       // so this write is granted no room.
@@ -473,6 +498,26 @@ export async function openQuotaWrite(home: string, quotaBytes: number, replacing
       const now = cache.get(k);
       if (now?.stale && !figureHeld(k)) cache.delete(k);
     },
+  };
+}
+
+/**
+ * The write into a home with a quota whose usage cannot be read at all
+ * (`openQuotaWrite` answered null): nothing is known, so it is granted no
+ * room, as a floor grants none — only a landing of no bytes is admitted — and
+ * its refusal is `quota_unmeasured`.
+ */
+export function unmeasuredQuotaWrite(quotaBytes: number): QuotaWrite {
+  return {
+    usedBytes: 0,
+    quotaBytes,
+    truncated: true,
+    ceiling: () => 0,
+    admits: (landedBytes: number) => Number.isFinite(landedBytes) && landedBytes <= 0,
+    staging: () => {},
+    settle: async () => {},
+    finish: () => {},
+    replacing: () => {},
   };
 }
 

@@ -20,7 +20,7 @@
 import fs from "fs";
 import path from "@/lib/runtime-path";
 import { MEMBER_HOME_ENTRY, type FilesFence } from "@/lib/files-scope";
-import { insideHome, measureHomeUsage, noteHomeChange, openQuotaWrite, withHomeLock, type QuotaWrite } from "@/lib/home-usage";
+import { insideHome, measureHomeUsage, noteHomeChange, openQuotaWrite, unmeasuredQuotaWrite, withHomeLock, type QuotaWrite } from "@/lib/home-usage";
 import { commitUploadTemp } from "@/lib/upload-temp";
 import { quotaExceededMessage, quotaUnmeasuredMessage, uploadTooLargeMessage } from "@/lib/user-limits";
 import { homeQuotaBytes, readUserLimits, uploadLimitBytes } from "@/lib/user-limits-server";
@@ -129,8 +129,10 @@ export async function userUploadGuard(opts: {
     const home = ownHome;
     if (quotaBytes !== null && home && insideHome(home, destPath)) {
       replaced = replacedBytes(destPath);
-      quota = await openQuotaWrite(home, quotaBytes, replaced);
-      if (quota) quotaHome = home;
+      // A home whose usage cannot be read at all grants no room: refused
+      // `quota_unmeasured`, as a floor is (only an empty file lands).
+      quota = (await openQuotaWrite(home, quotaBytes, replaced)) ?? unmeasuredQuotaWrite(quotaBytes);
+      quotaHome = home;
     }
   }
 
@@ -467,15 +469,18 @@ export async function guardedMove<T>(
       let ran = false;
       try {
         if (uploading()) return { refusal: MOVE_UPLOAD_IN_PROGRESS };
-        write = await openQuotaWrite(home, quotaBytes);
-        if (!write) return plain();
-        await write.settle();
+        // A home whose usage cannot be read at all grants no room: only a
+        // move of nothing but empty folders goes ahead.
+        write = (await openQuotaWrite(home, quotaBytes)) ?? unmeasuredQuotaWrite(quotaBytes);
         let unmeasured = false;
         for (const abs of incoming) {
           const at = await bytesAt(abs);
           bytes += at.bytes;
           if (at.truncated) unmeasured = true;
         }
+        // The home's figure as it is after the sources were measured — walked
+        // again if a delete or a move in the home marked it meanwhile.
+        await write.settle();
         // ── Nothing is awaited from here to the move. ──
         if (uploading()) return { refusal: MOVE_UPLOAD_IN_PROGRESS };
         if (incoming.some(measuring.landedUnder)) {

@@ -11,6 +11,7 @@ import {
   openQuotaWrite,
   resetHomeUsageForTests,
   SETTLE_ATTEMPTS,
+  unmeasuredQuotaWrite,
   withHomeLock,
 } from "@/lib/home-usage";
 
@@ -73,6 +74,42 @@ describe("measuring a home", () => {
       expect((await measureHomeUsage(HOME))?.bytes).toBe(3000);
     } finally {
       spy.mockRestore();
+    }
+  });
+
+  it("passes over a folder that is gone, but makes a floor of one it cannot read (TASK-2663)", async () => {
+    const deep = path.join(HOME, "Documents", "deep");
+    const realOpendir = fs.promises.opendir.bind(fs.promises);
+    for (const [code, truncated] of [["ENOENT", false], ["EACCES", true], ["EIO", true]] as const) {
+      const spy = vi.spyOn(fs.promises, "opendir").mockImplementation(async (p, ...rest) => {
+        if (String(p) === deep) throw Object.assign(new Error(code), { code });
+        return realOpendir(p as string, ...(rest as []));
+      });
+      try {
+        const usage = await measureHomeUsage(HOME);
+        expect(usage?.bytes, code).toBe(3000);
+        expect(usage?.truncated, code).toBe(truncated);
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  });
+
+  it("makes a floor of a file it cannot state, but not of one that is gone (TASK-2663)", async () => {
+    const b = path.join(HOME, "Documents", "b.txt");
+    const realLstat = fs.promises.lstat.bind(fs.promises);
+    for (const [code, truncated] of [["ENOENT", false], ["EACCES", true]] as const) {
+      const spy = vi.spyOn(fs.promises, "lstat").mockImplementation(async (p, ...rest) => {
+        if (String(p) === b) throw Object.assign(new Error(code), { code });
+        return realLstat(p as string, ...(rest as []));
+      });
+      try {
+        const usage = await measureHomeUsage(HOME);
+        expect(usage?.bytes, code).toBe(4000);
+        expect(usage?.truncated, code).toBe(truncated);
+      } finally {
+        spy.mockRestore();
+      }
     }
   });
 
@@ -225,9 +262,12 @@ describe("the last check before a write lands (TASK-2663)", () => {
     } finally {
       clock.mockRestore();
     }
-    // A floor grants no room ...
+    // What that walk counted (a.txt, before its clock ran out) is the floor,
+    // not the figure from before; a floor grants no room ...
+    expect(w.usedBytes).toBe(1000);
     expect(w.truncated).toBe(true);
     expect(w.admits(1, 0)).toBe(false);
+    expect(w.admits(0, 0)).toBe(true);
     // ... to this write or the next one, and nothing is walked again for them.
     const walks = vi.spyOn(fs.promises, "opendir");
     try {
@@ -296,6 +336,55 @@ describe("the last check before a write lands (TASK-2663)", () => {
     expect(w.truncated).toBe(true);
     expect(w.admits(1, 0)).toBe(false);
     w.finish(0);
+  });
+
+  it("grants no room when the home cannot be read before the check, and walks it again at the next", async () => {
+    expect((await homeUsage(HOME))?.bytes).toBe(6000);
+    const w = (await openQuotaWrite(HOME, 10_000))!;
+    noteHomeChange(HOME);
+    const spy = vi.spyOn(fs.promises, "opendir").mockRejectedValueOnce(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+    try {
+      await w.settle();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(w.truncated).toBe(true);
+    expect(w.admits(1, 0)).toBe(false);
+    // Still marked: the next check walks, and the home is readable again.
+    await w.settle();
+    expect(w.truncated).toBe(false);
+    expect(w.admits(4000, 0)).toBe(true);
+    w.finish(0);
+  });
+
+  it("follows the home's figure as it is now: one measured whole again grants room", async () => {
+    // Measured as a floor when the write opens ...
+    const t0 = Date.now();
+    let calls = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => (calls++ === 0 ? t0 : t0 + 60_000));
+    let w: Awaited<ReturnType<typeof openQuotaWrite>>;
+    try {
+      w = await openQuotaWrite(HOME, 10_000);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(w!.truncated).toBe(true);
+    // ... then walked whole before the check (a delete had marked it).
+    noteHomeChange(HOME);
+    await w!.settle();
+    expect(w!.truncated).toBe(false);
+    expect(w!.usedBytes).toBe(6000);
+    expect(w!.admits(4000, 0)).toBe(true);
+    expect(w!.admits(4001, 0)).toBe(false);
+    w!.finish(0);
+  });
+
+  it("grants no room in a home with a quota whose usage cannot be read at all", () => {
+    const w = unmeasuredQuotaWrite(10_000);
+    expect(w.truncated).toBe(true);
+    expect(w.ceiling(0)).toBe(0);
+    expect(w.admits(1, 5000)).toBe(false);
+    expect(w.admits(0, 0)).toBe(true);
   });
 
   it("grants nothing in a home that could only be measured as a floor", async () => {

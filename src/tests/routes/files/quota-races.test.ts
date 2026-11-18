@@ -307,6 +307,7 @@ describe("B: a move into the home whose source changes while it is measured", ()
     console.log(`[B rename] owner's renames ${others.join(",")}, Ivan's move ${move.status}, home on disk ${now.onDisk} of quota ${MB}`);
     expect(others).toEqual([200, 200]);
     expect(move.status).toBe(507);
+    expect(await move.json()).toMatchObject({ code: "quota_exceeded", quotaBytes: MB });
     expect(fs.existsSync(path.join(pack, "big.bin"))).toBe(true);
     expect(fs.existsSync(path.join(IVAN, "pack"))).toBe(false);
     expect(now.onDisk).toBeLessThanOrEqual(MB);
@@ -350,6 +351,7 @@ describe("B: a move whose source's folder is replaced while it is measured", () 
     console.log(`[B ancestor] owner's renames ${others.join(",")}, Ivan's move ${move.status}, home on disk ${now.onDisk} of quota ${MB}`);
     expect(others).toEqual([200, 200]);
     expect(move.status).toBe(507);
+    expect(await move.json()).toMatchObject({ code: "quota_exceeded", quotaBytes: MB });
     expect(fs.existsSync(path.join(SHARED, "outer", "pack", "big.bin"))).toBe(true);
     expect(fs.existsSync(path.join(IVAN, "pack"))).toBe(false);
     expect(now.onDisk).toBeLessThanOrEqual(MB);
@@ -382,6 +384,7 @@ describe("an upload and a move into one home at once", () => {
     console.log(`[mixed] upload ${up.status}, move ${move.status}, home on disk ${now.onDisk} (figure ${now.figure}) of quota ${MB}`);
     expect(up.status).toBe(200);
     expect(move.status).toBe(507);
+    expect(await move.json()).toMatchObject({ code: "quota_exceeded", quotaBytes: MB });
     expect(fs.statSync(path.join(IVAN, "new.bin")).size).toBe(700 * KB);
     expect(fs.existsSync(path.join(pack, "a.bin"))).toBe(true);
     expect(temps(IVAN)).toEqual([]);
