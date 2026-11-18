@@ -534,15 +534,22 @@ describe.skipIf(!hasPython3)("scripts/bench/stt-bench.py", () => {
     expect(lenient.stdout).toContain("Variants not measured");
   });
 
-  it("keeps a cause that runs to several lines whole, and in front", () => {
-    // huggingface_hub's offline errors are two sentences on two lines: the
-    // second alone ("Check your internet connection…") does not say which
-    // model, nor that it was a load that failed.
+  // huggingface_hub's offline errors are two sentences on two lines: the
+  // second alone ("Check your internet connection…") does not say which
+  // model, nor that it was a load that failed. An indented second line must
+  // not pass for a traceback frame, and a cause longer than the report keeps
+  // must still lead it.
+  const CHECK = "Check your internet connection or see how to run the library in offline mode.";
+  it.each([
+    ["on a line of its own", `\n${CHECK}`, CHECK],
+    ["indented under it", `\n  ${CHECK}`, `  ${CHECK}`],
+    ["longer than the report keeps", `\n  ${`${CHECK} `.repeat(8)}`, `  ${CHECK}`],
+  ])("keeps a cause that runs to several lines whole, and in front (%s)", (_shape, detail, second) => {
     configure({
       compute_types: { cpu: ["int8"] },
       delay: 0.02,
       fail_models: ["small"],
-      fail_detail: "\nCheck your internet connection or see how to run the library in offline mode.",
+      fail_detail: detail,
       default_text: "hello",
     });
     const out = path.join(dir, "report.json");
@@ -553,7 +560,7 @@ describe.skipIf(!hasPython3)("scripts/bench/stt-bench.py", () => {
     ]);
     const lines = String(readReport(out).variants[0].skipped).split("\n");
     expect(lines[0]).toContain("no weights for small");
-    expect(lines[1]).toContain("Check your internet connection");
+    expect(lines[1].startsWith(second), lines[1]).toBe(true);
   });
 
   it("records a worker that dies mid-run as a failure, not as fast", () => {

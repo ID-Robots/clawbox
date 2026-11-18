@@ -122,6 +122,9 @@ KOKORO_PEAK_MB = (2259, 2636)
 WORKER_START_TIMEOUT = float(os.environ.get("STT_BENCH_START_TIMEOUT", "900"))
 WORKER_TRANSCRIBE_TIMEOUT = float(os.environ.get("STT_BENCH_TRANSCRIBE_TIMEOUT", "900"))
 CLOUD_TIMEOUT = float(os.environ.get("STT_BENCH_CLOUD_TIMEOUT", "300"))
+# How much of a dead worker's stderr is searched for the exception that
+# killed it (cause_first): enough for the last frame and a long message.
+STDERR_SCAN_BYTES = 16384
 
 CLOUD_MODEL = "gpt-4o-mini-transcribe"
 CLOUD_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
@@ -595,28 +598,45 @@ def is_english_only(model: str) -> bool:
     return model.endswith(".en") or model in ENGLISH_ONLY_EXTRA
 
 
-def cause_first(stderr: str) -> str:
-    """A worker's last words with the line that says why moved to the front.
+def cause_first(stderr: str, limit: int = 500) -> str:
+    """A worker's last words, at most `limit` characters, the cause in front.
 
-    A Python traceback names its cause on its LAST line, and every reader of
-    these messages keeps the front: the report's `skipped` is cut to 300
+    A Python traceback names its cause at its END, and every reader of these
+    messages keeps the front: the report's `skipped` is cut to 300
     characters, and a log line is read from the left. Led by "Traceback (most
     recent call last):" the cause is the part that gets cut — and how many
     frames come before it depends on the interpreter (3.13 began printing the
     source lines of `-c` code, the worker's own frame included). So the cause
     leads, and the frames follow for whoever needs them.
 
-    The cause is everything after the last indented line: a traceback indents
-    its frames, their source lines and carets, and not the exception, whose
-    message can run to several lines (huggingface_hub's do). Output with no
+    The cause starts at the first unindented line after the last frame: a
+    frame is an indented `File …` line and the indented source and caret
+    lines under it, and the exception that follows begins in column 0. From
+    there to the end is all cause, however many lines its message runs to and
+    however they are indented (huggingface_hub's run to two). Output with no
     such shape leads with its last line.
+
+    The frame has to be in what is read, so the caller passes far more than
+    `limit` and the cut happens here, after the cause is found. What room
+    the cause leaves goes to the lines just before it: the innermost frames,
+    or for other output the lines that led up to its last.
     """
     lines = stderr.strip().splitlines()
-    last_indented = max((i for i, line in enumerate(lines) if line[:1].isspace()), default=-1)
-    start = last_indented + 1 if 0 <= last_indented < len(lines) - 1 else len(lines) - 1
+    start = len(lines) - 1
+    frames = [i for i, line in enumerate(lines) if line[:1].isspace() and line.lstrip().startswith("File ")]
+    if frames:
+        i = frames[-1] + 1
+        while i < len(lines) and lines[i][:1].isspace():
+            i += 1
+        if i < len(lines):
+            start = i
     if start <= 0:
-        return "\n".join(lines)
-    return "\n".join([*lines[start:], *lines[:start]])
+        return "\n".join(lines)[-limit:]
+    cause = "\n".join(lines[start:])
+    room = limit - len(cause) - 1
+    if room <= 0:
+        return cause[:limit]
+    return cause + "\n" + "\n".join(lines[:start])[-room:]
 
 
 def read_tagged_line(proc: subprocess.Popen, name: str, what: str, timeout: float, stderr_tail) -> dict:
@@ -734,7 +754,10 @@ class Variant:
             data = Path(self._stderr_file.name).read_bytes()
         except OSError:
             return ""
-        return cause_first(data[-limit:].decode("utf-8", "replace"))
+        # Read well past `limit`: cause_first needs the last frame as well as
+        # the exception after it, and a long exception message alone can
+        # outrun `limit`.
+        return cause_first(data[-STDERR_SCAN_BYTES:].decode("utf-8", "replace"), limit)
 
     def start(self) -> subprocess.Popen:
         if self.proc is not None:
