@@ -243,7 +243,7 @@ describe("the service: installed and started on every box, loopback only", () =>
       const began = Date.now();
       // ensure_vault_service is the script's last command: its status is the exit status.
       const r = spawnSync("bash", ["-c", `${fns}${stubs}\nensure_vault_service`], {
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, FAKE_DIR: dir, FAKE_BEFORE: before, FAKE_AFTER: after, VAULT_UP_WAIT_S: "2", VAULT_UP_STEADY_S: "0", FAKE_SLEEP_INSTANT: "", ...extra },
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, FAKE_DIR: dir, FAKE_BEFORE: before, FAKE_AFTER: after, VAULT_UP_WAIT_S: "2", VAULT_UP_STEADY_S: "0", FAKE_SLEEP_INSTANT: "", FAKE_SLOW_FIRST: "", ...extra },
         encoding: "utf8",
       });
       const ms = Date.now() - began;
