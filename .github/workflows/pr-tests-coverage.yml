@@ -98,8 +98,16 @@ jobs:
       # PR: shellcheck over every script under it, then its self-test against
       # fixture tests and a stub nano-ci (no board). Needs no toolchain —
       # shellcheck and jq are on the runner image — and takes seconds.
+      #
+      # SC2329 ("function is never invoked") is excluded, and only it
+      # (TASK-2687). The runner image's shellcheck moved to 0.11, which added
+      # that check, and it flags every function the suite invokes by NAME
+      # rather than by a call: the `trap cleanup EXIT` handlers and the
+      # callbacks handed to wait_app_update. Seven of those, all false
+      # positives, failed `checks` on every PR in the repository at once.
+      # Every other finding, info level included, still fails the step.
       - name: Nano hardware tests — shellcheck
-        run: shellcheck -x scripts/nano-tests/*.sh scripts/nano-tests/tests/*.sh
+        run: shellcheck -x -e SC2329 scripts/nano-tests/*.sh scripts/nano-tests/tests/*.sh
 
       - name: Nano hardware tests — runner self-test
         run: bash scripts/nano-tests/selftest.sh
@@ -117,6 +125,7 @@ jobs:
             bun-${{ runner.os }}-
 
       - name: Install
+        id: install
         run: bun install --frozen-lockfile
 
       # Explicit, and first: the sudoers allow-list is a privilege boundary, and
@@ -209,10 +218,28 @@ jobs:
       # it at all. `!cancelled()`, not `always()`: it still runs when a blocking
       # check above went red — the counts are most useful on exactly that run —
       # but not while the run is being cancelled.
+      #
+      # A FOURTH outcome: a check AHEAD of the toolchain went red, so setup-bun
+      # and Install were skipped and there is no bun (or eslint) to run. The
+      # step used to call bun anyway, die with 127 and add a "bun: command not
+      # found" error annotation to a PR whose real failure was elsewhere
+      # (TASK-2687). It now says in the summary that lint did not run, and why,
+      # and exits 0 — there is nothing advisory to report.
       - name: Lint (advisory)
         if: ${{ !cancelled() }}
         continue-on-error: true
+        env:
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
         run: |
+          if [ "$INSTALL_OUTCOME" != "success" ]; then
+            {
+              echo "### Lint (advisory — not blocking)"
+              echo
+              echo "Lint did not run: Install did not succeed (outcome: ${INSTALL_OUTCOME:-skipped}) — see the first failed step above."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "Lint skipped: Install did not succeed (outcome: ${INSTALL_OUTCOME:-skipped})."
+            exit 0
+          fi
           rc=0
           bun run lint > lint.out 2>&1 || rc=$?
           cat lint.out

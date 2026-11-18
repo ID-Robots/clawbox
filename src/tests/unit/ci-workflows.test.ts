@@ -215,7 +215,12 @@ describe("the checks CI runs, and their blocking status", () => {
     // The suite itself needs a lab board (nano-hardware-tests.yml, opt-in by
     // label); the runner that turns its output into a verdict does not, and a
     // runner that could not fail would report every board green.
-    runsBlocking("shellcheck -x scripts/nano-tests/*.sh scripts/nano-tests/tests/*.sh");
+    //
+    // SC2329 is the one check excluded (TASK-2687): shellcheck 0.11 on the
+    // runner image reads every trap handler and wait_app_update callback as a
+    // function nobody calls. Exactly that code — not a severity floor, which
+    // would drop every info finding with it.
+    runsBlocking("shellcheck -x -e SC2329 scripts/nano-tests/*.sh scripts/nano-tests/tests/*.sh");
     runsBlocking("bash scripts/nano-tests/selftest.sh");
   });
 
@@ -234,6 +239,15 @@ describe("the checks CI runs, and their blocking status", () => {
     expect(lint).toContain("GITHUB_STEP_SUMMARY");
     expect(lint).toMatch(/Lint clean/);
     expect(lint).toMatch(/crashed/);
+    // It still runs when a check went red, so when that check sat AHEAD of the
+    // toolchain there is no bun: it must say lint did not run and why, before
+    // it reaches for bun, rather than die with 127 (TASK-2687).
+    expect(tests).toMatch(/- name: Install\n\s+id: install\n/);
+    expect(lint).toContain("INSTALL_OUTCOME: ${{ steps.install.outcome }}");
+    const guard = lint.indexOf('if [ "$INSTALL_OUTCOME" != "success" ]');
+    expect(guard, "the lint step does not check that Install succeeded").toBeGreaterThan(-1);
+    expect(guard, "the lint step calls bun before checking Install").toBeLessThan(lint.indexOf("bun run lint >"));
+    expect(lint).toMatch(/Lint did not run/);
   });
 
   /** Every job of the Tests workflow by key, each bounded by the next two-space key after `jobs:`. */
@@ -300,7 +314,7 @@ describe("the checks CI runs, and their blocking status", () => {
       "./scripts/check-doc-images.sh", "bun run check:sudoers", "python3 -m unittest discover -s scripts/x64-migration",
       "bun run scripts/i18n-scan.ts", "bun run typecheck:mcp", "bun run check:mcp-tools", "bun run lint",
       "bash scripts/vitest-shard.sh", "node scripts/check-lockfiles.mjs", "bash scripts/check-vitest-shards.sh", "bun run test:coverage:merge",
-      "shellcheck -x scripts/nano-tests/", "bash scripts/nano-tests/selftest.sh",
+      "shellcheck -x -e SC2329 scripts/nano-tests/", "bash scripts/nano-tests/selftest.sh",
       "node scripts/check-claude-md-no-loss.mjs",
     ]) {
       const runners = [...jobs].filter(([, text]) => runsOfEachStep(text).some((body) => body.includes(command))).map(([key]) => key);
