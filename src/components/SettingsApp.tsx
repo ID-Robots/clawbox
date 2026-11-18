@@ -55,6 +55,7 @@ import { useSettledSessionUser } from "@/lib/use-session-user";
 import { isOrgMember, ORG_USER_SETTINGS_SECTIONS } from "@/lib/org-mode";
 import OwnPasswordCard from "./OwnPasswordCard";
 import MonitorsPanel from "./MonitorsPanel";
+import LinkedBoxesPanel from "./LinkedBoxesPanel";
 // From the pure module, never `@/lib/plugin-repair`: that one reads the
 // marker file and would pull `fs` into the browser bundle.
 import { canonicalPluginId } from "@/lib/plugin-repair-id";
@@ -244,7 +245,7 @@ interface SystemStats {
 
 // codingAgent is gone from this list on purpose: its settings moved into the
 // Coding Agent app itself (the owner asked for them back there).
-const SECTIONS = ["appearance", "account", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
+const SECTIONS = ["appearance", "account", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "linkedBoxes", "system", "update", "about"] as const;
 
 /**
  * Users is a part of System now — System → Users, beside the device's own
@@ -394,6 +395,9 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
+  // The owner's other ClawBoxes, switched to with Ctrl+Shift+1 … 9 like
+  // workspaces (TASK-2519). The owner's alone: the list is (`sectionShown`).
+  { id: "linkedBoxes", icon: "workspaces", labelKey: "settings.linkedBoxes" },
   // Who can sign in to the box — each a real Linux account — is System →
   // Users, the owner's alone; it had a row of its own here until TASK-2130.
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
@@ -705,6 +709,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const sectionShown = useCallback((id: Section): boolean => {
     if (id === "account") return nonOwner;
     if (id === "update" && nonOwner) return false;
+    if (id === "linkedBoxes" && nonOwner) return false;
     if (orgMember) return ORG_USER_SETTINGS_SECTIONS.includes(id === "localModels" ? "localAi" : id);
     return true;
   }, [nonOwner, orgMember]);
@@ -6802,6 +6807,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
         {/* ─── Remote Control ─── */}
         {activeSection === "remote" && renderRemoteSection()}
+
+        {/* ─── Linked ClawBoxes ─── */}
+        {activeSection === "linkedBoxes" && <LinkedBoxesPanel />}
 
         {activeSection === "monitors" && monitorsAvailable && <MonitorsPanel />}
 
