@@ -96,6 +96,8 @@ interface StubConfig {
   device?: string;
   compute_type?: string;
   fail_models?: string[];
+  /** Appended to the load failure's message, to make it run to several lines. */
+  fail_detail?: string;
   default_text?: string;
   transcripts?: Record<string, string>;
 }
@@ -162,11 +164,24 @@ const FASTER_WHISPER_STUB = [
   "    def __init__(self, text):",
   "        self.text = text",
   "",
+  // A load that fails comes up through several frames, as a real one does
+  // (download_model → huggingface_hub → …), so its cause is the last line of
+  // a traceback longer than the report keeps — on every Python, not only on
+  // those (3.13+) that also print the worker's own `-c` source line.
+  "def _download_model(name):",
+  "    return _snapshot_download(name)",
+  "",
+  "def _snapshot_download(name):",
+  "    return _hf_hub_download(name)",
+  "",
+  "def _hf_hub_download(name):",
+  '    raise RuntimeError("stub: no weights for " + name + CFG.get("fail_detail", ""))',
+  "",
   "class WhisperModel:",
   '    def __init__(self, model_size_or_path, device="cpu", compute_type="default", **kwargs):',
   '        _record({"load": model_size_or_path, "device": device, "compute_type": compute_type})',
   '        if model_size_or_path in CFG.get("fail_models", []):',
-  '            raise RuntimeError("stub: no weights for " + model_size_or_path)',
+  "            _download_model(model_size_or_path)",
   '        time.sleep(CFG.get("load_delay", 0.0))',
   // The harness reads the device back off the loaded model rather than
   // trusting what it asked for, so the stub gets to disagree with the request.
@@ -507,6 +522,9 @@ describe.skipIf(!hasPython3)("scripts/bench/stt-bench.py", () => {
     const report = readReport(out);
     const small = report.variants.find((v) => v.model === "small")!;
     expect(small.skipped).toContain("no weights for small");
+    // The cause leads, ahead of the frames: the line a reader sees first, and
+    // what is left when the reason is cut short.
+    expect(String(small.skipped).split("\n")[0]).toContain("no weights for small");
     expect(small.rows).toHaveLength(0);
     // The variant that did work is still measured and still reported.
     expect(report.variants.find((v) => v.model === "tiny")!.rows).toHaveLength(1);
@@ -514,6 +532,36 @@ describe.skipIf(!hasPython3)("scripts/bench/stt-bench.py", () => {
     const lenient = run([...args, "--skip-missing"]);
     expect(lenient.status).toBe(0);
     expect(lenient.stdout).toContain("Variants not measured");
+  });
+
+  // huggingface_hub's offline errors are two sentences on two lines: the
+  // second alone ("Check your internet connection…") does not say which
+  // model, nor that it was a load that failed. An indented second line must
+  // not pass for a traceback frame, and a cause longer than the report keeps
+  // must still lead it.
+  const CHECK = "Check your internet connection or see how to run the library in offline mode.";
+  it.each([
+    ["on a line of its own", `\n${CHECK}`, CHECK],
+    ["indented under it", `\n  ${CHECK}`, `  ${CHECK}`],
+    ["indented, and starting the way a frame does", "\n  File not found: /opt/models/small/model.bin", "  File not found: /opt/models/small/model.bin"],
+    ["longer than the report keeps", `\n  ${`${CHECK} `.repeat(8)}`, `  ${CHECK}`],
+  ])("keeps a cause that runs to several lines whole, and in front (%s)", (_shape, detail, second) => {
+    configure({
+      compute_types: { cpu: ["int8"] },
+      delay: 0.02,
+      fail_models: ["small"],
+      fail_detail: detail,
+      default_text: "hello",
+    });
+    const out = path.join(dir, "report.json");
+    run([
+      "--models", "small", "--compute", "int8", "--reps", "1", "--cache", cache,
+      "--samples", manifestFile([{ id: "en-1", lang: "en", seconds: 1.0, reference: "hello" }]),
+      "--out", out,
+    ]);
+    const lines = String(readReport(out).variants[0].skipped).split("\n");
+    expect(lines[0]).toContain("no weights for small");
+    expect(lines[1].startsWith(second), lines[1]).toBe(true);
   });
 
   it("records a worker that dies mid-run as a failure, not as fast", () => {
