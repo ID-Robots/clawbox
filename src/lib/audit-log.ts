@@ -219,7 +219,7 @@ export async function recordAudit(
     // Sealed by a factory reset: only its own line is written until the box
     // restarts — a sign-in that resolved its account before the wipe and
     // finishes after it must not bring the previous owner's name back.
-    if (sealState().sealed && line.event !== "factory_reset") return;
+    if (sealed() && line.event !== "factory_reset") return;
     const file = auditLogPath();
     let handle: fs.promises.FileHandle | null = null;
     try {
@@ -327,8 +327,9 @@ export async function readAuditLog({ limit = 200 }: { limit?: number } = {}): Pr
 export async function clearAuditLogForReset(): Promise<void> {
   await withLogLock(async () => {
     // Sealed first: from here every write but the reset's own line is
-    // dropped, including one from a request already past its checks.
-    sealState().sealed = true;
+    // dropped, including one from a request already past its checks, until
+    // the reboot (or, should it fail, until the seal lapses).
+    sealState().until = Date.now() + SEAL_MS;
     const file = auditLogPath();
     await fs.promises.rm(file, { force: true });
     await fs.promises.rm(`${file}.1`, { force: true });
@@ -337,17 +338,29 @@ export async function clearAuditLogForReset(): Promise<void> {
 
 /** A factory reset that stopped short (no reboot follows): the log records again. */
 export function unsealAuditLog(): void {
-  sealState().sealed = false;
+  sealState().until = 0;
 }
 
-/** The seal a factory reset puts on the log until the box restarts — one for every module copy. */
-function sealState(): { sealed: boolean } {
-  const g = globalThis as unknown as Record<symbol, { sealed: boolean } | undefined>;
+/**
+ * How long a reset's seal holds. The reboot follows within seconds, and so
+ * does any request that resolved its account before the wipe; a reboot that
+ * never comes (the command failed) must not silence the log for good, so the
+ * seal lapses on its own.
+ */
+const SEAL_MS = 5 * 60_000;
+
+/** The seal a factory reset puts on the log — one for every module copy. */
+function sealState(): { until: number } {
+  const g = globalThis as unknown as Record<symbol, { until: number } | undefined>;
   const key = Symbol.for("clawbox.auditLog.sealed");
   let state = g[key];
   if (!state) {
-    state = { sealed: false };
+    state = { until: 0 };
     g[key] = state;
   }
   return state;
+}
+
+function sealed(): boolean {
+  return Date.now() < sealState().until;
 }

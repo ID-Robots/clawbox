@@ -335,6 +335,15 @@ describe("the home quota", () => {
     expect(allowed.hold.writerStarted()).toBe(true);
     allowed.hold.done(false);
     late.finish(null);
+    // An upload that replaces the source and FINISHES while the move is still
+    // measuring leaves its old size counted: the move is called off too.
+    const again = await check([growing]);
+    if (!again || !("hold" in again)) throw new Error("the move should be admitted");
+    const quick = await userUploadGuard({ limitedUser: null, fence, destPath: growing, disk: () => Infinity });
+    quick.destination(growing);
+    quick.finish(500 * KB);
+    expect(again.hold.writerStarted()).toBe(true);
+    again.hold.done(false);
   });
 
   it("does not apply to the owner, nor without a quota", async () => {

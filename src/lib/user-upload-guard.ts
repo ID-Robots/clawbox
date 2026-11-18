@@ -254,6 +254,41 @@ function endWriting(abs: string): void {
   const n = (map.get(k) ?? 0) - 1;
   if (n > 0) map.set(k, n);
   else map.delete(k);
+  noteWritten(k);
+}
+
+// When each file last finished being written, by a sequence number: a move
+// that measured a source before an upload replaced it (and finished) must
+// not move it at the old size. Entries older than a move can take are pruned.
+const WRITTEN_KEY = Symbol.for("clawbox.userUploadGuard.written");
+const WRITTEN_KEEP_MS = 10 * 60_000;
+function writtenState(): { seq: number; at: Map<string, { seq: number; ms: number }> } {
+  const g = globalThis as unknown as Record<symbol, { seq: number; at: Map<string, { seq: number; ms: number }> } | undefined>;
+  let state = g[WRITTEN_KEY];
+  if (!state) {
+    state = { seq: 0, at: new Map() };
+    g[WRITTEN_KEY] = state;
+  }
+  return state;
+}
+
+function noteWritten(k: string): void {
+  const state = writtenState();
+  const now = Date.now();
+  for (const [p, v] of state.at) if (now - v.ms > WRITTEN_KEEP_MS) state.at.delete(p);
+  state.at.set(k, { seq: ++state.seq, ms: now });
+}
+
+/** The current write sequence: what `writtenUnderSince` compares against. */
+function writeSequence(): number {
+  return writtenState().seq;
+}
+
+/** Did an upload finish writing `abs`, or a file under it, after sequence `since`? */
+function writtenUnderSince(abs: string, since: number): boolean {
+  const k = path.resolve(abs);
+  for (const [p, v] of writtenState().at) if (v.seq > since && (p === k || p.startsWith(k + path.sep))) return true;
+  return false;
 }
 
 /** Is an upload writing `abs`, or a file under it right now? */
@@ -297,6 +332,9 @@ export async function moveQuotaCheck(opts: {
   if (!home || !insideHome(home, destAbs)) return null;
   const incoming = sources.filter((s): s is string => typeof s === "string" && !insideHome(home, s));
   if (incoming.length === 0) return null;
+  // Taken before anything is measured: an upload that replaces a source and
+  // finishes while the others are measured leaves its old size counted.
+  const measuredFrom = writeSequence();
   // A file an upload is still writing would keep growing once in the home.
   if (incoming.some(uploadWritingUnder)) {
     return {
@@ -333,7 +371,7 @@ export async function moveQuotaCheck(opts: {
   write.reserve(bytes);
   return {
     hold: {
-      writerStarted: () => incoming.some(uploadWritingUnder),
+      writerStarted: () => incoming.some((s) => uploadWritingUnder(s) || writtenUnderSince(s, measuredFrom)),
       done(moved = true) {
         // Counted whole at once — a write that opens before the next walk
         // must not be granted these bytes again — and then measured anew, so

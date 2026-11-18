@@ -154,6 +154,29 @@ describe("reading", () => {
 });
 
 describe("a factory reset", () => {
+  it("seals every copy of the module, as separate route bundles load it, and the seal lapses on its own", async () => {
+    vi.resetModules();
+    const other = await import("@/lib/audit-log");
+    expect(other).not.toBe(audit);
+    await audit.clearAuditLogForReset();
+    try {
+      // Written through the other copy: dropped all the same.
+      await other.recordAudit({ event: "login", actor: "previous-owner" });
+      expect(fs.existsSync(audit.auditLogPath())).toBe(false);
+      // Five minutes on, no reboot came: the log records again.
+      const now = Date.now();
+      const spy = vi.spyOn(Date, "now").mockReturnValue(now + 5 * 60_000 + 1);
+      try {
+        await other.recordAudit({ event: "login", actor: "owner" });
+      } finally {
+        spy.mockRestore();
+      }
+      expect(lines().map((l) => l.actor)).toEqual(["owner"]);
+    } finally {
+      audit.unsealAuditLog();
+    }
+  });
+
   it("seals the log: a sign-in that finishes after the clear writes nothing, the reset's own line does", async () => {
     await audit.clearAuditLogForReset();
     try {
