@@ -235,7 +235,10 @@ reported as an answer ClawBox could not read.
 ### Contract
 
 Every request carries the configured auth header. ClawBox does not follow
-redirects, waits 10 s at most, and reads at most 1 MiB of each answer.
+redirects, waits 10 s at most, and reads at most 1 MiB of each answer. It reads
+a body only from a `200` answer to a draft read. Every other status, and every
+answer to a send, is decided by the status alone, and the body is discarded
+unread. So a 404 with a large or broken body still means "no such draft".
 
 ```
 GET {endpoint}/drafts/{id}?user={clawbox username}

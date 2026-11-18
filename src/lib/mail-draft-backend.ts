@@ -490,6 +490,12 @@ async function readBounded(response: Response): Promise<string | null> {
  * body that breaks off after it must not turn the confirmed Send into a lost
  * one ("may have gone", and a Review again over mail already in Sent). Only
  * a request that never got a status back is a lost answer.
+ *
+ * A read's body is read only on a 200, the one status whose body means
+ * anything (a draft). Every other status says what it says by itself (404
+ * missing, 401/403 credentials refused): its body is cancelled unread, so an
+ * oversized or broken one cannot turn a 404 into "could not read" or hide a
+ * refused credential.
  */
 async function call(
   config: DraftApprovalConfig,
@@ -516,7 +522,7 @@ async function call(
     const name = (err as { name?: string } | null)?.name;
     return { ok: false, reason: name === "TimeoutError" || name === "AbortError" ? "timeout" : "unreachable" };
   }
-  if (init.statusOnly) {
+  if (init.statusOnly || response.status !== 200) {
     // Not awaited: a body that stalls or fails cannot hold up, or undo, the
     // status already in hand. Cancelling frees the connection.
     try {

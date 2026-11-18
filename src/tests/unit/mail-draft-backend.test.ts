@@ -482,6 +482,40 @@ describe("talking to the backend", () => {
     expect(await fetchDraft(CONFIG, "u", "d")).toEqual({ ok: false, reason: "unreachable" });
   });
 
+  it("decides a read that is not 200 by its status alone, whatever its body", async () => {
+    const huge = "x".repeat(BACKEND_MAX_BYTES + 1);
+    const breaking = () => new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("<html>"));
+        controller.error(new TypeError("terminated"));
+      },
+    });
+    for (const body of [() => huge, breaking]) {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(body(), { status: 404 })));
+      expect(await fetchDraft(CONFIG, "u", "d")).toEqual({ ok: false, reason: "not_found" });
+      expect(await probeBackend(CONFIG, "u")).toBe("ok");
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(body(), { status: 410 })));
+      expect(await fetchDraft(CONFIG, "u", "d")).toEqual({ ok: false, reason: "not_found" });
+      for (const status of [401, 403]) {
+        vi.stubGlobal("fetch", vi.fn(async () => new Response(body(), { status })));
+        expect(await fetchDraft(CONFIG, "u", "d")).toEqual({ ok: false, reason: "auth" });
+        expect(await probeBackend(CONFIG, "u")).toBe("auth");
+      }
+    }
+    // A body that never ends is let go, not waited on.
+    let cancelled = 0;
+    const stalling = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => undefined),
+      cancel: () => { cancelled += 1; },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(stalling, { status: 404 })));
+    expect(await fetchDraft(CONFIG, "u", "d")).toEqual({ ok: false, reason: "not_found" });
+    await vi.waitFor(() => expect(cancelled).toBe(1));
+    // A 200 is still read in full and bounded.
+    stub(200, JSON.stringify({ body: huge }));
+    expect(await fetchDraft(CONFIG, "u", "d")).toEqual({ ok: false, reason: "bad_response" });
+  });
+
   it("probes with an id nobody has", async () => {
     stub(404, {}, (url) => expect(url).toMatch(/\/drafts\/clawbox-probe-[0-9a-f]{12}\?user=u$/));
     expect(await probeBackend(CONFIG, "u")).toBe("ok");
