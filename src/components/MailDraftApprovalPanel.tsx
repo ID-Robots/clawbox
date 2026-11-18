@@ -25,6 +25,8 @@ interface Snapshot {
   authHeader: string;
   hasAuth: boolean;
   active: boolean;
+  /** The route could not read this box's settings: the rest are defaults, not what is saved. */
+  unknown?: boolean;
 }
 
 type Note = { kind: "ok" | "error"; text: string } | null;
@@ -74,7 +76,10 @@ export default function MailDraftApprovalPanel() {
       }
       const json: unknown = await res.json();
       if (!live()) return;
-      if (isSnapshot(json)) {
+      // `unknown: true` is the route saying it could not read the settings: the
+      // fields it sends are fallbacks, so it is a failed read like any other —
+      // never shown as what is saved.
+      if (isSnapshot(json) && json.unknown !== true) {
         adopt(json);
         setUnread(false);
       } else {
@@ -139,6 +144,24 @@ export default function MailDraftApprovalPanel() {
     }
   }, [endpoint, authHeader, authValue, send, adopt, t]);
 
+  /**
+   * The enabled checkbox. Switching ON saves what is typed, as Save does — the
+   * first address may be in the field. Switching OFF sends only that: the
+   * fields can hold an address the route would refuse, and turning sending off
+   * must not wait on it, nor throw away what is typed and not saved.
+   */
+  const toggle = useCallback(async (enabled: boolean) => {
+    if (enabled) {
+      await save(true);
+      return;
+    }
+    const json = await send("POST", { enabled: false });
+    if (json && isSnapshot(json)) {
+      setSnapshot(json);
+      setNote({ kind: "ok", text: t("settings.email.draftApproval.saved") });
+    }
+  }, [save, send, t]);
+
   const test = useCallback(async () => {
     const json = await send("POST", { action: "test" });
     if (!json) return;
@@ -201,7 +224,7 @@ export default function MailDraftApprovalPanel() {
               data-testid="settings-email-draft-approval-toggle"
               checked={snapshot.enabled}
               disabled={busy || (!snapshot.endpoint && !endpoint.trim())}
-              onChange={(e) => { void save(e.target.checked); }}
+              onChange={(e) => { void toggle(e.target.checked); }}
               className="mt-0.5 accent-[var(--coral-bright)]"
             />
             <span className="block text-sm text-[var(--text-primary)] font-medium">{t("settings.email.draftApproval.enabled")}</span>
@@ -289,15 +312,16 @@ export default function MailDraftApprovalPanel() {
           )}
         </div>
 
-        {note && (
-          <p
-            role="status"
-            data-testid="settings-email-draft-approval-note"
-            className={note.kind === "ok" ? "text-xs text-emerald-300/90" : "text-xs text-red-300/90"}
-          >
-            {note.text}
-          </p>
-        )}
+        {/* Mounted before there is anything to say: a status region that appears
+            with its text already inside is often not announced. Empty, it takes
+            no room (sr-only); the result is written into it when it arrives. */}
+        <p
+          role="status"
+          data-testid="settings-email-draft-approval-note"
+          className={!note ? "sr-only" : note.kind === "ok" ? "text-xs text-emerald-300/90" : "text-xs text-red-300/90"}
+        >
+          {note?.text}
+        </p>
       </div>
     </div>
   );

@@ -112,6 +112,25 @@ describe("normalizeDraft", () => {
     });
   });
 
+  it("reads a body type that is a string, and refuses one that is not — without throwing", () => {
+    expect(draftOf({ ...BASE, bodyType: "HTML" }).bodyType).toBe("html");
+    expect(draftOf({ ...BASE, bodyType: "plain" }).bodyType).toBe("text");
+    expect(draftOf({ ...BASE, bodyType: null }).bodyType).toBe("text");
+    const bare = { ...BASE };
+    delete bare.bodyType;
+    expect(draftOf(bare).bodyType).toBe("text");
+    expect(draftOf({ ...BASE, body: { contentType: "HTML", content: "<p>x</p>" } }).bodyType).toBe("html");
+    // `String({toString: 1})` throws a TypeError; a backend's JSON can say that.
+    const hostile = [{ toString: 1 }, { toString: 1, valueOf: {} }, 1, true, ["html"]];
+    for (const bodyType of hostile) {
+      expect(() => normalizeDraft({ ...BASE, bodyType }, "d1"), JSON.stringify(bodyType)).not.toThrow();
+      expect(normalizeDraft({ ...BASE, bodyType }, "d1"), JSON.stringify(bodyType)).toBeNull();
+      const graph = { ...BASE, body: { contentType: bodyType, content: "x" } };
+      expect(() => normalizeDraft(graph, "d1")).not.toThrow();
+      expect(normalizeDraft(graph, "d1")).toBeNull();
+    }
+  });
+
   it("refuses an answer about another draft, or one it cannot read whole", () => {
     expect(normalizeDraft({ id: "other", to: [], subject: "", body: "" }, "d1")).toBeNull();
     expect(normalizeDraft({ to: [42], subject: "", body: "" }, "d1")).toBeNull();
@@ -154,6 +173,15 @@ describe("draftContentHash", () => {
 
   it("is sha256 over a prefix and the canonical JSON, as the docs say", () => {
     expect(canonicalJson({ b: 1, a: [{ d: 2, c: "x" }] })).toBe('{"a":[{"c":"x","d":2}],"b":1}');
+    // A fixed vector, so a backend that recomputes the hash from the docs agrees
+    // with ClawBox, and a change of algorithm or prefix cannot slip through the
+    // relative assertions above. The digest is of
+    //   "clawbox-mail-draft/v2\n" + this canonical text
+    // as `printf ... | sha256sum` gives it, not as this module computes it.
+    expect(canonicalJson(BASE)).toBe(
+      '{"attachments":[],"bcc":[],"body":"Body","bodyType":"text","cc":[],"id":"d1","subject":"Hello","to":["ivan@example.com"]}',
+    );
+    expect(draftContentHash(BASE)).toBe("486400710f35e162a632768352574713f1ddde9f9872280dc83c946b76c8d7d5");
   });
 });
 
@@ -281,6 +309,27 @@ describe("what a card shows", () => {
     expect(huge.bodyTruncated).toBe(true);
   });
 
+  it("offers no Send when an image description was cut, and still does when it fits", () => {
+    const img = (alt: string) => `<p>Hi</p><img src="https://cdn.example.com/a.png" alt="${alt}">`;
+    const cut = draftView(draftOf({ ...BASE, bodyType: "html", body: img("a".repeat(301)) }));
+    expect(cut.bodyTruncated).toBe(true);
+    expect(cut.body).toContain(`[${"a".repeat(300)}]`);
+    const whole = draftView(draftOf({ ...BASE, bodyType: "html", body: img("a".repeat(300)) }));
+    expect(whole.bodyTruncated).toBe(false);
+    expect(whole.body).toContain(`[${"a".repeat(300)}]`);
+  });
+
+  it("does not call a body cut when the last run of text was taken whole at the node ceiling", () => {
+    // 11,999 line breaks, then the final words: node 12,000 is the last one the
+    // sanitiser keeps, and nothing after it is left unread.
+    const exact = draftView(draftOf({ ...BASE, bodyType: "html", body: `${"<br>".repeat(11_999)}Done` }));
+    expect(exact.body).toBe("Done");
+    expect(exact.bodyTruncated).toBe(false);
+    // One more node than it keeps is a real cut.
+    const over = draftView(draftOf({ ...BASE, bodyType: "html", body: `${"<br>".repeat(11_999)}Done<br>Tail` }));
+    expect(over.bodyTruncated).toBe(true);
+  });
+
   it("offers no Send when the HTML sanitiser had to drop part of the body", () => {
     // One run of text past the sanitiser's ceiling: the words that come out are
     // far under the preview cap, so only the sanitiser can say it was cut.
@@ -395,10 +444,28 @@ describe("talking to the backend", () => {
   it("probes with an id nobody has", async () => {
     stub(404, {}, (url) => expect(url).toMatch(/\/drafts\/clawbox-probe-[0-9a-f]{12}\?user=u$/));
     expect(await probeBackend(CONFIG, "u")).toBe("ok");
+    stub(410, {});
+    expect(await probeBackend(CONFIG, "u")).toBe("ok");
     stub(401, {});
     expect(await probeBackend(CONFIG, "u")).toBe("auth");
     stub(500, {});
     expect(await probeBackend(CONFIG, "u")).toBe("bad_response");
+  });
+
+  it("does not call a 200 that is not a draft a healthy backend", async () => {
+    // Some other service on the port: a page, an empty answer, JSON that is no draft.
+    stub(200, "<!doctype html><title>It works</title>");
+    expect(await probeBackend(CONFIG, "u")).toBe("bad_response");
+    stub(200, "");
+    expect(await probeBackend(CONFIG, "u")).toBe("bad_response");
+    stub(200, { status: "up", subject: 5 });
+    expect(await probeBackend(CONFIG, "u")).toBe("bad_response");
+    // A draft for some other id is a backend that is confused, as a card would find.
+    stub(200, { id: "another-draft", to: ["x@example.com"], subject: "S", body: "B" });
+    expect(await probeBackend(CONFIG, "u")).toBe("bad_response");
+    // One that answers the probe like a draft, as a card would read it, is reachable and reading.
+    stub(200, { to: ["x@example.com"], subject: "S", body: "B" });
+    expect(await probeBackend(CONFIG, "u")).toBe("ok");
   });
 
   it("does not call anything without an endpoint", async () => {

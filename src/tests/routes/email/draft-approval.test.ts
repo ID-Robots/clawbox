@@ -34,6 +34,7 @@ interface Draft {
   replyTo?: string[];
   subject: string;
   body: string;
+  bodyType?: string;
 }
 
 let root: string;
@@ -503,6 +504,34 @@ describe("Send", () => {
     expect(sends).toHaveLength(1);
   });
 
+  it("refuses a Send for a draft whose preview was cut, even with a valid approval, and leaves Keep and Revise open", async () => {
+    // The card offers no Send for these; the server must not either, for a caller that skips the card.
+    const cut: [string, Partial<Draft>, string][] = [
+      ["a subject over the cap", { subject: "s".repeat(1001) }, "headerTruncated"],
+      ["an HTML run past the sanitiser's ceiling", { bodyType: "html", body: `<p>${"x".repeat(100_000)}</p>` }, "bodyTruncated"],
+    ];
+    for (const [name, patch, flag] of cut) {
+      mailbox[OWNER][DRAFT_ID] = { id: DRAFT_ID, to: ["a@example.com"], cc: [], subject: "Cut", body: "Body", ...patch };
+      const minted = await mint(ownerCookie());
+      expect(minted.json.draft, name).toMatchObject({ [flag]: true });
+      const refused = await answer(ownerCookie(), minted.json.token, "send");
+      expect(refused.status, name).toBe(409);
+      expect(refused.json, name).toMatchObject({ kind: "too_long" });
+      expect(sends, name).toEqual([]);
+      // Nothing was sent and the card was given back: it can still be answered, again and otherwise.
+      expect((await answer(ownerCookie(), minted.json.token, "send")).json.kind, name).toBe("too_long");
+      expect((await answer(ownerCookie(), minted.json.token, "keep")).json, name).toEqual({ state: "kept" });
+      const again = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+      expect((await answer(ownerCookie(), again.json.token, "revise")).json, name).toEqual({ state: "revised" });
+      expect(sends, name).toEqual([]);
+    }
+    // A draft shown whole is sent as before.
+    mailbox[OWNER][DRAFT_ID] = { id: DRAFT_ID, to: ["a@example.com"], cc: [], subject: "Whole", body: "x".repeat(900_000) };
+    const whole = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect((await answer(ownerCookie(), whole.json.token, "send")).status).toBe(200);
+    expect(sends).toHaveLength(1);
+  });
+
   /**
    * Two open cards for ONE draft: card A close to its expiry is no longer
    * handed out, so a later look makes card B, and both stay valid.
@@ -610,7 +639,9 @@ describe("Send", () => {
     mailbox[OWNER]["second-draft"] = { id: "second-draft", to: ["b@example.com"], cc: [], subject: "Two", body: "2" };
     expect((await mint(ownerCookie(), "second-draft")).json.state).toBe("open");
     const trimmed = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as { cards: { d: string; state: string }[] };
-    expect(trimmed.cards.length).toBeLessThanOrEqual(2001);
+    // The cap is 2000 records, the pinned one among them: 1999 of the 2001
+    // newer ones stay beside it, not all of them plus the pin.
+    expect(trimmed.cards).toHaveLength(2000);
     expect(trimmed.cards.some((c) => c.d === DRAFT_ID && c.state === "uncertain")).toBe(true);
     // ...and the lost Send is still not offered again on a plain look.
     sendAnswer = 200;
@@ -744,6 +775,53 @@ describe("Send", () => {
     expect(reopened.json.state).toBe("open");
     expect((await answer(ownerCookie(), String(reopened.json.token), "send")).status).toBe(200);
     expect(sends).toHaveLength(1);
+  });
+
+  it("neither Keep nor Revise is confirmed while another card is sending that version", async () => {
+    const { a, b } = await twoCards();
+    let release!: () => void;
+    gate = { id: DRAFT_ID, hit: false, wait: new Promise<void>((resolve) => { release = resolve; }) };
+    // Card A's Send has claimed the draft and is reading it...
+    const sending = answer(ownerCookie(), a, "send");
+    await vi.waitFor(() => expect(gate?.hit).toBe(true));
+    // ...when the person answers the same version on card B: not confirmed, and nothing changed.
+    for (const action of ["keep", "revise"]) {
+      const declined = await answer(ownerCookie(), b, action);
+      expect(declined.status, action).toBe(409);
+      expect(declined.json, action).toMatchObject({ kind: "reused", state: "sending" });
+    }
+    release();
+    expect((await sending).json).toEqual({ state: "sent" });
+    expect(sends).toHaveLength(1);
+  });
+
+  it("a Send that stopped before sending cannot reopen a version whose decline was confirmed", async () => {
+    const { a, b } = await twoCards();
+    let fail!: () => void;
+    // Card A's read of the draft fails after the claim.
+    vi.mocked(fetch).mockImplementationOnce(() => new Promise<Response>((_, reject) => { fail = () => reject(new TypeError("fetch failed")); }));
+    const sending = answer(ownerCookie(), a, "send");
+    await vi.waitFor(() => expect(typeof fail).toBe("function"));
+    expect((await answer(ownerCookie(), b, "keep")).json).toMatchObject({ kind: "reused", state: "sending" });
+    fail();
+    expect((await sending).json.kind).toBe("backend_unreachable");
+    // The Send is over and nothing went: the decline is confirmed now, for BOTH cards.
+    expect((await answer(ownerCookie(), b, "keep")).json).toEqual({ state: "kept" });
+    expect((await answer(ownerCookie(), a, "send")).json).toMatchObject({ kind: "reused", state: "kept" });
+    expect(sends).toEqual([]);
+  });
+
+  it("a Send claim that is past the time a Send can take no longer holds up Keep", async () => {
+    const { a, b, t0 } = await twoCards();
+    const ledgerPath = path.join(root, "data", "mail-draft-approvals.json");
+    const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as { cards: { c: string; state: string; at: number }[] };
+    const claimedAt = t0 + 482_000;
+    Object.assign(ledger.cards.find((entry) => entry.c === cardIdOf(a))!, { state: "sending", at: claimedAt });
+    fs.writeFileSync(ledgerPath, JSON.stringify(ledger));
+    vi.setSystemTime(claimedAt + 60_000);
+    expect((await answer(ownerCookie(), b, "keep")).json).toMatchObject({ kind: "reused", state: "sending" });
+    vi.setSystemTime(claimedAt + 121_000);
+    expect((await answer(ownerCookie(), b, "keep")).json).toEqual({ state: "kept" });
   });
 
   it("Keep leaves the approvals for another version of the draft alone", async () => {

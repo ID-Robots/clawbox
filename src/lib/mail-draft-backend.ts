@@ -310,6 +310,18 @@ function attachments(value: unknown): DraftAttachment[] | null {
 }
 
 /**
+ * The body type a backend named. Absent is text; anything but a string is an
+ * answer ClawBox cannot read (null). Never `String(value)`: a backend's JSON
+ * such as `{"toString": 1}` makes that throw, and a throw here would leave a
+ * card claimed for Send.
+ */
+function bodyTypeOf(value: unknown): "text" | "html" | null {
+  if (value === undefined || value === null) return "text";
+  if (typeof value !== "string") return null;
+  return value.toLowerCase() === "html" ? "html" : "text";
+}
+
+/**
  * A backend's draft JSON, normalised — or null when it is not one.
  *
  * Two shapes are read: the simple one docs/email-draft-approval.md describes
@@ -344,10 +356,14 @@ export function normalizeDraft(json: unknown, requestedId: string): MailDraft | 
   if (graphBody) {
     if (typeof graphBody.content !== "string") return null;
     body = graphBody.content;
-    bodyType = String(graphBody.contentType).toLowerCase() === "html" ? "html" : "text";
+    const type = bodyTypeOf(graphBody.contentType);
+    if (type === null) return null;
+    bodyType = type;
   } else if (typeof draft.body === "string") {
     body = draft.body;
-    bodyType = String(draft.bodyType ?? "text").toLowerCase() === "html" ? "html" : "text";
+    const type = bodyTypeOf(draft.bodyType);
+    if (type === null) return null;
+    bodyType = type;
   } else if (draft.body != null) {
     return null;
   }
@@ -551,13 +567,16 @@ export type ProbeResult = "ok" | BackendFailure;
 /**
  * "Can ClawBox reach the backend, and does it accept the header?" — asked by
  * the owner's Test button. Reads a draft id nobody has, so it touches nothing:
- * a 404 is the healthy answer.
+ * a 404 is the healthy answer, and a 200 is one only when it reads as a draft.
  */
 export async function probeBackend(config: DraftApprovalConfig, user: string): Promise<ProbeResult> {
   const probeId = `clawbox-probe-${randomBytes(6).toString("hex")}`;
   const raw = await call(config, `${draftPath(probeId)}?user=${encodeURIComponent(user)}`, { method: "GET" });
   if (!raw.ok) return raw.reason === "too_large" ? "bad_response" : "unreachable";
-  if (raw.status === 404 || raw.status === 410 || raw.status === 200) return "ok";
+  if (raw.status === 404 || raw.status === 410) return "ok";
+  // A 200 is healthy only when it is a draft ClawBox can read, as a card would
+  // read it: a port serving some other page answers 200 too.
+  if (raw.status === 200) return normalizeDraft(raw.json, probeId) ? "ok" : "bad_response";
   if (raw.status === 401 || raw.status === 403) return "auth";
   return "bad_response";
 }

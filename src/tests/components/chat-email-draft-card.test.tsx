@@ -154,6 +154,16 @@ describe("EmailDraftCard", () => {
     await waitFor(() => expect(screen.getByTestId("chat-email-draft-body").textContent).toBe("New body"));
   });
 
+  it("says a Send for a draft too long to show whole is refused, and offers the current look", async () => {
+    // The server's own refusal, for a card whose preview was cut (the card itself offers no Send for it).
+    decideAnswers = [{ status: 409, body: { kind: "too_long" } }];
+    render(<EmailDraftCard draftId="AAMk-1=" t={t} />);
+    fireEvent.click(await screen.findByTestId("chat-email-draft-send"));
+    await waitFor(() => expect(screen.getByTestId("chat-email-draft-status").textContent).toBe("chat.emailDraft.tooLong"));
+    expect(screen.getByTestId("chat-email-draft").getAttribute("data-state")).toBe("too_long");
+    expect(screen.getByTestId("chat-email-draft-reload")).toBeTruthy();
+  });
+
   it("does not pass a change request on for a card that already went out or is someone else's", async () => {
     const sent: string[] = [];
     const listener = (e: Event) => sent.push((e as CustomEvent<ChatMessageDetail>).detail.text);

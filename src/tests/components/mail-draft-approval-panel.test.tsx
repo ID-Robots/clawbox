@@ -33,6 +33,18 @@ function stubReads(answers: (Response | Error)[]) {
   return fetchMock;
 }
 
+/** Answers a read with the setting and records every write's body. */
+function stubWrites(after: (body: Record<string, unknown>) => Record<string, unknown> = () => ({})) {
+  const writes: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+    if (init?.method !== "POST") return Response.json(SNAPSHOT);
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    writes.push(body);
+    return Response.json({ success: true, ...SNAPSHOT, ...after(body) });
+  }));
+  return writes;
+}
+
 const ok = (body: unknown) => Response.json(body);
 const code = (status: number) => new Response("{}", { status });
 
@@ -69,6 +81,64 @@ describe("MailDraftApprovalPanel", () => {
     expect((endpoint as HTMLInputElement).value).toBe("http://127.0.0.1:8790");
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(screen.queryByTestId("settings-email-draft-approval-retry")).toBeNull();
+  });
+
+  it("reads a snapshot the route says it could not read as a failed read, not as what is saved", async () => {
+    // `unknown: true`: the route's fields are fallbacks, not the setting.
+    const fetchMock = stubReads([
+      ok({ enabled: false, endpoint: null, authHeader: "Authorization", hasAuth: false, active: false, unknown: true }),
+      ok({ ...SNAPSHOT, unknown: false }),
+    ]);
+    render(<MailDraftApprovalPanel />);
+    expect((await screen.findByTestId("settings-email-draft-approval-note")).textContent)
+      .toBe("settings.email.draftApproval.readFailed");
+    expect(screen.queryByTestId("settings-email-draft-approval-endpoint")).toBeNull();
+    fireEvent.click(screen.getByTestId("settings-email-draft-approval-retry"));
+    // A known snapshot is adopted as before.
+    const endpoint = await screen.findByTestId("settings-email-draft-approval-endpoint");
+    expect((endpoint as HTMLInputElement).value).toBe("http://127.0.0.1:8790");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("settings-email-draft-approval-retry")).toBeNull();
+  });
+
+  it("switching sending off sends only that, and keeps what is typed and not yet saved", async () => {
+    const writes = stubWrites((body) => ({ enabled: body.enabled }));
+    render(<MailDraftApprovalPanel />);
+    const endpoint = (await screen.findByTestId("settings-email-draft-approval-endpoint")) as HTMLInputElement;
+    const authValue = screen.getByTestId("settings-email-draft-approval-auth-value") as HTMLInputElement;
+    const toggle = screen.getByTestId("settings-email-draft-approval-toggle") as HTMLInputElement;
+    // An address the route would refuse, and a credential not saved yet.
+    fireEvent.change(endpoint, { target: { value: "not an address" } });
+    fireEvent.change(authValue, { target: { value: "Bearer typed-placeholder" } });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle.checked).toBe(false));
+    expect(writes).toEqual([{ enabled: false }]);
+    expect(endpoint.value).toBe("not an address");
+    expect(authValue.value).toBe("Bearer typed-placeholder");
+    expect(screen.getByTestId("settings-email-draft-approval-note").textContent).toBe("settings.email.draftApproval.saved");
+    // Switching it on again carries what is typed, as Save does: the first address may be in the field.
+    await waitFor(() => expect(toggle.disabled).toBe(false));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(writes).toHaveLength(2));
+    expect(writes[1]).toEqual({
+      endpoint: "not an address",
+      authHeader: "Authorization",
+      authValue: "Bearer typed-placeholder",
+      enabled: true,
+    });
+  });
+
+  it("keeps the status region in the page before a save answers, and writes the result into it", async () => {
+    stubWrites();
+    render(<MailDraftApprovalPanel />);
+    const region = await screen.findByTestId("settings-email-draft-approval-note");
+    // Present, announced as a status, and empty: nothing said yet.
+    expect(region.getAttribute("role")).toBe("status");
+    expect(region.textContent).toBe("");
+    fireEvent.click(screen.getByTestId("settings-email-draft-approval-save"));
+    await waitFor(() => expect(region.textContent).toBe("settings.email.draftApproval.saved"));
+    // The same element, not one inserted with its words already inside.
+    expect(screen.getByTestId("settings-email-draft-approval-note")).toBe(region);
   });
 
   it("offers the same Retry when the connection drops or the answer is not the setting", async () => {

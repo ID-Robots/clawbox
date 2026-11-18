@@ -178,6 +178,8 @@ const MAX_DEPTH = 24;
 const MAX_NODES = 12_000;
 /** Longest single run of text kept as one node. */
 const MAX_TEXT_RUN = 40_000;
+/** Longest image `alt` kept. */
+const MAX_ALT = 300;
 
 /** Protocols a link may use. Everything else — `javascript:` above all — goes. */
 export function isSafeHref(href: string): boolean {
@@ -369,6 +371,10 @@ export function sanitizeEmailHtmlReporting(
     const lt = html.indexOf("<", i);
     if (lt < 0) {
       pushText(html.slice(i));
+      // The last run of text is taken whole (or reported cut by `pushText`):
+      // nothing is left unread, so the check after the loop must not say there
+      // is.
+      i = html.length;
       break;
     }
     if (lt > i) pushText(html.slice(i, lt));
@@ -404,9 +410,14 @@ export function sanitizeEmailHtmlReporting(
       if (tag.closing) continue;
       const resolved = resolveImage(attrValue(tag.attrs, "src") ?? "");
       if (resolved.src !== undefined || resolved.remoteHost !== undefined) {
+        // An alt past the cap is cut like any other text past a ceiling, and
+        // said so: the reader of `truncated` must not offer Send for a message
+        // it showed only in part.
+        const alt = attrValue(tag.attrs, "alt") ?? "";
+        if (alt.length > MAX_ALT) truncated = true;
         pushNode({
           type: "image",
-          alt: (attrValue(tag.attrs, "alt") ?? "").slice(0, 300),
+          alt: alt.slice(0, MAX_ALT),
           ...resolved,
         });
       }

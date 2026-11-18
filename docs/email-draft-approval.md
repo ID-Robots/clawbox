@@ -75,7 +75,9 @@ following, in order, and refuses if any check fails:
 | The card is still open (not sent, kept, revised or claimed by a parallel press) | 409 `reused` |
 | Send only: no other card of this person has sent this draft, is sending it, or lost the answer to sending it after this card was made | 409 `reused`, with `state` `sent`, `sending` or `uncertain` |
 | The token has not expired | 410 `expired` |
+| Keep or Revise only: no other card for the same draft version is sending it right now | 409 `reused`, with `state` `sending` (nothing is changed) |
 | Send only: the draft re-read from the backend still has the approved hash | 409 `changed` |
+| Send only: the preview of that draft was shown whole (see below) | 409 `too_long`, the card stays open |
 
 Only then does the server call the backend's send endpoint. A Send claims the
 card **before** the re-read, so two presses or two tabs cannot both send it.
@@ -126,7 +128,11 @@ outstanding for the draft version they decline — that person, that draft, that
 hash — not only the card they were pressed on. Two cards for one version exist
 in two tabs, or across an expiry, and the second must not be able to send the
 version the person has just asked to change. Approvals for other versions are
-untouched, and an explicit **Review again** opens a card that can send.
+untouched, and an explicit **Review again** opens a card that can send. While a
+Send of that version is running from another card, neither answer is confirmed:
+that Send may still go out, or, if its read of the draft fails, put its card back
+to open. The server answers `reused` with `state: "sending"` and changes nothing;
+the person can answer again once the Send has finished.
 
 In the chat, a Send whose answer never reaches the browser (the connection
 dropped, or something other than ClawBox answered, such as a proxy's error
@@ -159,11 +165,14 @@ offers **Check again**.
   that ever had to be cut offers no Send — including a cut the HTML sanitiser
   made rather than the preview limit: a body with more nodes than it keeps
   (12 000) or one run of text longer than it keeps (40 000 characters) is
-  reported as truncated, however short the words that came out of it are. The
-  same applies to a subject (over
-  1000 characters) or an attachment name (over 200) that had to be cut. A
+  reported as truncated, however short the words that came out of it are, and
+  so is an image description over 300 characters. The same applies to a subject
+  (over 1000 characters) or an attachment name (over 200) that had to be cut. A
   recipient is never cut: one over 400 characters makes the draft unreadable,
-  and ClawBox refuses it as the backend giving an answer it could not read.
+  and ClawBox refuses it as the backend giving an answer it could not read. The
+  server enforces this as well as the card: a Send for a draft whose preview was
+  cut is refused with 409 `too_long` after the re-read, and nothing is sent.
+  **Keep as draft** and **Tell me what to change** stay available for it.
 - **Tell me what to change** goes to the assistant only after the server has
   closed the card as `revised`. If the close fails, the request stays in the
   box, read-only, and nothing is sent to the assistant. When a look reopens
@@ -192,6 +201,8 @@ Only the owner's signed-in browser can read or change this setting
 failed read with a **Try again** that reads it once more, so the setting is
 never silently absent. The **Test connection** button reads a
 draft id nobody has, so a healthy backend answers 404 and nothing is touched.
+A 200 passes only when it reads as a draft; any other page on that port is
+reported as an answer ClawBox could not read.
 
 ### Contract
 
@@ -237,9 +248,14 @@ HTML body is shown as text, through the same sanitiser the mail viewer uses.
 Draft ids are one word of letters, digits and `. _ ~ + / = : @ -`, never only
 dots, and are percent-encoded into the path.
 
-`user` is the ClawBox user the card belongs to. A backend that serves one
-mailbox per person maps it to that person's mailbox. A backend for a single
-mailbox can ignore it.
+`user` is the ClawBox user the card belongs to. A backend must serve each
+person's own mailbox: it maps `user` to that person's mailbox and answers 404
+for a draft that is not theirs. ClawBox does not check who owns a draft; `user`
+is the only thing that keeps one person's drafts from another's. On a box with
+one person (the owner) a backend for a single mailbox can ignore `user`. **A
+backend for a single shared mailbox is not supported on an organisation box**:
+there any member who knows a draft id would read that draft and send it from
+the shared mailbox.
 
 ```
 POST {endpoint}/drafts/{id}/send
@@ -259,13 +275,16 @@ Sends that draft.
 | Other 4xx | Refused, not sent |
 | 5xx, or no answer | The outcome is unknown |
 
-Between ClawBox's re-read and the backend's send there is a short window. A
-backend that can should close it. It can recompute `contentHash` over its own
-current answer, as described above, or send with the mail provider's own
-concurrency check (for Graph, the message's `changeKey`). It answers 409 if the
-draft no longer matches. Include attachment contents or a digest in the draft
-JSON if attachment swaps should be caught. A Graph backend can use
-`$expand=attachments`.
+Between ClawBox's re-read and the backend's send there is a short window in
+which the draft can still be edited, and only the backend can close it. **A
+conforming backend must refuse to send a draft that no longer matches the
+`contentHash` it was given, and answer 409 (or 412).** It does that by
+recomputing `contentHash` over its own current answer, as described above, or
+by sending with the mail provider's own concurrency check (for Graph, the
+message's `changeKey`). A backend that does neither does not meet this
+contract: the approval then covers the draft only up to ClawBox's re-read.
+Include attachment contents or a digest in the draft JSON if attachment swaps
+should be caught. A Graph backend can use `$expand=attachments`.
 
 ## Who can do what
 
@@ -284,7 +303,9 @@ No MCP tool names the `card` or `decide` routes.
 On an organisation box each card is bound to the member who opened it. The
 backend is asked about, and sends from, that member's mailbox
 (`user=<their username>`). The owner cannot send a member's card, and a member
-cannot send the owner's.
+cannot send the owner's. This relies on a backend that keeps one mailbox per
+person, so a backend for a single shared mailbox is not supported here (see
+`user` in the contract).
 
 Two limits apply to members of staff today:
 

@@ -134,6 +134,7 @@ export function refusalKey(kind: string, state?: unknown): string {
     case 'backend_auth':
     case 'backend_bad': return 'chat.emailDraft.error.backend'
     case 'changed': return 'chat.emailDraft.error.changed'
+    case 'too_long': return 'chat.emailDraft.tooLong'
     case 'expired': return 'chat.emailDraft.error.expired'
     case 'reused': return state === 'sent' ? 'chat.emailDraft.error.alreadySent' : 'chat.emailDraft.error.reused'
     case 'other_user': return 'chat.emailDraft.error.otherUser'
@@ -152,7 +153,7 @@ export function refusalKey(kind: string, state?: unknown): string {
  * settled records age out — the server says "try again later", so the card
  * offers that rather than a dead end.
  */
-const RELOADABLE = new Set(['changed', 'expired', 'backend_unreachable', 'backend_bad', 'unavailable', 'network', 'no_room'])
+const RELOADABLE = new Set(['changed', 'too_long', 'expired', 'backend_unreachable', 'backend_bad', 'unavailable', 'network', 'no_room'])
 
 function isDraftView(value: unknown): value is EmailDraftView {
   const v = value as Partial<EmailDraftView> | null
@@ -244,6 +245,7 @@ export function EmailDraftCard({ draftId, t }: EmailDraftCardProps) {
     setPhase(next ?? { kind: 'failed', reason: typeof answer.json.kind === 'string' ? answer.json.kind : 'unavailable' })
   }, [draftId])
 
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- the card reads its draft from the server when it appears: an external system, which `load` also shows as `loading`
   useEffect(() => { void load(false) }, [load])
 
   /**

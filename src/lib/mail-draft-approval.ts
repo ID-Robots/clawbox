@@ -300,6 +300,11 @@ function lostAt(card: CardEntry, now: number): number | null {
   return null;
 }
 
+/** A Send claim that may still be running: claimed, and not yet old enough to be called lost. */
+function sendingNow(card: CardEntry, now: number): boolean {
+  return card.state === "sending" && now - card.at <= SENDING_STALE_MS;
+}
+
 /**
  * What stops `card` from sending its draft, judged across EVERY card of the
  * same person for the same draft — one Send per draft, not one per card. Two
@@ -320,7 +325,7 @@ function sendBlocker(cards: CardEntry[], card: CardEntry, now: number): "sent" |
   for (const other of cards) {
     if (other.c === card.c || other.u !== card.u || other.d !== card.d) continue;
     if (other.state === "sent") return "sent";
-    if (other.state === "sending" && now - other.at <= SENDING_STALE_MS) {
+    if (sendingNow(other, now)) {
       blocker = "sending";
       continue;
     }
@@ -660,13 +665,33 @@ export async function decideCard(
       // asked to change (`sendBlocker` has no reason to stop it: nothing was
       // sent). Other versions keep their cards, and a Review again opens a new
       // one as before.
-      moved = transition(card.c, "open", to, now, undefined, (cards, entry) =>
-        cards.filter((other) => other.state === "open" && other.u === entry.u && other.d === entry.d && other.h === entry.h),
+      //
+      // Not while a Send of that very version is running from another card: it
+      // may yet send the draft (or, if its read fails, put its card back to
+      // open), so "kept" or "revised" would confirm a decline the Send is about
+      // to make untrue. Judged in the same read-modify-write as the move, and
+      // answered as `sending` — nothing was changed.
+      moved = transition(
+        card.c,
+        "open",
+        to,
+        now,
+        (cards, entry) =>
+          cards.some((other) => other.c !== entry.c && other.u === entry.u && other.d === entry.d && other.h === entry.h && sendingNow(other, now))
+            ? "sending"
+            : null,
+        (cards, entry) =>
+          cards.filter((other) => other.state === "open" && other.u === entry.u && other.d === entry.d && other.h === entry.h),
       );
     } catch {
       return UNAVAILABLE();
     }
-    if (!moved.ok) return refusal(409, "reused", "This approval was already used.", { state: moved.state });
+    if (!moved.ok) {
+      if (moved.blocked) {
+        return refusal(409, "reused", "This draft is being sent from another card, so it cannot be kept or changed now. Nothing was changed.", { state: "sending" });
+      }
+      return refusal(409, "reused", "This approval was already used.", { state: moved.state });
+    }
     return { status: 200, body: { state: to } };
   }
 
@@ -715,6 +740,21 @@ export async function decideCard(
   if (hash !== claims.h) {
     close("changed");
     return refusal(409, "changed", "The draft changed after this card was shown, so it was not sent. Review the current version.");
+  }
+
+  // 5b. A draft whose card could not show it whole is not sent from here, even
+  //     when a caller skips the card's own refusal to offer Send: the person
+  //     would be approving words, recipients or a file name they never saw.
+  //     The card stays open, so Keep and Revise still work. The hash matched,
+  //     so this is the very preview the card drew.
+  const preview = draftView(fetched.draft);
+  if (preview.bodyTruncated || preview.headerTruncated) {
+    unclaim();
+    return refusal(
+      409,
+      "too_long",
+      "This draft is too long for ClawBox to show whole, so it cannot be sent from the chat. Nothing was sent. Send it from your mail app.",
+    );
   }
 
   // 6. Send — with the hash, so a backend that checks can refuse a draft
