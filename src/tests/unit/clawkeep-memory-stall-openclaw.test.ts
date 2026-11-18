@@ -312,9 +312,12 @@ describe("an OpenClaw pass off a terminal that rewrites chunks without adding an
 });
 
 describe("an OpenClaw pass whose descendant keeps its pipe open", () => {
-  it("ends once the indexer has exited, without waiting for the descendant", async () => {
+  it("ends once the indexer has exited, without waiting for the descendant — and not as stalled", async () => {
     // `close` waits for the pipes; a helper that inherited stderr held the
     // attempt (and the lock, and the offline gateway) for as long as it lived.
+    // A stall window shorter than the drain must not turn the exit 0 into
+    // `stalled` while the pipes are let go.
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "4000";
     noTerminal();
     const holder = path.join(tmpDir, "holder.pid");
     await fakeIndexer({ steps: 1, stepMs: 100, holdPipe: holder });
@@ -324,6 +327,11 @@ describe("an OpenClaw pass whose descendant keeps its pipe open", () => {
       expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
       expect(await settledMemoryRun(tmpDir, { tries: 1_500 })).toMatchObject({ status: "succeeded", errorCode: "" });
       expect(Date.now() - startedAt).toBeLessThan(25_000);
+      // The descendant really was there, and is still alive now: the run did
+      // not settle because it went away.
+      const pid = Number(await fs.readFile(holder, "utf8"));
+      expect(pid).toBeGreaterThan(0);
+      expect(() => process.kill(pid, 0)).not.toThrow();
     } finally {
       const pid = Number(await fs.readFile(holder, "utf8").catch(() => "0"));
       if (pid > 0) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }

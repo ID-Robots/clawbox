@@ -2882,6 +2882,7 @@ function startOpenclawAttempt(
   // the next tick, which without a listener is an unhandled event.
   /** See the `exit` listener below. */
   let pipesOpen: NodeJS.Timeout | undefined;
+  let draining: NodeJS.Timeout | undefined;
   const ended = new Promise<PassOutcome>((resolve) => {
     child.once("error", (err) => {
       stopPolling();
@@ -2889,6 +2890,7 @@ function startOpenclawAttempt(
     });
     child.once("close", (code, signal) => {
       clearTimeout(pipesOpen);
+      clearInterval(draining);
       stopPolling();
       resolve({ kind: "exit", code, signal });
     });
@@ -2899,6 +2901,13 @@ function startOpenclawAttempt(
   // are let go PIPES_AFTER_EXIT_MS later, which closes them and ends the
   // attempt with the exit's own code. Never while the indexer still runs.
   child.once("exit", () => {
+    // The indexer is done; what is left is its pipes draining, which is not
+    // a pass that stopped moving. Told to the stall watchdog until `close`
+    // (at most PIPES_AFTER_EXIT_MS), so a window shorter than the drain does
+    // not call an indexer that exited 0 stalled.
+    onActivity();
+    draining = setInterval(onActivity, 1_000);
+    draining.unref?.();
     pipesOpen = setTimeout(() => {
       child.stdout?.destroy();
       child.stderr?.destroy();
