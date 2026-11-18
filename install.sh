@@ -1479,6 +1479,9 @@ EXPECTED_ACTIVE_SERVICES=(
   clawbox-heartbeat.timer
   clawbox-ap-watchdog.timer
   clawbox-codex-auth-sync.timer
+  # ClawBox Vault, the built-in password manager (vault/). Every edition: it is
+  # ClawBox's own service, the same under OpenClaw and Hermes. Loopback only.
+  clawbox-vault.service
 )
 EXPECTED_INSTALLED_SERVICES=(
   clawbox-wifi-failover.service
@@ -4502,6 +4505,137 @@ ensure_pipx() {
 
 # dpkg_installed PACKAGE — true when dpkg has PACKAGE installed, whatever apt was
 # asked to want (install, hold or deinstall); never an apt-get exit code.
+# ClawBox Vault's storage (vault/src/server/pass.ts): `pass` keeps each login as
+# a GnuPG-encrypted file in a git-tracked folder, so the vault needs pass and
+# gnupg (and git, which the base package line carries). Asked by step_apt_update,
+# which every full install and every in-app update runs, and again by
+# ensure_vault_service for a box that reached post_update by another road.
+#
+# Never fatal to its caller: without them the vault still runs and says what is
+# missing in its own window. Which ones are missing is read back from dpkg,
+# never from apt-get's exit code. Returns 1 when one is still missing.
+ensure_vault_packages() {
+  local pkg="" missing=""
+  for pkg in pass gnupg; do
+    dpkg_installed "$pkg" || missing="$missing $pkg"
+  done
+  [ -n "$missing" ] || return 0
+  if ! wait_for_apt; then
+    echo "  Warning: ClawBox Vault packages not installed:$missing (apt is busy or dpkg could not be recovered)" >&2
+    return 1
+  fi
+  # shellcheck disable=SC2086  # a list of package names, split on purpose
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $missing || true
+  missing=""
+  for pkg in pass gnupg; do
+    dpkg_installed "$pkg" || missing="$missing $pkg"
+  done
+  [ -z "$missing" ] && return 0
+  echo "  Warning: ClawBox Vault packages not installed:$missing" >&2
+  return 1
+}
+
+# ClawBox Vault after an update. The in-app updater needs nothing from here:
+# its apt_update step installs the packages and its rebuild step starts every
+# enabled clawbox-* unit (restart_services_after_update). This is for the box
+# that reaches post_update by another road — a hand-run force-update.sh, a
+# heal, an update that stopped after the rebuild — where neither of those ran:
+# the unit step_systemd_services has just installed and enabled would otherwise
+# stay down until the next boot. On that road nothing restarts a vault that IS
+# running either, so it would keep serving the previous build (from a vault/
+# folder the checkout may have replaced under it) until the next boot: such a
+# vault is restarted. One the updater has already restarted onto this build is
+# left alone. Idempotent; a failure is a warning.
+ensure_vault_service() {
+  local rc=0 old_pid
+  ensure_vault_packages || rc=1
+  [ "$(systemctl is-enabled clawbox-vault.service 2>/dev/null || true)" = enabled ] || return "$rc"
+  if ! systemctl is-active --quiet clawbox-vault.service 2>/dev/null; then
+    echo "  Starting clawbox-vault.service: enabled and not running"
+    if ! systemctl start --no-block clawbox-vault.service; then
+      echo "  Warning: could not start clawbox-vault.service" >&2
+      rc=1
+    elif ! vault_came_up 0; then
+      echo "  Warning: clawbox-vault.service did not stay up after its start (journalctl -u clawbox-vault.service)" >&2
+      rc=1
+    fi
+  elif vault_runs_previous_build; then
+    echo "  Restarting clawbox-vault.service: it is still running the previous build"
+    old_pid="$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)"
+    if ! systemctl restart --no-block clawbox-vault.service; then
+      echo "  Warning: could not restart clawbox-vault.service" >&2
+      rc=1
+    elif ! vault_came_up "${old_pid:-0}"; then
+      echo "  Warning: clawbox-vault.service did not stay up after its restart (journalctl -u clawbox-vault.service)" >&2
+      rc=1
+    fi
+  fi
+  return "$rc"
+}
+
+# vault_came_up OLD_PID — after a --no-block start or restart: within
+# VAULT_UP_WAIT_S (30) seconds of wall clock the unit is active on a MainPID
+# other than OLD_PID (0 for a start), and is still active on that same pid
+# VAULT_UP_STEADY_S (3) seconds later, so a launcher that exits at once is
+# reported here instead of only in the journal. It only watches: the unit's
+# own Restart=on-failure retries are left to systemd either way. The deadline
+# is $SECONDS as a delta, asked first, as in restore_previous_build: a count of
+# sleeps would stretch by however long each systemctl query took. The queries
+# themselves are not cut short (nothing in the installer is, for being slow).
+# Each look is ONE systemctl call (vault_active_pid): a stop that begins between
+# an is-active and a show leaves the unit `deactivating` on the very same
+# MainPID, which two calls would take for a vault that is up.
+vault_came_up() {
+  local old=${1:-0} limit=${VAULT_UP_WAIT_S:-30} steady=${VAULT_UP_STEADY_S:-3} pid started=$SECONDS
+  while [ $((SECONDS - started)) -lt "$limit" ]; do
+    pid="$(vault_active_pid)"
+    case "$pid" in
+      '' | 0 | *[!0-9]* | "$old") ;;
+      *)
+        sleep "$steady"
+        [ "$(vault_active_pid)" = "$pid" ] && return 0
+        ;;
+    esac
+    sleep 1
+  done
+  return 1
+}
+
+# vault_active_pid — the vault's MainPID when it is `active` right now, else
+# nothing. ActiveState, SubState and MainPID come from ONE `systemctl show`, so
+# the state and the pid are the same observation. show prints the properties in
+# systemd's own order, not the one asked for: each line is matched by name.
+vault_active_pid() {
+  local line state="" pid=""
+  while IFS= read -r line; do
+    case "$line" in
+      ActiveState=*) state="${line#ActiveState=}" ;;
+      MainPID=*) pid="${line#MainPID=}" ;;
+    esac
+  done < <(systemctl show clawbox-vault.service -p ActiveState,SubState,MainPID 2>/dev/null || true)
+  if [ "$state" = active ]; then
+    printf '%s\n' "$pid"
+  fi
+}
+
+# Whether the running vault started before the build on disk: its working
+# directory is no longer the checkout's vault/ (replaced, so "(deleted)"), or a
+# file it runs from changed after it started. Unknown (no pid, no start time)
+# is "no": a restart nobody can justify is not made.
+vault_runs_previous_build() {
+  local pid cwd started dir="$PROJECT_DIR/vault"
+  pid="$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)"
+  case "$pid" in '' | 0 | *[!0-9]*) return 1 ;; esac
+  cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+  [ -n "$cwd" ] || return 1
+  [ "$cwd" = "$(readlink -f "$dir" 2>/dev/null || echo "$dir")" ] || return 0
+  started="$(date -d "$(ps -o lstart= -p "$pid" 2>/dev/null)" +%s 2>/dev/null || true)"
+  case "$started" in '' | *[!0-9]*) return 1 ;; esac
+  # ps has whole seconds: a file of the vault's own start second is not "newer".
+  [ -n "$(find "$dir/src" "$dir/extension" "$dir/package.json" "$PROJECT_DIR/scripts/start-vault.sh" \
+    -type f -newermt "@$((started + 1))" -print -quit 2>/dev/null)" ]
+}
+
 dpkg_installed() {
   case "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null || true)" in
     *' ok installed') return 0 ;;
@@ -4632,6 +4766,10 @@ step_apt_update() {
     dpkg_installed "$doc_lib" || doc_missing="$doc_missing $doc_lib"
   done
   [ -z "$doc_missing" ] || echo "  Warning: document libraries not installed:$doc_missing" >&2
+  # ClawBox Vault's storage, pass and gnupg (git is in the base line above).
+  # Separate and non-fatal, like the document libraries: a mirror without one
+  # of them must not fail the base install. See ensure_vault_packages.
+  ensure_vault_packages || true
   # Node.js for production server and OpenClaw. The floor is the pinned core's
   # `engines.node` ($OPENCLAW_NODE_ENGINE): 2026.9.3 refuses Node 22 outright,
   # so an older ClawBox image — every one of which shipped Node 22 — takes the
@@ -11770,6 +11908,9 @@ step_post_update() {
   # sudoers change the same way. The step is idempotent — cp, daemon-reload,
   # enable — and is exactly what fresh installs already run.
   optional_step systemd_services step_systemd_services
+  # After the units are in place: ClawBox Vault's packages and its unit, for a
+  # box that got here without the updater's apt and rebuild steps.
+  optional_step vault_service ensure_vault_service
   optional_step hermes_dashboard_proxy_refresh step_hermes_dashboard_proxy_refresh
   optional_step nm_dispatcher step_nm_dispatcher
   # The polkit narrowing, again. step_rebuild_reboot removes the old grant right
@@ -12448,7 +12589,11 @@ step_polkit_rules() {
 
 step_start_services() {
   local svc
-  local -a svcs=(clawbox-ap clawbox-setup clawbox-performance)
+  # clawbox-vault: the built-in password manager, on every edition. An in-app
+  # update needs no line of its own for it: step_rebuild_reboot installs and
+  # enables the unit, and restart_services_after_update then starts or restarts
+  # every enabled clawbox-* unit on the new build.
+  local -a svcs=(clawbox-ap clawbox-setup clawbox-performance clawbox-vault)
   # The OpenClaw gateway only exists on editions that run it. On the Hermes SKU
   # it is never installed (and is masked by step_edition_gateway_state), and
   # `systemctl restart` on a missing unit exits 5 — which, under the

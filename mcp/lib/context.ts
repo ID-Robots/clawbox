@@ -71,6 +71,7 @@ const APP_DESCRIPTIONS: Record<string, Omit<DesktopApp, "id">> = {
   "memory-shard": { name: "Memory Shard", description: "The memory index: embedding health, reindex, schedule" },
   "prime-radiant": { name: "Prime Radiant", description: "The living wiki: browse pages and claims, review disputed facts, history, ingest documents" },
   system_update: { name: "System Update", description: "The installed ClawBox version and the update button" },
+  vault: { name: "ClawBox Vault", description: "The owner's password manager: saved logins, the vault PIN, the browser's pairing, activity. The owner's only" },
   store: { name: "Store", description: "App store" },
   browser: { name: "Browser Setup", description: "Browser integration panel, not the browsing window" },
   web: { name: "Web", description: "The web: a search start page in a browser tab, with the kiosk's address bar", external: true, kioskOnly: true },

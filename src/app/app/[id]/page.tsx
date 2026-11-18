@@ -34,6 +34,7 @@ const TerminalTabs = dynamic(() => import("@/components/TerminalTabs"), { ssr: f
 const ChatApp = dynamic(() => import("@/components/ChatApp"), { ssr: false });
 const ClawKeepApp = dynamic(() => import("@/components/ClawKeepApp"), { ssr: false });
 const SystemUpdateApp = dynamic(() => import("@/components/SystemUpdateApp"), { ssr: false });
+const VaultApp = dynamic(() => import("@/components/VaultApp"), { ssr: false });
 const SetupWizard = dynamic(() => import("@/components/SetupWizard"), { ssr: false });
 const InstalledAppSettings = dynamic(() => import("@/components/InstalledAppSettings"), { ssr: false });
 const CodingAgentApp = dynamic(() => import("@/components/CodingAgentApp"), { ssr: false });
@@ -562,6 +563,8 @@ export default function StandaloneAppPage() {
         return <ClawKeepApp />;
       case "system_update":
         return <SystemUpdateApp />;
+      case "vault":
+        return <VaultApp />;
       case "setup":
         return <SetupWizard />;
       case "hermes":

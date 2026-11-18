@@ -124,6 +124,7 @@ const MemoryShardApp = dynamic(() => import("@/components/MemoryShardApp"), { ss
 const PrimeRadiantApp = dynamic(() => import("@/components/PrimeRadiantApp"), { ssr: false, loading: WindowLoading });
 const ScreenshotApp = dynamic(() => import("@/components/ScreenshotApp"), { ssr: false, loading: WindowLoading });
 const SystemUpdateApp = dynamic(() => import("@/components/SystemUpdateApp"), { ssr: false, loading: WindowLoading });
+const VaultApp = dynamic(() => import("@/components/VaultApp"), { ssr: false, loading: WindowLoading });
 const TerminalTabs = dynamic(() => import("@/components/TerminalTabs"), { ssr: false, loading: WindowLoading });
 const CodingAgentApp = dynamic(() => import("@/components/CodingAgentApp"), { ssr: false, loading: WindowLoading });
 const InstalledAppSettings = dynamic(() => import("@/components/InstalledAppSettings"), { ssr: false, loading: WindowLoading });
@@ -527,6 +528,8 @@ const WindowContent = memo(function WindowContent({ app, meta, windowId, termina
       return <PrimeRadiantApp />;
     case "system_update":
       return <SystemUpdateApp />;
+    case "vault":
+      return <VaultApp />;
     case "browser":
       return <BrowserApp onOpenApp={actions.openApp} />;
     case "vnc":

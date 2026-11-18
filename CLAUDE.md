@@ -120,6 +120,7 @@ The area files under `docs/agents/` (moved verbatim out of this file on 2026-10-
 - [memory-shard.md](docs/agents/memory-shard.md) — read this when you touch the memory embedder, `clawkeep/memory/*` or the Memory Shard app.
 - [prime-radiant.md](docs/agents/prime-radiant.md) — read this when you touch `src/lib/prime-radiant/`, `prime-radiant/*` or the Prime Radiant app.
 - [clawkeep.md](docs/agents/clawkeep.md) — read this when you touch `clawkeep/` (backup and restore) or the ClawKeep components.
+- [vault.md](docs/agents/vault.md) — read this when you touch `vault/` (ClawBox Vault, the password manager), `mcp/tools/vault.ts`, `vault-proxy.ts` or `clawbox-vault.service`.
 - [mcp.md](docs/agents/mcp.md) — read this when you touch `mcp/` (with `mcp/README.md`, the authoritative tool list).
 - [update-and-install.md](docs/agents/update-and-install.md) — read this when you touch `update/*`, `updater.ts`, `install.sh`, a root step, `config/*.service`, the AP or `production-server.js`.
 - [testing-and-ci.md](docs/agents/testing-and-ci.md) — read this when you touch a workflow, `e2e-install` or the triage and review bots.
