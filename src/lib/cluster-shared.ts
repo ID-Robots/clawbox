@@ -315,16 +315,24 @@ export function engineSampleUsable(s: EngineSample): boolean {
 }
 
 /**
+ * A rate is "now" only for reads this close together. Further apart, the change
+ * is an average over however long nobody was looking (the owner closed the page
+ * and came back an hour later) and would be shown as the current speed.
+ */
+export const TOKEN_RATE_MAX_GAP_MS = 30_000;
+
+/**
  * Tokens per second from two reads of a running total. Null for the first read,
- * for reads closer than a second, and for a total that went DOWN (the engine
- * restarted): none of those is a rate, and zero would claim an idle engine.
+ * for reads closer than a second or further apart than `TOKEN_RATE_MAX_GAP_MS`,
+ * and for a total that went DOWN (the engine restarted): none of those is a
+ * rate, and zero would claim an idle engine.
  */
 export function tokensPerSecondBetween(
   previous: { at: number; tokens: number } | null,
   current: { at: number; tokens: number },
 ): number | null {
   if (!previous) return null;
-  const seconds = (current.at - previous.at) / 1000;
-  if (seconds < 1 || current.tokens < previous.tokens) return null;
-  return Math.round(((current.tokens - previous.tokens) / seconds) * 10) / 10;
+  const gap = current.at - previous.at;
+  if (gap < 1_000 || gap > TOKEN_RATE_MAX_GAP_MS || current.tokens < previous.tokens) return null;
+  return Math.round(((current.tokens - previous.tokens) / (gap / 1000)) * 10) / 10;
 }

@@ -4,6 +4,7 @@ import {
   engineSampleUsable,
   parsePrometheus,
   parseSparkOutput,
+  TOKEN_RATE_MAX_GAP_MS,
   tokensPerSecondBetween,
   unreachableSparks,
   type SparkCard,
@@ -184,6 +185,12 @@ describe("tokensPerSecondBetween", () => {
     expect(tokensPerSecondBetween(null, { at: 1_000, tokens: 100 })).toBeNull();
     expect(tokensPerSecondBetween({ at: 1_000, tokens: 100 }, { at: 1_500, tokens: 200 })).toBeNull();
     expect(tokensPerSecondBetween({ at: 1_000, tokens: 500 }, { at: 9_000, tokens: 10 })).toBeNull();
+  });
+
+  it("is null for reads too far apart to be 'now': an average over an hour nobody watched is not the current speed", () => {
+    expect(tokensPerSecondBetween({ at: 0, tokens: 0 }, { at: TOKEN_RATE_MAX_GAP_MS, tokens: 3_000 })).toBe(100);
+    expect(tokensPerSecondBetween({ at: 0, tokens: 0 }, { at: TOKEN_RATE_MAX_GAP_MS + 1, tokens: 3_000 })).toBeNull();
+    expect(tokensPerSecondBetween({ at: 0, tokens: 0 }, { at: 3_600_000, tokens: 360_000 })).toBeNull();
   });
 
   it("is a real zero for an engine that generated nothing in the window", () => {

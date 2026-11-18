@@ -27,19 +27,43 @@ import {
 
 const POLL_MS = 5_000;
 
-/** Is there a cluster to show? Asked once when the owner opens System; never by anyone else. */
+/** A request that is still unanswered after this long is given up, so a read that never settles cannot stop the polling for good. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
+/** fetch with a deadline of our own (an AbortController, not `AbortSignal.timeout`, which not every runtime has). */
+async function fetchWithDeadline(url: string): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { cache: "no-store", signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Is there a cluster to show? Asked once when the owner opens System; never by
+ * anyone else. Only a DEFINITE answer changes it — the box says there is a
+ * cluster, or says there is none or that this person may not ask — so a request
+ * that merely failed does not take the tab away from an owner who is on it.
+ */
 export function useClusterAvailable(active: boolean): boolean {
   const [available, setAvailable] = useState(false);
   useEffect(() => {
     if (!active) return;
     let live = true;
-    fetch("/setup-api/system/cluster?availability=1", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: { enabled?: unknown } | null) => {
-        if (live) setAvailable(data?.enabled === true);
+    fetchWithDeadline("/setup-api/system/cluster?availability=1")
+      .then(async (res) => {
+        if (!live) return;
+        if (res.ok) {
+          const data = (await res.json()) as { enabled?: unknown } | null;
+          if (live && typeof data?.enabled === "boolean") setAvailable(data.enabled);
+        } else if (res.status === 401 || res.status === 403 || res.status === 404) {
+          setAvailable(false);
+        }
       })
       .catch(() => {
-        if (live) setAvailable(false);
+        // Not an answer: what was known stays.
       });
     return () => {
       live = false;
@@ -318,7 +342,7 @@ export default function ClusterPanel() {
     if (busy.current) return;
     busy.current = true;
     try {
-      const res = await fetch("/setup-api/system/cluster", { cache: "no-store" });
+      const res = await fetchWithDeadline("/setup-api/system/cluster");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as ClusterAnswer;
       if (data.enabled === true) {

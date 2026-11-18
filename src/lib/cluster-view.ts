@@ -35,10 +35,13 @@
  * what is known while a fresh read runs behind the answer, so a Spark that
  * went away costs the page nothing but a stale card for one refresh.
  *
- * NOTHING LEAVES THE LAN. The only requests this makes to anything but a
- * Spark's ssh port go to the engine's address, and only when that address is
- * loopback or private (RFC 1918, unique-local): the check is made on the
- * literal and on every address a name resolves to.
+ * NOTHING LEAVES THE LAN. The Sparks are the owner's own list (an ssh target is
+ * a name the owner chose, and ssh's own config may map it anywhere, so it is not
+ * second-guessed here). The only other requests go to the engine's address, and
+ * only when that address is loopback or private (RFC 1918, unique-local): the
+ * check is made on the literal and on every address a name resolves to. A name
+ * that is rebound between that check and the connection is not defended
+ * against, which is the limit of the external engine's own probe as well.
  */
 
 import { spawn } from "child_process";
@@ -164,12 +167,12 @@ const MAX_OUTPUT_BYTES = 64 * 1024;
  * either way.
  */
 function childEnvironment(): NodeJS.ProcessEnv {
-  const keep: NodeJS.ProcessEnv = { LC_ALL: "C" };
+  const keep: Record<string, string> = { LC_ALL: "C" };
   for (const name of ["PATH", "HOME", "USER", "LOGNAME"]) {
     const value = process.env[name];
     if (value !== undefined) keep[name] = value;
   }
-  return keep;
+  return keep as unknown as NodeJS.ProcessEnv;
 }
 
 /** spawn with a hard ceiling: the answer arrives by the deadline whatever the child does. */
@@ -270,7 +273,7 @@ function deps(): ClusterDeps {
 export const FRESH_MS = 6_000;
 export const FRESH_FAILURE_MS = 4_000;
 /** Past this a remembered card is not shown while a read runs: the page waits for the new one. */
-export const STALE_MS = 60_000;
+export const STALE_MS = 30_000;
 
 interface Remembered<T> {
   at: number;
@@ -338,7 +341,9 @@ export function _setClusterDepsForTest(next: Partial<ClusterDeps>): void {
  */
 export const COLLECTOR_SCRIPT = `{
 export LC_ALL=C
-echo "${COLLECTOR_PREFIX} host $(hostname 2>/dev/null </dev/null | head -n 1)"
+H=$(hostname 2>/dev/null </dev/null | head -n 1)
+[ -n "$H" ] || H=$(cat /proc/sys/kernel/hostname 2>/dev/null </dev/null | head -n 1)
+echo "${COLLECTOR_PREFIX} host $H"
 echo "${COLLECTOR_PREFIX} cpu1 $(head -n 1 /proc/stat 2>/dev/null </dev/null)"
 sleep 0.5 </dev/null 2>/dev/null || sleep 1 </dev/null
 echo "${COLLECTOR_PREFIX} cpu2 $(head -n 1 /proc/stat 2>/dev/null </dev/null)"
@@ -608,7 +613,10 @@ export async function clusterAnswer(): Promise<ClusterAnswer> {
   ]);
   const snapshot: ClusterSnapshot = {
     enabled: true,
-    generatedAt: d.now(),
+    // The OLDEST card's read, not the moment of the answer: a card served from
+    // memory while a fresh read runs is up to STALE_MS old, and a stamp that
+    // said "now" over it would make its figures look current.
+    generatedAt: Math.min(d.now(), local.checkedAt, ...peers.map((card) => card.checkedAt)),
     sparks: [{ ...local, id: "local" }, ...peers.map((card, i) => ({ ...card, id: `peer-${i + 1}` }))],
     engine,
   };

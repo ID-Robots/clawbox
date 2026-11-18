@@ -67,7 +67,7 @@ const PEERS = "spark-b spark-c spark-d";
 
 function setup(extra: Parameters<typeof _setClusterDepsForTest>[0] = {}) {
   _setClusterDepsForTest({
-    env: { CLAWBOX_CLUSTER_PEERS: PEERS } as NodeJS.ProcessEnv,
+    env: { CLAWBOX_CLUSTER_PEERS: PEERS } as unknown as NodeJS.ProcessEnv,
     now: () => clock,
     isWorkstation: () => true,
     readEngine: async () => null,
@@ -88,31 +88,31 @@ afterEach(() => {
 
 describe("clusterPeers", () => {
   it("takes ssh targets separated by spaces, commas or newlines, once each", () => {
-    const { targets, ignored } = clusterPeers({ CLAWBOX_CLUSTER_PEERS: "a.example, b\nc  a.example ops@d" } as NodeJS.ProcessEnv);
+    const { targets, ignored } = clusterPeers({ CLAWBOX_CLUSTER_PEERS: "a.example, b\nc  a.example ops@d" } as unknown as NodeJS.ProcessEnv);
     expect(targets).toEqual(["a.example", "b", "c", "ops@d"]);
     expect(ignored).toBe(0);
   });
 
   it("reads a quoted value as .env loaders may leave it", () => {
-    expect(clusterPeers({ CLAWBOX_CLUSTER_PEERS: '"b c"' } as NodeJS.ProcessEnv).targets).toEqual(["b", "c"]);
+    expect(clusterPeers({ CLAWBOX_CLUSTER_PEERS: '"b c"' } as unknown as NodeJS.ProcessEnv).targets).toEqual(["b", "c"]);
   });
 
   it("refuses anything that could be read as an ssh option or carry a shell character", () => {
     const bad = ["-oProxyCommand=touch", "-F/etc/passwd", "a;b", "$(id)", "`id`", "host:22", "a/b", "user@@host", "[::1]", "a&b", "x'y", "x\"y", "@host", "user@"];
-    const { targets, ignored } = clusterPeers({ CLAWBOX_CLUSTER_PEERS: ["good", ...bad].join(" ") } as NodeJS.ProcessEnv);
+    const { targets, ignored } = clusterPeers({ CLAWBOX_CLUSTER_PEERS: ["good", ...bad].join(" ") } as unknown as NodeJS.ProcessEnv);
     expect(targets).toEqual(["good"]);
     expect(ignored).toBe(bad.length);
   });
 
   it("stops at the cap, counting the rest as ignored", () => {
     const many = Array.from({ length: MAX_PEERS + 3 }, (_, i) => `h${i}`).join(" ");
-    const { targets, ignored } = clusterPeers({ CLAWBOX_CLUSTER_PEERS: many } as NodeJS.ProcessEnv);
+    const { targets, ignored } = clusterPeers({ CLAWBOX_CLUSTER_PEERS: many } as unknown as NodeJS.ProcessEnv);
     expect(targets).toHaveLength(MAX_PEERS);
     expect(ignored).toBe(3);
   });
 
   it("is empty when unset", () => {
-    expect(clusterPeers({} as NodeJS.ProcessEnv)).toEqual({ targets: [], ignored: 0 });
+    expect(clusterPeers({} as unknown as NodeJS.ProcessEnv)).toEqual({ targets: [], ignored: 0 });
   });
 
   it("names an offline Spark by the host part of its target", () => {
@@ -123,7 +123,7 @@ describe("clusterPeers", () => {
 
 describe("clusterMode and clusterEnabled", () => {
   it("reads the mode, and anything it does not know is auto", () => {
-    const mode = (v?: string) => clusterMode({ CLAWBOX_CLUSTER_VIEW: v } as NodeJS.ProcessEnv);
+    const mode = (v?: string) => clusterMode({ CLAWBOX_CLUSTER_VIEW: v } as unknown as NodeJS.ProcessEnv);
     expect(mode()).toBe("auto");
     expect(mode("auto")).toBe("auto");
     expect(mode("ON")).toBe("on");
@@ -135,7 +135,7 @@ describe("clusterMode and clusterEnabled", () => {
 
   const enabled = (env: Record<string, string>, workstation: boolean) =>
     clusterEnabled({
-      env: env as NodeJS.ProcessEnv,
+      env: env as unknown as NodeJS.ProcessEnv,
       now: () => clock,
       run: runnerBy({}),
       isWorkstation: () => workstation,
@@ -196,6 +196,10 @@ describe("the collector script", () => {
     for (const verb of ["rm ", "mv ", "cp ", "tee ", "chmod", "chown", "kill", "systemctl", "apt", "pip", "curl", "wget", "sudo", "reboot", "ssh "]) {
       expect(COLLECTOR_SCRIPT, verb).not.toContain(verb);
     }
+  });
+
+  it("names the Spark from the kernel when there is no hostname program", () => {
+    expect(COLLECTOR_SCRIPT).toContain("/proc/sys/kernel/hostname");
   });
 
   it("prints every figure under the collector's prefix", () => {
@@ -302,7 +306,7 @@ describe("clusterAnswer: the Sparks", () => {
 
   it("marks a Spark that is down offline, names it by its configured host and says why — and still answers", async () => {
     setup({
-      env: { CLAWBOX_CLUSTER_PEERS: "ops@spark-b spark-c spark-d spark-e spark-f" } as NodeJS.ProcessEnv,
+      env: { CLAWBOX_CLUSTER_PEERS: "ops@spark-b spark-c spark-d spark-e spark-f" } as unknown as NodeJS.ProcessEnv,
       run: runnerBy({
         local: ok(GOOD("spark-a")),
         "ops@spark-b": ok(GOOD("spark-b")),
@@ -366,7 +370,7 @@ describe("clusterAnswer: remembering, and never blocking", () => {
       }
       return ok(GOOD(command === "ssh" ? args[args.indexOf("--") + 1] : "spark-a"));
     });
-    setup({ run, env: { CLAWBOX_CLUSTER_PEERS: "spark-b" } as NodeJS.ProcessEnv });
+    setup({ run, env: { CLAWBOX_CLUSTER_PEERS: "spark-b" } as unknown as NodeJS.ProcessEnv });
     const first = (await clusterAnswer()) as ClusterSnapshot;
     expect(first.sparks[1].online).toBe(true);
 
@@ -394,10 +398,22 @@ describe("clusterAnswer: remembering, and never blocking", () => {
     expect(((await clusterAnswer()) as ClusterSnapshot).sparks[1].online).toBe(true);
   });
 
+  it("stamps the answer with its OLDEST card's read, not with the moment it was given", async () => {
+    const run = runnerBy({ local: ok(GOOD("spark-a")), "spark-b": ok(GOOD("spark-b")) });
+    setup({ run, env: { CLAWBOX_CLUSTER_PEERS: "spark-b" } as unknown as NodeJS.ProcessEnv });
+    const first = (await clusterAnswer()) as ClusterSnapshot;
+    expect(first.generatedAt).toBe(clock);
+    // Past the fresh window: the cards go out from memory while a read runs behind them.
+    clock += FRESH_MS + 2_000;
+    const second = (await clusterAnswer()) as ClusterSnapshot;
+    expect(second.generatedAt).toBe(first.generatedAt);
+    expect(second.generatedAt).toBeLessThan(clock);
+  });
+
   it("remembers a failure for less time, so a Spark that came back shows soon", async () => {
     const answers: Record<string, ScriptResult> = { local: ok(GOOD("spark-a")), "spark-b": sshFailure("Connection refused") };
     const run = runnerBy(answers);
-    setup({ run, env: { CLAWBOX_CLUSTER_PEERS: "spark-b" } as NodeJS.ProcessEnv });
+    setup({ run, env: { CLAWBOX_CLUSTER_PEERS: "spark-b" } as unknown as NodeJS.ProcessEnv });
     expect(((await clusterAnswer()) as ClusterSnapshot).sparks[1].online).toBe(false);
     answers["spark-b"] = ok(GOOD("spark-b"));
     clock += 4_100; // past the failure window, inside the success one
@@ -488,6 +504,19 @@ describe("clusterAnswer: the engine", () => {
     await engineOf();
     await new Promise((r) => setTimeout(r, 20));
     expect((await engineOf()).metrics?.tokensPerSecond).toBe(25);
+  });
+
+  it("gives no speed from a previous read that is too old to be 'now'", async () => {
+    let tokens = 1_000;
+    const { impl } = engineFetch({ models: modelsOk(), metrics: () => new Response(metricsText(tokens), { status: 200 }) });
+    setup({ fetchImpl: impl, readEngine: async () => TARGET, lookup: async () => [], run: runnerBy({ local: ok(GOOD("spark-a")) }) });
+    await engineOf();
+    // The owner went away for an hour and came back.
+    clock += 3_600_000;
+    tokens = 361_000;
+    await engineOf();
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await engineOf()).metrics?.tokensPerSecond).toBeNull();
   });
 
   it("shows n/a, never zero, for an engine with no metrics endpoint — and still reports the gate", async () => {

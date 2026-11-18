@@ -283,7 +283,7 @@ describe("ClusterPanel: reading the route", () => {
   it("asks the cluster route, without a cache", async () => {
     render(<ClusterPanel />);
     await screen.findByTestId("cluster-sparks");
-    expect(fetchMock).toHaveBeenCalledWith("/setup-api/system/cluster", { cache: "no-store" });
+    expect(fetchMock).toHaveBeenCalledWith("/setup-api/system/cluster", expect.objectContaining({ cache: "no-store" }));
   });
 
   it("shows a spinner first, and an alert when the page cannot be read", async () => {
@@ -329,6 +329,31 @@ describe("ClusterPanel: reading the route", () => {
     expect(fetchMock.mock.calls.length).toBe(first + 1);
   });
 
+  it("gives up on a read that never settles, so the polling does not stop for good", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn((_url: string, init?: RequestInit) => {
+      calls += 1;
+      if (calls === 1) {
+        // The first request hangs until it is aborted.
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => snapshot() });
+    }));
+    render(<ClusterPanel />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_100);
+    });
+    // The hung read was abandoned (an alert), and the next poll got through.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100);
+    });
+    await screen.findByTestId("cluster-sparks");
+    expect(calls).toBeGreaterThanOrEqual(2);
+  });
+
   it("draws nothing if the box says it has no cluster after all", async () => {
     answer = { enabled: false };
     const { container } = render(<ClusterPanel />);
@@ -358,7 +383,7 @@ describe("useClusterAvailable", () => {
     const { result, rerender } = renderHook(({ on }) => useClusterAvailable(on), { initialProps: { on: true } });
     await waitFor(() => expect(result.current).toBe(true));
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock).toHaveBeenCalledWith("/setup-api/system/cluster?availability=1", { cache: "no-store" });
+    expect(fetchMock).toHaveBeenCalledWith("/setup-api/system/cluster?availability=1", expect.objectContaining({ cache: "no-store" }));
     rerender({ on: true });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -379,6 +404,33 @@ describe("useClusterAvailable", () => {
     const { result } = renderHook(() => useClusterAvailable(true));
     await new Promise((r) => setTimeout(r, 20));
     expect(result.current).toBe(false);
+  });
+
+  it("keeps what it knew when a later request merely fails — a hiccup does not take the tab from the owner", async () => {
+    answer = { enabled: true };
+    const { result, rerender } = renderHook(({ on }) => useClusterAvailable(on), { initialProps: { on: true } });
+    await waitFor(() => expect(result.current).toBe(true));
+    rerender({ on: false });
+    answer = new TypeError("down");
+    serve();
+    rerender({ on: true });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(result.current).toBe(true);
+    // A 500 is no answer either; a 403 is one.
+    status = 500;
+    answer = {};
+    serve();
+    rerender({ on: false });
+    rerender({ on: true });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(result.current).toBe(true);
+    status = 403;
+    answer = { code: "owner_only" };
+    serve();
+    rerender({ on: false });
+    rerender({ on: true });
+    await waitFor(() => expect(result.current).toBe(false));
   });
 
   it("goes back to false when it is switched off", async () => {

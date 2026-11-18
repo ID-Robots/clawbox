@@ -53,7 +53,7 @@ describe("GET /setup-api/system/cluster", () => {
     const view = await import("@/lib/cluster-view");
     view._resetClusterForTest();
     view._setClusterDepsForTest({
-      env: { CLAWBOX_CLUSTER_PEERS: "spark-b spark-c spark-d", ...(options.env ?? {}) } as NodeJS.ProcessEnv,
+      env: { CLAWBOX_CLUSTER_PEERS: "spark-b spark-c spark-d", ...(options.env ?? {}) } as unknown as NodeJS.ProcessEnv,
       isWorkstation: () => options.workstation ?? true,
       readEngine: async () => null,
       run,
