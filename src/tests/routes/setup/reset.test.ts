@@ -482,6 +482,39 @@ describe("POST /setup-api/setup/reset", () => {
     expect(mockExecFile).toHaveBeenCalled();
   });
 
+  it("ends the web server when the reboot fails, so the audit log's seal ends with the process (TASK-2446)", async () => {
+    const audit = await import("@/lib/audit-log");
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl reboot": new Error("Failed to reboot: access denied"),
+    });
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    try {
+      expect((await resetPost()).status).toBe(200);
+      expect(audit.auditLogSealed()).toBe(true);
+      expect(kill).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1500);
+      // systemd brings clawbox-setup back (Restart=always), unsealed; every
+      // request that began before the wipe ends with this process.
+      expect(kill).toHaveBeenCalledWith(process.pid, "SIGTERM");
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it("does not end the web server when the reboot goes through", async () => {
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    try {
+      expect((await resetPost()).status).toBe(200);
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(mockExecFile).toHaveBeenCalledWith("/usr/bin/sudo", ["/usr/bin/systemctl", "reboot"], expect.anything(), expect.anything());
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
   it("returns 500 and skips reboot on partial file-deletion failure", async () => {
     // First readdir = DATA_DIR, then OPENCLAW_DIR. Make DATA_DIR's rm reject
     // so we hit the partial-failure path; OPENCLAW_DIR returns empty so we

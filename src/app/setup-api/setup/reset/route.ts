@@ -762,6 +762,15 @@ function scheduleReboot(): void {
       await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reboot"], { timeout: 10_000 });
     } catch (err) {
       console.error("[Reset] Reboot failed:", err instanceof Error ? err.message : err);
+      // The wipe went through and only the reboot failed: a confirmed failure
+      // of the reset's last step. The audit log stays sealed for as long as
+      // this process lives (src/lib/audit-log.ts), so this process ends now —
+      // clawbox-setup runs under `Restart=always` and systemd brings it back,
+      // unsealed — and every request that began before the wipe ends with it:
+      // none of them can write the previous owner back into the log. SIGTERM,
+      // so production-server.js closes its listeners as for any stop.
+      console.error("[Reset] restarting the web server so the audit log records again");
+      process.kill(process.pid, "SIGTERM");
     }
   }, 1_000);
 }
