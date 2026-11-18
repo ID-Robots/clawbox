@@ -32,6 +32,14 @@
 # complete, or one whose radio is a WiFi client right now (switching the
 # hotspot on is then deferred by design, and would take the radio off that
 # network).
+#
+# nano-lab boards carry /etc/clawbox/lab-hotspot-off (lab policy: no setup
+# hotspot in the lab; a drop-in keeps clawbox-ap from ever starting). There the
+# AP cannot come up whatever the switch says, so: the switch, Settings and the
+# reboot are checked as above; the boot gate is the installed start-ap.sh run
+# unprivileged against this board's data with its radio tools stubbed (it must
+# skip AP mode and touch nothing); "on" must leave Settings at enabled:true
+# active:false (on, truthfully not broadcasting); the AP coming back is a SKIP.
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
@@ -148,6 +156,10 @@ SSID=$(api_json '.ssid')
 INIT_UP=no
 ap_up "$P0" && INIT_UP=yes
 note "found: switch enabled=${STATE0% *} active=${STATE0#* }, AP up=$INIT_UP, stored $(stored)"
+LAB_OFF=$(board '[ -e /etc/clawbox/lab-hotspot-off ] && echo yes || echo no' | tail -n 1)
+if [ "$LAB_OFF" = yes ]; then
+  note "nano-lab policy (/etc/clawbox/lab-hotspot-off): clawbox-ap never starts on this board, so the AP itself cannot come up here"
+fi
 
 # Put the board's hotspot back from the kept copy: the radio first, through
 # the route (switch_hotspot), to the AP state that was found, then
@@ -275,7 +287,15 @@ trap 'exit 143' TERM INT HUP
 
 # ---- 1. off -----------------------------------------------------------------------
 switch_hotspot false || { not_ok "switching the hotspot off failed"; finish; }
-if [ "$AP_ACTION" = stopped ]; then ok "off: the route stopped the AP (apAction stopped)"; else not_ok "off: apAction ${AP_ACTION:-?}, not stopped"; fi
+if [ "$AP_ACTION" = stopped ]; then
+  ok "off: the route stopped the AP (apAction stopped)"
+elif [ "$LAB_OFF" = yes ]; then
+  # stop-ap.sh (unprivileged) takes the radio lock in /run/clawbox-radio, which
+  # the root AP unit creates; on a lab board that unit never runs.
+  note "off: apAction ${AP_ACTION:-?} (stop-ap.sh has no radio lock directory on a board whose AP unit never ran: lab policy)"
+else
+  not_ok "off: apAction ${AP_ACTION:-?}, not stopped"
+fi
 P1=$(probe)
 note "after off: $P1"
 if ap_down "$P1"; then ok "off: no AP on $IFACE (nmcli no active ClawBox-Setup, iw type $(field "$P1" iw))"; else not_ok "off: the AP is still up: $P1"; fi
@@ -328,21 +348,50 @@ done
 # shellcheck disable=SC2016  # expanded on the board
 SAID=$(board 'journalctl -b -u clawbox-ap.service -o cat --no-pager 2>/dev/null | grep -c "Hotspot disabled in settings"' | tail -n 1)
 note "clawbox-ap.service after boot: ${AP_UNIT:-?}; 'Hotspot disabled in settings' lines this boot: ${SAID:-unreadable}"
-# The boot-time decision itself, asked again now: the AP unit restarted as root
-# through the restart_ap root step (the launcher Settings uses), so
-# start-ap.sh reads the switch exactly as at boot. A board whose
-# clawbox-ap.service is not enabled at boot (some lab boards) would otherwise
-# never have asked it.
-# shellcheck disable=SC2016  # expanded on the board
-GATE=$(board '
-  since=$(date +%s)
-  timeout 300 sudo -n /usr/local/libexec/clawbox/clawbox-run-root-step.sh restart_ap >/dev/null 2>&1
-  rc=$?
-  n=$(journalctl -u clawbox-ap.service --since "@$since" -o cat --no-pager 2>/dev/null | grep -c "Hotspot disabled in settings")
-  echo "$rc ${n:-0}"
-' | tail -n 1)
-if [ "${GATE%% *}" = 0 ]; then ok "boot decision: clawbox-ap.service restarted as root (restart_ap root step)"; else not_ok "boot decision: the restart_ap root step failed (exit ${GATE%% *})"; fi
-if [ "${GATE#* }" -ge 1 ] 2>/dev/null; then ok "boot decision: start-ap.sh said 'Hotspot disabled in settings'"; else note "start-ap.sh's 'Hotspot disabled in settings' line not seen in the journal (${GATE#* }); the radio below decides"; fi
+if [ "$LAB_OFF" = yes ]; then
+  # The unit is skipped by the lab condition, so ask the installed script
+  # itself: unprivileged, its radio lock in a temp dir, nmcli/iw/iptables/
+  # sysctl/systemctl replaced by recorders that fail. It reads this board's
+  # real data/ and must skip AP mode before touching any of them.
+  # shellcheck disable=SC2016  # expanded on the board
+  GATE=$(board '
+    t=$(mktemp -d) || exit 1
+    mkdir "$t/bin" "$t/radio"
+    for x in nmcli iw iptables sysctl systemctl; do
+      printf "#!/bin/sh\necho \"\$0 \$*\" >> %s/calls\nexit 1\n" "$t" > "$t/bin/$x"; chmod +x "$t/bin/$x"
+    done
+    printf "#!/bin/sh\nexit 0\n" > "$t/bin/ip"; chmod +x "$t/bin/ip"
+    out=$(PATH="$t/bin:$PATH" CLAWBOX_ROOT="$REPO" CLAWBOX_RADIO_RUN_DIR="$t/radio" NM_READY_TIMEOUT=1 IFACE_TIMEOUT=1 PRE_AP_SCAN_TIMEOUT=0 \
+      timeout 60 bash /usr/local/libexec/clawbox/start-ap.sh 2>&1)
+    rc=$?
+    said=0; grep -q "Hotspot disabled in settings" <<<"$out" && said=1
+    calls=0; [ -f "$t/calls" ] && calls=$(wc -l < "$t/calls")
+    rm -rf -- "$t"
+    echo "$rc $said $calls"
+  ' | tail -n 1)
+  read -r G_RC G_SAID G_CALLS <<<"$GATE"
+  if [ "${G_RC:-}" = 0 ] && [ "${G_SAID:-}" = 1 ] && [ "${G_CALLS:-}" = 0 ]; then
+    ok "boot decision: the installed start-ap.sh, run unprivileged against this board's data with its radio tools stubbed, skips AP mode ('Hotspot disabled in settings') and calls none of them"
+  else
+    not_ok "boot decision: start-ap.sh against this board's data: exit ${G_RC:-?}, skip line ${G_SAID:-?}, radio-tool calls ${G_CALLS:-?}"
+  fi
+else
+  # The boot-time decision itself, asked again now: the AP unit restarted as root
+  # through the restart_ap root step (the launcher Settings uses), so
+  # start-ap.sh reads the switch exactly as at boot. A board whose
+  # clawbox-ap.service is not enabled at boot (some lab boards) would otherwise
+  # never have asked it.
+  # shellcheck disable=SC2016  # expanded on the board
+  GATE=$(board '
+    since=$(date +%s)
+    timeout 300 sudo -n /usr/local/libexec/clawbox/clawbox-run-root-step.sh restart_ap >/dev/null 2>&1
+    rc=$?
+    n=$(journalctl -u clawbox-ap.service --since "@$since" -o cat --no-pager 2>/dev/null | grep -c "Hotspot disabled in settings")
+    echo "$rc ${n:-0}"
+  ' | tail -n 1)
+  if [ "${GATE%% *}" = 0 ]; then ok "boot decision: clawbox-ap.service restarted as root (restart_ap root step)"; else not_ok "boot decision: the restart_ap root step failed (exit ${GATE%% *})"; fi
+  if [ "${GATE#* }" -ge 1 ] 2>/dev/null; then ok "boot decision: start-ap.sh said 'Hotspot disabled in settings'"; else note "start-ap.sh's 'Hotspot disabled in settings' line not seen in the journal (${GATE#* }); the radio below decides"; fi
+fi
 sleep 30
 P2=$(probe)
 note "after reboot: $P2"
@@ -353,17 +402,28 @@ wired_same "$P2" "reboot" device
 
 # ---- 3. on ------------------------------------------------------------------------
 switch_hotspot true || { not_ok "switching the hotspot on failed"; finish; }
-if [ "$AP_ACTION" = restarted ]; then ok "on: the route restarted the AP (apAction restarted)"; else not_ok "on: apAction ${AP_ACTION:-?}, not restarted"; fi
-P3=""
-for _ in $(seq 1 24); do
+if [ "$LAB_OFF" = yes ]; then
+  note "on: apAction ${AP_ACTION:-?} (the unit's restart is skipped by the lab condition)"
+  sleep 15
   P3=$(probe)
-  ap_up "$P3" && break
-  sleep 5
-done
-note "after on: $P3"
-if ap_up "$P3"; then ok "on: the AP is back on $IFACE (nmcli active ClawBox-Setup, iw type AP)"; else not_ok "on: no AP 2 min after switching on: $P3"; fi
-hotspot_state; S3=$HS
-if [ "$S3" = "true true" ]; then ok "on: Settings reads enabled:true active:true"; else not_ok "on: Settings reads '${S3:-no answer}' (enabled active)"; fi
+  note "after on: $P3"
+  if ap_down "$P3"; then ok "on: still no AP on this lab board (lab policy keeps clawbox-ap from starting)"; else not_ok "on: an AP is up on a nano-lab board: $P3"; fi
+  skip "on: the AP coming back cannot be shown on a nano-lab board (setup hotspot disabled by lab policy)"
+  hotspot_state; S3=$HS
+  if [ "$S3" = "true false" ]; then ok "on: Settings reads enabled:true active:false (switched on, and truthfully not broadcasting)"; else not_ok "on: Settings reads '${S3:-no answer}' (enabled active), expected 'true false' here"; fi
+else
+  if [ "$AP_ACTION" = restarted ]; then ok "on: the route restarted the AP (apAction restarted)"; else not_ok "on: apAction ${AP_ACTION:-?}, not restarted"; fi
+  P3=""
+  for _ in $(seq 1 24); do
+    P3=$(probe)
+    ap_up "$P3" && break
+    sleep 5
+  done
+  note "after on: $P3"
+  if ap_up "$P3"; then ok "on: the AP is back on $IFACE (nmcli active ClawBox-Setup, iw type AP)"; else not_ok "on: no AP 2 min after switching on: $P3"; fi
+  hotspot_state; S3=$HS
+  if [ "$S3" = "true true" ]; then ok "on: Settings reads enabled:true active:true"; else not_ok "on: Settings reads '${S3:-no answer}' (enabled active)"; fi
+fi
 ST3=$(stored)
 if [ "$ST3" = "- True" ]; then ok "on: no HOTSPOT_DISABLED in data/hotspot.env, hotspot_enabled true in config"; else not_ok "on: stored '$ST3' (env flag, config), expected '- True'"; fi
 wired_same "$P3" "on"
