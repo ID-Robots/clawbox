@@ -117,7 +117,12 @@ tab loses its answer: its **Review again** names no loss, so it is answered
 with the warning, never with a sendable card. It also covers a **Review again**
 that was already loading when a Send of the same draft lost its answer: that
 loss is newer than the one it acknowledged, so the card says `uncertain` and
-waits for another **Review again**. A **Review again** with no loss outstanding
+waits for another **Review again**. That holds even when another tab has
+already shown that warning and opened a card past it while this one was
+loading. A card load compares the newest loss before and after its own read
+of the draft, whoever has been warned. A loss that appeared in between is
+answered with its warning, never with the other tab's sendable card. A
+plain look that was loading is answered the same way. A **Review again** with no loss outstanding
 (every loss has had a card made since) opens a card as before. So a crashed
 Send blocks the older cards, never the draft for good.
 

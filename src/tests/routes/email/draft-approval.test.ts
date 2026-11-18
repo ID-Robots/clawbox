@@ -897,6 +897,56 @@ describe("Send", () => {
     expect(sends).toHaveLength(2);
   });
 
+  it("a Send lost and already answered in another tab while Review again was loading is still shown to the tab that missed it", async () => {
+    // Tab A: the person keeps the draft; the card says "Kept".
+    const first = await mint(ownerCookie());
+    expect((await answer(ownerCookie(), first.json.token, "keep")).json.state).toBe("kept");
+    let release!: () => void;
+    gate = { id: DRAFT_ID, hit: false, wait: new Promise<void>((resolve) => { release = resolve; }) };
+    // Tab A's Review again is reading the draft...
+    const reviewing = mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    await vi.waitFor(() => expect(gate?.hit).toBe(true));
+    // ...while tab B reviews it again, loses a Send's answer, is warned, and
+    // reviews it again once more — a card made after the loss.
+    const tabB = await mint(ownerCookie(), DRAFT_ID, { reopen: true });
+    expect(tabB.json.state).toBe("open");
+    sendAnswer = 503;
+    const lost = await answer(ownerCookie(), tabB.json.token, "send");
+    expect(lost.json).toMatchObject({ kind: "send_uncertain", uncertainty: expect.any(Number) });
+    sendAnswer = 200;
+    const reopenedB = await mint(ownerCookie(), DRAFT_ID, { reopen: true, acknowledged: lost.json.uncertainty });
+    expect(reopenedB.json.state).toBe("open");
+    release();
+    // Tab A was never shown that warning: it gets the warning, not B's token.
+    const late = await reviewing;
+    expect(late.json).toMatchObject({ state: "uncertain", uncertainty: lost.json.uncertainty });
+    expect(late.json.token).toBeUndefined();
+    expect(sends).toHaveLength(1);
+    // Once tab A has shown it, its Review again names it and gets a card that can send.
+    const reviewed = await mint(ownerCookie(), DRAFT_ID, { reopen: true, acknowledged: late.json.uncertainty });
+    expect(reviewed.json.state).toBe("open");
+    expect((await answer(ownerCookie(), String(reviewed.json.token), "send")).status).toBe(200);
+    expect(sends).toHaveLength(2);
+  });
+
+  it("a plain look that was loading while another tab lost a Send and reopened gets the warning, not that tab's token", async () => {
+    let release!: () => void;
+    gate = { id: DRAFT_ID, hit: false, wait: new Promise<void>((resolve) => { release = resolve; }) };
+    const looking = mint(ownerCookie());
+    await vi.waitFor(() => expect(gate?.hit).toBe(true));
+    const tabB = await mint(ownerCookie());
+    sendAnswer = 503;
+    const lost = await answer(ownerCookie(), tabB.json.token, "send");
+    expect(lost.json.kind).toBe("send_uncertain");
+    sendAnswer = 200;
+    expect((await mint(ownerCookie(), DRAFT_ID, { reopen: true, acknowledged: lost.json.uncertainty })).json.state).toBe("open");
+    release();
+    const late = await looking;
+    expect(late.json).toMatchObject({ state: "uncertain", uncertainty: lost.json.uncertainty });
+    expect(late.json.token).toBeUndefined();
+    expect(sends).toHaveLength(1);
+  });
+
   it("Review again from Kept or Revised opens a card as before once every lost Send has been answered", async () => {
     sendAnswer = 503;
     const first = await mint(ownerCookie());

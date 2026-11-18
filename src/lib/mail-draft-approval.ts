@@ -465,6 +465,22 @@ function unansweredLoss(cards: CardEntry[], user: string, draftId: string, now: 
   return newest;
 }
 
+/**
+ * The newest lost Send of this person's draft, whether or not a card has been
+ * made since it. `unansweredLoss` asks whether ANYONE was warned; this is what
+ * `mintCard` compares across its own backend read, to tell whether a loss
+ * happened while THIS request was waiting — warned in another tab or not.
+ */
+function newestLoss(cards: CardEntry[], user: string, draftId: string, now: number): number | null {
+  let newest: number | null = null;
+  for (const card of cards) {
+    if (card.u !== user || card.d !== draftId) continue;
+    const at = lostAt(card, now);
+    if (at !== null && (newest === null || at > newest)) newest = at;
+  }
+  return newest;
+}
+
 /** The fields an `uncertain` answer carries: the warning's identifier, when the ledger has one. */
 function uncertainty(loss: number | null): Record<string, unknown> {
   return loss === null ? {} : { uncertainty: loss };
@@ -504,7 +520,9 @@ function acknowledgedLoss(value: unknown): number | null {
  * again: the card says so. After a lost Send, "Review again" must also name
  * the warning it answers (`acknowledged`, the `uncertainty` the card was
  * shown): a reopen that names none, or an older one, is answered `uncertain`
- * with the current identifier instead of a card.
+ * with the current identifier instead of a card. A loss that appears while
+ * this request reads the draft is answered the same way, even when another
+ * tab has already been warned about it and opened a card since.
  */
 export async function mintCard(
   identity: SessionIdentity,
@@ -532,6 +550,7 @@ export async function mintCard(
   }
   const early = settledAnswerIn(before, identity.username, draftId, acknowledged, now);
   if (early) return early;
+  const lossBefore = newestLoss(before, identity.username, draftId, now);
 
   const fetched = await fetchDraft(active.config, identity.username, draftId);
   if (!fetched.ok) return fetched.reason === "not_found" ? GONE() : backendRefusal(fetched.reason);
@@ -555,6 +574,15 @@ export async function mintCard(
   // loss, the order `stamp` keeps strict.
   const again = settledAnswerIn(cards, identity.username, draftId, acknowledged, now);
   if (again) return again;
+  // A loss newer than any this request saw before its read was not shown to
+  // the person here, EVEN WHEN another tab has since been warned and made a
+  // card past it (which `settledAnswerIn` reads as answered): that tab's card
+  // would otherwise be handed out below, a Send this person was never warned
+  // about. Asked separately from who was warned, by the moment of the loss.
+  const lossAfter = newestLoss(cards, identity.username, draftId, now);
+  if (lossAfter !== null && (lossBefore === null || lossAfter > lossBefore) && lossAfter !== acknowledged) {
+    return { status: 200, body: { state: "uncertain", decidedAt: lossAfter, ...uncertainty(lossAfter) } };
+  }
   const mine = cards.filter((card) => card.u === identity.username && card.d === draftId);
 
   // The same open card when one is still good for a while, so reopening a
