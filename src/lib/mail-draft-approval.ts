@@ -238,8 +238,15 @@ function readLedger(): CardEntry[] {
   return parsed.cards as CardEntry[];
 }
 
-/** The cards `writeLedger` kept: the list on disk after aging and the count cap. */
-function writeLedger(cards: CardEntry[], now: number): CardEntry[] {
+/**
+ * The cards `writeLedger` kept: the list on disk after aging and the count cap.
+ *
+ * `require` is a card the write EXISTS FOR (the one being minted). When the
+ * count cap cannot keep it, nothing is written and the list that would have
+ * been is returned: a request about to be refused must not cost the ledger the
+ * open and answered records it still holds.
+ */
+function writeLedger(cards: CardEntry[], now: number, require?: string): CardEntry[] {
   // A claim no answer ever came back for is settled as uncertain AS OF THE
   // MOMENT IT WAS LOST (`lostAt`), not of this write: the card that write may
   // be minting — the person's "Review again" — is then strictly newer, and
@@ -254,6 +261,7 @@ function writeLedger(cards: CardEntry[], now: number): CardEntry[] {
   const pinned = (card: CardEntry) => card.state === "sending" || card.state === "uncertain" || card.state === "sent";
   let room = MAX_CARDS - live.filter(pinned).length;
   const kept = live.filter((card) => pinned(card) || room-- > 0);
+  if (require !== undefined && !kept.some((card) => card.c === require)) return kept;
   fs.mkdirSync(DATA_DIR, { recursive: true });
   // config-store's discipline: a fresh temp at 0600, chmod for a stale one,
   // then an atomic rename — a crash leaves the old ledger or the new one.
@@ -362,14 +370,19 @@ function transition(
   return { ok: true };
 }
 
-/** Records a state with no precondition. Used only after a claim succeeded. */
-function settle(cardId: string, to: CardState, now: number): void {
+/**
+ * Records a state with no precondition. Used only after a claim succeeded.
+ * False when the ledger no longer holds the card — the state is then recorded
+ * NOWHERE, which the caller must not mistake for a write that worked.
+ */
+function settle(cardId: string, to: CardState, now: number): boolean {
   const cards = readLedger();
   const card = cards.find((entry) => entry.c === cardId);
-  if (!card) return;
+  if (!card) return false;
   card.state = to;
   card.at = stamp(cards, now);
   writeLedger(cards, now);
+  return true;
 }
 
 /** How many times a known outcome is written before the ledger is given up on. */
@@ -388,8 +401,10 @@ const RECORD_ATTEMPTS = 3;
 function record(cardId: string, state: CardState): boolean {
   for (let attempt = 0; attempt < RECORD_ATTEMPTS; attempt += 1) {
     try {
-      settle(cardId, state, Date.now());
-      return true;
+      // A card the ledger no longer holds is a card this outcome did not reach:
+      // retrying cannot bring it back, and reporting it as recorded would hide
+      // that a later look may offer the draft again.
+      return settle(cardId, state, Date.now());
     } catch {
       // The same write again, never another Send.
     }
@@ -557,7 +572,7 @@ export async function mintCard(
     };
     let kept: CardEntry[];
     try {
-      kept = writeLedger([...cards, minted], now);
+      kept = writeLedger([...cards, minted], now, minted.c);
     } catch {
       return UNAVAILABLE();
     }
@@ -565,7 +580,8 @@ export async function mintCard(
     // have gone, so a ledger full of those has no room for an open one. A token
     // for a card the ledger does not hold would be refused as `reused` by every
     // press — a Send that cannot work and a message that misstates why. Refused
-    // here instead, and said plainly. It clears as those records age out.
+    // here instead, and said plainly (nothing was written either). It clears as
+    // those records age out.
     if (!kept.some((entry) => entry.c === minted.c)) return NO_ROOM();
     card = minted;
   }

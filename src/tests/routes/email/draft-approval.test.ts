@@ -653,14 +653,39 @@ describe("Send", () => {
       iat: now + i, exp: now + 600_000, state: "sent", at: now + i,
     }));
     fs.writeFileSync(ledgerPath, JSON.stringify({ v: 1, cards }));
+    // An answered card of this person's, which a refused request must not cost them.
+    cards.push({
+      c: "kept".padEnd(22, "0"), u: OWNER, d: "earlier-draft", h: "1".repeat(64),
+      iat: now, exp: now + 600_000, state: "kept", at: now,
+    });
+    fs.writeFileSync(ledgerPath, JSON.stringify({ v: 1, cards }));
     const full = await mint(ownerCookie());
     expect(full.status).toBe(503);
     expect(full.json.kind).toBe("no_room");
     expect(full.json.token).toBeUndefined();
-    // The pinned records are all still there, and nothing was sent.
+    // Nothing was written: the pinned records and the answered one are all there.
     const after = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as { cards: { state: string }[] };
     expect(after.cards.filter((c) => c.state === "sent")).toHaveLength(2000);
+    expect(after.cards.filter((c) => c.state === "kept")).toHaveLength(1);
     expect(sends).toEqual([]);
+  });
+
+  it("does not call a Send recorded when the ledger no longer holds the card", async () => {
+    const ledgerPath = path.join(root, "data", "mail-draft-approvals.json");
+    const { json } = await mint(ownerCookie());
+    let release!: () => void;
+    gate = { id: DRAFT_ID, hit: false, wait: new Promise<void>((resolve) => { release = resolve; }) };
+    // The Send has claimed the card and is re-reading the draft...
+    const sending = answer(ownerCookie(), json.token, "send");
+    await vi.waitFor(() => expect(gate?.hit).toBe(true));
+    // ...when the ledger is replaced under it, claim and all. The mail still
+    // goes, and the result reaches no record: the answer must say both.
+    fs.writeFileSync(ledgerPath, JSON.stringify({ v: 1, cards: [] }));
+    release();
+    const sent = await sending;
+    expect(sent.status).toBe(200);
+    expect(sent.json).toMatchObject({ state: "sent", recorded: false });
+    expect(sends).toHaveLength(1);
   });
 
   it("records a confirmed Send even when the first ledger write fails, and says so when none works", async () => {

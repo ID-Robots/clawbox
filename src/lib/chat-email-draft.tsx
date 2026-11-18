@@ -146,8 +146,13 @@ export function refusalKey(kind: string, state?: unknown): string {
   }
 }
 
-/** Refusals after which the CURRENT version can be fetched and approved afresh. */
-const RELOADABLE = new Set(['changed', 'expired', 'backend_unreachable', 'backend_bad', 'unavailable', 'network'])
+/**
+ * Refusals after which the CURRENT version can be fetched and approved afresh.
+ * `no_room`: the ledger had no room for another approval, which clears as its
+ * settled records age out — the server says "try again later", so the card
+ * offers that rather than a dead end.
+ */
+const RELOADABLE = new Set(['changed', 'expired', 'backend_unreachable', 'backend_bad', 'unavailable', 'network', 'no_room'])
 
 function isDraftView(value: unknown): value is EmailDraftView {
   const v = value as Partial<EmailDraftView> | null

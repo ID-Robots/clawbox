@@ -103,16 +103,20 @@ Send blocks the older cards, never the draft for good.
 
 A Send the backend **confirmed** is recorded in the ledger with retries, and the
 retries repeat the ledger write alone — the backend is never asked to send
-twice. If no write succeeds, the answer is still `sent`, with `recorded: false`
-and a sentence saying the mail went and the record of it did not; the card shows
-that rather than only "Sent."
+twice. If no write succeeds — or if the ledger no longer holds the card at all —
+the answer is still `sent`, with `recorded: false` and a sentence saying the
+mail went and the record of it did not; the card shows that rather than only
+"Sent."
 
 The ledger keeps at most 2000 cards, but a `sent`, `sending` or `uncertain` card
 is never dropped to make room. Those leave only by age (30 days). When they fill
 the ledger there is no room for a new open card, and the card route refuses with
 503 `no_room` instead of handing out an approval the ledger does not hold (which
-every press would refuse as `reused`, saying the wrong thing about why). Nothing
-can be sent without an approval, so the refusal is fail-closed as well.
+every press would refuse as `reused`, saying the wrong thing about why). The
+refused request writes nothing, so it costs the person none of their open or
+answered records; nothing can be sent without an approval, so the refusal is
+fail-closed as well. The card offers **Try again**, since the state clears as
+the settled records age out.
 
 A reload after **Review again** shows the new open card, not the earlier
 **Keep as draft** or **Tell me what to change** answer for the same version.
