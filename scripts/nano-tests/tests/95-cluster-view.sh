@@ -348,8 +348,9 @@ if [ ! -e "$DIR/env.orig" ] && [ ! -e "$DIR/env.absent" ]; then
 fi
 base="$DIR/env.orig"
 [ -e "$DIR/env.absent" ] && base=/dev/null
-# The filter below works on lines. A quoted value that runs over several lines
-# (EnvironmentFile allows it) could hold a line that looks like a cluster
+# The filter below works on lines. A value that runs over several lines
+# (EnvironmentFile allows a quoted one, and an unquoted one continued by a
+# backslash at the end of the line) could hold a line that looks like a cluster
 # setting, so a .env with one is not rewritten at all.
 if ! awk '"'"'
   q == "" && /^[[:space:]]*[#;]/ { next }
@@ -357,7 +358,10 @@ if ! awk '"'"'
     n = length($0)
     for (i = 1; i <= n; i++) {
       c = substr($0, i, 1)
-      if (q == "") { if (c == "\"" || c == "\047") q = c }
+      if (q == "") {
+        if (c == "\\") { if (i == n) { multi = 1; exit } i++ }
+        else if (c == "\"" || c == "\047") q = c
+      }
       else if (c == "\\" && q == "\"") i++
       else if (c == q) q = ""
     }
@@ -365,7 +369,7 @@ if ! awk '"'"'
   }
   END { exit multi ? 3 : 0 }
 '"'"' "$base"; then
-  echo "FAIL the .env holds a value over several lines (or a quote that never closes), which this test does not rewrite; it was not changed"
+  echo "FAIL the .env holds a value over several lines (a quote that does not close on its line, or a backslash that continues it), which this test does not rewrite; it was not changed"
   exit 0
 fi
 # awk, not grep: it answers 0 whether or not a line was dropped, so any
