@@ -59,6 +59,7 @@ import { isOpenclawMaintenanceRefusal, withOpenclawMaintenanceRetry } from "@/li
 import { FALLBACK_AGENT_ID, openclawDefaultAgentId } from "@/lib/openclaw-default-agent";
 import {
   countIndexChunks,
+  indexWriteMark,
   createIndexProgressReader,
   openclawAgentDbPath,
   ptyHostArgs,
@@ -629,6 +630,12 @@ interface SupervisedPass {
   abandon(): void;
   /** Set by `stopMemoryIndex`, read by `finish` to say "stopped" rather than "interrupted". */
   stopRequested: boolean;
+  /**
+   * The pass's own work is over (the OpenClaw arm, while the gateway is being
+   * started again): there is nothing left to stop, and a stop taken now
+   * would record a pass that finished as a stopped one.
+   */
+  readonly workEnded: boolean;
 }
 
 function supervisedPass(): { current: SupervisedPass | null } {
@@ -805,6 +812,21 @@ async function markInterrupted(
 }
 
 /**
+ * One section, in this process, for judging and settling a run record and for
+ * taking the run lock. `markInterrupted` re-reads, checks, writes and frees
+ * the lock across awaits: two readers settling the same stale record, or one
+ * settling it while `acquireRunLock` judges the lock, could otherwise free
+ * the lock of a pass that started in between. Process-wide like the pass
+ * itself (see process-store.ts).
+ */
+function runRecordSection<T>(work: () => Promise<T>): Promise<T> {
+  const section = processStore("clawkeep-memory.run-record-section", () => ({ tail: Promise.resolve() as Promise<unknown> }));
+  const turn = section.tail.then(work, work);
+  section.tail = turn.catch(() => undefined);
+  return turn;
+}
+
+/**
  * A `running` record a reader found is not going: a stalled one's orphaned
  * indexer is ended first, then the run is settled as `stalled` or
  * `interrupted`.
@@ -821,7 +843,7 @@ export async function readMemoryRunState(): Promise<MemoryRunState> {
   let state = await readPersistedRunState();
   if (state.status === "running") {
     const verdict = runningRecordVerdict(state);
-    if (verdict !== "going") state = await settleStaleRun(state, verdict);
+    if (verdict !== "going") state = await runRecordSection(() => settleStaleRun(state, verdict));
   }
   return publicMemoryRunState(state);
 }
@@ -2379,6 +2401,10 @@ async function planIndexPass(
 }
 
 async function acquireRunLock(): Promise<boolean> {
+  return runRecordSection(acquireRunLockInSection);
+}
+
+async function acquireRunLockInSection(): Promise<boolean> {
   await ensureDataDir();
   try {
     await fs.mkdir(RUN_LOCK_PATH, { mode: 0o700 });
@@ -2674,7 +2700,7 @@ function startOpenclawPass(
   onRespawn: (pid: number) => void,
   onWaiting: () => void,
 ): IndexPass {
-  let current = startOpenclawAttempt(mode, onProgress, agentId, stallMs);
+  let current = startOpenclawAttempt(mode, onProgress, agentId, stallMs, onWaiting);
   let abandoned = false;
   let wake: (() => void) | null = null;
   const ended = (async (): Promise<PassOutcome> => {
@@ -2707,7 +2733,7 @@ function startOpenclawPass(
       if (abandoned) return outcome;
       onWaiting();
       try {
-        current = startOpenclawAttempt(mode, onProgress, agentId, stallMs);
+        current = startOpenclawAttempt(mode, onProgress, agentId, stallMs, onWaiting);
       } catch (error) {
         // `spawn` throws at once for some failures (ENOMEM, E2BIG) rather
         // than emitting "error". The pass ends on it like on any other end,
@@ -2740,6 +2766,8 @@ function startOpenclawAttempt(
   onProgress: PassProgressReporter,
   agentId: string,
   stallMs: number,
+  /** The index was written to: progress for the stall watchdog, whatever the counts say. */
+  onActivity: () => void,
 ): IndexPass {
   const host = ptyHost();
   // The agent the status reads (`openclawDefaultAgentId`), so the card's
@@ -2806,11 +2834,17 @@ function startOpenclawAttempt(
   const dbPath = openclawAgentDbPath(agentId, openclawEnv());
   const since = Date.now();
   let chunks = 0;
+  let lastWrite: string | null = null;
   let poll: NodeJS.Timeout | null = setInterval(() => {
     const counts = host ? reader.latest() : null;
     const counted = countIndexChunks(dbPath, since, { rebuild: mode === "full" });
     if (counted !== null) chunks = counted;
     onProgress({ filesDone: counts?.filesDone ?? 0, filesTotal: counts?.filesTotal ?? 0, chunks }, host !== null);
+    // A commit that moved no count — chunks replaced one for one — is
+    // progress all the same; an index nobody writes keeps its mark.
+    const written = indexWriteMark(dbPath, since, { rebuild: mode === "full" });
+    if (written !== null && lastWrite !== null && written !== lastWrite) onActivity();
+    if (written !== null) lastWrite = written;
     // Off a terminal, inside the stall window however short it is set: a
     // window shorter than the clock would end a pass that is writing chunks
     // before its first reading.
@@ -3175,7 +3209,9 @@ export async function startMemoryIndex(
       await startOpenclawGatewayAfterOffline().catch(() => undefined);
       // The record as it stands, so markInterrupted recognises it as this run's.
       const onRecord = await readPersistedRunState();
-      if (onRecord.status === "running" && ourStamps.has(onRecord.startedAtMs)) await markInterrupted(onRecord).catch(() => undefined);
+      if (onRecord.status === "running" && ourStamps.has(onRecord.startedAtMs)) {
+        await runRecordSection(() => markInterrupted(onRecord)).catch(() => undefined);
+      }
       throw err;
     }
     // Still this run's? Every claim write issued so far has landed first;
@@ -3218,14 +3254,23 @@ export async function startMemoryIndex(
   }
   // Set once the pass's own work is over: what follows on the OpenClaw arm is
   // the gateway's start, which moves no count, and the stall watchdog must not
-  // read that wait as a pass that stopped moving.
+  // read that wait as a pass that stopped moving — nor may an owner's stop
+  // that arrives in it turn a pass that finished into a stopped one.
   let workEnded = false;
+  // A pass given up on (the owner's stop, the stall watchdog) is settled even
+  // if it never ends — see `giveUp` below.
+  let abandonGrace: NodeJS.Timeout | null = null;
+  let settleAbandoned: ((outcome: PassOutcome) => void) | null = null;
+  const abandonedEnd = new Promise<PassOutcome>((resolve) => { settleAbandoned = resolve; });
   if (!localArm) {
     // However the pass ended, the assistant is started again — once more after
     // a pause if the first start fails — and a pass whose assistant could not
-    // be brought back is recorded as failed, not succeeded.
+    // be brought back is recorded as failed, not succeeded. An attempt that
+    // never ends after it was given up on counts as ended here too, so the
+    // gateway's start is inside the run, and the run lock is not freed (for a
+    // next pass to stop the gateway again) until that start is over.
     const inner = pass;
-    const ended = inner.ended.then(async (outcome): Promise<PassOutcome> => {
+    const ended = Promise.race([inner.ended, abandonedEnd]).then(async (outcome): Promise<PassOutcome> => {
       workEnded = true;
       watchdog?.stop();
       let lastError: unknown = null;
@@ -3261,7 +3306,9 @@ export async function startMemoryIndex(
   try {
     // The first write that names the pass, which must land (see the catch);
     // later writes queue behind it.
-    const named = writeRunState(state);
+    // Behind any progress write already on its way, so none can land after
+    // it and leave the record without the child's name.
+    const named = progressWritten.then(() => writeRunState(state));
     progressWritten = named.catch(() => { /* answered by the await below */ });
     await named;
   } catch (err) {
@@ -3281,9 +3328,6 @@ export async function startMemoryIndex(
   // ends: the OpenClaw arm is SIGKILLed TERMINATE_GRACE_MS after the SIGTERM,
   // but the local arm can only stop at its next check of the signal, and a
   // pass that never reached one must not hold the lock for ever.
-  let abandonGrace: NodeJS.Timeout | null = null;
-  let settleAbandoned: ((outcome: PassOutcome) => void) | null = null;
-  const abandonedEnd = new Promise<PassOutcome>((resolve) => { settleAbandoned = resolve; });
   const giveUp = () => {
     pass.abandon();
     if (abandonGrace) return;
@@ -3296,7 +3340,12 @@ export async function startMemoryIndex(
     }, ABANDON_SETTLE_MS);
     abandonGrace.unref?.();
   };
-  const supervised: SupervisedPass = { startedAtMs, abandon: giveUp, stopRequested: false };
+  const supervised: SupervisedPass = {
+    startedAtMs,
+    abandon: giveUp,
+    stopRequested: false,
+    get workEnded() { return workEnded; },
+  };
   supervisedPass().current = supervised;
   // Deliberately no cache invalidation here: nothing the probe reports changes
   // until the pass ends, and dropping the reading at spawn time made the
@@ -3415,7 +3464,9 @@ export async function startMemoryIndex(
   };
   // A pass that rejected instead of ending is settled the same way: left
   // unhandled, the record would say "running" and the lock stay for good.
-  passSettling().current = Promise.race([pass.ended, abandonedEnd])
+  // The OpenClaw arm's `ended` already gives up on an attempt that never ends
+  // (and then starts the gateway); the local arm's is raced here.
+  passSettling().current = (localArm ? Promise.race([pass.ended, abandonedEnd]) : pass.ended)
     .then(finish, (error: unknown) => finish({ kind: "threw", error }));
 
   return { accepted: true, run: publicMemoryRunState(state) };
@@ -3437,7 +3488,9 @@ export async function startMemoryIndex(
 export async function stopMemoryIndex(): Promise<{ stopped: boolean; run: MemoryRunState }> {
   const run = await readMemoryRunState();
   const held = supervisedPass().current;
-  if (run.status !== "running" || !held || held.startedAtMs !== run.startedAtMs) return { stopped: false, run };
+  if (run.status !== "running" || !held || held.startedAtMs !== run.startedAtMs || held.workEnded) {
+    return { stopped: false, run };
+  }
   held.stopRequested = true;
   held.abandon();
   return { stopped: true, run };

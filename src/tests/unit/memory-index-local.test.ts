@@ -1521,6 +1521,49 @@ describe("a pass given up on inside its last file", () => {
     expect(storeCount("SELECT COUNT(*) AS n FROM files")).toBe(1);
     expect(storeMeta("generation")).toBe("1");
   });
+
+  it("tells a search the store changed when a rebuild is stopped after emptying it, before any file commits", async () => {
+    // The rebuild clears every row first; a stop before the first file lands
+    // left `generation` where it was, and a cached copy kept vectors whose
+    // rows were gone.
+    write("notes.md", "The deposit is two months' rent.");
+    await runLocalIndexPass("full");
+    expect(storeMeta("generation")).toBe("1");
+    const controller = new AbortController();
+    const embed = globalThis.fetch;
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (...args: Parameters<typeof fetch>) => {
+      // The probe (first) answers; the stop lands with the file's batch.
+      if ((calls += 1) === 2) controller.abort();
+      return embed(...args);
+    }));
+    await expect(runLocalIndexPass("full", controller.signal)).rejects.toBeInstanceOf(IndexPassAbortedError);
+    expect(storeCount("SELECT COUNT(*) AS n FROM chunks")).toBe(0);
+    expect(storeMeta("generation")).toBe("2");
+  });
+
+  it("does no bookkeeping when it is given up on while closing its last, unchanged file", async () => {
+    // Nothing inside the walk checks the signal for a file it skips, so this
+    // is the guard after the walk alone: no stale row swept, no identity
+    // stamped, for a run that is over.
+    write("kept.md", "The deposit is two months' rent.");
+    const gone = write("gone.md", "The boiler is serviced in March.");
+    await runLocalIndexPass("full");
+    expect(storeCount("SELECT COUNT(*) AS n FROM files")).toBe(2);
+    const builtAt = storeMeta("built_at");
+    fs.rmSync(gone);
+    const controller = new AbortController();
+    let lastFileReports = 0;
+    const report = (p: { filesDone: number; filesTotal: number; chunks: number }) => {
+      // The report before the walk, then the one at the top of the last
+      // (only) file: the stop lands there, and the file is skipped as unchanged.
+      if (p.filesTotal === 1 && p.filesDone === 0 && (lastFileReports += 1) === 2) controller.abort();
+    };
+    await expect(runLocalIndexPass("incremental", controller.signal, report)).rejects.toBeInstanceOf(IndexPassAbortedError);
+    expect(lastFileReports).toBe(2);
+    expect(storeCount("SELECT COUNT(*) AS n FROM files")).toBe(2);
+    expect(storeMeta("built_at")).toBe(builtAt);
+  });
 });
 
 describe("what a pass reports about its own progress", () => {

@@ -356,7 +356,22 @@ export async function extractDocuments(
     }
 
     await fs.mkdir(derived, { recursive: true });
-    if (await extractOne(file, out)) extracted += 1;
+    // Into a file of this pass's own, published over `out` only if the pass
+    // is still wanted when the conversion is done (TASK-2431). A conversion
+    // takes no signal and can outlast the run that gave up on this pass, by
+    // when a newer pass may have written `out` from a newer revision of the
+    // document — and a late write over it, newer than its source, would be
+    // taken as current by every scan after.
+    const part = path.join(derived, `.${outName}.${process.pid}-${crypto.randomUUID()}.part`);
+    let converted = false;
+    try {
+      converted = await extractOne(file, part);
+      signal?.throwIfAborted();
+      if (converted) await fs.rename(part, out);
+    } finally {
+      await fs.rm(part, { force: true }).catch(() => { /* gone or never written */ });
+    }
+    if (converted) extracted += 1;
     else {
       skipped += 1;
       notes.push(`${path.basename(file)} could not be read.`);

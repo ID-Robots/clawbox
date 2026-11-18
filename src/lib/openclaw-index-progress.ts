@@ -194,6 +194,30 @@ function currentScratchIndex(dbPath: string, sinceMs: number): string | null {
 }
 
 /**
+ * A mark that changes whenever something commits to the index the pass is
+ * writing (TASK-2431): the size and mtime of the database file and of its
+ * write-ahead log. A pass that replaces chunks without changing how many
+ * there are (an incremental pass over edited notes) moves no count, but it
+ * moves this; an index nobody writes keeps the same mark. Null when there is
+ * no such file yet. Never throws, never opens the database.
+ */
+export function indexWriteMark(dbPath: string, sinceMs: number, { rebuild = false } = {}): string | null {
+  const scratch = currentScratchIndex(dbPath, sinceMs);
+  if (!scratch && rebuild) return null;
+  const target = scratch ?? dbPath;
+  const part = (file: string): string => {
+    try {
+      const stat = statSync(/* turbopackIgnore: true */ file);
+      return `${stat.size}@${stat.mtimeMs}`;
+    } catch {
+      return "-";
+    }
+  };
+  const main = part(target);
+  return main === "-" ? null : `${target}|${main}|${part(`${target}-wal`)}`;
+}
+
+/**
  * Chunks in the index the pass is writing, or null when that cannot be read
  * right now — no database yet, a writer holding it, a schema this does not
  * know. Never throws, and never waits.

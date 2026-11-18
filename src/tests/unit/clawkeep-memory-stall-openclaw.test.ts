@@ -99,8 +99,8 @@ interface FakeIndexer {
  *   lines the CLI prints whatever happened.
  */
 async function fakeIndexer(
-  { steps = 0, stepMs = 400, hang = false, lockHeldTimes = 0, chunks = false }:
-  { steps?: number; stepMs?: number; hang?: boolean; lockHeldTimes?: number; chunks?: boolean } = {},
+  { steps = 0, stepMs = 400, hang = false, lockHeldTimes = 0, chunks = false, replace = false }:
+  { steps?: number; stepMs?: number; hang?: boolean; lockHeldTimes?: number; chunks?: boolean; replace?: boolean } = {},
 ): Promise<FakeIndexer> {
   const db = process.env.CLAWKEEP_MEMORY_AGENT_DB!;
   await fs.mkdir(path.dirname(db), { recursive: true });
@@ -126,7 +126,9 @@ async function fakeIndexer(
     // only progress there is to see off a terminal.
     `const scratch = ${JSON.stringify(chunks)} ? new (await import('node:sqlite')).DatabaseSync(${JSON.stringify(db)} + '.memory-reindex-' + crypto.randomUUID()) : null;`,
     "scratch?.exec('CREATE TABLE memory_index_chunks (id TEXT PRIMARY KEY)');",
-    "const say = (done) => { scratch?.prepare('INSERT INTO memory_index_chunks VALUES (?)').run('c' + done); if (process.stderr.isTTY && process.argv.includes('--verbose')) process.stderr.write(`\\r\\x1b[2KIndexing memory files\\u2026 ${done}/" + `${Math.max(steps, 1)}` + " \\u00b7 elapsed 0:0${done % 10} 50%`); };",
+    // `replace`: every step rewrites the same chunk, so the count never moves.
+    `const write = ${replace ? "(done) => scratch?.prepare('INSERT OR REPLACE INTO memory_index_chunks VALUES (?)').run('c0')" : "(done) => scratch?.prepare('INSERT INTO memory_index_chunks VALUES (?)').run('c' + done)"};`,
+    "const say = (done) => { write(done); if (process.stderr.isTTY && process.argv.includes('--verbose')) process.stderr.write(`\\r\\x1b[2KIndexing memory files\\u2026 ${done}/" + `${Math.max(steps, 1)}` + " \\u00b7 elapsed 0:0${done % 10} 50%`); };",
     "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));",
     `for (let done = 0; done <= ${steps}; done += 1) { say(done); if (done < ${steps}) await sleep(${stepMs}); }`,
     `if (${JSON.stringify(hang)}) { setInterval(() => {}, 1000); } else {`,
@@ -240,7 +242,35 @@ describe("an OpenClaw pass off a terminal, under a short stall window", () => {
   });
 });
 
+describe("an OpenClaw pass off a terminal that rewrites chunks without adding any", () => {
+  it("is never taken for stalled while it writes, though its chunk count stays the same", async () => {
+    // An incremental pass over edited notes replaces chunks one for one: the
+    // count is the only figure off a terminal, and it does not move.
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "2000";
+    noTerminal();
+    const fake = await fakeIndexer({ steps: 16, stepMs: 300, chunks: true, replace: true });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
+    expect(existsSync(fake.termed)).toBe(false);
+  });
+});
+
 describe("an OpenClaw pass the owner stops", () => {
+  it("is not stopped once its work has ended and the gateway is being started again", async () => {
+    // Nothing is left to stop; taking the stop would record a finished pass
+    // as a stopped one.
+    gateway.startDelayMs = 3_000;
+    noTerminal();
+    await fakeIndexer({ steps: 1, stepMs: 100 });
+    const { startMemoryIndex, stopMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    for (let i = 0; i < 500 && gateway.starts === 0; i += 1) await new Promise((r) => setTimeout(r, 20));
+    expect(gateway.starts).toBe(1);
+    expect((await stopMemoryIndex()).stopped).toBe(false);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
+  });
+
   it("is never recorded as succeeded on a terminal, where `script` exits 0 for it", async () => {
     // Before TASK-2431 the run read the pty host's exit 0 as success.
     const fake = await fakeIndexer({ hang: true });
@@ -354,11 +384,11 @@ describe("the pass after one that died holding OpenClaw's memory workspace lock"
     const startedAt = Date.now();
     expect((await startMemoryIndex("incremental", "manual")).accepted).toBe(true);
     await waitFor(fake.started);
-    // The first attempt has failed and the pass is waiting out the lock.
-    for (let i = 0; i < 250; i += 1) {
-      if (vi.mocked(console.warn).mock.calls.some((c) => String(c[0]).includes("memory workspace lock held"))) break;
-      await new Promise((r) => setTimeout(r, 20));
-    }
+    // The first attempt has failed and the pass is waiting out the lock: the
+    // stop below must land in that wait, not on the first attempt.
+    const waiting = () => vi.mocked(console.warn).mock.calls.some((c) => String(c[0]).includes("memory workspace lock held"));
+    for (let i = 0; i < 250 && !waiting(); i += 1) await new Promise((r) => setTimeout(r, 20));
+    expect(waiting()).toBe(true);
     expect((await readMemoryRunState()).status).toBe("running");
     expect((await stopMemoryIndex()).stopped).toBe(true);
     expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "failed", errorCode: "interrupted" });

@@ -1251,6 +1251,9 @@ export async function runLocalIndexPass(
       // for it to be true of.
       db.exec("DELETE FROM chunks; DELETE FROM files;");
       db.prepare("DELETE FROM meta WHERE key = 'identity'").run();
+      // Emptied is changed: a stop before the first file commits must still
+      // move `generation`, or a cached copy keeps vectors that are gone.
+      wrote = true;
     }
     metaSet(db, "schema_version", SCHEMA_VERSION);
 
@@ -1403,7 +1406,10 @@ export async function runLocalIndexPass(
       // gone — including this file's own rows, which is why `replaced` follows
       // from the same answer rather than being asked for a second time.
       const wiped = assertDimension(db, vectors[0]);
-      if (wiped) chunkCount = 0;
+      if (wiped) {
+        chunkCount = 0;
+        wrote = true;
+      }
       const replaced = wiped ? 0 : existing;
 
       // One transaction per FILE: sqlite fsyncs at every commit, so a document
