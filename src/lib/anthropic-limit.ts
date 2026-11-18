@@ -477,6 +477,12 @@ export interface ModelLimit {
   /** Anthropic's own name for it, for the owner ("Fable"). */
   name: string;
   until: number;
+  /**
+   * Set from Anthropic's usage reading alone (TASK-2515), not from a refusal:
+   * a later reading that shows the week with room again lifts it. Absent: a
+   * run was refused on it, and only its time (or the owner) ends it.
+   */
+  fromUsage?: true;
 }
 
 export interface PoolMember {

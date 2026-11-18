@@ -1,7 +1,7 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { readFile, realpath, rm, writeFile } from "fs/promises";
-import { existsSync, lstatSync, readdirSync } from "fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "fs";
 import path from "./runtime-path";
 import { openclawSkippedLine, openclawUpdateSkip, type OpenclawUpdateSkip } from "./openclaw-update-skip";
 import { get, getKnown, set, setMany } from "./config-store";
@@ -30,6 +30,14 @@ import { monotonicNow } from "./monotonic-clock";
 import { waitForGatewayStartBeforeStop } from "./gateway-start-guard";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
+import {
+  probeUpdateHost,
+  resolveUpdateChannel,
+  UpdateChannelError,
+  workstationRefMissingReason,
+  workstationRefMissingUpdateError,
+  type UpdateChannel,
+} from "./update-channel";
 import { classifyUpdaterHandover } from "./updater-handover";
 import { startRootStep } from "./root-step-runner";
 import { preserveLocalEdits } from "./local-edits";
@@ -146,9 +154,27 @@ import {
   downgradeAuthorizedFor,
   writeDowngradeAuthorization,
 } from "./harness-downgrade-backup";
-import { describeOpenclawMigration, doctorFixBudgetMs, migrationBudgetMs, openclawDatabaseBytes, readOpenclawMigrationStatus } from "./openclaw-migration-status";
-import { dbMaintenanceRunning } from "./openclaw-db-maintenance";
+import {
+  describeOpenclawMigration,
+  doctorFixBudgetMs,
+  doctorRecordRefusal,
+  doctorRunCompleted,
+  migrationBudgetMs,
+  openclawDatabaseBytes,
+  readOpenclawMigrationStatus,
+} from "./openclaw-migration-status";
+import { installedOpenclawCoreVersion } from "./openclaw-core-generation";
+import { dbMaintenanceRunning, markOpenclawDoctorDue, recordOpenclawDoctorComplete } from "./openclaw-db-maintenance";
 import { redactCredentialShapes } from "./incident-sanitize";
+import {
+  closeUpdateLog,
+  finishUpdateUnitFollows,
+  followUpdateUnit,
+  logUpdateCommand,
+  logUpdateStepEnd,
+  logUpdateStepStart,
+  openUpdateLog,
+} from "./update-raw-log";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
@@ -188,7 +214,7 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // `{target: null, updateAvailable: false}` — "no OpenClaw update available" over a
 // box that has one, the false-success shape — and `reinstallManagedPluginPayload`
 // pinned the channel plugins to `@2026.8.1` on a 2026.9.3 core.
-const OPENCLAW_VERSION_FALLBACK = "2026.10.9";
+const OPENCLAW_VERSION_FALLBACK = "2026.11.5";
 
 /**
  * The state-DB schema each pinned core supports, read from the published
@@ -220,6 +246,8 @@ const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
   "2026.10.6": 20,
   "2026.10.7": 20,
   "2026.10.9": 20,
+  "2026.11.3": 22,
+  "2026.11.5": 36,
 };
 
 /**
@@ -242,6 +270,8 @@ const OPENCLAW_AGENT_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
   "2026.10.6": 25,
   "2026.10.7": 25,
   "2026.10.9": 25,
+  "2026.11.3": 27,
+  "2026.11.5": 38,
 };
 
 /** The state schema `version` supports, or null when this pin is not in the table. */
@@ -624,7 +654,7 @@ function noUpdateBranchReason(): RemoteReachability {
 async function reachOrigin(
   projectDir: string,
   args: string[],
-  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number },
+  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number; log?: boolean },
 ): Promise<RemoteReachability> {
   return (await readFromOrigin(projectDir, args, options)).remote;
 }
@@ -638,20 +668,27 @@ async function reachOrigin(
 async function readFromOrigin(
   projectDir: string,
   args: string[],
-  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number },
-): Promise<{ remote: RemoteReachability; stdout: string }> {
+  /** `log`: each attempt, its output and its exit into the update's raw log. */
+  options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number; log?: boolean },
+): Promise<{
+  remote: RemoteReachability;
+  stdout: string;
+  /** origin answered that the ref asked for does not exist (isMissingRef). */
+  missingRef: boolean;
+}> {
   const attempts = options.attempts ?? REMOTE_FETCH_ATTEMPTS;
   const retryDelayMs = options.retryDelayMs ?? REMOTE_RETRY_DELAY_MS;
   let lastText = "";
   let lastErr: unknown;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const { stdout } = await execGit(projectDir, args, {
+      const attemptGit = () => execGit(projectDir, args, {
         timeout: options.timeout,
         maxBuffer: options.maxBuffer,
         env: { ...process.env, ...GIT_NO_PROMPT_ENV },
       });
-      return { remote: REMOTE_REACHABLE, stdout: String(stdout ?? "") };
+      const { stdout } = options.log ? await logUpdateCommand(["git", ...args], attemptGit) : await attemptGit();
+      return { remote: REMOTE_REACHABLE, stdout: String(stdout ?? ""), missingRef: false };
     } catch (err) {
       lastErr = err;
       lastText = errorText(err);
@@ -670,6 +707,7 @@ async function readFromOrigin(
       reason: refusalReason(lastErr, lastText),
     },
     stdout: "",
+    missingRef: isMissingRef(lastText),
   };
 }
 
@@ -1154,7 +1192,15 @@ async function readRootStepFailure(stepId: string, sinceMs: number | null): Prom
  * Used for steps that will kill the current process (rebuild, reboot).
  */
 async function startRootServiceFireAndForget(stepId: string): Promise<void> {
-  await startRootStep(stepId, { noBlock: true, timeoutMs: 10_000 });
+  // Followed into the raw log until this process is replaced; the next one
+  // reads the unit on from where this one stopped (update-raw-log.ts).
+  const follow = followUpdateUnit(stepId);
+  try {
+    await startRootStep(stepId, { noBlock: true, timeoutMs: 10_000 });
+  } catch (err) {
+    await follow.finish();
+    throw err;
+  }
 }
 
 /**
@@ -1200,7 +1246,13 @@ export type BranchSource =
   /** Detached HEAD, resolved from the build stamp / refs that contain HEAD. */
   | "detached-recovered"
   /** Nothing said otherwise: `main`. Never auto-pinned. */
-  | "default";
+  | "default"
+  /**
+   * A ClawBox Workstation's own channel (src/lib/update-channel.ts): the
+   * `workstation` branch, ahead of every rule above. Never pinned — it follows
+   * from the hardware (or CLAWBOX_UPDATE_CHANNEL), not from a record.
+   */
+  | "workstation-channel";
 
 export interface ResolvedBranch {
   /** Local branch to checkout */
@@ -1308,8 +1360,27 @@ async function recoverDetachedBranch(projectDir: string): Promise<string | null>
   return null;
 }
 
+/**
+ * The update channel this checkout follows (src/lib/update-channel.ts).
+ * Throws UpdateChannelError when it cannot be decided without guessing.
+ */
+function currentUpdateChannel(projectDir: string): UpdateChannel {
+  return resolveUpdateChannel(probeUpdateHost(projectDir));
+}
+
 export async function resolveUpdateBranch(projectDir: string = PROJECT_DIR): Promise<ResolvedBranch> {
   const main: ResolvedBranch = { local: "main", upstream: "origin/main", source: "default" };
+
+  // 0. A ClawBox Workstation follows its own channel, ahead of the pin: the
+  // pin on a Workstation is the branch install-x64.sh installed from, and
+  // following it is exactly the "Workstation on beta" this channel replaces.
+  // Every other box answers `branch` and goes on below, unchanged. A channel
+  // that cannot be decided throws (UpdateChannelError), like rule 3 refuses a
+  // guess: the update fails with the reason instead of moving the box.
+  const channel = currentUpdateChannel(projectDir);
+  if (channel.kind === "workstation") {
+    return { local: channel.ref, upstream: `origin/${channel.ref}`, source: "workstation-channel" };
+  }
 
   // 1. Check .update-branch file
   try {
@@ -1511,6 +1582,18 @@ async function persistWarnings(): Promise<void> {
   await set("update_warnings", runtime.state.warnings?.length ? JSON.stringify(runtime.state.warnings) : undefined);
 }
 
+/**
+ * Take back a warning about a gateway this step has since replaced, in memory
+ * and in the persisted copy: the check that follows warns again if the new one
+ * earns it.
+ */
+async function dropUpdateWarning(code: string): Promise<void> {
+  const warnings = runtime.state.warnings ?? [];
+  if (!warnings.some((w) => w.code === code)) return;
+  runtime.state.warnings = warnings.filter((w) => w.code !== code);
+  await persistWarnings();
+}
+
 async function restoreWarnings(): Promise<UpdateWarning[]> {
   try {
     const raw = await get("update_warnings");
@@ -1558,6 +1641,10 @@ export async function repinUpdateBranch(
   projectDir: string = PROJECT_DIR,
   source: BranchSource = "checkout-branch",
 ): Promise<UpdateWarning[]> {
+  // The Workstation channel is not a record either: it follows from the
+  // hardware, and a pin written from it would outlive an override back to the
+  // branch rules (CLAWBOX_UPDATE_CHANNEL=branch). The pin is left as it is.
+  if (source === "workstation-channel") return [];
   if (source === "default") {
     return [{
       code: "repin-skipped",
@@ -1891,6 +1978,7 @@ async function updateClawBoxAsOwner(): Promise<void> {
   await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
   try {
     await rebuildAsOwner(PROJECT_DIR, {
+      onCommand: logUpdateCommand,
       onProgress: (detail) => {
         const running = runtime.state.steps[runtime.state.currentStepIndex];
         if (running?.status === "running") running.detail = detail;
@@ -1919,7 +2007,25 @@ async function updateClawBoxAsOwner(): Promise<void> {
  * order: `openclaw_install` reads the NEW release's pin.
  */
 async function syncCheckoutAsOwner(): Promise<void> {
-  const { local, upstream, source } = await resolveUpdateBranch(PROJECT_DIR);
+  const { local, upstream } = await fetchUpdateBranchAsOwner(PROJECT_DIR);
+  // The code install.sh's step 1 raises for the same save, so the restart
+  // step's own save recognises it the way it does on the appliance.
+  await syncCheckoutToUpstream(local, upstream, "local-edits-saved");
+}
+
+/**
+ * The first half of `syncCheckoutAsOwner`: resolve the update branch and fetch
+ * it, touching nothing else. Throws with the owner's sentence when it cannot.
+ *
+ * On the Workstation channel a branch origin does not carry is not "the pin
+ * no longer exists, choose another one" (refusalReason's sentence for a
+ * deleted QA branch): nothing has been released to Workstations yet, and the
+ * box stays on what it has — it is never moved to the pin or to main instead.
+ * Thrown before the tree is touched, so step 1 fails with the checkout as it was.
+ */
+export async function fetchUpdateBranchAsOwner(projectDir: string = PROJECT_DIR): Promise<ResolvedBranch> {
+  const resolved = await resolveUpdateBranch(projectDir);
+  const { upstream, source } = resolved;
   const slash = upstream.indexOf("/");
   const remote = slash > 0 ? upstream.slice(0, slash) : "";
   const branch = slash > 0 ? upstream.slice(slash + 1) : "";
@@ -1927,17 +2033,20 @@ async function syncCheckoutAsOwner(): Promise<void> {
     throw new Error(`This ClawBox cannot fetch its update branch: ${upstream} is not a remote branch the updater can name.`);
   }
   console.log(`[Updater] Fetching ${upstream} as the desktop owner (resolved from: ${source})`);
-  const fetched = await reachOrigin(
-    PROJECT_DIR,
+  const fetched = await readFromOrigin(
+    projectDir,
     ["fetch", "--quiet", remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`],
-    { timeout: 120_000 },
+    // Every attempt, with git's own output, into the update's raw log.
+    { timeout: 120_000, log: true },
   );
-  if (!fetched.reachable) {
-    throw new Error(fetched.reason ?? `Could not fetch ${upstream}. Check the internet connection and try again.`);
+  if (!fetched.remote.reachable) {
+    if (source === "workstation-channel" && fetched.missingRef) {
+      await dropStaleChannelRef(projectDir, branch);
+      throw new Error(workstationRefMissingUpdateError(branch));
+    }
+    throw new Error(fetched.remote.reason ?? `Could not fetch ${upstream}. Check the internet connection and try again.`);
   }
-  // The code install.sh's step 1 raises for the same save, so the restart
-  // step's own save recognises it the way it does on the appliance.
-  await syncCheckoutToUpstream(local, upstream, "local-edits-saved");
+  return resolved;
 }
 
 /**
@@ -2041,14 +2150,16 @@ async function syncCheckoutToUpstream(local: string, upstream: string, savedCode
     warnUpdate(savedCode, saved.message);
     await persistWarnings();
   }
-  await execGit(PROJECT_DIR, ["reset", "--hard", "HEAD"], gitOptions);
+  // Each into the update's raw log as it would read typed by hand.
+  const git = (args: string[]) => logUpdateCommand(["git", ...args], () => execGit(PROJECT_DIR, args, gitOptions));
+  await git(["reset", "--hard", "HEAD"]);
   try {
-    await execGit(PROJECT_DIR, ["checkout", local], gitOptions);
+    await git(["checkout", local]);
   } catch {
-    await execGit(PROJECT_DIR, ["checkout", "-b", local, upstream], gitOptions);
+    await git(["checkout", "-b", local, upstream]);
   }
-  await execGit(PROJECT_DIR, ["reset", "--hard", upstream], gitOptions);
-  await execGit(PROJECT_DIR, ["clean", "-fd"], gitOptions);
+  await git(["reset", "--hard", upstream]);
+  await git(["clean", "-fd"]);
 }
 
 // First-time `npm install -g openclaw` on cold Jetson caches routinely runs
@@ -2365,6 +2476,13 @@ function doctorChildEnv(): NodeJS.ProcessEnv {
  * finds no gateway, and swallowing it silently is what left a customer box
  * dark for 25 hours with "Applying system fixups — completed" on screen
  * (TASK-737).
+ *
+ * A run that exited 0 and, by install.sh's rule (`doctorRunCompleted`),
+ * finished its migration is recorded the way install.sh records its own run
+ * (`recordOpenclawDoctorComplete`): that fresh `complete`, with its time, is
+ * what lets the next updates start the gateway without doctor for 30 days.
+ * Any other run marks the recorded one due again (`markOpenclawDoctorDue`), so
+ * the next update runs doctor again, as it did at every update before.
  */
 async function runOpenclawDoctorFix(): Promise<void> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
@@ -2377,15 +2495,17 @@ async function runOpenclawDoctorFix(): Promise<void> {
   // is what tells a field log "not long enough" apart from "stuck".
   console.log(`[Updater] openclaw doctor --fix: bound ${Math.round(timeoutMs / 1000)}s `
     + `for ${(databaseBytes / 1024 ** 3).toFixed(2)} GiB of OpenClaw databases`);
+  let ran: { stdout?: unknown; stderr?: unknown };
   try {
     // Asked again while another holder has the state under maintenance: the
     // core refuses before it acts (`@/lib/openclaw-maintenance`).
-    await withOpenclawMaintenanceRetry((timeout) => execFile(openclawBin(), ["doctor", "--fix", "--yes", "--non-interactive"], {
+    ran = await withOpenclawMaintenanceRetry((timeout) => execFile(openclawBin(), ["doctor", "--fix", "--yes", "--non-interactive"], {
       timeout,
       maxBuffer: 2 * 1024 * 1024,
       env: doctorChildEnv(),
     }), { timeoutMs, label: "openclaw doctor --fix" });
   } catch (err) {
+    logDoctorMarkedDue("did not complete", await markOpenclawDoctorDue());
     // WHICH failure this was, and what the owner can do about it (TASK-754).
     // A doctor blocked by a legacy exec-approvals file migrated NOTHING, and
     // its own closing sentence is advice for the command that is blocked —
@@ -2421,7 +2541,27 @@ async function runOpenclawDoctorFix(): Promise<void> {
     }
     warnUpdate("openclaw-doctor-fix-failed", `\`openclaw doctor --fix\` did not complete. `
       + `Config and session migrations it performs may still be pending: ${describeDoctorFailure(err, timeoutMs)}`);
+    return;
   }
+  const output = [ran?.stdout, ran?.stderr].map((part) => (typeof part === "string" ? part : "")).join("\n");
+  if (!doctorRunCompleted(output)) {
+    logDoctorMarkedDue("exited 0 but its migration did not finish", await markOpenclawDoctorDue());
+  } else if (await recordOpenclawDoctorComplete()) {
+    console.log("[Updater] openclaw doctor --fix: completed; its run is recorded complete");
+  } else {
+    console.log("[Updater] openclaw doctor --fix: completed, but its run could not be recorded; the record stays as it was");
+  }
+}
+
+/**
+ * What the update's log says after a doctor run that did not complete, by the
+ * helper's own answer. "Due" holds as well when there was nothing to write (no
+ * record, or one already due), which the helper also answers true.
+ */
+function logDoctorMarkedDue(how: string, markedDue: boolean): void {
+  console.log(`[Updater] openclaw doctor --fix: ${how}; ${markedDue
+    ? "its recorded run is due, so the next update runs doctor again"
+    : "its recorded run could not be marked due, so the record stays as it was"}`);
 }
 
 /**
@@ -2436,9 +2576,14 @@ async function runOpenclawDoctorFix(): Promise<void> {
  * problem.
  */
 function describeDoctorFailure(err: unknown, timeoutMs: number): string {
-  if ((err as { killed?: boolean } | null)?.killed) {
+  const ended = err as { killed?: boolean; signal?: unknown } | null;
+  if (ended?.killed) {
     return `it was still running after ${Math.round(timeoutMs / 1000)}s and was stopped`;
   }
+  // node sets `killed` only for a kill it sent (the bound above); a signal
+  // without it came from elsewhere (the OOM killer, a stray kill, doctor's own
+  // crash), and doctor's last line is then progress, not the reason.
+  if (typeof ended?.signal === "string") return `it was killed by ${ended.signal} from outside the updater`;
   const said = commandOutput(err)
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -2876,6 +3021,13 @@ function pluginPayloadsRepairedByPreStart(preStartOutput: string): Set<string> {
   return repaired;
 }
 
+/**
+ * How long the pre-start may run outside the unit: the unit's 600 s
+ * TimeoutStartSec with a little process overhead. Also what the owner is told
+ * when the updater stopped it.
+ */
+const PRE_START_OUTSIDE_UNIT_TIMEOUT_MS = 650_000;
+
 /** Run the newly checked-out pre-start repair while the gateway is stopped. */
 async function runCurrentGatewayPreStart(): Promise<string> {
   if (!existsSync(CURRENT_GATEWAY_PRE_START)) return "";
@@ -2907,19 +3059,19 @@ async function runCurrentGatewayPreStart(): Promise<string> {
   let result: { stdout: string; stderr: string };
   try {
     result = await execFile("/bin/bash", [CURRENT_GATEWAY_PRE_START], {
-      // Match the unit's 600s TimeoutStartSec with a little process overhead.
       // Killing this halfway through a plugin migration recreates the lock race
       // this maintenance path exists to avoid.
-      timeout: 650_000,
+      timeout: PRE_START_OUTSIDE_UNIT_TIMEOUT_MS,
       maxBuffer: 4 * 1024 * 1024,
       env,
     });
   } catch (err) {
-    // Rethrown exactly as node built it: its message already carries stderr
-    // and is the step error the owner reads. What it lacks is stdout, the step
-    // the script stopped in, which under `set -euo pipefail` can be all there is.
+    // The owner reads ONE bounded, redacted line: node's message is
+    // `Command failed: …` and every byte of stderr (up to maxBuffer), unredacted.
+    // Everything the script printed goes to this process's journal, tagged and
+    // bounded; node's error rides as the cause, unchanged.
     logPreStartOutput("failed", err);
-    throw err;
+    throw new Error(describePreStartFailure(err), { cause: err });
   }
   logPreStartOutput("succeeded", result);
   // Read whole and unredacted: only the logged copy is cut and redacted.
@@ -2929,7 +3081,7 @@ async function runCurrentGatewayPreStart(): Promise<string> {
 /**
  * The log is a record of the run, never part of its outcome: a fault here must
  * not fail a pre-start that succeeded, nor stand in for the error of one that
- * failed (that error is the step error the owner reads).
+ * failed (the step error the owner reads is built from that error).
  */
 function logPreStartOutput(outcome: "succeeded" | "failed", output: unknown): void {
   try {
@@ -2938,10 +3090,7 @@ function logPreStartOutput(outcome: "succeeded" | "failed", output: unknown): vo
       console.log(describePreStartOutput("succeeded", detail));
       return;
     }
-    const how = detail.killed
-      ? `killed by ${String(detail.signal ?? "a signal")}`
-      : typeof detail.code === "number" ? `exit ${detail.code}` : String(detail.code ?? "no exit code");
-    console.error(describePreStartOutput(`failed (${how})`, detail));
+    console.error(describePreStartOutput(`failed (${describePreStartExit(detail)})`, detail));
   } catch (logErr) {
     try {
       console.warn("[Updater] pre-start (outside the unit): its output could not be logged:",
@@ -2949,6 +3098,96 @@ function logPreStartOutput(outcome: "succeeded" | "failed", output: unknown): vo
     } catch {
       // Nothing left to tell it to; the run's own outcome stands.
     }
+  }
+}
+
+type PreStartRejection = {
+  stdout?: unknown; stderr?: unknown; code?: unknown; killed?: unknown; signal?: unknown; syscall?: unknown;
+};
+
+/** node's string code when it could not spawn the script at all (`syscall` "spawn …"). */
+function preStartSpawnFailure(detail: PreStartRejection): string | null {
+  return typeof detail.code === "string" && typeof detail.syscall === "string" && detail.syscall.startsWith("spawn")
+    ? detail.code
+    : null;
+}
+
+/**
+ * How the pre-start outside the unit ended, for its log header and its step
+ * error. The updater's own limit is told apart by `killed` (node sets it only
+ * for a kill it sent), never by the signal: node closes the pipes before that
+ * kill, so a script whose EXIT trap prints dies of SIGPIPE instead. Not
+ * `clientTimedOut`, which also requires a signal: a child that handles the
+ * SIGTERM and exits with its own code was stopped by this limit all the same.
+ */
+export function describePreStartExit(detail: PreStartRejection): string {
+  // node's string code: a spawn that failed, where the script never ran, or a
+  // maxBuffer overflow, worded as the log always had it.
+  const notStarted = preStartSpawnFailure(detail);
+  if (notStarted) return `could not be started: ${notStarted}`;
+  if (typeof detail.code === "string") return detail.code;
+  const signal = typeof detail.signal === "string" ? detail.signal : null;
+  if (detail.killed === true) {
+    const limit = `stopped at the updater's ${Math.round(PRE_START_OUTSIDE_UNIT_TIMEOUT_MS / 1000)} s limit`;
+    return signal ? `${limit}, signal ${signal}` : limit;
+  }
+  if (signal) return `killed by ${signal} from outside the updater`;
+  if (typeof detail.code === "number") return `exit ${detail.code}`;
+  return "no exit code";
+}
+
+/** The EXIT trap's closing line, printed last on every exit that runs it. */
+const PRE_START_TOTAL_LINE = /^Timing: pre-start total \d+ ms/;
+/** The line each step closes with (clawbox_step_mark). */
+const PRE_START_STEP_LINE = /^Timing: (.+) \d+ ms$/;
+const PRE_START_STEP_NAME_MAX_CHARS = 80;
+const PRE_START_FAILURE_MAX_CHARS = 500;
+
+function cutWithEllipsis(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+/** Non-empty trimmed lines, redacted as a whole first so a cut cannot part a key from its value. */
+function redactedLines(text: unknown): string[] {
+  if (typeof text !== "string") return [];
+  return redactCredentialShapes(text).split("\n").map((line) => line.trim()).filter(Boolean);
+}
+
+/**
+ * The step error for a pre-start that failed outside the unit: one line, never
+ * node's `Command failed: …` with all of stderr. It names how the script ended
+ * and where, read from its Timing lines: the step line just before the trap's
+ * total line is the step that was open when it stopped; with no total line (a
+ * kill the trap did not survive) the newest step line is the last one that
+ * finished. Only an exit the script made itself gets its last error output
+ * quoted, and never as the cause: this script's `ERROR:` lines are not all
+ * fatal, and a killed script never reached its own error branch.
+ */
+export function describePreStartFailure(err: unknown): string {
+  try {
+    const detail = (err ?? {}) as PreStartRejection;
+    const notStarted = preStartSpawnFailure(detail);
+    let sentence = notStarted
+      ? `The gateway pre-start could not be started (${notStarted})`
+      : `The gateway pre-start failed (${describePreStartExit(detail)})`;
+    const stdout = redactedLines(detail.stdout);
+    const total = stdout.findLastIndex((line) => PRE_START_TOTAL_LINE.test(line));
+    const stepLine = total >= 0 ? stdout[total - 1] : stdout.findLast((line) => PRE_START_STEP_LINE.test(line));
+    const step = PRE_START_STEP_LINE.exec(stepLine ?? "");
+    if (step) {
+      sentence += ` ${total >= 0 ? "in" : "after"} "${cutWithEllipsis(step[1], PRE_START_STEP_NAME_MAX_CHARS)}"`;
+    }
+    const exitedOnItsOwn = typeof detail.code === "number" && detail.killed !== true
+      && typeof detail.signal !== "string";
+    const lastError = exitedOnItsOwn
+      ? redactedLines(detail.stderr).findLast((line) => !line.startsWith("Command failed:"))
+      : undefined;
+    sentence = lastError
+      ? `${sentence}; last error output: ${cutWithEllipsis(lastError, STEP_WARNING_MAX_CHARS)}`
+      : `${sentence}.`;
+    return cutWithEllipsis(sentence, PRE_START_FAILURE_MAX_CHARS - 1);
+  } catch {
+    return "The gateway pre-start failed.";
   }
 }
 
@@ -3932,17 +4171,125 @@ async function codexCapabilityRepairIsAllowed(): Promise<boolean> {
   }
 }
 
-async function readGatewayJournalTail(): Promise<string> {
+/**
+ * This boot's last 160 lines of the gateway's journal, or "" when journalctl
+ * fails. `quiet` drops journalctl's own `-- … --` lines (`-q`): without it a
+ * unit with no entries reads `-- No entries --` (some versions print a
+ * `-- Journal begins at … --` header above it), which is journalctl talking,
+ * not the gateway. The readers that quote the last line keep the plain form.
+ */
+async function readGatewayJournalTail(options: { quiet?: boolean } = {}): Promise<string> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/journalctl",
-      ["-u", "clawbox-gateway.service", "-b", "-n", "160", "--no-pager"],
+      [...(options.quiet ? ["-q"] : []), "-u", "clawbox-gateway.service", "-b", "-n", "160", "--no-pager"],
       { timeout: 10_000, maxBuffer: 2 * 1024 * 1024 },
     );
     return stdout;
   } catch {
     return "";
   }
+}
+
+/**
+ * What the full repair in `ensureGatewayHealthy` exists for, as the gateway's
+ * journal names it — the two plugin refusals its plugin repair answers, the
+ * legacy state its quarantine moves aside, and the SQLite lock wait — in words
+ * for the log line that says why the repair runs, or null for none of them.
+ */
+function repairNamedIn(journal: string): string | null {
+  const named: Array<[RegExp, string]> = [
+    [PLUGIN_PAYLOAD_VERIFICATION_RE, "a plugin payload refusal"],
+    [PLUGIN_CAPABILITY_CONSENT_RE, "a capability consent refusal"],
+    [LEGACY_GATEWAY_BLOCKER_RE, "legacy state"],
+    [/SQLite transaction lock wait failed/i, "a SQLite lock failure"],
+  ];
+  return named.find(([pattern]) => pattern.test(journal))?.[1] ?? null;
+}
+
+/**
+ * The one line every way into the verify's full repair logs, naming the gate
+ * that sent it there in neutral words: a field log must tell them apart.
+ */
+function logFullRepair(why: string): void {
+  console.log(`[Updater] gateway_verify: running the full repair: ${why}`);
+}
+
+/**
+ * systemd's id for the gateway unit's current run (InvocationID: new at every
+ * start, never reused), or null when systemctl cannot name one. The unit is
+ * installed and loaded, so a running one always has its id — unlike an ad-hoc
+ * root step instance (see `@/lib/root-step-journal`).
+ */
+async function gatewayRunId(): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/systemctl",
+      ["show", "clawbox-gateway.service", "-p", "InvocationID"],
+      { timeout: 10_000 },
+    );
+    return /^InvocationID=([0-9a-f]{32})\s*$/im.exec(stdout)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Everything one run of the gateway logged — its pre-start's lines and its
+ * own, none of the boot's other runs — or null when journalctl cannot answer
+ * or has nothing for it: a run that started has logged, so silence is no
+ * evidence. Read by the journal's own `_SYSTEMD_INVOCATION_ID`, as
+ * `latestSwapPhase` and `readLoadedHermesPlugins` read one run; no `-n`,
+ * because the refusals sit at the head of a run, where a last-N read would cut
+ * them off a chatty start.
+ */
+async function readGatewayRunJournal(runId: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/journalctl",
+      ["-q", "--no-pager", "-b", `_SYSTEMD_INVOCATION_ID=${runId}`],
+      { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 },
+    );
+    return stdout.trim() ? stdout : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where install.sh's gateway setup step notes which run of the gateway it left
+ * serving (`record_gateway_left_running`): root's, on /run, so the note
+ * outlives a web-server restart inside the update and is gone after a boot.
+ */
+function gatewayLeftRunningNote(): string {
+  return process.env.CLAWBOX_GATEWAY_LEFT_RUNNING || "/run/clawbox/gateway-left-running";
+}
+
+/**
+ * Why the gateway serving now must be started again rather than accepted, in
+ * neutral words for the log line, or null to accept it: it is the very run the
+ * update's gateway setup step left running, so nothing stopped it after that
+ * step and accepting it would keep the process from before the update. Read
+ * at each decision.
+ *
+ * No note: the step restarted the gateway itself, or the box has booted since,
+ * and the answer is null without asking systemd. A note that cannot be read,
+ * or a run systemctl cannot name, is a reason: the restart the step itself
+ * used to do. Compared by systemd's id for the run, never by clocks: these
+ * boards have no battery-backed clock, and the time can step during an update.
+ */
+async function gatewaySetupRunStillServing(): Promise<string | null> {
+  let left: string;
+  try {
+    left = readFileSync(/* turbopackIgnore: true */ gatewayLeftRunningNote(), "utf-8").trim();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return null;
+    return "the gateway setup step's note cannot be read";
+  }
+  if (!/^[0-9a-f]{32}$/.test(left)) return "the gateway setup step's note cannot be read";
+  const now = await gatewayRunId();
+  if (now === null) return "systemctl could not name the gateway's run";
+  return now === left ? "it is still the run the update's gateway setup step left running" : null;
 }
 
 function getGatewayFailureDetail(logText: string): string | null {
@@ -3984,8 +4331,103 @@ mv -v "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"* "$Q
   });
 }
 
-/** Recover gateway readiness using the installed desktop or appliance contract. */
-async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): Promise<void> {
+/**
+ * Whether the verify after a quiesced root step can just START the gateway that
+ * step stopped, on the unit's own ExecStartPre (the same new pre-start), and
+ * keep the full repair below for a start that does not come up. Each reason
+ * for that repair, answered:
+ *
+ * - One writer for the SQLite store: nothing here writes. The unit's pre-start
+ *   runs before the gateway process exists, as at every boot.
+ * - A pre-start killed midway is unsafe: nothing is killed. Only a unit stopped
+ *   cleanly (`inactive`, no job queued — what the quiesce leaves) is started;
+ *   one in `start-pre`, up, failed, or that systemctl cannot describe goes to
+ *   the full repair, which lets a running pre-start finish before it stops it.
+ *   Read last, right before the start, so the gap after it is the shortest.
+ * - The pre-start's output feeds the plugin repair: taken only when the journal
+ *   names nothing that repair, or the legacy quarantine, exists for. A journal
+ *   that says nothing at all — journalctl failed, or the gateway logged nothing
+ *   this boot (read with `-q`, so journalctl's own `-- No entries --` is not
+ *   taken for the gateway's) — is no such evidence, and gets the full repair.
+ *   This start's own lines are read once the chat has answered
+ *   (`repairWhatOwnStartNamed`): a refusal at plugin load can come after the
+ *   port opens.
+ * - doctor --fix: still run whenever doctor's own record does not prove it
+ *   completed for the installed core in the last 30 days (install.sh records it
+ *   at the core install, and the repair below at each run that completes), and
+ *   whenever this start fails; the pre-start's own `config validate` -> doctor
+ *   arm covers a config the core refuses at this start.
+ * - No pre-start runs outside the unit, so none leaves a start record behind.
+ */
+async function gatewayStartsWithoutRepair(): Promise<boolean> {
+  // Each refusal says which gate it was: a field log must tell them apart.
+  const refuse = (why: string) => {
+    logFullRepair(why);
+    return false;
+  };
+  const record = await doctorRecordRefusal();
+  if (record) return refuse(record);
+  const journal = await readGatewayJournalTail({ quiet: true });
+  if (!journal.trim()) return refuse("the gateway journal says nothing this boot, or could not be read");
+  const named = repairNamedIn(journal);
+  if (named) return refuse(`the gateway journal names ${named}`);
+  // For the log line only, and read before the unit: nothing may sit between
+  // that read and the start.
+  const core = await installedOpenclawCoreVersion();
+  const unit = await readGatewayStartState("clawbox-gateway.service");
+  if (!unit) return refuse("systemctl could not describe clawbox-gateway.service");
+  if (unit.activeState !== "inactive" || unit.job) {
+    return refuse(`clawbox-gateway.service is ${describeUnitState(unit)}${unit.job ? " with a job queued" : ""}`);
+  }
+  console.log("[Updater] gateway_verify: nothing to repair (no blocker in the gateway journal; doctor recorded "
+    + `complete for OpenClaw ${core ?? "(version unreadable)"}); starting the gateway on its own pre-start`);
+  return true;
+}
+
+/**
+ * A start `ensureGatewayHealthy` made WITHOUT the full repair — the routine
+ * start after the update's own quiesce, or the start of a gateway the update's
+ * gateway setup step left running — and its run's id, null when systemctl
+ * could not name it. The verify reads that run's journal once the chat has
+ * answered (`repairWhatOwnStartNamed`).
+ */
+interface OwnGatewayStart {
+  runId: string | null;
+}
+
+/**
+ * Start the gateway on its own pre-start (the unit's ExecStartPre) and wait
+ * for it as every recovery restart is waited for. Its run when it came up;
+ * null when it did not, or systemd refused the start, which is a start that
+ * did not come up, not the step's verdict: the caller's full repair is for it.
+ */
+async function startGatewayWithoutRepair(): Promise<OwnGatewayStart | null> {
+  try {
+    await restartGatewayForRecovery();
+    if ((await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true)).kind === "listening") {
+      return { runId: await gatewayRunId() };
+    }
+  } catch (err) {
+    console.warn(`[Updater] gateway_verify: the gateway's own start failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // From the top: the journal is read again inside the quiesce, now with this
+  // start's own lines in it.
+  logFullRepair("the gateway did not come up on its own pre-start");
+  return null;
+}
+
+/**
+ * Recover gateway readiness using the installed desktop or appliance contract.
+ * Answers the start it made without the full repair, if it made one (only on
+ * the appliance); null otherwise. `journal`: lines a start of ours named a
+ * repair with, handed to the full repair beside the boot's tail. `why`: what
+ * the caller says for the full repair's log line, when it knows better than
+ * the default (a `restartFirst` caller, or one whose own step stopped the
+ * gateway).
+ */
+async function ensureGatewayHealthy(
+  options: { restartFirst?: boolean; journal?: string; why?: string } = {},
+): Promise<OwnGatewayStart | null> {
   if (hasX64DesktopIntegration(PROJECT_DIR)) {
     // The desktop package restores its existing user gateway before its core
     // step returns, including failures. It must not inherit the appliance's
@@ -3994,9 +4436,9 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     // (X64_DESKTOP_GATEWAY_READY_WAIT_MS says why): restarting a gateway that
     // is still booting only starts the slow boot over.
     gatewayNeedsRecovery = false;
-    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return;
+    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return null;
     await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
-    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return;
+    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return null;
     throw new Error("The existing OpenClaw user gateway did not become ready. Check its service logs before retrying the update.");
   }
   if (hasX64Install(PROJECT_DIR)) {
@@ -4008,27 +4450,48 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     // the appliance's repairs. Its sudoers grant carries this restart.
     // Same unit, same slow start on large databases: followed the same way.
     gatewayNeedsRecovery = false;
-    if (!options.restartFirst && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") return;
+    if (!options.restartFirst && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") return null;
     await restartGatewayForRecovery();
     const verdict = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
-    if (verdict.kind === "listening") return;
+    if (verdict.kind === "listening") return null;
     throw new Error(await describeDeadGateway(await readGatewayJournalTail(), gatewayNotListeningPrefix(verdict)));
   }
+  if (options.restartFirst) logFullRepair(options.why ?? "a restart was asked for first");
   const recoverImmediately = options.restartFirst || gatewayNeedsRecovery;
+  // Read before the reset below: the gateway is down because an update root
+  // step of ours quiesced it, and no caller asked for a restart first.
+  const routine = !options.restartFirst && gatewayNeedsRecovery;
   gatewayNeedsRecovery = false;
   // Followed, not raced: a gateway systemd says is still starting is waited
   // for here rather than stopped for the repair below and started over, which
   // on a large database only begins the same slow start again. Anything else
   // past the old 30 s — failed, stopped, crash-looping, or a unit systemctl
   // cannot describe — goes on to the repair exactly as before.
-  if (!recoverImmediately && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") return;
+  if (!recoverImmediately && (await waitForGatewayToStart(GATEWAY_HEALTH_WAIT_MS, false)).kind === "listening") {
+    // The one place a listening gateway is accepted without a start of ours:
+    // never the run the update's gateway setup step left serving (nothing of
+    // this update stopped it, so it is the process from before the update).
+    const why = await gatewaySetupRunStillServing();
+    if (!why) return null;
+    console.log(`[Updater] gateway_verify: starting the gateway on the updated tree: ${why}`);
+    const started = await startGatewayWithoutRepair();
+    if (started) return started;
+  } else if (routine && (await gatewayStartsWithoutRepair())) {
+    const started = await startGatewayWithoutRepair();
+    if (started) return started;
+  } else if (!recoverImmediately) {
+    logFullRepair(options.why ?? "the gateway is not listening, and this update's own quiesce did not stop it");
+  }
 
   // post_update and the standalone OpenClaw updater both run several config,
   // doctor and plugin commands. Do all remaining repair against a stopped,
   // masked gateway so the v2 SQLite store has one writer. A pre-start timeout
   // is fatal here: restarting after killing a migration midway is unsafe.
   await withGatewayQuiesced(async () => {
-    const journal = await readGatewayJournalTail();
+    // A start of ours that named a repair hands its own lines over too: by now
+    // the boot's 160-line tail may have scrolled past them.
+    const tail = await readGatewayJournalTail();
+    const journal = options.journal ? `${tail}\n${options.journal}` : tail;
     let preStartOutput: string;
     try {
       preStartOutput = await runCurrentGatewayPreStart();
@@ -4052,7 +4515,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   // it exists to perform ever ran.
   await restartGatewayForRecovery();
   const verdict = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
-  if (verdict.kind === "listening") return;
+  if (verdict.kind === "listening") return null;
 
   const beforeRecoveryLog = await readGatewayJournalTail();
   if (!LEGACY_GATEWAY_BLOCKER_RE.test(beforeRecoveryLog)) {
@@ -4065,7 +4528,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   });
   await restartGatewayForRecovery();
   const afterRecovery = await waitForGatewayToStart(GATEWAY_RECOVERY_WAIT_MS, true);
-  if (afterRecovery.kind === "listening") return;
+  if (afterRecovery.kind === "listening") return null;
 
   const afterRecoveryLog = await readGatewayJournalTail();
   throw new Error(
@@ -4106,10 +4569,15 @@ async function restartGatewayAndWait(): Promise<void> {
  *
  * `CLAWBOX_TEST_SESSION_FAULT` is a hardware-test seam (see
  * `withSimulatedSessionFault`), read per run; nothing on a box sets it.
+ *
+ * Answers null when the gateway served the chat's request — an authenticated
+ * request, which the core admits only once its startup sidecars have settled
+ * (OpenClaw 2026.10.9, docs/gateway/embedding.md, "Wait for protocol
+ * readiness") — and otherwise what the chat did, in neutral words.
  */
-async function ensureGatewayServesSessions(): Promise<void> {
+async function ensureGatewayServesSessions(): Promise<string | null> {
   // No OpenClaw gateway on the Hermes edition: nothing to ask.
-  if (gatewayIsAbsent()) return;
+  if (gatewayIsAbsent()) return null;
   const outcome = await verifyGatewaySessions({
     probe: withSimulatedSessionFault(
       () => probeMainChatSession(GATEWAY_SESSION_CALL_TIMEOUT_MS),
@@ -4124,7 +4592,7 @@ async function ensureGatewayServesSessions(): Promise<void> {
   });
   if (outcome.verdict === "serving") {
     console.log(`[Updater] gateway sessions: serving${outcome.restarted ? " after one restart" : ""}`);
-    return;
+    return null;
   }
   // Not a failure — nothing said the store failed — but not a silent green
   // either: a gateway that listens and never answers the chat's own request,
@@ -4147,6 +4615,9 @@ async function ensureGatewayServesSessions(): Promise<void> {
         + "if the chat does not answer in a few minutes, restart the device.",
     );
   }
+  if (outcome.answer.kind === "refused") return "the chat refused its request";
+  if (outcome.answer.kind === "unreachable" && outcome.answer.final && !outcome.restarted) return "the chat could not be asked";
+  return "the chat did not answer";
 }
 
 /**
@@ -4166,14 +4637,20 @@ async function ensureGatewayServesSessions(): Promise<void> {
  * its to inherit. Nor on a PC installed with install-x64.sh: the retry runs
  * under `withGatewayQuiesced`, whose root-owned maintenance helper that PC does
  * not have.
+ *
+ * Answers whether it started the gateway again through the full repair.
  */
-async function retryPluginRepairsLeftByOlderCore(): Promise<void> {
-  if (hasX64DesktopIntegration(PROJECT_DIR) || hasX64Install(PROJECT_DIR)) return;
+async function retryPluginRepairsLeftByOlderCore(): Promise<boolean> {
+  if (hasX64DesktopIntegration(PROJECT_DIR) || hasX64Install(PROJECT_DIR)) return false;
+  let repairedGateway = false;
   try {
     await retryPluginRepairsAfterCoreUpdate({
       release: currentCoreRelease,
       quiesce: withGatewayQuiesced,
-      restartAndVerify: () => ensureGatewayHealthy({ restartFirst: true }),
+      restartAndVerify: async () => {
+        repairedGateway = true;
+        await ensureGatewayHealthy({ restartFirst: true, why: "the after-update plugin repair restarts the gateway" });
+      },
     });
   } catch (err) {
     // A repair the update OFFERS, never one it depends on: the gateway was
@@ -4186,8 +4663,54 @@ async function retryPluginRepairsLeftByOlderCore(): Promise<void> {
       "[Updater] the after-update plugin repair did not complete:",
       err instanceof Error ? err.message : err,
     );
-    await ensureGatewayHealthy();
+    // Its own quiesce may be what left the gateway down.
+    await ensureGatewayHealthy({ why: "the gateway is not listening after the after-update plugin repair did not complete" });
   }
+  return repairedGateway;
+}
+
+/**
+ * After the session check, the start `ensureGatewayHealthy` made without the
+ * full repair (`ownStart`) answers for itself, once.
+ *
+ * On a box that neither reboots nor pauses the gateway for the build, that
+ * start is the updated tree's first, and the journal the gate read before it
+ * was the old process's. A refusal raised at plugin load can come after the
+ * port opens, so its lines are read here, after the wait the step already
+ * has: the session check asked the chat, which the core admits only once its
+ * startup sidecars have settled. The read waits for nothing itself — one
+ * `systemctl show` when the run came up, one `journalctl` here.
+ *
+ * Runs the full repair, with the start's own lines as its evidence, then the
+ * degraded-databases warning and the chat again, when those lines name a
+ * repair, cannot be read, or the chat was not served (`chat`, what it did: the
+ * start's lines may then be incomplete): the sequence the check ran before it
+ * had a routine start. The first check's warning about the chat is taken back
+ * first: it was about the gateway the repair replaces. The caller skips all
+ * this when the after-update plugin retry has already run that repair on a
+ * later start.
+ */
+async function repairWhatOwnStartNamed(ownStart: OwnGatewayStart, chat: string | null): Promise<void> {
+  let journal: string | null = null;
+  let why: string;
+  if (chat) {
+    why = `${chat} after its own start`;
+  } else {
+    journal = ownStart.runId ? await readGatewayRunJournal(ownStart.runId) : null;
+    const named = journal === null ? null : repairNamedIn(journal);
+    if (journal === null) {
+      why = "its own start's journal could not be read";
+    } else if (named) {
+      why = `its own start's journal names ${named}`;
+    } else {
+      console.log(`[Updater] gateway_verify: its own start's journal names nothing to repair (${journal.trim().split("\n").length} lines)`);
+      return;
+    }
+  }
+  await ensureGatewayHealthy({ restartFirst: true, journal: journal ?? undefined, why });
+  await warnIfOpenclawDatabasesDegraded();
+  await dropUpdateWarning("gateway-sessions-unconfirmed");
+  await ensureGatewayServesSessions();
 }
 
 /**
@@ -4368,12 +4891,14 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     // gateway only when it has something to load, and only a healthy gateway
     // is one it can prove a repair against. The session check (TASK-2153) asks
     // the gateway the owner is left with, after the degraded-agents warning
-    // that its throw must not swallow.
+    // that its throw must not swallow. A start made without the full repair
+    // then answers for itself from its own journal (repairWhatOwnStartNamed).
     customRun: async () => {
-      await ensureGatewayHealthy();
-      await retryPluginRepairsLeftByOlderCore();
+      const ownStart = await ensureGatewayHealthy();
+      const retryRepairedGateway = await retryPluginRepairsLeftByOlderCore();
       await warnIfOpenclawDatabasesDegraded();
-      await ensureGatewayServesSessions();
+      const chat = await ensureGatewayServesSessions();
+      if (ownStart && !retryRepairedGateway) await repairWhatOwnStartNamed(ownStart, chat);
     },
     failFast: true,
     // The gateway is absent by design on this SKU — port 18789 is closed and
@@ -4474,16 +4999,25 @@ function onX64Host(): boolean {
  */
 async function execAsRoot(stepId: string, timeoutMs: number): Promise<void> {
   const startedAt = monotonicNow();
+  // The unit's own output, into the update's raw log as it is written. Read
+  // from the journal, beside the dispatch: nothing about how the step is
+  // started, timed or torn down changes.
+  const follow = followUpdateUnit(stepId);
   try {
     await startRootStep(stepId, { timeoutMs: timeoutMs + 30_000 });
+    await follow.finish();
   } catch (err) {
+    const killed = (err as { killed?: boolean }).killed === true;
+    // An overrun unit runs on, and so does the read of its journal.
+    if (killed) follow.settleThenFinish();
+    else await follow.finish();
     // When OUR timeout kills the blocking `systemctl start`, the unit itself
     // usually keeps running (it has its own much larger TimeoutStartSec) and
     // often finishes fine in the background. Report that as a budget overrun
     // — otherwise the caller dresses up the unit's most recent (often
     // successful) log line as the failure, which is how a healthy update
     // once showed "failed: Linkdown routing sysctl installed".
-    if ((err as { killed?: boolean }).killed) {
+    if (killed) {
       const waitedS = Math.round((monotonicNow() - startedAt) / 1000);
       throw new BudgetOverrunError(
         `${stepId} was still running after ${waitedS}s — gave up waiting (it may finish on its own in the background)`,
@@ -4503,7 +5037,10 @@ async function waitForRootStepToSettle(stepId: string): Promise<void> {
         ["show", serviceName, "-p", "ActiveState", "--value"],
         { timeout: 10_000 },
       );
-      if (/^(?:inactive|failed)$/.test(stdout.trim())) return;
+      if (/^(?:inactive|failed)$/.test(stdout.trim())) {
+        await finishUpdateUnitFollows(stepId);
+        return;
+      }
     } catch {
       // A transient systemd query failure must not unmask a still-running
       // writer. Keep the gateway quiesced and retry within the unit ceiling.
@@ -4930,13 +5467,21 @@ async function readHermesVersion(): Promise<string | null> {
   }
 }
 
-interface PinnedBranchCheck {
+export interface PinnedBranchCheck {
   target: { branch: string; currentSha: string; targetSha: string } | null;
   remote: RemoteReachability;
+  /**
+   * The channel the comparison was made on (src/lib/update-channel.ts):
+   * `branch` — the branch rules every Jetson follows — or `workstation`; null
+   * when the channel itself could not be decided, which `remote` says.
+   */
+  channel: UpdateChannel["kind"] | null;
 }
 
 /**
- * Compare the device against its pinned branch on origin.
+ * Compare the device against the branch it follows on origin: the
+ * Workstation channel's branch on a ClawBox Workstation, else its pinned
+ * branch.
  *
  * The fetch outcome is RETURNED, not swallowed. It used to be
  * `.catch(() => {})`, after which HEAD was compared against whatever
@@ -4945,7 +5490,18 @@ interface PinnedBranchCheck {
  * screen said "You're up to date" about a check that never happened
  * (TASK-655).
  */
-async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCheck> {
+export async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCheck> {
+  let channel: UpdateChannel;
+  try {
+    channel = currentUpdateChannel(projectDir);
+  } catch (err) {
+    if (!(err instanceof UpdateChannelError)) throw err;
+    // No channel, no comparison — and never the pin's branch in its place.
+    return { target: null, remote: { reachable: false, cause: "device", reason: err.message }, channel: null };
+  }
+  // The Workstation channel's branch, whatever the pin says (resolveUpdateBranch's rule 0).
+  if (channel.kind === "workstation") return compareWithOrigin(projectDir, channel.ref, "workstation");
+
   let branch: string;
   try {
     branch = (await readFile(path.join(projectDir, ".update-branch"), "utf-8")).trim();
@@ -4953,7 +5509,7 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
     // Only "there is no file" means "no branch is recorded". Any other read
     // error is a pin that IS there and could not be read.
     if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-      return { target: null, remote: noUpdateBranchReason() };
+      return { target: null, remote: noUpdateBranchReason(), channel: "branch" };
     }
     branch = "";
   }
@@ -4961,19 +5517,65 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
   // updater would resolve, `main` by default, instead of declining to look:
   // a box in that state could not see a release waiting for it (TASK-1213).
   if (!branch) branch = (await resolveEffectiveUpdateBranch(projectDir)).branch;
-  else if (!isSafeBranch(branch)) return { target: null, remote: noUpdateBranchReason() };
+  else if (!isSafeBranch(branch)) return { target: null, remote: noUpdateBranchReason(), channel: "branch" };
 
-  const remote = await reachOrigin(projectDir, ["fetch", "--quiet", "origin", branch], {
+  return compareWithOrigin(projectDir, branch, "branch");
+}
+
+/**
+ * origin answered that the channel's branch does not exist: forget the local
+ * copy of it, as `git fetch --prune` would. A copy left from before the branch
+ * was deleted is otherwise a version every local reader still sees — the
+ * What's new panel reads its package.json, the drift report its tip — while
+ * the check says nothing has been released. Best effort: a ref that cannot be
+ * removed changes no verdict here.
+ */
+async function dropStaleChannelRef(projectDir: string, branch: string): Promise<void> {
+  try {
+    await execGit(projectDir, ["update-ref", "-d", `refs/remotes/origin/${branch}`], { timeout: 10_000 });
+  } catch {
+    // No such ref, or a locked one: nothing to do.
+  }
+}
+
+/** Fetch `origin <branch>` and compare HEAD with it. */
+async function compareWithOrigin(
+  projectDir: string,
+  branch: string,
+  channel: UpdateChannel["kind"],
+): Promise<PinnedBranchCheck> {
+  // The Workstation channel names the ref it compares against, as step 1's
+  // fetch does: a checkout whose `remote.origin.fetch` was narrowed (say, to
+  // beta) would otherwise never write `origin/workstation`, and the comparison
+  // below would read a missing or stale ref. The branch rules keep the fetch
+  // they always made.
+  const fetchArgs = channel === "workstation"
+    ? ["fetch", "--quiet", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]
+    : ["fetch", "--quiet", "origin", branch];
+  const fetched = await readFromOrigin(projectDir, fetchArgs, {
     timeout: 20_000,
     attempts: REMOTE_CHECK_ATTEMPTS,
     retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS,
   });
+  const remote = fetched.remote;
+  // origin has no workstation branch: nothing has been released to
+  // Workstations. Said as such, and decided here — a stale local
+  // `origin/workstation` left by a deleted branch is no target either.
+  if (channel === "workstation" && fetched.missingRef) {
+    await dropStaleChannelRef(projectDir, branch);
+    return {
+      target: null,
+      remote: { reachable: false, cause: "device", reason: workstationRefMissingReason(branch) },
+      channel,
+    };
+  }
   // The fetch landed but the comparison did not, so this check has NO verdict —
   // a different answer from "no update", and the only one the device is
   // entitled to give. A fetch that failed already carries the better reason.
   const unresolved = (): PinnedBranchCheck => ({
     target: null,
     remote: remote.reachable ? unresolvedTargetReason(branch) : remote,
+    channel,
   });
   try {
     const [{ stdout: currentOut }, { stdout: targetOut }] = await Promise.all([
@@ -4986,8 +5588,8 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
     // compared empty against empty and read as "equal", so a box with no refs
     // reported itself converged.
     if (!currentSha || !targetSha) return unresolved();
-    if (currentSha === targetSha) return { target: null, remote };
-    return { target: { branch, currentSha, targetSha }, remote };
+    if (currentSha === targetSha) return { target: null, remote, channel };
+    return { target: { branch, currentSha, targetSha }, remote, channel };
   } catch {
     return unresolved();
   }
@@ -5028,7 +5630,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   // ls-remote: they are this check's two anonymous requests to GitHub, and the
   // refusal both are retried for is caused by an address sending too many, so
   // they go one after the other rather than as a burst.
-  const [[targetVersion, { target: pinnedBranchTarget, remote: pinnedRemote }], openclawCurrent, openclawTarget, rawVersion, hermesCurrent, releaseRemote] = await Promise.all([
+  const [[targetVersion, { target: pinnedBranchTarget, remote: pinnedRemote, channel: updateChannel }], openclawCurrent, openclawTarget, rawVersion, hermesCurrent, releaseRemote] = await Promise.all([
     getTargetVersion().then(async (targetVersion) => [targetVersion, await getPinnedBranchTarget(PROJECT_DIR)] as const),
     // Nothing to read on the Hermes edition: there is no OpenClaw to report
     // there (see `openclawAbsent` above).
@@ -5057,7 +5659,13 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   // this device, which is why the address is checked too. Any one of them
   // failing means this check did not see the releases, so the worst answer is
   // what the device reports.
-  const remote = [releaseRemote, pinnedRemote, lastTagRemote].find((r) => !r.reachable) ?? REMOTE_REACHABLE;
+  //
+  // The tag list is one of them only on the branch rules, the one channel that
+  // offers a tag (see taggedClawboxTarget below): a Workstation whose own
+  // branch was fetched and compared has its verdict, whatever the tag lookup
+  // met. A channel that could not be decided already says so in pinnedRemote.
+  const tagRemote = updateChannel === "branch" ? lastTagRemote : REMOTE_REACHABLE;
+  const remote = [releaseRemote, pinnedRemote, tagRemote].find((r) => !r.reachable) ?? REMOTE_REACHABLE;
 
   // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
   // so it compares cleanly against the target tag.
@@ -5065,7 +5673,11 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 
   // Only report a target if it's strictly newer than the device's base tag.
   // (A dev box can sit on a local tag ahead of origin's latest release.)
-  const taggedClawboxTarget = targetVersion && compareSemverTags(targetVersion, baseTag) > 0
+  // Only on the branch rules: a release tag is cut on main, and a Workstation
+  // (or a box whose channel could not be decided) installs the workstation
+  // branch or nothing — never the tag. Offering it would name a version the
+  // update does not install.
+  const taggedClawboxTarget = updateChannel === "branch" && targetVersion && compareSemverTags(targetVersion, baseTag) > 0
     ? targetVersion
     : null;
   // `main` is the release channel and its releases are tagged, so a box behind
@@ -5553,6 +6165,12 @@ function launchUpdate(steps: UpdateStepDef[], startFrom: number, options: RunOpt
     })
     .finally(() => {
       runtime.running = false;
+      // The raw log is complete: a reader following it is told the run ended.
+      // Only a run that SAID how it ended — a refusal before step 1 says so
+      // too. Not reached when the rebuild replaces this process: the next one
+      // goes on writing the same file.
+      const { phase, error } = runtime.state;
+      if (phase === "completed" || phase === "failed") void closeUpdateLog(phase, error);
       // The lock is released here and nowhere else on the success path. This
       // does NOT run when do_rebuild kills the server mid-run — the process
       // simply ends — which is exactly right: the flag stays on disk and the
@@ -5730,6 +6348,12 @@ async function resumeContinuation(): Promise<boolean> {
         await set(UPDATE_INTERRUPTED_DETAIL_KEY, record);
         // Only on the transition, so the record keeps the time it happened.
         await set(UPDATE_INTERRUPTED_KEY, new Date().toISOString());
+        // The dead run's raw log ends here, with what its units said after it
+        // died, instead of being followed by readers for ever. A resume
+        // starts a new one.
+        const interruption = interruptedMessage(describeInterruption(record, applicableSteps()).detail);
+        void openUpdateLog({ fresh: false, resumeOnly: true, flow: "update", title: "The update was interrupted" })
+          .then((id) => (id ? closeUpdateLog("failed", interruption) : undefined));
       } else {
         record = await readInterruptionRecord();
       }
@@ -5805,6 +6429,16 @@ async function resumeContinuation(): Promise<boolean> {
     runtime.state.steps[restartIndex].status = "failed";
     runtime.state.steps[restartIndex].error = message;
     runtime.state.error = message;
+    // The raw log the first half was writing: the rebuild's own output, read
+    // on from where that process stopped, and how it ended.
+    // In the background: the verdict above is the update's, and nothing here
+    // waits on the log.
+    const restartStep = steps[restartIndex];
+    void openUpdateLog({ fresh: false, resumeOnly: true, flow: "update", title: "ClawBox restarted" }).then((id) => {
+      if (!id) return undefined;
+      void logUpdateStepEnd(restartStep, "failed", message);
+      return closeUpdateLog("failed", message);
+    });
     // The rebuild failed and the previous build is what came back up: move the
     // checkout back to it rather than leave new code beside an old build.
     await rollBackCheckoutIfStranded();
@@ -5883,7 +6517,7 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
     timeoutMs: 30_000,
     // The core-only update changes the core too, so it owes the same retry.
     customRun: async () => {
-      await ensureGatewayHealthy({ restartFirst: true });
+      await ensureGatewayHealthy({ restartFirst: true, why: "the OpenClaw update restarts the gateway" });
       await retryPluginRepairsLeftByOlderCore();
       // First: the session check's throw must not swallow it.
       await warnIfOpenclawDatabasesDegraded();
@@ -6318,6 +6952,9 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // run again, never skipped as "already at the pin": the work it was doing
   // when it died may be what is unfinished.
   let resumedAt = -1;
+  // Where the caller asked to start: 0 is a new run, anything later the second
+  // half of one (the raw log goes on in the file the first half wrote).
+  const requestedStart = startFrom;
   // Lock the desktop FIRST, AWAITED, before anything that can take time.
   //
   // It used to sit below the internet check and the drift baseline — up to two
@@ -6406,6 +7043,21 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     }
   }
 
+  // The raw log of this run (update-raw-log.ts): a new file for a new run, the
+  // same file for the half after the restart and for a resumed run, so the
+  // owner reads one transcript of one update. After the resume is resolved, so
+  // a resume is known for one, and before anything below can refuse the run,
+  // so a refusal is in it too.
+  const continuing = requestedStart > 0 || resumedAt >= 0;
+  await openUpdateLog({
+    fresh: !continuing,
+    flow: ownsTheDesktop ? "update" : "openclaw",
+    title: continuing
+      ? `${requestedStart > 0 ? "ClawBox restarted on the new build" : "Continuing the interrupted update"}`
+        + ` — from step ${startFrom + 1}: ${steps[startFrom]?.label ?? ""}`
+      : ownsTheDesktop ? "ClawBox update" : "OpenClaw update",
+  });
+
   // THE STATE-SCHEMA PRE-FLIGHT — its first ask; the second stands at the
   // `openclaw_install` boundary in the loop.
   //
@@ -6441,6 +7093,28 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // run writes its own after its backup — so no run can ever set data aside
   // on an override it was not given.
   const remainingSteps = steps.slice(startFrom);
+
+  // THE UPDATE CHANNEL (src/lib/update-channel.ts), asked before anything that
+  // moves the checkout. Step 0 on an appliance is install.sh, which reads the
+  // pin and never this channel: a CLAWBOX_UPDATE_CHANNEL it cannot honour
+  // would otherwise move the tree first and be refused only at the restart
+  // step's resolveUpdateBranch, over a box already half-moved. Refused here
+  // the way the internet check below refuses: the box is as it was. Every box
+  // whose channel is decided — every Jetson with no override — passes.
+  if (remainingSteps.some((s) => s.id === "bootstrap_updater" || s.id === RESTART_STEP_ID)) {
+    try {
+      currentUpdateChannel(PROJECT_DIR);
+    } catch (err) {
+      if (!(err instanceof UpdateChannelError)) throw err;
+      console.error(`[Updater] refusing the update before step 1: ${err.message}`);
+      runtime.state.phase = "failed";
+      runtime.state.error = err.message;
+      runtime.state.currentStepIndex = -1;
+      await clearUpdateLock();
+      return;
+    }
+  }
+
   let schemaCheckedPin: string | null = null;
   const syncAhead = remainingSteps.some((s) => s.id === "bootstrap_updater");
   const downgradeScope = {
@@ -6506,6 +7180,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     runtime.state.currentStepIndex = i;
     runtime.state.steps[i].status = "running";
     runtime.state.steps[i].error = undefined;
+    void logUpdateStepStart(step, i, steps.length);
 
     // Re-assert the lock at every step boundary, because another PROCESS can
     // drop it. config-store.set is an unlocked read-modify-write of the whole
@@ -6566,6 +7241,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         runtime.state.downgrade = stop.backupFailure === undefined
           ? refusal.detail
           : { ...refusal.detail, backupFailure: stop.backupFailure };
+        void logUpdateStepEnd(step, "failed", stop.message);
         failed = true;
         break;
       }
@@ -6587,6 +7263,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       if (skip.skip && skip.version) {
         console.log(`[Updater] ${openclawSkippedLine(skip.version)}`);
         runtime.state.steps[i].status = "completed";
+        void logUpdateStepEnd(step, "skipped", openclawSkippedLine(skip.version));
         continue;
       }
     }
@@ -6651,10 +7328,11 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
           await execAsRoot(step.id, timeoutMs);
         }
       } else if (step.command) {
-        await execShell(step.command, {
+        const command = step.command;
+        await logUpdateCommand([command], () => execShell(command, {
           timeout: step.timeoutMs,
           maxBuffer: 2 * 1024 * 1024,
-        });
+        }));
       }
       if (desktopIntegration && step.id === "apt_update") {
         // Existing desktop adapters already refresh the verified mirror and
@@ -6663,13 +7341,18 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         // root adapter (which can contain additional workstation repairs).
         // Match the coding runner's capability drop: the web server can carry
         // ambient network capabilities that its installer must not inherit.
-        await execFile("/usr/bin/setpriv", [
+        const harnessArgv = [
+          "/usr/bin/setpriv",
           "--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--",
           "/bin/bash",
           "/var/lib/clawbox/root-exec-mirror/scripts/x64-migration/install-coding-harness.sh",
           "/var/lib/clawbox/root-exec-mirror/scripts/claude-ds",
           PROJECT_DIR,
-        ], { timeout: 900_000, maxBuffer: 2 * 1024 * 1024 });
+        ];
+        await logUpdateCommand(harnessArgv, () => execFile(harnessArgv[0], harnessArgv.slice(1), {
+          timeout: 900_000,
+          maxBuffer: 2 * 1024 * 1024,
+        }));
       }
       // A root step that SUCCEEDED can still have skipped a fixup: install.sh's
       // non-fatal steps say so on a `CLAWBOX-WARN:` line, and this is where
@@ -6677,6 +7360,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       if (viaRoot) await collectRootStepWarnings(step.id, stepStartedAt);
       runtime.state.steps[i].status = "completed";
       console.log(`[Updater] Completed: ${step.label}`);
+      void logUpdateStepEnd(step, "completed", undefined, stepStartedAt);
     } catch (err) {
       let message = err instanceof Error ? err.message : "Unknown error";
       // An overrun on an advisory step doesn't fail the update. Serialized
@@ -6690,6 +7374,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         if (viaRoot) await collectRootStepWarnings(step.id, stepStartedAt);
         runtime.state.steps[i].status = "completed";
         console.warn(`[Updater] ${step.label}: ${message} — treating as advisory`);
+        void logUpdateStepEnd(step, "completed", `${message} (advisory)`, stepStartedAt);
         continue;
       }
       // Only let the unit's journal override the error when the unit actually
@@ -6713,6 +7398,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       runtime.state.steps[i].status = "failed";
       runtime.state.steps[i].error = message;
       console.error(`[Updater] Failed: ${step.label} — ${message}`);
+      void logUpdateStepEnd(step, "failed", message, stepStartedAt);
       failed = true;
       if (step.failFast || (desktopIntegration && step.id === "apt_update")) {
         runtime.state.error = message;

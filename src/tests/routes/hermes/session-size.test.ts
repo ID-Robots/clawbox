@@ -8,7 +8,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 vi.mock("@/lib/route-auth", () => ({ requireSession: vi.fn(async () => null) }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
-vi.mock("@/lib/harness/hermes-turn-record", () => ({ readHermesSessionBytes: vi.fn() }));
+// The store a read opens is the turn's scope: recorded here, so a case can say whose.
+const scope = vi.hoisted(() => ({ homes: [] as Array<string | null | undefined> }));
+vi.mock("@/lib/harness/hermes-turn-record", () => ({
+  readHermesSessionBytes: vi.fn(),
+  withHermesStateHome: (home: string | null | undefined, fn: () => unknown) => {
+    scope.homes.push(home);
+    return fn();
+  },
+}));
+vi.mock("@/lib/org-mode-server", () => ({ orgMemberStrictOf: vi.fn(async () => null) }));
 vi.mock("@/lib/hermes-config-yaml", () => ({ readHermesConfigValue: vi.fn() }));
 
 import { GET } from "@/app/setup-api/hermes/session-size/route";
@@ -16,6 +25,8 @@ import { requireSession } from "@/lib/route-auth";
 import { getActiveHarness } from "@/lib/harness";
 import { readHermesSessionBytes } from "@/lib/harness/hermes-turn-record";
 import { readHermesConfigValue } from "@/lib/hermes-config-yaml";
+import { orgMemberStrictOf } from "@/lib/org-mode-server";
+import { staffHermesProfilePaths } from "@/lib/hermes-staff-profile";
 
 const SESSION = "20260810_221825_609d1e";
 const ask = (id = SESSION) => GET(new Request(`http://localhost/setup-api/hermes/session-size?sessionId=${encodeURIComponent(id)}`));
@@ -28,6 +39,8 @@ beforeEach(() => {
   vi.mocked(requireSession).mockResolvedValue(null);
   vi.mocked(getActiveHarness).mockResolvedValue("hermes");
   vi.mocked(readHermesSessionBytes).mockResolvedValue(401840);
+  vi.mocked(orgMemberStrictOf).mockResolvedValue(null);
+  scope.homes.length = 0;
   config({ "compression.enabled": "true", "compression.threshold": "0.5" });
 });
 
@@ -50,6 +63,22 @@ describe("GET /setup-api/hermes/session-size", () => {
     config({ "compression.enabled": "false" });
     vi.mocked(readHermesSessionBytes).mockResolvedValue(null);
     expect(await (await ask()).json()).toEqual({ tokens: null, window: 65536, limit: null });
+  });
+
+  it("measures the owner's conversation in the box's own store", async () => {
+    await ask();
+    expect(scope.homes).toEqual([undefined]);
+  });
+
+  it("measures a member of staff's conversation in their own profile's store, and nothing when the switch cannot be read", async () => {
+    vi.mocked(orgMemberStrictOf).mockResolvedValue({ username: "maria" });
+    expect((await (await ask()).json()).tokens).toBe(100460);
+    expect(scope.homes).toEqual([staffHermesProfilePaths("maria")!.home]);
+    vi.mocked(orgMemberStrictOf).mockResolvedValue("unknown");
+    scope.homes.length = 0;
+    expect((await (await ask()).json()).tokens).toBeNull();
+    expect(readHermesSessionBytes).toHaveBeenCalledTimes(1);
+    expect(scope.homes).toEqual([]);
   });
 
   it("refuses anything that is not a Hermes session id", async () => {

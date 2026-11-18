@@ -44,6 +44,15 @@
  */
 const PROXY_IDENTITY_HEADERS = ["cf-connecting-ip", "cf-connecting-ipv6", "true-client-ip"];
 
+/**
+ * The socket's own peer address, written by this guard on EVERY request over
+ * whatever a client sent under the same name (TASK-2446): the audit log
+ * (src/lib/audit-log.ts) records where a sign-in came from, and only this
+ * process sees the socket. `X-Forwarded-For` is no such source — Next keeps a
+ * client's own value — so nothing reads it for that.
+ */
+const PEER_HEADER = "x-clawbox-peer";
+
 /** ::ffff:192.168.1.5 is how a v4 client shows up on a dual-stack listener. */
 function normalizeIp(value) {
   if (!value) return null;
@@ -101,15 +110,34 @@ function stripUntrustedProxyHeaders(req) {
  * HTTPS needs no second attachment — production-server.js re-emits every TLS
  * request onto this same server, with the TLS socket as `req.socket`.
  */
+/**
+ * Write the socket's peer into PEER_HEADER, replacing any value a client
+ * sent; remove it when the peer cannot be read. Never throws.
+ */
+function recordPeer(req) {
+  try {
+    const headers = req && req.headers;
+    if (!headers || typeof headers !== "object") return;
+    const peer = normalizeIp(req.socket && req.socket.remoteAddress);
+    if (peer && /^[0-9A-Fa-f:.]{2,64}$/.test(peer)) headers[PEER_HEADER] = peer;
+    else delete headers[PEER_HEADER];
+  } catch {
+    // a request the box cannot attribute is recorded without an address
+  }
+}
+
 function attachProxyPeerGuard(server) {
   server.prependListener("request", (req) => {
     stripUntrustedProxyHeaders(req);
+    recordPeer(req);
   });
   return true;
 }
 
 module.exports = {
+  PEER_HEADER,
   PROXY_IDENTITY_HEADERS,
+  recordPeer,
   attachProxyPeerGuard,
   isLoopback,
   normalizeIp,

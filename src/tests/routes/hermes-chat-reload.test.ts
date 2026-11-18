@@ -35,6 +35,7 @@ vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
 vi.mock("child_process", () => ({ spawn: spawnMock }));
 vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock }));
 vi.mock("@/lib/harness/hermes-turn-record", () => ({
+  withHermesStateHome: (_home: unknown, fn: () => unknown) => fn(),
   readHermesTurn: readTurnMock,
   readHermesUsageMarks: async () => null,
   readHermesBillingProvider: async () => "",

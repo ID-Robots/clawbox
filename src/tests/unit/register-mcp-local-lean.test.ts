@@ -119,3 +119,24 @@ d("register-mcp.sh — the lean-mode plugin", () => {
     expect(fs.existsSync(path.join(pluginsDir, LEAN))).toBe(false);
   });
 });
+
+// The staff guard (scripts/hermes-plugins/clawbox_staff_guard, TASK-2444):
+// installed by the same boot with the policy table and the chat's staging
+// directory recorded beside it, and enabled after the lean plugin.
+d("register-mcp.sh — the staff guard", () => {
+  const STAFF = "clawbox_staff_guard";
+
+  it("installs the plugin, the policy table and where the attachments are staged, and enables it", () => {
+    fs.writeFileSync(configPath, "plugins:\n  enabled:\n    - clawai\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    const dir = path.join(pluginsDir, STAFF);
+    expect(fs.readdirSync(dir).sort()).toEqual(["__init__.py", "clawbox-paths.json", "org-staff-policy.json", "plugin.yaml", "staff_guard.py"]);
+    expect(fs.readFileSync(path.join(dir, "org-staff-policy.json"), "utf-8")).toBe(fs.readFileSync(path.join(REPO, "config/org-staff-policy.json"), "utf-8"));
+    expect(JSON.parse(fs.readFileSync(path.join(dir, "clawbox-paths.json"), "utf-8"))).toEqual({ attachments: path.join(REPO, "data/chat-media/chat-attachments"), mediaOwners: path.join(REPO, "data/chat-media-owners.json") });
+    const enabled = (readConfig().plugins as { enabled: string[] }).enabled;
+    expect(enabled).toEqual(["clawai", "clawbox_email_directives", LEAN, STAFF]);
+    expect(r.stdout).toContain(`enabled the ${STAFF} plugin`);
+  });
+});
+

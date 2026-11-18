@@ -79,7 +79,10 @@ beforeEach(() => {
 });
 afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
-/** The fake: --help and --version as given (each counted), anything else records its argv. */
+/**
+ * The fake: --help and --version as given (each counted), anything else records
+ * its argv. --version goes to stderr, as the real binary's does.
+ */
 function writeBinary(helpText: string, version: string, failToStart = false): void {
   fs.writeFileSync(path.join(tmp, "help.txt"), helpText);
   fs.writeFileSync(
@@ -90,7 +93,7 @@ ${failToStart ? `echo "llama-server: error while loading shared libraries: libll
 echo "ggml_cuda_init: found 1 CUDA devices (Total VRAM: 7607 MiB):" >&2
 case "$1" in
   --help) cat "${tmp}/help.txt"; exit 0 ;;
-  --version) echo "${version}"; echo "built with GNU 11.4.0 for Linux aarch64"; exit 0 ;;
+  --version) { echo "${version}"; echo "built with GNU 11.4.0 for Linux aarch64"; } >&2; exit 0 ;;
 esac
 printf '%s\\n' "$@" > "${tmp}/argv"
 `,

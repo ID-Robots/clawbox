@@ -30,6 +30,7 @@ import {
   type TurnRequest,
   type TurnResult,
 } from "./transport";
+import { isOfficeDocumentName, isSpreadsheetName, officeTextPath } from "@/lib/office-documents";
 
 /**
  * The OpenClaw side of the transport, wrapping today's gateway RPCs 1:1.
@@ -336,7 +337,12 @@ export function projectGatewayHistory(
       previous.audio = audio;
       continue;
     }
-    chatMsgs.push({ role: "assistant", text, timestamp, images, audio, ...(files.length ? { files } : {}) });
+    // The run that wrote it, off the gateway's own record: what the live final
+    // for the same run is recognised by when this read painted it first
+    // (TASK-2494, `withAssistantReply`).
+    const meta = m.__openclaw && typeof m.__openclaw === "object" ? m.__openclaw as Record<string, unknown> : null;
+    const runId = typeof meta?.runId === "string" && meta.runId ? meta.runId : undefined;
+    chatMsgs.push({ role: "assistant", text, timestamp, images, audio, ...(files.length ? { files } : {}), ...(runId ? { idempotencyKey: runId } : {}) });
   }
   // Current OpenClaw merges TTS supplement records into chat.history, but
   // older supported gateways do not. The session-gated device route reads
@@ -448,6 +454,15 @@ export function agentIdFromSessionKey(key: string): string | undefined {
 export function attachmentLine(attachment: { path: string; type: string }, picturesViaTool: boolean): string {
   if (picturesViaTool && typeof attachment.type === "string" && attachment.type.startsWith("image/")) {
     return `[Attached image: ${attachment.path} — you cannot see this picture directly; look at it with the view_image tool before you say anything about it]`;
+  }
+  // An office document is a ZIP no model reads: the staging route took its
+  // text out beside it (src/lib/office-documents.ts), and the agent is pointed
+  // there. The hint rides the line after ` — `, the shape the transcript's
+  // reader (chat-media.ts `splitUserAttachments`) strips, so the bubble still
+  // shows the file's name and nothing else.
+  if (isOfficeDocumentName(attachment.path)) {
+    const what = isSpreadsheetName(attachment.path) ? "its sheets as CSV" : "its text";
+    return `[Attached file: ${attachment.path} — ClawBox saved ${what} in ${officeTextPath(attachment.path)}; read that file to answer from the document]`;
   }
   return `[Attached file: ${attachment.path}]`;
 }

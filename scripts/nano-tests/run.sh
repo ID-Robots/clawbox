@@ -9,7 +9,10 @@
 # lib.sh): no address, key or password of a board is known to this repository.
 # The board must already be reserved (`nano-ci reserve`) — this script never
 # reserves, cleans up or releases one; .github/workflows/nano-hardware-tests.yml
-# does, and so must anyone running it by hand.
+# does, and so must anyone running it by hand. What it does hold is a claim on
+# the board itself while it runs, so that a second suite on the same board stops
+# before its first test instead of mixing its results with this one's (see "one
+# suite per board" below).
 #
 # Every scripts/nano-tests/tests/NN-*.sh runs, in order, as `bash <test> <serial>`
 # under a deadline — 600 s, or the test's own `# timeout: NNN` header line — and
@@ -48,7 +51,13 @@
 # NANO_RUN_ID (names the folders a test creates on the board), NANO_CI (the
 # helper, default `nano-ci`), NANO_RESULTS_DIR, NANO_TEST_NAME, NANO_TEST_TIMEOUT.
 # NANO_BRANCH (the branch the commit under test is the head of; the update
-# tests hand it to the box's own updater), NANO_TESTS_LONG.
+# tests hand it to the box's own updater), NANO_TESTS_LONG, NANO_STOP_FILE.
+#
+# NANO_STOP_FILE: a test that leaves the box unfit for any test after it (93-:
+# an owner's update it could not wait out, so a rebuild would race it) writes
+# one line saying so into that file; every test still to start is then
+# reported as a skip "not run: <that line>" instead of judging that box. The
+# test itself still fails, so the run does too.
 #
 # A test whose first 20 lines hold `# tier: long` takes tens of minutes (it
 # rebuilds the box, more than once): it runs only with NANO_TESTS_LONG=1 and is
@@ -65,7 +74,8 @@
 # default (the self-test uses both).
 #
 # Exit: 0 every test passed or was skipped; 1 at least one failed; 2 usage
-# error, a missing tool, or no test to run; 130 interrupted.
+# error, a missing tool, no test to run, or the board is running another
+# suite; 130 interrupted.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -145,7 +155,7 @@ NANO_SHA=${NANO_SHA:-$(git -C "$HERE" rev-parse HEAD 2>/dev/null || true)}
 NANO_RUN_ID=${NANO_RUN_ID:-local-$(date -u +%Y%m%d%H%M%S)-$$}
 NANO_RUN_ID=$(printf '%s' "$NANO_RUN_ID" | tr -c 'A-Za-z0-9._-' '-')
 export NANO_SERIAL=$SERIAL NANO_IP=${NANO_IP:-} NANO_LAB=${NANO_LAB:-} NANO_SHA NANO_RUN_ID \
-  NANO_CI NANO_RESULTS_DIR=$RESULTS_DIR
+  NANO_CI NANO_RESULTS_DIR=$RESULTS_DIR NANO_STOP_FILE=$WORK/stop-suite
 STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # Redact what must never reach a log or the uploaded artifact: bearer tokens,
@@ -180,6 +190,79 @@ parallel_for() {
 }
 NANO_TESTS_LONG=${NANO_TESTS_LONG:-0}
 export NANO_TESTS_LONG NANO_BRANCH=${NANO_BRANCH:-}
+
+# ---- one suite per board -------------------------------------------------------
+# Two suites on one board spoil each other's results. A test that switches
+# something box-wide (the chat model, Local AI, memory search) and puts it back
+# when it ends puts it back under the other suite's tests too. Seen on a lab
+# board (TASK-2633): a second copy of the suite started 4 s after the first,
+# its 68-local-ai-chat ended first and put the chat model back on the cloud
+# model, and the other copy's thinking turns then ran on the cloud model. A
+# lease says who may use a board, not that one run uses it at a time (runs can
+# share a lease's owner), so the board holds a claim as well. run.sh takes it
+# before the first test, renews it before every batch for that batch's
+# deadline plus CLAIM_MARGIN seconds (so a run that died holds the board no
+# longer than that), and gives it back when it ends or is cancelled. A run that
+# finds another run's live claim exits 2 before any test, naming that run. When
+# the board does not answer, the run goes on without a claim: its tests will
+# say what is wrong with the board.
+CLAIM_MARGIN=${NANO_CLAIM_MARGIN:-300}
+[[ $CLAIM_MARGIN =~ ^[0-9]+$ ]] || die "NANO_CLAIM_MARGIN must be a number of seconds"
+# On the board, with `set -- take|release RUN_ID [SECONDS]` before it: prints
+# `claimed`, `released` or `held RUN_ID SECONDS_LEFT`. The claim file holds
+# "RUN_ID EXPIRY"; flock makes two runs that start at once take turns.
+# shellcheck disable=SC2016  # expanded on the board
+CLAIM_SCRIPT='f=$HOME/.cache/clawbox-nano-tests/suite.claim
+mkdir -p "${f%/*}" && exec 9>>"$f.lock" && flock -w 30 9 || exit 3
+now=$(date +%s) id="" expiry=0
+[ -s "$f" ] && read -r id expiry _ < "$f"
+[[ $expiry =~ ^[0-9]+$ ]] || expiry=0
+if [ "$1" = release ]; then
+  if [ "$id" = "$2" ]; then rm -f "$f"; fi
+  echo released
+elif [ -n "$id" ] && [ "$id" != "$2" ] && [ "$expiry" -gt "$now" ]; then
+  echo "held $id $((expiry - now))"
+else
+  printf "%s %s\n" "$2" "$((now + $3))" > "$f.tmp" && mv -f "$f.tmp" "$f" && echo claimed
+fi'
+CLAIMED=false
+CLAIM=""
+# Until when (this host's clock) the claim surely lasts.
+CLAIM_UNTIL=0
+# board_claim take SECONDS | board_claim release — sets CLAIM to the board's
+# answer (its last line: a hop may print a banner first), "" when none came.
+board_claim() {
+  local b64
+  b64=$(printf 'set -- %q %q %q\n%s\n' "$1" "$NANO_RUN_ID" "${2:-0}" "$CLAIM_SCRIPT" | base64 -w0)
+  CLAIM=$(timeout 90 "$NANO_CI" ssh "$SERIAL" "bash -c \"\$(echo $b64 | base64 -d)\"" </dev/null 2>/dev/null | tail -n 1)
+}
+# take_claim SECONDS — sets CLAIM, and CLAIMED and CLAIM_UNTIL when it is ours.
+take_claim() {
+  local asked_at
+  asked_at=$(date +%s)
+  board_claim take "$1"
+  if [ "$CLAIM" = claimed ]; then
+    CLAIMED=true
+    CLAIM_UNTIL=$((asked_at + $1))
+  fi
+}
+release_claim() {
+  [ "$CLAIMED" = true ] || return 0
+  CLAIMED=false
+  board_claim release
+}
+# renew_claim I… — before a batch: the claim must outlast its longest deadline.
+renew_claim() {
+  local k limit=0 holder left
+  [ "$CLAIMED" = true ] || return 0
+  for k in "$@"; do [ "${LIMITS[k]}" -gt "$limit" ] && limit=${LIMITS[k]}; done
+  [ "$CLAIM_UNTIL" -ge $(($(date +%s) + limit + KILL_GRACE + CLAIM_MARGIN / 2)) ] && return 0
+  take_claim $((limit + KILL_GRACE + CLAIM_MARGIN))
+  if [[ $CLAIM == "held "* ]]; then
+    read -r _ holder left <<<"$CLAIM"
+    echo "# warning: run $holder took this board's claim (${left}s left); results from here on may be mixed with that run's"
+  fi
+}
 
 # One line, at most 300 characters: a reason goes into TAP, JSON and the job summary.
 one_line() { tr -d '\r' | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//' | cut -c1-300; }
@@ -376,10 +459,30 @@ on_signal() {
   exit 130
 }
 trap on_signal INT TERM
+trap release_claim EXIT
+
+# The claim, before anything runs: long enough for the longest test that will.
+CLAIM_NEED=0
+for i in "${!TESTS[@]}"; do
+  if [ -z "${PRESKIP[i]}" ] && [ "${LIMITS[i]}" -gt "$CLAIM_NEED" ]; then CLAIM_NEED=${LIMITS[i]}; fi
+done
+CLAIM_NOTE=""
+if [ "$CLAIM_NEED" -gt 0 ]; then
+  take_claim $((CLAIM_NEED + KILL_GRACE + CLAIM_MARGIN))
+  if [[ $CLAIM == "held "* ]]; then
+    read -r _ holder left <<<"$CLAIM"
+    rm -rf "$WORK"
+    echo "run.sh: board $SERIAL is running another suite (run $holder, its claim lasts ${left}s more); no test was started" >&2
+    exit 2
+  fi
+  # Not the answer itself: a failed hop's words can name the board's address.
+  [ "$CLAIMED" = true ] || CLAIM_NOTE="# the board did not answer the suite claim: running without one"
+fi
 
 echo "TAP version 13"
 echo "1..${#TESTS[@]}"
 echo "# board $SERIAL${NANO_LAB:+ in $NANO_LAB}, commit ${NANO_SHA:-unknown}, run $NANO_RUN_ID"
+[ -z "$CLAIM_NOTE" ] || echo "$CLAIM_NOTE"
 if [ -n "$SELECTED" ]; then
   echo "# change-based selection:${SELECTED% }${NANO_TESTS_SELECT_REASON:+ ($NANO_TESTS_SELECT_REASON)}"
 fi
@@ -388,6 +491,9 @@ FAILED=0
 COUNT=${#TESTS[@]}
 i=0
 while [ "$i" -lt "$COUNT" ]; do
+  if [ -z "${PRESKIP[i]}" ] && [ -s "$NANO_STOP_FILE" ]; then
+    PRESKIP[i]="not run: $(head -n 1 "$NANO_STOP_FILE" | tr -d '\r' | cut -c1-200)"
+  fi
   if [ -n "${PRESKIP[i]}" ]; then
     report_skip "$i"
     i=$((i + 1))
@@ -409,6 +515,7 @@ while [ "$i" -lt "$COUNT" ]; do
   if [ ${#members[@]} -gt 1 ]; then
     echo "# side by side (parallel: $group):$(for k in "${members[@]}"; do printf ' %s' "${NAMES[k]}"; done)"
   fi
+  [ ${#members[@]} -eq 0 ] || renew_claim "${members[@]}"
   for k in "${members[@]}"; do start_test "$k"; done
   if [ ${#members[@]} -eq 1 ]; then
     reap "${members[0]}"

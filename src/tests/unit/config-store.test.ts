@@ -548,6 +548,19 @@ describe("config-store", () => {
       await expect(configStore.getKnown("present")).resolves.toEqual({ value: undefined, known: false });
     });
 
+    it("says known:false for a store that is there but cannot be read — only ENOENT is absent", async () => {
+      // A directory where the file should be: readFile fails with EISDIR, which
+      // the old existsSync test read as "no store" and answered `{}`.
+      await fs.mkdir(CONFIG_PATH, { recursive: true });
+      try {
+        await expect(configStore.getKnown("org_mode")).resolves.toEqual({ value: undefined, known: false });
+        // The forgiving read still answers its empty store, as it always has.
+        await expect(configStore.get("org_mode")).resolves.toBeUndefined();
+      } finally {
+        await fs.rm(CONFIG_PATH, { recursive: true, force: true });
+      }
+    });
+
     it("never logs a window of the file it failed to parse", async () => {
       // A SyntaxError from JSON.parse quotes a slice of its INPUT in its own
       // message, and the input here holds the mailbox password and both bot

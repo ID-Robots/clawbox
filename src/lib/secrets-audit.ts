@@ -79,7 +79,7 @@ export interface SecretAuditEvent {
   /** A copy's expiry: "run" or an ISO instant. A label, like the name. */
   expiresAt?: string;
   runId?: string;
-  /** Why, when it was not the owner's own click — "project_deleted", "run_ended", "spawn_failed", "reset". */
+  /** Why, when it was not the owner's own click — "project_deleted", "run_ended", "resume_refused", "spawn_failed", "reset". */
   reason?: string;
 }
 

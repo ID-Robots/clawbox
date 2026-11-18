@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -701,5 +701,52 @@ describe("step_apt_update installs the document extractors", () => {
 
   it("does not pull in the full LibreOffice suite", () => {
     expect(body).not.toMatch(/\blibreoffice(?![-\w])/);
+  });
+});
+
+describe("the x64 installer never runs the Jetson installer", () => {
+  // The Jetson installer's root steps change as the appliance needs them; an
+  // x64 host must not pick those changes up through a call into install.sh.
+  // Three things keep it out: no x64 line runs install.sh, the packaged root
+  // dispatcher is rewritten to the x64 step worker, and root runs its own
+  // installed copy of install-x64.sh.
+  const REPO_ROOT_FOR_X64 = path.dirname(INSTALLER);
+  const X64_DIR = path.join(REPO_ROOT_FOR_X64, "scripts", "x64-migration");
+  /** A shell or Python line that runs install.sh: by an interpreter, exec or source. */
+  const RUNS_INSTALL_SH = /(?:^|[\s;&|(`])(?:\S*\/)?(?:bash|sh|exec|source|\.)\s+(?:-\S+\s+)*["']?(?:\S*\/)?install\.sh(?=["'\s;)]|$)/;
+
+  function filesUnder(dir: string): string[] {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? filesUnder(path.join(dir, e.name)) : [path.join(dir, e.name)]);
+  }
+  const codeLines = (file: string) =>
+    readFileSync(file, "utf8").split("\n").filter((l) => l.trim() !== "" && !l.trim().startsWith("#"));
+
+  it("finds what it looks for", () => {
+    for (const line of ['bash "$SRC_DIR/install.sh" --step x', "  exec /bin/bash install.sh", ". ./install.sh", "sudo sh -e /opt/c/install.sh"]) {
+      expect(RUNS_INSTALL_SH.test(line), line).toBe(true);
+    }
+    for (const line of ['exec /bin/bash "$ENTRYPOINT" --step "$step"', 'bash "$ROOT_STEP_DIR/clawbox-x64-install.sh"', "COVERED_PATHS=\"install.sh scripts\""]) {
+      expect(RUNS_INSTALL_SH.test(line), line).toBe(false);
+    }
+  });
+
+  it("no line of install-x64.sh or scripts/x64-migration runs install.sh", () => {
+    const files = [INSTALLER, ...filesUnder(X64_DIR)];
+    expect(files.length).toBeGreaterThan(5);
+    const offenders = files.flatMap((file) =>
+      codeLines(file).filter((l) => RUNS_INSTALL_SH.test(l)).map((l) => `${path.relative(REPO_ROOT_FOR_X64, file)}: ${l.trim()}`));
+    expect(offenders).toEqual([]);
+  });
+
+  it("the packaged root dispatcher runs the x64 step worker, not the tree's entrypoint", () => {
+    const build = readFileSync(path.join(X64_DIR, "build-package.py"), "utf8");
+    expect(build).toContain(`dispatcher=replace_once(dispatcher, 'exec /bin/bash "$ENTRYPOINT" --step "$step"', f'exec /bin/bash {lib}clawbox-x64-step.sh "$step"')`);
+    expect(readFileSync(path.join(REPO_ROOT_FOR_X64, "config", "clawbox-root-step.sh"), "utf8")).toContain('exec /bin/bash "$ENTRYPOINT" --step "$step"');
+  });
+
+  it("root runs its own installed copy of install-x64.sh", () => {
+    expect(SOURCE).toContain('ROOT_INSTALLER_COPY="$ROOT_STEP_DIR/clawbox-x64-install.sh"');
+    expect(SOURCE).toContain('install -o root -g root -m 0755 "$0" "$ROOT_INSTALLER_COPY"');
   });
 });

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { recordAudit } from "@/lib/audit-log";
 import { get, set } from "@/lib/config-store";
 import {
   verifyPassword,
@@ -10,6 +11,7 @@ import {
 import { hasOwnerPassword } from "@/lib/system-password";
 import { checkUserPassword, findUser } from "@/lib/clawbox-users";
 import { isTunnelRequest } from "@/lib/host-allowlist";
+import { passwordChangeEpoch, passwordChangeInProgress } from "@/lib/password-change-lock";
 import {
   checkLockout,
   recordFailure,
@@ -170,6 +172,16 @@ export async function POST(request: Request) {
   // be a user Settings → System → Users created; anything else is refused exactly like
   // a wrong password, so the answer never says which names exist.
   const requested = typeof body.username === "string" ? body.username.trim() : "";
+  // A user's own password change ends their sessions before it changes the
+  // password (users/me/password): no sign-in is issued in between, nor by one
+  // that began before it and finishes after (src/lib/password-change-lock.ts).
+  const changeEpoch = requested ? passwordChangeEpoch(requested) : 0;
+  const passwordChanging = () =>
+    requested !== "" && (passwordChangeInProgress(requested) || passwordChangeEpoch(requested) !== changeEpoch);
+  if (passwordChanging()) {
+    await padResponseTime(startedAt);
+    return NextResponse.json({ error: "This account's password is being changed. Try again in a moment.", code: "password_changing" }, { status: 409 });
+  }
   const target = await resolveLoginTarget(requested);
   if (target.kind !== "unknown") {
     buckets.push(userBucket(target.username));
@@ -205,6 +217,16 @@ export async function POST(request: Request) {
       const after = await recordFailure(bucket.key, { maxLockMs: bucket.maxLockMs });
       if (after.locked) worstRetryAfter = Math.max(worstRetryAfter, after.retryAfterSeconds);
     }
+    // Who it was tried as only when that is an account on this box: a name
+    // nobody has may be a password typed into the wrong field.
+    await recordAudit(
+      {
+        event: "login_failed",
+        actor: target.kind === "unknown" ? null : target.username,
+        detail: { locked: worstRetryAfter > 0, remote: isTunnelRequest(request.headers) },
+      },
+      request,
+    );
     await padResponseTime(startedAt);
     if (worstRetryAfter > 0) {
       return lockoutResponse(worstRetryAfter);
@@ -219,6 +241,13 @@ export async function POST(request: Request) {
   // behind the shared cap.
   for (const bucket of buckets) await recordSuccess(bucket.key);
 
+  // Checked again at the last moment: a change that began while this sign-in
+  // was being checked may already have ended the sessions it would join.
+  if (target.kind === "user" && passwordChanging()) {
+    await padResponseTime(startedAt);
+    return NextResponse.json({ error: "This account's password is being changed. Try again in a moment.", code: "password_changing" }, { status: 409 });
+  }
+
   const secret = await getSessionSigningSecret();
   const gen = await getSessionGeneration();
   // The cookie names who signed in (src/lib/session-identity.ts): `u` always,
@@ -228,6 +257,10 @@ export async function POST(request: Request) {
     ? createSessionCookie(duration, secret, gen, { u: target.username, sv: target.sv })
     : createSessionCookie(duration, secret, gen, { u: target.username });
 
+  await recordAudit(
+    { event: "login", actor: target.username, detail: { remote: isTunnelRequest(request.headers), hours: Math.round(duration / 360) / 10 } },
+    request,
+  );
   await padResponseTime(startedAt);
   const res = NextResponse.json({ success: true, username: target.username });
   res.cookies.set("clawbox_session", cookie, {

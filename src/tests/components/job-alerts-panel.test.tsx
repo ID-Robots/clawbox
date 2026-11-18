@@ -139,6 +139,97 @@ describe("JobAlertsPanel", () => {
     }
   });
 
+  describe("Telegram recipients", () => {
+    // Made-up ids; seven approved users, more than the default's five.
+    const APPROVED = [
+      { id: "100000001", name: "Иван Иванов" },
+      { id: "100000002" },
+      { id: "100000003" },
+      { id: "100000004" },
+      { id: "100000005" },
+      { id: "100000006" },
+      { id: "100000007", name: "Acme desk" },
+    ];
+    const DEFAULT = {
+      runtime: "openclaw",
+      picked: null,
+      known: true,
+      approved: APPROVED,
+      effective: APPROVED.slice(0, 5).map((u) => u.id),
+      defaultCount: 5,
+      maxPicked: 20,
+    };
+    const box = (id: string) => screen.getByTestId(`job-alerts-recipient-${id}`) as HTMLInputElement;
+
+    it("lists the bot's approved users with id and name, ticking who the default reaches", async () => {
+      route({ ...STATUS, recipients: DEFAULT });
+      render(<JobAlertsPanel />);
+      await waitFor(() => expect(screen.getByTestId("job-alerts-recipients-note").textContent).toContain("first 5 approved users"));
+      const section = screen.getByTestId("job-alerts-recipients");
+      expect(section.textContent).toContain("Иван Иванов");
+      expect(section.textContent).toContain("100000001");
+      expect(section.textContent).toContain("100000002");
+      expect(APPROVED.map((u) => box(u.id).checked)).toEqual([true, true, true, true, true, false, false]);
+      expect(screen.queryByTestId("job-alerts-recipients-reset")).toBeNull();
+    });
+
+    it("ticking someone saves the ticked approved users as the pick, in the store's order", async () => {
+      const picked = { ...DEFAULT, picked: ["100000001", "100000002", "100000003", "100000004", "100000005", "100000007"] };
+      const fetchMock = route({ ...STATUS, recipients: DEFAULT }, () =>
+        new Response(JSON.stringify({ ok: true, ...STATUS, recipients: { ...picked, effective: picked.picked } }), { status: 200 }));
+      render(<JobAlertsPanel />);
+      await waitFor(() => expect(box("100000007")).toBeTruthy());
+      fireEvent.click(box("100000007"));
+      await waitFor(() => expect(box("100000007").checked).toBe(true));
+      expect(postBodies(fetchMock)).toEqual([{ recipients: picked.picked }]);
+      expect(screen.getByTestId("job-alerts-recipients-reset")).toBeTruthy();
+    });
+
+    it("unticking the last one saves an empty pick and says nobody gets them on Telegram", async () => {
+      const one = { ...DEFAULT, picked: ["100000002"], effective: ["100000002"] };
+      const fetchMock = route({ ...STATUS, recipients: one }, () =>
+        new Response(JSON.stringify({ ok: true, ...STATUS, recipients: { ...one, picked: [], effective: [] } }), { status: 200 }));
+      render(<JobAlertsPanel />);
+      await waitFor(() => expect(box("100000002").checked).toBe(true));
+      fireEvent.click(box("100000002"));
+      await waitFor(() => expect(screen.getByTestId("job-alerts-recipients-note").textContent).toContain("this desktop only"));
+      expect(postBodies(fetchMock)).toEqual([{ recipients: [] }]);
+    });
+
+    it("counts a picked user who is no longer approved, and goes back to the default on request", async () => {
+      const stale = { ...DEFAULT, picked: ["100000003", "100000099"], effective: ["100000003"] };
+      const fetchMock = route({ ...STATUS, recipients: stale }, () =>
+        new Response(JSON.stringify({ ok: true, ...STATUS, recipients: DEFAULT }), { status: 200 }));
+      render(<JobAlertsPanel />);
+      await waitFor(() => expect(screen.getByTestId("job-alerts-recipients-note").textContent).toContain("no longer approved on the bot, so skipped: 1"));
+      fireEvent.click(screen.getByTestId("job-alerts-recipients-reset"));
+      await waitFor(() => expect(screen.queryByTestId("job-alerts-recipients-reset")).toBeNull());
+      expect(postBodies(fetchMock)).toEqual([{ recipients: null }]);
+    });
+
+    it("a pick that cannot be read ticks nobody and says no alert goes to Telegram", async () => {
+      route({ ...STATUS, recipients: { ...DEFAULT, known: false, effective: [] } });
+      render(<JobAlertsPanel />);
+      await waitFor(() => expect(screen.getByTestId("job-alerts-recipients-note").textContent).toContain("could not be read"));
+      expect(APPROVED.some((u) => box(u.id).checked)).toBe(false);
+      expect(screen.getByTestId("job-alerts-recipients-reset")).toBeTruthy();
+    });
+
+    it("an older server without recipients, or a bot nobody is approved on: the card, without that part", async () => {
+      route(STATUS);
+      const { unmount } = render(<JobAlertsPanel />);
+      await screen.findByTestId("settings-job-alerts");
+      await settle();
+      expect(screen.queryByTestId("job-alerts-recipients")).toBeNull();
+      unmount();
+      route({ ...STATUS, recipients: { ...DEFAULT, approved: [], effective: [] } });
+      render(<JobAlertsPanel />);
+      await screen.findByTestId("settings-job-alerts");
+      await settle();
+      expect(screen.queryByTestId("job-alerts-recipients")).toBeNull();
+    });
+  });
+
   it.each([[{}], [{ ...STATUS, problems: [null] }], [{ ...STATUS, problems: [{ ...STATUS.problems[0], problem: "weird" }] }]])(
     "hides itself for a body it cannot draw (%#)",
     async (body) => {

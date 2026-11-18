@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getLlamaCppBaseUrl } from "@/lib/llamacpp";
 import { verifyLocalAiBearer } from "@/lib/local-ai-token";
+import { externalEngineSelected } from "@/lib/external-engine";
 import {
   beginLocalAiUse,
   endLocalAiUse,
@@ -174,6 +175,21 @@ export async function proxyLocalAiRequest(
   // cookie) can reach this route; the bearer check enforces auth here instead.
   if (!verifyLocalAiBearer(request.headers.get("authorization"))) {
     return NextResponse.json({ error: "local-ai bearer token required" }, { status: 401 });
+  }
+
+  // An external engine is the box's Local AI (TASK-2376): the on-device chat
+  // runtimes stay down, whatever still points here — a stale session override,
+  // a fallback an older build wrote. Refused before anything starts, and
+  // answered fast so OpenClaw's failover moves on. The memory embedder is not
+  // a chat runtime and keeps working.
+  if ((provider === "llamacpp" || provider === "ollama") && await externalEngineSelected()) {
+    return NextResponse.json(
+      {
+        error: "An external AI engine is selected as Local AI, so the on-device model is not started. Remove the engine in Settings → Local AI to use it again.",
+        code: "external_engine_selected",
+      },
+      { status: 503 },
+    );
   }
 
   try {

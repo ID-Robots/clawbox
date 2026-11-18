@@ -223,9 +223,10 @@ export CLAWBOX_OPENCLAW_V2
 # variable on purpose: the test suites run single sections of this file on
 # their own, and in such a slice the call is `:` and does nothing.
 #
-# STAMPS. The three checks that cost a CLI cold start on every boot whatever
-# their answer — the Codex plugin's registry dependencies, the core's
-# plugin-consent report and the Claude Code version report — ask
+# STAMPS. The checks that cost a CLI cold start whenever they run, whatever
+# their answer — the Codex plugin's registry dependencies, the registry's "no
+# Codex" on a Jetson with no Codex payload, the core's plugin-consent report and
+# the Claude Code version report — ask
 # scripts/gateway-pre-start-stamps.py whether the answer the last full check
 # recorded still holds, and skip the CLI when it does. That helper says yes
 # only when nothing the check reads has changed, the record is under a day
@@ -289,6 +290,14 @@ clawbox_stamp_remember() {
     echo "  WARN: could not record the $1 check in $CLAWBOX_STAMPS_FILE; the next start runs it in full" >&2
   fi
   return 0
+}
+
+# A Jetson: the marker install.sh keys on and install-x64.sh refuses on. The x64
+# desktop and the DGX Spark run this same script, and a check only a Jetson may
+# take on trust (the registry's "no Codex") asks this first, so every other host
+# runs it in full as before. CLAWBOX_TEGRA_RELEASE moves the marker for tests.
+clawbox_jetson_appliance() {
+  [ -f "${CLAWBOX_TEGRA_RELEASE:-/etc/nv_tegra_release}" ]
 }
 
 # Milliseconds on the box's MONOTONIC clock, into CLAWBOX_NOW_MS: /proc/uptime
@@ -385,6 +394,21 @@ if [ -z "${CLAWBOX_OPENCLAW_2026_10:-}" ]; then
   fi
 fi
 export CLAWBOX_OPENCLAW_2026_10
+
+# OpenClaw 2026.11.5 RETIRED the heartbeat config: `agents.defaults.heartbeat`
+# and `agents.entries.*.heartbeat` are no longer keys (a config that still holds
+# one is invalid until `openclaw doctor --fix` has turned the monitor into an
+# ordinary automation job and removed it), and a `config set` or `config unset`
+# of them is refused. Same precedence as the two flags above: an explicit value
+# wins; an unknown core is 0, which keeps the old behaviour.
+if [ -z "${CLAWBOX_OPENCLAW_2026_11_5:-}" ]; then
+  CLAWBOX_OPENCLAW_2026_11_5=0
+  if [ -n "${CLAWBOX_OPENCLAW_EFFECTIVE:-}" ] \
+     && [ "$(printf '%s\n' 2026.11.5 "$CLAWBOX_OPENCLAW_EFFECTIVE" | sort -V | head -1)" = "2026.11.5" ]; then
+    CLAWBOX_OPENCLAW_2026_11_5=1
+  fi
+fi
+export CLAWBOX_OPENCLAW_2026_11_5
 
 "${CLAWBOX_STEP:-:}" "start-loop recovery"
 
@@ -1291,6 +1315,8 @@ import json, os, re, sys, tempfile, secrets, shutil, time
 CLAWBOX_OPENCLAW_V2 = os.environ.get("CLAWBOX_OPENCLAW_V2") == "1"
 # OpenClaw 2026.10+: the keys the agent-database work writes (see the bash block).
 CLAWBOX_OPENCLAW_2026_10 = os.environ.get("CLAWBOX_OPENCLAW_2026_10") == "1"
+# OpenClaw 2026.11.5+: the retired heartbeat key, the on-device model's tool list.
+CLAWBOX_OPENCLAW_2026_11_5 = os.environ.get("CLAWBOX_OPENCLAW_2026_11_5") == "1"
 
 # Gateway auth token gates LAN access to the agent's privileged tools
 # (run_command / file_write / system_power). Earlier builds wrote the public
@@ -2335,6 +2361,128 @@ if isinstance(_lai_providers, dict):
             " data/.local-ai-token: the entry points at this box's local-AI"
             " proxy, which accepts only the current bearer."
         )
+
+# Reconciliation: the external AI engine (TASK-2376).
+#
+# Settings -> Local AI -> External engine makes an OpenAI-compatible endpoint
+# the owner runs the box's Local AI: `models.providers.clawext` in this file,
+# the primary through chat/model, and a record in the device store
+# (`external_engine`: base URL, model, window, output cap, image input, reasoning — the
+# key in its own 0600 file, data/.external-engine-key). Nothing above touches a
+# provider it does not own, so a start keeps the entry as it is; this block is
+# the half that PUTS IT BACK when the store says an engine is selected and the
+# entry is gone or differs — a dual box that ran Hermes when the engine was
+# saved, a doctor pass, a config restored from an older backup. Only ClawBox's
+# own keys are written (an owner's extra header on the entry survives), the
+# primary and fallbacks are never touched, and nothing starts llama.cpp or
+# Ollama: while an engine is selected the Local AI proxy refuses to.
+# No record (the appliance default) → nothing happens, whatever the file holds.
+_ext_store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or os.path.join(_clawbox_root, "data", "config.json")
+_ext_record = None
+try:
+    with open(_ext_store_path) as _ext_f:
+        _ext_store = json.load(_ext_f)
+    if isinstance(_ext_store, dict) and isinstance(_ext_store.get("external_engine"), dict):
+        _ext_record = _ext_store["external_engine"]
+except Exception:
+    _ext_record = None
+
+def _ext_pos_int(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+
+def _ext_host_refused(base):
+    # The same rule as refusedEngineHost (src/lib/external-engine-shared.ts):
+    # never a link-local / cloud-metadata or unspecified target; loopback, LAN
+    # and public hosts are the feature.
+    # (Imported as whole modules on purpose: other test suites slice this
+    # script starting at the first line that imports urlsplit by name.)
+    try:
+        import ipaddress as _ext_ip
+        import urllib.parse as _ext_urlparse
+        host = (_ext_urlparse.urlsplit(base).hostname or "").rstrip(".").lower()
+    except Exception:
+        return True
+    if host in ("metadata.google.internal", "metadata.goog", "metadata"):
+        return True
+    try:
+        ip = _ext_ip.ip_address(host.split("%")[0])
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if ip.version == 6 and ip in _ext_ip.ip_network("64:ff9b::/96"):
+        ip = _ext_ip.ip_address(int(ip) & 0xFFFFFFFF)
+    if ip.version == 4 and ip in _ext_ip.ip_network("0.0.0.0/8"):
+        return True
+    return ip.is_link_local or ip.is_unspecified
+
+if _ext_record is not None:
+    _ext_base = _ext_record.get("baseUrl")
+    _ext_model = _ext_record.get("modelId")
+    _ext_ctx = _ext_pos_int(_ext_record.get("contextWindow"))
+    _ext_max = _ext_pos_int(_ext_record.get("maxTokens"))
+    _ext_valid = (
+        isinstance(_ext_base, str) and re.match(r"^https?://[^\s/?#@]+(/[^\s?#]*)?$", _ext_base) is not None
+        and "/setup-api/" not in _ext_base
+        and not _ext_host_refused(_ext_base)
+        and isinstance(_ext_model, str) and re.match(r"^[A-Za-z0-9][A-Za-z0-9_./:-]*$", _ext_model) is not None
+        and _ext_ctx is not None and _ext_max is not None
+    )
+    if not _ext_valid:
+        print("  External engine record in the device store is malformed; models.providers.clawext left as it is.")
+    else:
+        _ext_key = None
+        try:
+            with open(os.path.join(_clawbox_root, "data", ".external-engine-key")) as _ext_kf:
+                _ext_key = _ext_kf.read().strip() or None
+        except Exception:
+            _ext_key = None
+        if not isinstance(cfg.get("models"), dict):
+            cfg["models"] = {}
+        if not isinstance(cfg["models"].get("providers"), dict):
+            cfg["models"]["providers"] = {}
+        _ext_providers = cfg["models"]["providers"]
+        _ext_entry = _ext_providers.get("clawext")
+        _ext_entry = dict(_ext_entry) if isinstance(_ext_entry, dict) else {}
+        if _ext_key is None:
+            # No key file: keep whatever key the entry already carries.
+            _ext_key = _ext_entry.get("apiKey") if isinstance(_ext_entry.get("apiKey"), str) and _ext_entry.get("apiKey") else "none"
+        _ext_name = [p for p in _ext_model.split("/") if p][-1]
+        # TASK-2497: a reasoning engine keeps `reasoning: true` and its effort
+        # contract (EXTERNAL_ENGINE_REASONING_COMPAT in src/lib/external-engine.ts:
+        # Off sent as `none`, low/medium/high as they are); anything but an
+        # explicit true in the record — a record from before the switch — is off.
+        _ext_reasoning = _ext_record.get("reasoning") is True
+        _ext_model_entry = {
+            "id": _ext_model,
+            "name": _ext_name,
+            "reasoning": _ext_reasoning,
+            "input": ["text", "image"] if _ext_record.get("imageInput") is True else ["text"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": _ext_ctx,
+            "maxTokens": min(_ext_max, _ext_ctx),
+        }
+        if _ext_reasoning:
+            _ext_model_entry["compat"] = {
+                "supportedReasoningEfforts": ["none", "low", "medium", "high"],
+                "reasoningEffortMap": {"off": "none"},
+            }
+        _ext_want = {
+            "baseUrl": _ext_base,
+            "api": "openai-completions",
+            "apiKey": _ext_key,
+            "models": [_ext_model_entry],
+        }
+        _ext_merged = dict(_ext_entry)
+        _ext_merged.update(_ext_want)
+        if _ext_merged != _ext_entry:
+            _ext_providers["clawext"] = _ext_merged
+            changed = True
+            print(
+                "  Restored models.providers.clawext (the external AI engine selected as"
+                " Local AI) from the device store: model " + _ext_model + " at " + _ext_base + "."
+            )
 
 # Model migration: legacy ChatGPT-subscription devices can have their active
 # model — or a fallback — stored as `openai/<gpt>` from before the setup UI
@@ -3849,6 +3997,49 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
 # import a TS constant. It must name a model production allows, because the
 # proxy matches the bare id and answers 400 on a miss.
 CLAWBOX_TRANSCRIBE_MODEL_ID = "gpt-4o-mini-transcribe"
+
+
+def _clawbox_cloud_ai_locked():
+    """Is the local-only AI lock on (TASK-2501)? FAILING CLOSED.
+
+    The device-store key `ai_cloud_lock`: `true` or `"pinned"` is on. An
+    absent store is a box that never wrote a setting, so unlocked; a store that
+    is there and cannot be read or parsed is not known to be unlocked, so it
+    reads as LOCKED — `cloudAiLockOn` in src/lib/feature-engine.ts, the rule
+    the web server reads it by; keep the two in step. The lock's own module
+    (PR-A, `ai-cloud-lock.ts`) replaces both readers once it is on beta.
+
+    Under the lock the speech migrations below write no cloud row and take
+    back the ones ClawBox wrote: the transcription row and its endpoint, and
+    the stamped cloud voice. `except Exception`, as wide as the sibling store
+    readers, because this runs inside the unguarded heredoc under `set -e`.
+    """
+    import os
+
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return False
+    try:
+        with open(_store_path) as _fh:
+            _store = json.load(_fh)
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return True
+    if not isinstance(_store, dict):
+        return True
+    _lock = _store.get("ai_cloud_lock")
+    return _lock is True or _lock == "pinned"
+# end of the local-only AI lock reader
+
+
+_clawbox_ai_locked = _clawbox_cloud_ai_locked()
+# Set by EVERY change this start makes because the lock is on — a cloud
+# transcription row or endpoint taken back, a locked seed, the audio switch
+# turned off, ClawBox's own cloud voice withdrawn, cloud voices held aside. The
+# config on disk still lets that cloud leg run, so the gateway config write
+# below must not start the gateway on it if the write fails.
+_clawbox_lock_applied = False
 # The auth profile the cloud row names as its OWN bearer, and it is now
 # load-bearing rather than belt-and-braces. This row's provider is `openai` —
 # the only bundled media-understanding provider that speaks the proxy's
@@ -3889,6 +4080,12 @@ CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL = {
 # matched by name rather than full path because HOME is the script's to
 # resolve, and a path check here would call a moved workspace foreign.
 CLAWBOX_STT_CLIENT_SCRIPT = "stt-client.py"
+# The owner's own speech server (TASK-2501 PR-D): a CLI row running the app's
+# scripts/stt-endpoint-client.py, which reads `stt_endpoint` and its key from
+# the device store and keeps the private-address rule. Ours like the on-box
+# row; `buildAudioModels` (src/lib/stt-preference.ts) writes it field for field.
+CLAWBOX_STT_ENDPOINT_SCRIPT = "stt-endpoint-client.py"
+CLAWBOX_STT_SCRIPTS = (CLAWBOX_STT_CLIENT_SCRIPT, CLAWBOX_STT_ENDPOINT_SCRIPT)
 # The modes `isKeyModeProfile` (src/lib/auth-profile-mode.ts) reads as a
 # key of the profile's own; anything else — `oauth` above all — is not.
 CLAWBOX_KEY_PROFILE_MODES = ("token", "api_key", "api-key")
@@ -3911,7 +4108,10 @@ def _is_clawbox_audio_model(_entry):
     if _entry.get("type") == "cli":
         _args = _entry.get("args")
         _named = [_entry.get("command")] + (list(_args) if isinstance(_args, list) else [])
-        return any(isinstance(_v, str) and _v.endswith(CLAWBOX_STT_CLIENT_SCRIPT) for _v in _named)
+        return any(
+            isinstance(_v, str) and any(_v.endswith(_script) for _script in CLAWBOX_STT_SCRIPTS)
+            for _v in _named
+        )
     return _entry in (CLAWBOX_CLOUD_AUDIO_MODEL, CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL)
 
 
@@ -4017,6 +4217,44 @@ def _clawbox_local_stt_row():
         "type": "cli",
         "command": "/usr/bin/python3",
         "args": [_script, "{{MediaPath}}"],
+        "timeoutSeconds": 120,
+    }
+
+
+def _clawbox_endpoint_stt_row():
+    """The owner's own speech server's CLI row when it is the chosen engine, else None.
+
+    Chosen means `stt_primary` is `endpoint` and an `stt_endpoint` record with
+    an http(s) base URL and a model is saved — `resolveSttPrimary` and
+    `sttEndpointFromValue` (src/lib/stt-preference.ts, src/lib/stt-endpoint.ts)
+    say the rest. Unreadable reads as not chosen: the seed then falls back to
+    the box's own engine, and the web server's boot pass writes the list from
+    the same store a moment later.
+    """
+    import os
+
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return None
+    try:
+        with open(_store_path) as _fh:
+            _store = json.load(_fh)
+    except Exception:
+        return None
+    if not isinstance(_store, dict) or _store.get("stt_primary") != "endpoint":
+        return None
+    _record = _store.get("stt_endpoint")
+    if not isinstance(_record, dict):
+        return None
+    _base = _record.get("baseUrl")
+    _model = _record.get("model")
+    if not (isinstance(_base, str) and _base.startswith(("http://", "https://")) and isinstance(_model, str) and _model.strip()):
+        return None
+    _root = os.environ.get("CLAWBOX_ROOT") or os.path.dirname(os.path.dirname(_store_path))
+    return {
+        "type": "cli",
+        "command": "/usr/bin/python3",
+        "args": [os.path.join(_root, "scripts", CLAWBOX_STT_ENDPOINT_SCRIPT), "{{MediaPath}}"],
         "timeoutSeconds": 120,
     }
 
@@ -4217,7 +4455,11 @@ if _clawai_openai_route_is_ours:
     # Asked once: the seed and the repair below both stand down on it. The
     # reason why, or None while a ClawBox AI credential backs the cloud row.
     _audio_cloud_refused = (
-        "the openai credential is a ChatGPT sign-in, which OpenClaw will not send to a custom endpoint"
+        # The local-only AI lock first (TASK-2501): no cloud row is seeded or
+        # kept, and the withdrawal below takes ours and our endpoint back.
+        "local-only AI is on, so no recording is sent to a cloud transcription engine"
+        if _clawbox_ai_locked
+        else "the openai credential is a ChatGPT sign-in, which OpenClaw will not send to a custom endpoint"
         if _openai_signed_in_with_oauth(cfg)
         else _clawai_transcribe_profile_problem(cfg)
     )
@@ -4234,10 +4476,18 @@ if _clawai_openai_route_is_ours:
     _audio_seed = None
     if not _audio_route_taken and _audio_models is None and not _audio_models_move_in_flight:
         _audio_local_row = _clawbox_local_stt_row()
-        _audio_seed = ([_audio_local_row] if _audio_local_row else []) + (
-            [] if _audio_cloud_refused else [dict(CLAWBOX_CLOUD_AUDIO_MODEL)]
-        )
-        if _audio_local_row:
+        # The owner's own speech server leads when it is the chosen engine
+        # (`sttEngineOrder("endpoint")`); under the lock it is the whole list,
+        # as is the box's own engine without one (`lockedSttOrder`).
+        _audio_endpoint_row = _clawbox_endpoint_stt_row()
+        _audio_seed = ([_audio_endpoint_row] if _audio_endpoint_row else []) + (
+            [_audio_local_row] if _audio_local_row else []
+        ) + ([] if _audio_cloud_refused else [dict(CLAWBOX_CLOUD_AUDIO_MODEL)])
+        if _clawbox_ai_locked:
+            _audio_seed = _audio_seed[:1]
+        if _audio_endpoint_row:
+            print("  Channel voice notes go to the owner's own speech server first")
+        elif _audio_local_row:
             print("  Channel voice notes try the Whisper engine installed on this box first")
 
     def _audio_write_seed(_rows):
@@ -4275,6 +4525,9 @@ if _clawai_openai_route_is_ours:
         if _audio_seed:
             _audio_write_seed(_audio_seed)
             changed = True
+            if _clawbox_ai_locked:
+                # On disk there is no list, so the core auto-detects one.
+                _clawbox_lock_applied = True
     elif _audio_models is None or (
         # The endpoint only ever travels WITH the cloud row. A list Settings
         # wrote without one — the box's own engine alone, because no ClawBox
@@ -4326,10 +4579,14 @@ if _clawai_openai_route_is_ours:
                 _audio_models[:] = _audio_kept
                 print("  Withdrew the ClawBox AI transcription row: %s" % _audio_cloud_refused)
                 changed = True
+                if _clawbox_ai_locked:
+                    _clawbox_lock_applied = True
         if _audio_has_base_url and _same_endpoint(_audio_base_url, _clawai_proxy_base_url):
             del _audio["baseUrl"]
             print("  Removed the ClawBox AI transcription endpoint along with its row")
             changed = True
+            if _clawbox_ai_locked:
+                _clawbox_lock_applied = True
     elif not _audio_route_taken and isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
         _audio_repaired = False
         for _row in _audio_models:
@@ -4346,6 +4603,88 @@ if _clawai_openai_route_is_ours:
                 " the image migration no longer writes models.providers.openai.apiKey"
             )
             changed = True
+
+
+# THE LOCAL-ONLY AI LOCK AND AUDIO AUTO-DETECTION (TASK-2501 PR-D).
+#
+# With no audio row at all the core AUTO-DETECTS a transcription engine — the
+# reply model, then any provider holding a key for a transcription API (OpenAI,
+# Groq, Deepgram …), then local CLIs (OpenClaw docs/nodes/audio.md). On a
+# locked box with no engine of its own that would send a voice note to
+# whichever cloud it finds, so the switch is turned off; once there is a row
+# again, or the lock is lifted, the switch ClawBox turned off — and only that
+# one, marked by `data/.channel-audio-lock-off` — is turned back on.
+# `syncChannelAudio` (src/lib/stt-channel.ts) keeps the same switch and the
+# same mark. An endpoint of the owner's own with no rows is their route and is
+# left as it is. Outside the `claw_` gate on purpose: a locked box with no
+# ClawBox AI link at all is the one this is most for.
+def _clawbox_audio_lock_off_marker():
+    import os
+
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    return os.path.join(os.path.dirname(_store_path), ".channel-audio-lock-off") if _store_path else ""
+
+
+# The mark, removed only once the config it switched back on is written (the
+# gateway config write, as `_clawbox_tts_held_to_remove`): a write that fails
+# leaves it, so the next start switches the audio back on again.
+_clawbox_audio_mark_to_remove = None
+
+
+def _clawbox_audio_lock_switch():
+    import os
+
+    global changed, _clawbox_lock_applied, _clawbox_audio_mark_to_remove
+    _marker = _clawbox_audio_lock_off_marker()
+    _tools = cfg.get("tools") if isinstance(cfg.get("tools"), dict) else {}
+    _media = _tools.get("media") if isinstance(_tools.get("media"), dict) else {}
+    _audio = _media.get("audio") if isinstance(_media.get("audio"), dict) else {}
+    if bool(globals().get("CLAWBOX_OPENCLAW_V2", False)):
+        _list = _media.get("models")
+        _rows = [
+            _r for _r in (_list if isinstance(_list, list) else [])
+            if isinstance(_r, dict) and "audio" in (_r.get("capabilities") or [])
+        ]
+    else:
+        _list = _audio.get("models")
+        _rows = list(_list) if isinstance(_list, list) else []
+    _base = _audio.get("baseUrl")
+    _proxy = globals().get("_clawai_proxy_base_url") or ""
+    _owner_route = (
+        isinstance(_base, str) and bool(_base.strip())
+        and not (_proxy and _base.strip().rstrip("/") == _proxy.rstrip("/"))
+    )
+    if globals().get("_clawbox_ai_locked") and not _rows and not _owner_route:
+        if _audio.get("enabled") is not False:
+            if _marker:
+                try:
+                    with open(_marker, "w") as _fh:
+                        _fh.write("")
+                except OSError:
+                    print("  WARNING: could not mark the audio switch as ClawBox's; turning it off anyway")
+            _audio["enabled"] = False
+            _media["audio"] = _audio
+            _tools["media"] = _media
+            cfg["tools"] = _tools
+            changed = True
+            _clawbox_lock_applied = True
+            print("  Channel transcription off: local-only AI is on and this box has no engine of its own")
+    elif _marker and os.path.exists(_marker):
+        if _audio.get("enabled") is False:
+            del _audio["enabled"]
+            changed = True
+            _clawbox_audio_mark_to_remove = _marker
+            print("  Channel transcription back on: the switch local-only AI turned off is no longer needed")
+        else:
+            # Nothing of ours to switch back on, so nothing to write first: a
+            # mark kept now would one day turn on a switch the owner set.
+            try:
+                os.unlink(_marker)
+            except OSError:
+                pass
+
+
+_clawbox_audio_lock_switch()
 
 
 # Migration: ClawBox AI cloud voice (text to speech).
@@ -4483,7 +4822,15 @@ _clawai_speech_withdrawable = bool(
     _clawai_plan_tier and _clawai_plan_tier != CLAWBOX_SPEECH_DEVICE_TIER
 )
 
-if _clawai_openai_route_is_ours and _clawai_speech_entitled:
+# THE LOCAL-ONLY AI LOCK (TASK-2501) overrides the plan in both directions: a
+# locked box is never armed, and the cloud voice ClawBox stamped is withdrawn
+# by the arm below — the same delete a downgrade gets, so lifting the lock on
+# an entitled box arms it again at the next start. `tts.provider` is left as
+# it is, for the downgrade's reason: with our entry gone the gateway falls
+# through to the voice on the box. The reader is the transcription block's.
+_clawai_speech_locked = bool(globals().get("_clawbox_cloud_ai_locked", lambda: False)())
+
+if _clawai_openai_route_is_ours and _clawai_speech_entitled and not _clawai_speech_locked:
     _messages = cfg.get("messages")
     if not isinstance(_messages, dict):
         _messages = {}
@@ -4582,7 +4929,7 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
                     cfg["messages"] = _messages
                 changed = True
 
-elif _clawai_openai_route_is_ours and _clawai_speech_withdrawable:
+elif _clawai_openai_route_is_ours and (_clawai_speech_withdrawable or _clawai_speech_locked):
     # ONLY OVER A PLAN WE HAVE ACTUALLY BEEN TOLD. This condition used to be
     # `_clawai_openai_route_is_ours` alone, so every reading that was not a
     # positive "pro" reached the delete: a device store that was absent, or
@@ -4673,11 +5020,243 @@ elif _clawai_openai_route_is_ours and _clawai_speech_withdrawable:
             )
         ):
             del _tts_providers["openai"]
+            if _clawai_speech_locked:
+                # Withdrawn for the lock: the config on disk still speaks
+                # through it, and the pass below may find nothing more to move.
+                _clawbox_lock_applied = True
             print(
-                "  Removed the ClawBox AI cloud voice: this box's plan no longer includes it"
+                "  Removed the ClawBox AI cloud voice: %s"
+                % (
+                    "local-only AI is on, so this box speaks with its own voice only"
+                    if _clawai_speech_locked
+                    else "this box's plan no longer includes it"
+                )
             )
             changed = True
 
+
+
+# THE GATEWAY'S OWN VOICES UNDER THE LOCAL-ONLY AI LOCK (TASK-2501 PR-D).
+#
+# The arm above stands down and our stamped entry is withdrawn, but the gateway
+# speaks a channel reply with `tts.provider` and falls through EVERY other
+# configured speech provider (`resolveTtsProviderOrder`), so an owner's own
+# ElevenLabs or OpenAI entry — or Microsoft's Edge switched on — would still be
+# a cloud leg. Under the lock the box speaks with its own voice only:
+#   - every speech provider that is not on the box is HELD: moved out of the
+#     config into `data/.tts-local-only-held.json` (0600; it can carry the
+#     owner's own key, like the other key files beside it), Microsoft's switch
+#     turned off, and a cloud `provider` pointed at the on-box one;
+#   - lifting the lock puts back exactly what was held, and the selection only
+#     where it still names the voice the lock chose.
+# The held file is written BEFORE the config moves. A box whose held file cannot
+# be written (or read) still FAILS CLOSED, and still loses nothing: each cloud
+# entry is held IN PLACE, renamed to `clawbox-held--<id>` under the same
+# `providers` record — a key no speech plugin registers, so it is out of the
+# gateway's chain, with every value kept for the next unlock — and the previous
+# selection beside them as `clawbox-held--provider`. An owner's key is never
+# lost to a lock, and no cloud voice speaks under it.
+# "Local" is `isLocalProviderId` (src/lib/voice-output.ts), transcribed.
+CLAWBOX_TTS_LOCAL_PROVIDER_ID = "tts-local-cli"
+CLAWBOX_TTS_HELD_PREFIX = "clawbox-held--"
+# The held file, removed only once the config it was restored into is written.
+_clawbox_tts_held_to_remove = None
+# Holding cloud voices aside sets `_clawbox_lock_applied` (defined beside the
+# lock reader, and already set when the arm above withdrew our own voice): the
+# config on disk still lets them speak, so it must not be started on if the
+# write fails. Never reset here, or a withdrawal with nothing left to hold
+# would start on the cloud config.
+
+
+def _clawbox_tts_is_local(_id):
+    import re as _re
+
+    _id = str(_id).strip().lower()
+    return _id == CLAWBOX_TTS_LOCAL_PROVIDER_ID or bool(
+        _re.search(r"(?:^|[-_.])(local|cli|piper|kokoro)(?:$|[-_.])", _id)
+    )
+
+
+def _clawbox_tts_lock_pass():
+    import os
+
+    global changed
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return
+    _held_path = os.path.join(os.path.dirname(_store_path), ".tts-local-only-held.json")
+    _v2 = bool(globals().get("CLAWBOX_OPENCLAW_V2", False))
+    _messages = cfg.get("messages") if isinstance(cfg.get("messages"), dict) else {}
+    _homes = []
+    if _v2 and isinstance(cfg.get("tts"), dict):
+        _homes.append(("tts", cfg.get("tts")))
+    if isinstance(_messages.get("tts"), dict):
+        _homes.append(("messages.tts", _messages.get("tts")))
+    _held_unreadable = False
+    try:
+        with open(_held_path) as _fh:
+            _held = json.load(_fh)
+    except FileNotFoundError:
+        _held = None
+    except Exception:
+        # Never written over (it may hold an owner's key), never trusted.
+        _held = None
+        _held_unreadable = True
+    _held_foreign = False
+    if not (isinstance(_held, dict) and _held.get("version") == 1 and isinstance(_held.get("homes"), dict)):
+        # A file there in a shape ClawBox did not write is left alone too,
+        # never written over: the lock then holds in place.
+        _held_foreign = _held is not None
+        _held = None
+
+    if globals().get("_clawai_speech_locked"):
+        _next = _held if _held is not None else {"version": 1, "homes": {}}
+        _moves = []
+        for _name, _home in _homes:
+            _providers = _home.get("providers")
+            if not isinstance(_providers, dict):
+                continue
+            _record = _next["homes"].setdefault(_name, {"providers": {}})
+            _locals = [_id for _id in _providers if _clawbox_tts_is_local(_id) and not str(_id).startswith(CLAWBOX_TTS_HELD_PREFIX)]
+            for _id, _entry in list(_providers.items()):
+                # Already held in place by an earlier locked start.
+                if _clawbox_tts_is_local(_id) or str(_id).startswith(CLAWBOX_TTS_HELD_PREFIX):
+                    continue
+                if _id == "microsoft":
+                    _cur = _entry.get("enabled") if isinstance(_entry, dict) else None
+                    if _cur is not False:
+                        _record.setdefault("microsoft", {"enabled": _cur} if isinstance(_entry, dict) and "enabled" in _entry else {})
+                        _moves.append((_providers, _id, "off"))
+                    continue
+                _record["providers"][_id] = _entry
+                _moves.append((_providers, _id, "hold"))
+            _provider = _home.get("provider")
+            if isinstance(_provider, str) and _provider.strip() and not _clawbox_tts_is_local(_provider) and _locals:
+                _chosen = CLAWBOX_TTS_LOCAL_PROVIDER_ID if CLAWBOX_TTS_LOCAL_PROVIDER_ID in _locals else _locals[0]
+                _record.setdefault("provider", _provider)
+                # The voice the lock chose, so the unlock gives the owner's
+                # selection back only over that one, never over a later pick.
+                _record["selected"] = _chosen
+                _moves.append((_home, _chosen, "select"))
+        if not _moves:
+            return
+        _in_file = not (_held_unreadable or _held_foreign)
+        if _in_file:
+            try:
+                _tmp = _held_path + ".tmp"
+                _fd = os.open(_tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(_fd, "w") as _fh:
+                    json.dump(_next, _fh)
+                os.replace(_tmp, _held_path)
+            except OSError:
+                _in_file = False
+        for _target, _key, _how in _moves:
+            if _how == "hold":
+                if not _in_file:
+                    _target.setdefault(CLAWBOX_TTS_HELD_PREFIX + _key, _target[_key])
+                del _target[_key]
+            elif _how == "off":
+                _entry = _target.get(_key) if isinstance(_target.get(_key), dict) else {}
+                if not _in_file:
+                    _target.setdefault(CLAWBOX_TTS_HELD_PREFIX + _key, {"enabled": _entry["enabled"]} if "enabled" in _entry else {})
+                _entry["enabled"] = False
+                _target[_key] = _entry
+            else:
+                if not _in_file and isinstance(_target.get("providers"), dict):
+                    _target["providers"].setdefault(CLAWBOX_TTS_HELD_PREFIX + "provider", {"provider": _target.get("provider"), "selected": _key})
+                _target["provider"] = _key
+        changed = True
+        global _clawbox_lock_applied
+        _clawbox_lock_applied = True
+        if _in_file:
+            print("  Local-only AI is on: the gateway speaks with this box's own voice only (cloud voices held aside)")
+        else:
+            print("  WARNING: local-only AI is on and the held speech providers file could not be "
+                  + ("read" if _held_unreadable else "used (it is not one ClawBox wrote)" if _held_foreign else "written")
+                  + "; the cloud voices are held in place in the gateway config instead (out of its speech chain, nothing lost)")
+        return
+
+    _clawbox_tts_restore_in_place(_homes)
+
+    if _held is None:
+        if _held_unreadable:
+            print("  WARNING: the held speech providers could not be read; leaving them for the next start")
+        elif os.path.exists(_held_path):
+            print("  WARNING: the held speech providers file is not one ClawBox wrote; leaving it")
+        return
+    for _name, _record in _held["homes"].items():
+        if not isinstance(_record, dict):
+            continue
+        if _name == "tts":
+            _home = cfg.get("tts") if isinstance(cfg.get("tts"), dict) else None
+            if _home is None and _v2:
+                _home = {}
+                cfg["tts"] = _home
+        else:
+            _home = _messages.get("tts") if isinstance(_messages.get("tts"), dict) else None
+        if _home is None:
+            continue
+        _providers = _home.get("providers") if isinstance(_home.get("providers"), dict) else {}
+        for _id, _entry in (_record.get("providers") or {}).items():
+            if _id not in _providers:
+                _providers[_id] = _entry
+        _ms = _record.get("microsoft")
+        if isinstance(_ms, dict) and isinstance(_providers.get("microsoft"), dict) and _providers["microsoft"].get("enabled") is False:
+            if "enabled" in _ms:
+                _providers["microsoft"]["enabled"] = _ms["enabled"]
+            else:
+                del _providers["microsoft"]["enabled"]
+        _home["providers"] = _providers
+        _clawbox_tts_restore_selection(_home, _record.get("provider"), _record.get("selected"))
+    # Removed only after the config these entries went back into is written
+    # (below, after the gateway config write): a failed write keeps them here.
+    global _clawbox_tts_held_to_remove
+    _clawbox_tts_held_to_remove = _held_path
+    changed = True
+    print("  Local-only AI is off: the speech providers it held aside are back")
+
+
+def _clawbox_tts_restore_selection(_home, _prev, _selected):
+    """The owner's selection back, only over the voice the lock chose: an owner
+    who picked another voice while locked keeps it. A record from before the
+    lock remembered its choice falls back to any voice on the box."""
+    _now = _home.get("provider")
+    if not (isinstance(_prev, str) and isinstance(_now, str)):
+        return
+    if (_now == _selected) if isinstance(_selected, str) else _clawbox_tts_is_local(_now):
+        _home["provider"] = _prev
+
+
+def _clawbox_tts_restore_in_place(_homes):
+    """Unlocked: put back what a lock held IN PLACE (see the header above)."""
+    global changed
+    _restored = False
+    for _name, _home in _homes:
+        _providers = _home.get("providers")
+        if not isinstance(_providers, dict):
+            continue
+        for _key in [k for k in list(_providers) if isinstance(k, str) and k.startswith(CLAWBOX_TTS_HELD_PREFIX)]:
+            _id = _key[len(CLAWBOX_TTS_HELD_PREFIX):]
+            _val = _providers.pop(_key)
+            _restored = True
+            if _id == "provider":
+                if isinstance(_val, dict):
+                    _clawbox_tts_restore_selection(_home, _val.get("provider"), _val.get("selected"))
+            elif _id == "microsoft":
+                _ms = _providers.get("microsoft")
+                if isinstance(_val, dict) and isinstance(_ms, dict) and _ms.get("enabled") is False:
+                    if "enabled" in _val:
+                        _ms["enabled"] = _val["enabled"]
+                    else:
+                        del _ms["enabled"]
+            elif _id and _id not in _providers:
+                _providers[_id] = _val
+    if _restored:
+        changed = True
+        print("  Local-only AI is off: the speech providers it held in place are back")
+
+
+_clawbox_tts_lock_pass()
 
 # --- memory index defaults ---
 # The memory-search index lives in each agent's database
@@ -4919,6 +5498,55 @@ if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
         changed = True
 # --- end memory index defaults ---
 
+# The on-device model's six tools, by config (OpenClaw 2026.11.5+).
+#
+# clawbox-local-lean narrows a turn on the llamacpp model to six tools with the
+# `before_prompt_build` hook's `toolsAllow`. Up to 2026.11.3 that took the other
+# tools off the turn. 2026.11.5 keeps every tool of the agent's catalog active,
+# narrows only which ones may be called, and sizes the turn (its pre-prompt
+# context check and the compaction budget) from that whole catalog. With Tool
+# Search off, as the ~2B model needs it (below), that is ~84k estimated tokens
+# against Gemma's 32768-token window: every turn on the on-device model ended
+# "Context overflow: the system prompt, injected context, or tool definitions
+# exceed the model's context window" before the model was asked (measured on a
+# lab board, 68-local-ai-chat). HARNESS FIRST: the core's own per-provider tool
+# policy, `tools.byProvider.<provider>.allow`, applies when the tools are built,
+# before anything is sized; with it the same turn is a ~1.4k-token prompt and
+# answers. It narrows only the llamacpp provider's turns, so it does not follow
+# the primary. ClawBox writes exactly {"allow": [the six]} where the provider has
+# no entry and removes only that exact value (on an older core, which narrows
+# through the hook alone); an owner's own entry is never touched. Keep the list
+# in step with LEAN_TOOLS in scripts/openclaw-plugins/clawbox-local-lean/local-lean.mjs.
+_LOCAL_LEAN_TOOLS = ["read", "write", "clawbox__webapp_create", "web_fetch", "web_search", "clawbox__browser_open"]
+_lt_tools = cfg.get("tools")
+_lt_by = _lt_tools.get("byProvider") if isinstance(_lt_tools, dict) else None
+_lt_value = _lt_by.get("llamacpp") if isinstance(_lt_by, dict) else None
+_lt_ours = (
+    isinstance(_lt_value, dict)
+    and list(_lt_value.keys()) == ["allow"]
+    and _lt_value["allow"] == _LOCAL_LEAN_TOOLS
+)
+if bool(globals().get("CLAWBOX_OPENCLAW_2026_11_5", False)):
+    if (
+        (_lt_tools is None or isinstance(_lt_tools, dict))
+        and (_lt_by is None or (isinstance(_lt_by, dict) and "llamacpp" not in _lt_by))
+    ):
+        if _lt_tools is None:
+            _lt_tools = {}
+            cfg["tools"] = _lt_tools
+        if _lt_by is None:
+            _lt_by = {}
+            _lt_tools["byProvider"] = _lt_by
+        _lt_by["llamacpp"] = {"allow": list(_LOCAL_LEAN_TOOLS)}
+        changed = True
+        print("  Narrowed the on-device model's tools to its six by config (tools.byProvider.llamacpp): OpenClaw 2026.11.5 sizes a turn from every active tool")
+elif _lt_ours:
+    del _lt_by["llamacpp"]
+    if not _lt_by:
+        del _lt_tools["byProvider"]
+    changed = True
+    print("  Removed the on-device model's config tool list: this core narrows its turns through the lean hook alone")
+
 # Reconciliation: OpenClaw's Tool Search vs a primary on the on-device model.
 #
 # Off while the primary is `llamacpp/*`, OpenClaw's default otherwise — the
@@ -5046,25 +5674,65 @@ if changed:
     # write and OSError on ENOSPC, and it sat outside the `try` that existed
     # to contain exactly those.
     tmp_path = None
+    # Whether the config itself landed: the bookkeeping after it is inside the
+    # same `try`, and its failure is not a failed config write.
+    cfg_written = False
     try:
         tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
         with os.fdopen(tmp_fd, "w") as f:
             json.dump(cfg, f, indent=2)
         os.replace(tmp_path, cfg_path)
+        cfg_written = True
         print("  Updated gateway config")
+        # Read through globals(): the block is also run on its own (tests).
+        if globals().get("_clawbox_tts_held_to_remove"):
+            try:
+                os.unlink(globals()["_clawbox_tts_held_to_remove"])
+            except OSError:
+                pass
+        if globals().get("_clawbox_audio_mark_to_remove"):
+            try:
+                os.unlink(globals()["_clawbox_audio_mark_to_remove"])
+            except OSError:
+                pass
         _record_memory_rebuild(_memory_index_changes)
         _record_keyword_only_rebuild()
     except Exception as exc:
-        if tmp_path is not None:
+        if tmp_path is not None and not cfg_written:
             try:
                 os.unlink(tmp_path)
             except Exception:
                 pass
-        print(
-            "  WARN: could not write the gateway config (%s: %s); the gateway starts on the config already on disk"
-            % (type(exc).__name__, exc),
-            file=sys.stderr,
-        )
+        if cfg_written:
+            # The config is on disk, lock and all; only the rebuild bookkeeping
+            # after it failed. That never stops a start.
+            print(
+                "  WARN: the gateway config was written but its follow-up bookkeeping failed (%s: %s)"
+                % (type(exc).__name__, exc),
+                file=sys.stderr,
+            )
+        elif globals().get("_clawbox_lock_applied"):
+            # The one exception to "carry on" above: under the local-only AI
+            # lock (TASK-2501) this start took a cloud leg out (a voice, a
+            # transcription row, audio auto-detection) and the config on disk
+            # still has it, so starting on it would break the lock. Failing closed
+            # costs the gateway its start: systemd retries until its start
+            # limit, and past it the gateway stays down until a start can
+            # write the config (a restart once there is room, or the next
+            # boot). Under the lock that is the chosen trade: no chat rather
+            # than a cloud voice.
+            print(
+                "  ERROR: local-only AI is on and the gateway config that keeps its cloud legs out could not be written (%s: %s); the gateway is not started on the old config"
+                % (type(exc).__name__, exc),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        else:
+            print(
+                "  WARN: could not write the gateway config (%s: %s); the gateway starts on the config already on disk"
+                % (type(exc).__name__, exc),
+                file=sys.stderr,
+            )
 else:
     print("  Gateway config already correct, skipping write")
     # It changes nothing in the config, so it needs no write to land first.
@@ -6488,6 +7156,35 @@ fi
 # pinned CLI for the root it will actually load, time-bounded because this is
 # ExecStartPre, and accept it only when it contains the expected package file.
 #
+# On a Jetson that answer may be the last full check's. A box with no Codex
+# anywhere paid this cold start (2.4-2.8 s on an 8 GB Jetson) on every start to
+# hear "no Codex" again, so a well-formed "no Codex" is recorded (`codex-absent`)
+# and taken on trust while none of the inputs its key reads has changed (the
+# stamps helper's docstring lists them, and what it does not read).
+# Workspace-origin plugins stay disabled unless `plugins.entries` or
+# `plugins.allow` names them (OpenClaw 2026.10.9 docs/tools/plugin.md), and both
+# are keyed. That key and the record's 24 h age are what bound a stale "no
+# Codex". What one would skip is the Codex install-and-consent step below, for a
+# Codex the registry would have found outside the managed layouts, which is
+# exactly the outcome of this CLI failing or timing out today: nothing after this
+# block reads CODEX_PLUGIN_DIR_FOUND or CODEX_PLUGIN_LAYOUT, and every later
+# reader tests "$CODEX_PLUGIN_DIR/package.json". Every other host asks on every
+# start, as before.
+_codex_absent_key=""
+_codex_absent_reused=0
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] \
+  && [ "${CLAWBOX_STAMPS_READY:-0}" = "1" ] && clawbox_jetson_appliance; then
+  if clawbox_stamp_check codex-absent plugins --config "$OPENCLAW_CONFIG" --openclaw-home "$OPENCLAW_HOME_DIR" \
+      --global-modules "$(dirname "$OPENCLAW_BIN")/../lib/node_modules" \
+      --plugin-index "$OPENCLAW_HOME_DIR/state/openclaw.sqlite" \
+    && [ "$CLAWBOX_STAMP_VALUE" = "absent" ]; then
+    _codex_absent_reused=1
+    echo "  Codex plugin: the core's registry listed no Codex at the last full check and nothing it reads has changed; not asked again"
+  else
+    _codex_absent_key="${CLAWBOX_STAMP_KEY:-}"
+    [ -z "${CLAWBOX_STAMP_WHY:-}" ] || echo "  Codex plugin: asking the core's registry (${CLAWBOX_STAMP_WHY})"
+  fi
+fi
 # `-k 5` is what makes "time-bounded" true. Plain `timeout` sends SIGTERM and
 # then goes on WAITING for the child, and an `openclaw` that ignores it — or any
 # surviving grandchild — keeps this command substitution's pipe open through the
@@ -6496,7 +7193,7 @@ fi
 # against a 2 s ceiling. This is an ExecStartPre with no leading `-`, so that
 # stall is the gateway's start time and then the unit's failure — with no agent
 # on the box — over the codex plugin-repair probe.
-if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
+if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ] && [ "$_codex_absent_reused" = "0" ]; then
   CODEX_PLUGIN_DIR_FOUND="$(
     timeout -k 5 20 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
       python3 -c 'import json, os, sys
@@ -6504,7 +7201,9 @@ try:
     data = json.load(sys.stdin)
 except (json.JSONDecodeError, OSError):
     raise SystemExit(0)
-plugins = data.get("plugins", []) if isinstance(data, dict) else []
+plugins = data.get("plugins") if isinstance(data, dict) else None
+if not isinstance(plugins, list):
+    raise SystemExit(0)
 for plugin in plugins:
     if not isinstance(plugin, dict) or plugin.get("id") != "codex":
         continue
@@ -6515,8 +7214,27 @@ for plugin in plugins:
         root = os.path.dirname(parent) if os.path.basename(parent) == "dist" else parent
     if isinstance(root, str):
         print(root)
-    break'
+    break
+else:
+    # "-": the CLI answered in its own shape and listed no Codex, the one answer
+    # a later start may take on trust: every entry an object that names its
+    # plugin id, as the stamps helper asks of the core index. An entry without
+    # one could be a Codex this reader cannot see, and an empty list is no
+    # answer at all (the pinned core always lists the plugins it bundles), so
+    # any other shape prints nothing.
+    if plugins and all(isinstance(plugin, dict) and isinstance(plugin.get("id"), str) and plugin["id"]
+                       for plugin in plugins):
+        print("-")'
   )" || CODEX_PLUGIN_DIR_FOUND=""
+  # Recorded only from a CLI that exited 0 (pipefail sends any other exit to
+  # the empty branch above), and never by the updater's run outside the unit
+  # (clawbox_stamp_remember refuses that).
+  if [ "$CODEX_PLUGIN_DIR_FOUND" = "-" ]; then
+    CODEX_PLUGIN_DIR_FOUND=""
+    if [ -n "$_codex_absent_key" ]; then
+      clawbox_stamp_remember codex-absent "$_codex_absent_key" absent
+    fi
+  fi
   if [ -n "$CODEX_PLUGIN_DIR_FOUND" ] && [ -f "$CODEX_PLUGIN_DIR_FOUND/package.json" ]; then
     CODEX_PLUGIN_DIR="$CODEX_PLUGIN_DIR_FOUND"
     CODEX_PLUGIN_LAYOUT="registry"
@@ -6535,9 +7253,9 @@ if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ] \
     --global-modules "$(dirname "$OPENCLAW_BIN")/../lib/node_modules" \
   && [ "$CLAWBOX_STAMP_VALUE" = "1" ]; then
   # A CLI cold start on every boot for an answer that cannot have changed:
-  # only a POSITIVE verdict is ever recorded, and only reused while nothing it
-  # reads has changed and the last start came up (see "the checks a start may
-  # take on trust" near the top).
+  # only a POSITIVE dependency verdict is ever recorded here, and only reused
+  # while nothing it reads has changed and the last start came up (see "the
+  # checks a start may take on trust" near the top).
   CODEX_REGISTRY_DEPS_OK=1
   echo "  Codex plugin dependencies: nothing they depend on changed since the last full check, which the core's registry passed; not asked again"
 elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; then
@@ -6667,7 +7385,9 @@ fi
 # WHAT ONE BOOT DOES, by what the record says:
 #   generation 2       DONE. One small file read and nothing else — this is a
 #                      blocking ExecStartPre and a CLI cold start is 10-12 s on
-#                      a Jetson.
+#                      a Jetson. (Plus a read of `.env` while the record does
+#                      not name the single-engine rows, and one pass for them
+#                      on a single-engine box: see A SINGLE-ENGINE BOX below.)
 #   generation absent  the previous build's record, so the opt-outs were
 #                      ClawBox's: every key still AT its opt-out literal is
 #                      flipped ON — check-ins by REMOVING the key, dreaming to
@@ -6711,9 +7431,31 @@ fi
 # same verb the panel's ON uses (`runOpenclawConfigUnset`) — because a batch
 # entry must carry a value and the CLI has no batch form that removes one. At
 # most two CLI starts, and only on the one boot that migrates.
+#
+# A SINGLE-ENGINE BOX (TASK-2387) is the one exception to "on by default".
+# `CLAWBOX_SINGLE_ENGINE=1` in `.env` (process environment first, then
+# `$CLAWBOX_ROOT/.env`, read like the Local AI repair's reader above — no gateway
+# unit loads that file; install-x64.sh seeds it on a workstation-class host)
+# says every chat on the box shares ONE local or cluster engine, and a
+# background review or a dreaming sweep is a turn on the engine every user is
+# waiting on. On such a box:
+#   - self-learning and dreaming are NEVER flipped on here — not off->auto, not
+#     false->true — whatever the record says; the check-ins flip is unchanged;
+#   - ONCE PER BOX each of the two keys is judged: an ABSENT key (the core's
+#     default, ON) gets the off value, `off` / `false`, and either way the row
+#     `single-engine:<key>` is added to `seeded`. A key that is already there
+#     — an owner's explicit `auto`, a restored `off` — is left exactly as it is.
+#     From then on the keys are the owner's: Settings → Harness switches them
+#     on, and no boot takes that back, because the row is the "done".
+#   - a generation-2 box (done before the flag was set) gets ONE more pass for
+#     the two rows, and on that pass nothing of the generation-2 migration is
+#     redone — a check-in or a job the owner switched off since stays off.
+# Hermes keys are not touched: `register-mcp.sh` judges its own harness and
+# keeps the rows it does not know.
 CLAWBOX_OPTOUT_STATE="$CLAWBOX_ROOT/data/background-optouts.json"
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
-  CLAWBOX_JOBS_PLAN="$(CLAWBOX_OPTOUT_STATE="$CLAWBOX_OPTOUT_STATE" python3 - "$OPENCLAW_CONFIG" <<'SEEDPY' || true
+  CLAWBOX_JOBS_PLAN="$(CLAWBOX_OPTOUT_STATE="$CLAWBOX_OPTOUT_STATE" CLAWBOX_DOTENV="$CLAWBOX_ROOT/.env" \
+    python3 - "$OPENCLAW_CONFIG" <<'SEEDPY' || true
 import json, os, sys
 
 # path -> the opt-out literal TASK-609 seeded, and what brings the key to the
@@ -6727,6 +7469,61 @@ WANTED = [
 ]
 GENERATION = 2
 KEYS = [".".join(path) for path, _, _ in WANTED]
+
+# TASK-2387: path -> the value a SINGLE-ENGINE box seeds into the key once,
+# only while it is absent. Keys of OpenClaw 2026.10.9 (the version the
+# installers pin): `docs/reference/memory-config.md` and the memory-core
+# plugin's own configSchema (`dreaming.enabled`, boolean, default true), and
+# `docs/tools/self-learning.md` (`auto` | `off`).
+SINGLE_ENGINE_OFF = [
+    (("plugins", "entries", "memory-core", "config", "dreaming", "enabled"), False),
+    (("skills", "workshop", "autonomous", "mode"), "off"),
+]
+SINGLE_ENGINE_ROW = "single-engine:"
+SINGLE_ENGINE_KEYS = {".".join(path) for path, _ in SINGLE_ENGINE_OFF}
+SINGLE_ENGINE_ROWS = [SINGLE_ENGINE_ROW + ".".join(path) for path, _ in SINGLE_ENGINE_OFF]
+
+
+def setting(name):
+    """`name` from the process environment, else from `$CLAWBOX_ROOT/.env`.
+
+    The process decides whenever it HAS the variable, empty included — an
+    empty value there is "off", as it is for `isSingleEngineBox` in
+    `src/lib/background-jobs.ts`, which reads only its process — and `.env` is
+    read only when it does not. `.env` is read the way the Local AI repair's
+    reader reads it: `export ` stripped, the last assignment wins. Whichever
+    source answered, one pair of matching quotes is stripped, as the panel
+    strips them, so the two never disagree about the same value.
+    errors="replace" and a broad except for the reason that reader gives:
+    `.env` is clawbox-writable, and a stray byte must not cost a blocking
+    ExecStartPre its gateway — an unreadable file is simply no setting.
+    """
+    if name in os.environ:
+        value = os.environ[name]
+    else:
+        value = ""
+        try:
+            with open(os.environ.get("CLAWBOX_DOTENV") or "", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, raw = line.partition("=")
+                    key = key.strip()
+                    if key.startswith("export "):
+                        key = key[len("export "):].strip()
+                    if key == name:
+                        value = raw
+        except Exception:
+            return ""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1]
+    return value.strip()
+
+
+def single_engine():
+    return setting("CLAWBOX_SINGLE_ENGINE").lower() in ("1", "true", "yes", "on")
 
 
 def read_record(path):
@@ -6774,9 +7571,17 @@ if record is None:
     print("")
     raise SystemExit(0)
 seeded, generation = record
-if generation >= GENERATION and all(key in seeded for key in KEYS):
-    # Done. This is the cost of every boot after the first, and it has to stay
-    # one small file read: nothing below is reached.
+# The generation-2 migration of THESE keys has happened: from here they are the
+# owner's, and a later pass (the single-engine one) must not flip any of them.
+migrated = generation >= GENERATION and all(key in seeded for key in KEYS)
+# Done. This is the cost of every boot after the first, and it has to stay
+# small file reads — the record, and `.env` unless the record already names
+# the single-engine rows: nothing below either exit is reached.
+if migrated and all(row in seeded for row in SINGLE_ENGINE_ROWS):
+    print("")
+    raise SystemExit(0)
+quiet = single_engine()
+if migrated and not quiet:
     print("")
     raise SystemExit(0)
 
@@ -6799,6 +7604,25 @@ def current(path):
     return node
 
 
+def absent(path):
+    """True only when the walk ends at an object that lacks the next key.
+
+    The single-engine seed writes into an ABSENT key and nowhere else. A path
+    that runs into something that is not an object (`"config": null`, a
+    `workshop` that is a string) is a shape ClawBox did not write and the core's
+    schema rejects: `config set` would have to replace it to land the key, so
+    it is left for the owner exactly as it is.
+    """
+    node = cfg
+    for part in path:
+        if not isinstance(node, dict):
+            return False
+        if part not in node:
+            return True
+        node = node[part]
+    return False
+
+
 def at_optout(value, literal):
     # The panel's own reading of each key: a cadence is off at `0m`, the mode
     # at `off` (case aside), dreaming at a real JSON `false` — never at `0`,
@@ -6818,7 +7642,34 @@ def at_optout(value, literal):
 batch = []
 unset_heartbeat = False
 flipped = []
+# OpenClaw 2026.11.5 retired the heartbeat key (the exported flag is set by the
+# core's own version, above): there is nothing at the opt-out literal to take
+# back, and a `config unset` of it would be refused. The monitor is an
+# automation job there, and the Settings switch drives that job.
+#
+# WHAT THIS GIVES UP, on purpose: a box still holding a generation-1 record
+# (seeded off by a build from before the 2026-09-15 ruling and never booted
+# since) that reaches a 2026.11.5 core keeps its monitor as Doctor converted it,
+# disabled. By the time this plan runs, Doctor has already turned the monitor
+# into a job and removed the key (the update's own `openclaw doctor --fix`,
+# which install.sh runs right after installing the core, and this script's
+# start-guard for a config the core still refuses at boot; measured on a lab
+# board), so the `0m` this row looks for is gone with or without this skip, and
+# once converted a seeded-off job cannot be told from one the owner switched
+# off: enabling it here would undo a choice that may be theirs. Settings ->
+# Harness switches it on.
+HEARTBEAT_RETIRED = os.environ.get("CLAWBOX_OPENCLAW_2026_11_5") == "1"
 for path, literal, default in WANTED:
+    if default is None and HEARTBEAT_RETIRED:
+        continue
+    # A box whose generation 2 is recorded is here only for the single-engine
+    # rows: its three keys are the owner's, and a check-in they switched off since
+    # must not be switched back on by a pass that came for something else.
+    if migrated:
+        break
+    # A single-engine box never has these two switched ON by ClawBox.
+    if quiet and ".".join(path) in SINGLE_ENGINE_KEYS:
+        continue
     if not at_optout(current(path), literal):
         continue
     flipped.append(".".join(path))
@@ -6826,7 +7677,22 @@ for path, literal, default in WANTED:
         unset_heartbeat = True
     else:
         batch.append({"path": ".".join(path), "value": default})
-print(json.dumps({"batch": batch, "unsetHeartbeat": unset_heartbeat, "flipped": flipped, "settled": KEYS}))
+
+# The single-engine seed: once per box, into an absent key only. The row is
+# recorded whatever the key held — the box has been judged, and an `auto` the
+# owner sets later (or a key they remove) is theirs — and a row already there is
+# never acted on again.
+quieted = []
+settled = list(KEYS)
+if quiet:
+    for (path, value), row in zip(SINGLE_ENGINE_OFF, SINGLE_ENGINE_ROWS):
+        settled.append(row)
+        if row in seeded or not absent(path):
+            continue
+        quieted.append(".".join(path))
+        batch.append({"path": ".".join(path), "value": value})
+print(json.dumps({"batch": batch, "unsetHeartbeat": unset_heartbeat, "flipped": flipped,
+                  "quieted": quieted, "settled": settled}))
 SEEDPY
 )"
   if [ -n "$CLAWBOX_JOBS_PLAN" ]; then
@@ -6879,9 +7745,22 @@ SEEDPY
       if [ "$CLAWBOX_JOBS_OK" != "1" ]; then
         echo "  WARN: could not bring the OpenClaw 2 background jobs to their defaults; the box keeps its opt-outs until the next boot or until Settings is used" >&2
       else
-        if [ "$CLAWBOX_JOBS_WRITES" != "[]" ] || [ "$CLAWBOX_JOBS_UNSET" = "1" ]; then
-          echo "  Brought the OpenClaw 2 background jobs (check-ins, memory dreaming, self-learning) to their defaults — on; Settings → Harness switches any of them off"
-        fi
+        # What the writes WERE, for the log only: a batch can now carry a
+        # single-engine box's `off` as well as a flip's `on`, and the line that
+        # says "on" must not be printed over a write that switched things off.
+        # Read off the plan like the two above and checked by shape; a reader
+        # that fails says nothing rather than something untrue.
+        CLAWBOX_JOBS_SAY="$(printf %s "$CLAWBOX_JOBS_PLAN" | python3 -c 'import json,sys; p=json.load(sys.stdin); print(("on" if p["flipped"] else "") + ("off" if p["quieted"] else "") or "none")' || true)"
+        case "$CLAWBOX_JOBS_SAY" in
+          on|onoff)
+            echo "  Brought the OpenClaw 2 background jobs ClawBox had switched off back to their defaults — on; Settings → Harness switches any of them off"
+            ;;
+        esac
+        case "$CLAWBOX_JOBS_SAY" in
+          off|onoff)
+            echo "  Single-engine box (CLAWBOX_SINGLE_ENGINE): self-learning's background review and memory dreaming are off by default — every chat shares one AI engine; Settings → Harness switches them on"
+            ;;
+        esac
         # RECORDED ONLY AFTER THE WRITES LANDED, and merged with what is there:
         # a flip that failed must be tried again next boot, and on a dual box
         # `register-mcp.sh` keeps its own keys in this file.
@@ -8315,6 +9194,78 @@ else
     if (!denied) throw new Error("the installed rule does not refuse a model-folder delete");
   ' 2>&1; then
     echo "  WARNING: the installed $CLAWBOX_PATH_GUARD_ID plugin did not load or did not refuse a model-folder delete — the ClawBox tree and the local-model folders are NOT protected from the agent's tool calls" >&2
+  fi
+fi
+
+# ── The staff guard (TASK-2444, TASK-2445) ──────────────────────────────────
+#
+# On an organisation box every member of staff talks to an agent of their own
+# (`clawbox-staff-<name>`, src/lib/org-staff-agents.ts) whose tool policy is the
+# staff allow-list of config/org-staff-policy.json. This hook is the half of
+# the rule the core's tool policy cannot express — a member's file tools write
+# only inside their own folder and read only there or in the chat's staged
+# attachments — and a second refusal of every tool the table does not name.
+# It has an opinion only on a staff agent's calls; the owner's agent is never
+# looked at. Installed and enabled on every box, like the path guard, so the
+# owner turning the organisation switch on needs no gateway restart; the table
+# is copied in beside it.
+CLAWBOX_STAFF_GUARD_ID="clawbox-staff-guard"
+CLAWBOX_STAFF_GUARD_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_STAFF_GUARD_ID"
+CLAWBOX_STAFF_GUARD_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_STAFF_GUARD_ID"
+install_clawbox_hook_plugin "$CLAWBOX_STAFF_GUARD_ID" "$CLAWBOX_STAFF_GUARD_DST" \
+  "a member of staff's file tools on an organisation box are held only by their agent's own tool policy" \
+  "$CLAWBOX_STAFF_GUARD_SRC/openclaw.plugin.json" \
+  "$CLAWBOX_STAFF_GUARD_SRC/package.json" \
+  "$CLAWBOX_STAFF_GUARD_SRC/index.mjs" \
+  "$CLAWBOX_STAFF_GUARD_SRC/staff-guard.mjs" \
+  "$CLAWBOX_ROOT/config/org-staff-policy.json"
+# Where ClawBox records whose upload each staged attachment is
+# (src/lib/chat-media-owners.ts): a member may open only their own. The gateway
+# does not know where ClawBox keeps its data, so it is written beside the
+# plugin; when it cannot be, no staged file is a member's (the guard fails closed).
+if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ]; then
+  python3 -c 'import json,sys; print(json.dumps({"mediaOwners": sys.argv[1]}))' "$CLAWBOX_ROOT/data/chat-media-owners.json" \
+    > "$CLAWBOX_STAFF_GUARD_DST/clawbox-paths.json" 2>/dev/null \
+    || echo "  WARNING: could not record the attachment owner file for $CLAWBOX_STAFF_GUARD_ID — members of staff cannot open their chat attachments with the read tools" >&2
+fi
+# The same cheap proof as the path guard's: the INSTALLED copy imports, reads
+# its table, refuses a staff agent's write outside its folder and leaves the
+# owner's agent alone.
+CLAWBOX_STAFF_GUARD_NODE="$(command -v node 2>/dev/null || true)"
+if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ -n "$CLAWBOX_STAFF_GUARD_NODE" ]; then
+  if ! CLAWBOX_STAFF_GUARD_DST="$CLAWBOX_STAFF_GUARD_DST" "$CLAWBOX_STAFF_GUARD_NODE" --input-type=module -e '
+    const dir = process.env.CLAWBOX_STAFF_GUARD_DST;
+    const plugin = (await import(`${dir}/index.mjs`)).default;
+    const hooks = [];
+    plugin.register({ on: (name) => hooks.push(name) });
+    if (!hooks.includes("before_tool_call")) throw new Error("no before_tool_call hook");
+    const { staffToolCallDenyReason } = await import(`${dir}/staff-guard.mjs`);
+    const opts = { openclawHome: "/nonexistent/.openclaw", home: "/nonexistent" };
+    if (!staffToolCallDenyReason({ toolName: "write", params: { path: "/nonexistent/.openclaw/openclaw.json" } }, { agentId: "clawbox-staff-probe" }, opts)) throw new Error("a staff write outside its folder was not refused");
+    if (!staffToolCallDenyReason({ toolName: "exec", params: { command: "ls" } }, { agentId: "clawbox-staff-probe" }, opts)) throw new Error("a staff exec was not refused");
+    if (staffToolCallDenyReason({ toolName: "exec", params: { command: "ls" } }, { agentId: "main" }, opts)) throw new Error("the owner agent was judged");
+    // Staff MCP grants (TASK-2377): only an entry granted to THAT member, read
+    // from the grants file; a missing file grants nothing; never clawbox__*;
+    // a member relay entry is never the owner agent'"'"'s to call.
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const tmp = fs.mkdtempSync(`${os.tmpdir()}/clawbox-staff-guard-probe-`);
+    try {
+      const grants = `${tmp}/staff-mcp-grants.json`;
+      fs.writeFileSync(grants, JSON.stringify({ agents: { "clawbox-staff-probe": ["cbstaff-00000000-docs"] } }));
+      const g = { ...opts, mcpGrants: grants };
+      if (staffToolCallDenyReason({ toolName: "cbstaff-00000000-docs__search", params: {} }, { agentId: "clawbox-staff-probe" }, g)) throw new Error("a granted staff MCP tool was refused");
+      if (!staffToolCallDenyReason({ toolName: "dispatch_action", params: { id: "mcp:cbstaff-00000000-other:search" } }, { agentId: "clawbox-staff-probe" }, g)) throw new Error("an ungranted staff MCP tool behind tool_call was not refused");
+      if (!staffToolCallDenyReason({ toolName: "cbstaff-00000000-docs__search", params: {} }, { agentId: "clawbox-staff-other" }, g)) throw new Error("another member could call a granted MCP tool");
+      if (!staffToolCallDenyReason({ toolName: "clawbox__system_info", params: {} }, { agentId: "clawbox-staff-probe" }, g)) throw new Error("a staff clawbox__ call was not refused");
+      if (!staffToolCallDenyReason({ toolName: "cbstaff-00000000-docs__search", params: {} }, { agentId: "clawbox-staff-probe" }, { ...opts, mcpGrants: `${tmp}/missing.json` })) throw new Error("a missing grants file granted a staff MCP tool");
+      if (!staffToolCallDenyReason({ toolName: "cbstaff-00000000-docs__search", params: {} }, { agentId: "main" }, g)) throw new Error("the owner agent could call a member relay entry");
+      if (staffToolCallDenyReason({ toolName: "docs__search", params: {} }, { agentId: "main" }, g)) throw new Error("the owner agent was judged on its own MCP server");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  ' 2>&1; then
+    echo "  WARNING: the installed $CLAWBOX_STAFF_GUARD_ID plugin did not load or did not refuse a staff write — a member of staff's file tools are held only by their agent's own tool policy" >&2
   fi
 fi
 

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { CLAWBOX_AI_CHAT_MODEL_LABEL, CLAWBOX_AI_FLASH_MODEL_ID } from "@/lib/clawbox-ai-models";
 import { coreRetiredModels } from "@/lib/core-model-lifecycle";
 import { spawn } from "child_process";
-import { promises as fsp } from "fs";
+import { existsSync, promises as fsp } from "fs";
 import path, { untraced } from "@/lib/runtime-path";
 import { findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { DATA_DIR } from "@/lib/config-store";
@@ -22,23 +22,30 @@ import { forgetProviderEnumeration, recordProviderEnumeration } from "@/lib/prov
 import { followsNewestModel, newestModelId, rankNewestFirst } from "@/lib/provider-newest-model";
 import { readUnavailableModelIds } from "@/lib/provider-model-availability";
 import { isOpenclawMaintenanceRefusal, withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
+import { GatewayRpcError, GatewayWsCallTimeoutError, gatewayWsCall } from "@/lib/openclaw-gateway-ws";
+import { cliDiagnosticFromModelsList, cliJsonFromModelsList, modelsListRequest } from "@/lib/openclaw-models-list";
+import { TEGRA_RELEASE } from "@/lib/ollama-size-cap";
 
 export const dynamic = "force-dynamic";
 
 // /setup-api/ai-models/catalog?provider=<id>
 //
-// Async-first model catalog. The route never blocks on openclaw — that
-// CLI takes ~3 minutes to enumerate models on the Jetson, far longer
-// than any reasonable HTTP timeout. Instead:
+// Async-first model catalog. The route never blocks on an enumeration —
+// one asks the core, and a request must not wait on that. Instead:
 //
 // * Disk cache at data/catalog-cache/<provider>.json is the source of
 //   truth across restarts. Reads are O(1) file IO.
 // * Background refreshes spawn `openclaw models list --provider <p>
 //   --all --json` (or fetch OpenRouter's REST endpoint) detached from
-//   any request, write the result to the disk cache on success.
-// * On boot, the first import of this module kicks off a refresh for
-//   every CATALOG_PROVIDERS entry so picker opens are instant from
-//   minute 4 onward.
+//   any request, and write the result to the disk cache on success. On a
+//   Jetson they first ask the running gateway for the `models.list` that
+//   CLI itself sends it, unless a counted provider change awaits its
+//   answer or the provider's last attempt failed; the CLI answers when no
+//   gateway does. At OpenClaw 2026.10.9 a CLI enumeration finished inside
+//   5 s on an 8 GB Jetson; the socket costs no start-up.
+// * The first picker GET after a start kicks off a refresh for every
+//   CATALOG_PROVIDERS entry, 5 s apart, so later picker opens are
+//   instant.
 // * If both caches are empty (fresh install, first picker open), we serve
 //   the curated cold-start list from src/lib/provider-models.ts with
 //   `warming: true` and no `source`, which is what "not the box's answer"
@@ -61,7 +68,7 @@ export const dynamic = "force-dynamic";
 // was true for — a core installed (or a second one under /usr removed) under a
 // running web server — until the next restart.
 const openclawBin = (): string => findOpenclawBin();
-const REFRESH_TIMEOUT_MS = 5 * 60_000; // openclaw on Jetson is ~3min
+const REFRESH_TIMEOUT_MS = 5 * 60_000; // the whole budget, maintenance retries included
 const REFRESH_INTERVAL_MS = 6 * 60 * 60_000; // 6h
 const CACHE_DIR = path.join(DATA_DIR, "catalog-cache");
 const OPENROUTER_API = "https://openrouter.ai/api/v1/models";
@@ -107,8 +114,10 @@ interface CatalogResponse {
    * enumeration this route performs for that provider returned rows, and ONLY
    * such a payload is ever written to the disk cache.
    *
-   * For every CLI provider that is `openclaw models list --provider <p> --all
-   * --json`, and for openrouter it is that catalogue's own /api/v1/models. For
+   * For every CLI provider that is the core's own enumeration — the running
+   * gateway's `models.list`, asked directly or through `openclaw models list
+   * --provider <p> --all --json` — and for openrouter it is that catalogue's
+   * own /api/v1/models. For
    * `clawai` the enumeration IS a literal (`CLAWAI_STATIC_MODELS`), and it is
    * stamped all the same, deliberately: the gateway routes exactly the one
    * model, so that row is the routing table rather than a stand-in for one
@@ -154,9 +163,9 @@ const refreshing = new Set<string>();
  *
  * Why it exists: without it, "re-enumerate whenever the payload is not live"
  * means a provider that CANNOT enumerate — plugin disabled, provider id gone,
- * an edition with no CLI — forks `openclaw models list` on every request
- * forever, ~3 minutes and ~2 cores of a Jetson each, and the single-flight set
- * only collapses the concurrent ones.
+ * an edition with no CLI — is enumerated again on every request forever (a
+ * whole `openclaw models list` process whenever the CLI is asked), and the
+ * single-flight set only collapses the concurrent ones.
  *
  * What it rate-limits is a client ASKING AGAIN. It must not survive the box
  * CHANGING, and the two are different events: a provider connect enables the
@@ -260,10 +269,10 @@ const publishedSeq = new Map<string, number>();
  * other edition and solved it with `EXPLICIT_REFRESH_MIN_GAP_MS`; this is that
  * primitive.
  *
- * The gap is longer than an enumeration (~3 minutes on a Jetson) so a mounted
- * picker's warming poll cannot chain one fork into the next, and it is cleared
- * by the two events that make an old failure meaningless — a successful
- * refresh, and a provider-set change.
+ * The gap is longer than an enumeration (a CLI one is bounded by the route's
+ * five-minute budget) so a mounted picker's warming poll cannot chain one fork
+ * into the next, and it is cleared by the two events that make an old failure
+ * meaningless — a successful refresh, and a provider-set change.
  */
 const CLIENT_RETRY_MIN_GAP_MS = 5 * 60_000;
 const clientRetryAt = new Map<string, number>();
@@ -289,6 +298,14 @@ function currentSeq(provider: string): number {
  */
 function publishedIsCurrent(provider: string): boolean {
   return (publishedSeq.get(provider) ?? 0) >= currentSeq(provider);
+}
+
+/**
+ * Is this host a Jetson? The marker install.sh and install-x64.sh go by.
+ * Read at every call: nothing about the host is cached for the process.
+ */
+function onJetson(): boolean {
+  return existsSync(/* turbopackIgnore: true */ TEGRA_RELEASE);
 }
 
 function refreshIsBlocked(provider: string): boolean {
@@ -333,7 +350,7 @@ function clearFailedRefresh(provider: string): void {
 // ClawBox AI catalog is hardcoded — the gateway routes via DeepSeek
 // upstream, and there is exactly one model to pick: DeepSeek V4.1 Flash on
 // every plan, for chat and pictures alike (TASK-2261). Skipping the openclaw
-// spawn for clawai also dodges the 3-min CLI execution time on Jetson.
+// enumeration for clawai also saves a whole CLI process per refresh.
 export const CLAWAI_STATIC_MODELS: CatalogModel[] = [
   // 1M matches what the provider definition writes to openclaw.json and what a
   // real device reports back from `openclaw models list`. `text+image`: the
@@ -590,16 +607,21 @@ function compareCatalogModels(a: CatalogModel, b: CatalogModel): number {
  * The surface depends on the plugin's catalogue, not on the customer's
  * credentials, so it rides the same mem+disk cache every other catalogue
  * uses. It has to survive a restart: a process-local cache would leave the
- * picker unmarked — i.e. back to the defect this stamp exists to fix — for
- * the first three minutes after every reboot.
+ * picker unmarked — i.e. back to the defect this stamp exists to fix — until
+ * the first enumeration after every reboot lands.
+ *
+ * It keeps the CLI (`fetchOpenclawCatalog` without `viaGateway`), and stamps
+ * `publishedSeq` with the generation current at PUBLISH time rather than at
+ * fork time — a second `publishedSeq` writer beside `publish`. Both are moot
+ * while SUBSCRIPTION_SURFACE names no separate surface provider.
  */
 async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string> | null> {
   const surfaceProvider = subscriptionSurfaceProvider(provider);
   if (!surfaceProvider) return null;
   // A natively-routed provider's surface is its OWN catalogue, which this
   // refresh is already fetching. Enumerating it again would spend a second
-  // multi-minute `openclaw models list` on the identical list, and — worse —
-  // publish it to `<provider>.json` unmerged and unsanitized, clobbering the
+  // enumeration on the identical list, and — worse — publish it to
+  // `<provider>.json` unmerged and unsanitized, clobbering the
   // payload the picker and the server-side guard both read. `buildPayload`
   // stamps that case from the merged list instead.
   if (surfaceProvider === provider) return null;
@@ -612,7 +634,7 @@ async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string
   // to `<surfaceProvider>.json` like any other refresh, so without it a
   // `refreshInBackground(surfaceProvider)` arriving from a picker open could
   // run a second `openclaw models list` for that provider beside this one —
-  // two multi-minute forks on a Jetson for one catalogue. Released in the
+  // two enumerations for one catalogue. Released in the
   // `finally` below, including on the error path.
   if (refreshing.has(surfaceProvider)) return null;
   refreshing.add(surfaceProvider);
@@ -1172,6 +1194,8 @@ interface CatalogFetchResult {
    * zero is recorded, and only it stops the row being offered.
    */
   emptyIsAnswer: boolean;
+  /** The running gateway answered over the socket (no CLI ran). Names the source in the log. */
+  fromGateway?: true;
 }
 
 function toFetchResult(
@@ -1261,12 +1285,74 @@ function toFetchResult(
  * is under offline maintenance (a gateway start, a doctor run). The refusal
  * is a parseable `{ok:false}` answer, which used to keep the previous
  * catalogue with the core's sentence as the reason; see `@/lib/openclaw-maintenance`.
+ *
+ * `viaGateway` (a Jetson only, see `refreshInBackground`) sends the first ask's
+ * request to the running gateway (see `fetchOpenclawCatalogViaGateway`). A
+ * maintenance retry asks the CLI: the retry asks every 1.5 s for up to 25 s,
+ * and a CLI fork's length is what spaced those asks.
  */
-function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
+function fetchOpenclawCatalog(provider: string, opts: { viaGateway?: boolean } = {}): Promise<CatalogFetchResult> {
+  let viaGateway = opts.viaGateway === true;
   return withOpenclawMaintenanceRetry(
-    (timeoutMs) => fetchOpenclawCatalogOnce(provider, timeoutMs),
+    (timeoutMs) => {
+      const ask = viaGateway
+        ? fetchOpenclawCatalogViaGateway(provider, timeoutMs)
+        : fetchOpenclawCatalogOnce(provider, timeoutMs);
+      viaGateway = false;
+      return ask;
+    },
     { timeoutMs: REFRESH_TIMEOUT_MS, label: "openclaw models list" },
   );
+}
+
+/**
+ * The same enumeration, asked of the running gateway over its socket.
+ *
+ * With a gateway running, the pinned `openclaw models list --provider <p> --all
+ * --json [--refresh]` sends it exactly this `models.list` and prints the rows
+ * (OpenClaw 2026.10.9, docs/cli/models.md; docs/gateway/protocol/
+ * operator-methods.md, "models.list views"). Asking directly costs no CLI
+ * start-up; the answer is projected to the CLI's own `--json` output and read
+ * by `toFetchResult` like the CLI's stdout. The connection's `caps: []` (the
+ * CLI sends `["ultrafast"]`) changes only `effectiveFastMode` and
+ * `runtimeChoices` on a row, which that projection drops.
+ *
+ * Only the outcomes the CLI could not change skip it:
+ *  * the core's maintenance refusal is rethrown, so the retry around this asks
+ *    the CLI again, as it does after the CLI's own;
+ *  * any other refusal is what the CLI prints for a refused request — the
+ *    previous catalogue is kept and the backoff recorded. The CLI does not
+ *    resend a refused `models.list` either;
+ *  * a call the gateway took and never answered is rethrown: the CLI would ask
+ *    the same slow gateway again;
+ *  * an answer the projection cannot read rejects, as the CLI would crash.
+ * Everything else — no token, nothing listening, a gateway still starting, a
+ * core that does not advertise `published-model-catalog` — is today's CLI fork.
+ */
+async function fetchOpenclawCatalogViaGateway(provider: string, timeoutMs: number): Promise<CatalogFetchResult> {
+  const request = modelsListRequest(provider, followsNewestModel(provider));
+  let payload: Record<string, unknown>;
+  try {
+    payload = await gatewayWsCall("models.list", request.params, {
+      timeoutMs: Math.min(timeoutMs, request.timeoutMs),
+      requiredCapabilities: request.requiredCapabilities,
+    });
+  } catch (err) {
+    if (err instanceof GatewayRpcError) {
+      if (isOpenclawMaintenanceRefusal(err)) throw err;
+      const refused = { ok: false, error: { type: "gateway_request_error", message: err.message } };
+      return { ...toFetchResult(provider, refused as OpenclawListResponse, ""), fromGateway: true };
+    }
+    if (err instanceof GatewayWsCallTimeoutError) throw err;
+    console.log(
+      `[catalog] ${provider}: the gateway did not answer (${err instanceof Error ? err.message : String(err)}), asking the CLI`,
+    );
+    return fetchOpenclawCatalogOnce(provider, timeoutMs);
+  }
+  return {
+    ...toFetchResult(provider, cliJsonFromModelsList(payload) as OpenclawListResponse, cliDiagnosticFromModelsList(payload)),
+    fromGateway: true,
+  };
 }
 
 function fetchOpenclawCatalogOnce(provider: string, timeoutMs: number): Promise<CatalogFetchResult> {
@@ -1380,10 +1466,11 @@ async function fetchOpenRouterCatalog(): Promise<CatalogFetchResult> {
 }
 
 // Refresh the catalog for `provider` in the background. Returns
-// immediately; the actual openclaw spawn / openrouter fetch runs out
-// of band. Single-flight via `refreshing` so concurrent requests
-// collapse to one fork. Exported so configure/route.ts can trigger a
-// refresh right after the user adds an API key — otherwise the
+// immediately; the enumeration (the gateway's `models.list`, the openclaw
+// CLI, or the openrouter fetch) runs out of band. Single-flight via
+// `refreshing` so concurrent requests collapse to one fork. Exported so
+// configure/route.ts can trigger a refresh right after the user adds an
+// API key — otherwise the
 // catalog stays on the pre-auth snapshot from boot warmup until the
 // next service restart.
 export function refreshInBackground(
@@ -1436,8 +1523,10 @@ export function refreshInBackground(
   } = {},
 ): void {
   // Providers that never touch the CLI (see NO_CLI_ENUMERATION_PROVIDERS);
-  // every other one's catalog comes from `openclaw models list`. On an edition
-  // without the binary (Hermes) that spawn is a guaranteed ENOENT.
+  // every other one's catalog comes from OpenClaw — its gateway's
+  // `models.list`, or `openclaw models list`. An edition without the binary
+  // (Hermes) has neither: that spawn is a guaranteed ENOENT, and no socket is
+  // opened either.
   const usesOpenclawCli = !NO_CLI_ENUMERATION_PROVIDERS.has(provider);
   const cliMissing = usesOpenclawCli && openclawIsAbsent();
 
@@ -1491,9 +1580,10 @@ export function refreshInBackground(
   // it is the only concurrency discipline this file has apart from
   // `bootWarmup`'s 5 s stagger — and the wizard's provider list re-runs
   // `useProviderCatalog` on every click, so a walk down anthropic → openai →
-  // google could otherwise start three ~2-core, ~3-minute forks at once on an
-  // Orin. Leaving it unspent is also the honest answer: something IS on its
-  // way, and the response says `warming`.
+  // google could otherwise start three enumerations at once — three whole CLI
+  // processes on an Orin, which is what an attempt after a failure is for
+  // every CLI provider (see `viaGateway` below). Leaving it unspent is also the honest answer:
+  // something IS on its way, and the response says `warming`.
   //
   // The wait is LIFTED, not cleared: `clearFailedRefresh` deletes the entry
   // and `recordFailedRefresh` then restarts the doubling from its two-minute
@@ -1531,6 +1621,23 @@ export function refreshInBackground(
   refreshing.add(provider);
   // Captured at START, because that is when the box this fork reads is fixed.
   const forkSeq = currentSeq(provider);
+  // The running gateway is asked first only when all three hold, each read
+  // here, at every fork:
+  //  * no counted change awaits its first answer. Right after a save the
+  //    gateway may not have applied the write yet (configure counts the change
+  //    before its hot apply), and its answer would publish as this
+  //    generation's. So every fork that answers a change (the one the change
+  //    starts, the `.finally` re-entry, a GET's stale refresh) takes the CLI,
+  //    with the CLI's start-up between the count and the answer, as before;
+  //  * the provider's last attempt did not fail. After a failure the CLI's
+  //    length is what spaced the next attempts: the client retry starts only
+  //    while nothing else is enumerating, and a fork of 3 to 5 s held that
+  //    for the other providers a client walks past, where a socket answer
+  //    holds it for a tenth of a second. A failed provider is asked as before
+  //    until it answers again;
+  //  * the host is a Jetson (the installers' marker). Every other host keeps
+  //    the CLI exactly as it was.
+  const viaGateway = publishedIsCurrent(provider) && !refreshFailedLast(provider) && onJetson();
 
   if (hasNoEnumerationOnThisCore(provider)) {
     // Documented above: this core has no ChatGPT-surface enumeration, and the
@@ -1553,13 +1660,13 @@ export function refreshInBackground(
     // answer rather than a stand-in for one.
     fetcher = Promise.resolve({ models: CLAWAI_STATIC_MODELS, diagnostic: "", emptyIsAnswer: false });
   } else {
-    fetcher = fetchOpenclawCatalog(provider);
+    fetcher = fetchOpenclawCatalog(provider, { viaGateway });
   }
 
   // A provider whose subscription narrows to a SECOND catalogue needs that
   // catalogue enumerated too. The two enumerations are independent — the
-  // surface list never reads the main one — and each costs minutes of Jetson
-  // CPU, so start both now and publish the main catalogue the moment IT lands:
+  // surface list never reads the main one — and either can be a whole CLI
+  // process, so start both now and publish the main catalogue the moment IT lands:
   // making the picker wait on the surface would double the first-boot window
   // the whole async-first design in this file's header exists to shrink.
   //
@@ -1575,7 +1682,7 @@ export function refreshInBackground(
   const surface = fetchSubscriptionSurfaceIds(provider).catch(() => null);
 
   const publish = async (models: CatalogModel[], surfaceIds: Set<string> | null) => {
-    // The CLI answered, so the provider is enumerable — that much is true
+    // The core answered, so the provider is enumerable — that much is true
     // whatever generation this is, and it is what the backoff tracks.
     recordSuccessfulRefresh(provider);
 
@@ -1642,7 +1749,7 @@ export function refreshInBackground(
   };
 
   fetcher
-    .then(async ({ models, diagnostic, emptyIsAnswer }) => {
+    .then(async ({ models, diagnostic, emptyIsAnswer, fromGateway }) => {
       if (models.length === 0) {
         // NOT a success, and every line of beta's handling stands: nothing is
         // published, the previous catalogue is kept, and `markStale` records
@@ -1667,7 +1774,7 @@ export function refreshInBackground(
         }
         console.warn(
           `[catalog] ${provider}: live enumeration returned no models, keeping the previous catalogue`
-          + (diagnostic ? ` — ${diagnostic.slice(-300)}` : " (the CLI gave no reason)"),
+          + (diagnostic ? ` — ${diagnostic.slice(-300)}` : ` (the ${fromGateway ? "gateway" : "CLI"} gave no reason)`),
         );
         markStale();
         return;
@@ -1685,9 +1792,9 @@ export function refreshInBackground(
       // released here rather than in each arm above because the arms that end
       // early — an empty enumeration, a rejection — are exactly the ones that
       // used to forget. For a provider with a genuinely narrower surface the
-      // surface enumeration is a second multi-minute `openclaw models list`,
-      // and releasing while it still holds ~2 cores of a Jetson lets the next
-      // request start a second MAIN enumeration beside it.
+      // surface enumeration is a second `openclaw models list` process, and
+      // releasing while it still runs lets the next request start a second
+      // MAIN enumeration beside it.
       //
       // Already carries its own handler (see where it is created), so this is
       // just "wait for it".
@@ -1755,8 +1862,8 @@ let bootWarmupStarted = false;
 function bootWarmup(): void {
   if (bootWarmupStarted) return;
   bootWarmupStarted = true;
-  // Stagger by 5s so we don't fork four openclaw bins at the exact
-  // same instant. Each one is ~2 cores of CPU for ~3 minutes.
+  // Stagger by 5s so no two enumerations start at the same instant: wherever
+  // the CLI is asked, each provider's is a whole openclaw CLI process.
   CATALOG_PROVIDERS.forEach((p, i) => {
     setTimeout(() => refreshInBackground(p), i * 5_000);
   });

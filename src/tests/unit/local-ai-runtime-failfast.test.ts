@@ -35,14 +35,33 @@ vi.mock("@/lib/llamacpp-server", () => ({
   resolveConfiguredLlamaCppAlias: async () => "gemma4-e2b-it-q4_0",
 }));
 
+// TASK-2376: whether an external AI engine holds the Local AI slot.
+const externalSelectedMock = vi.fn(async () => false);
+vi.mock("@/lib/external-engine", () => ({ externalEngineSelected: () => externalSelectedMock() }));
+
 async function loadRuntime() {
   vi.resetModules();
   return await import("@/lib/local-ai-runtime");
 }
 
+describe("ensureLocalAiReady while an external AI engine is the Local AI (TASK-2376)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    externalSelectedMock.mockResolvedValue(true);
+  });
+
+  it.each(["llamacpp", "ollama"] as const)("never starts %s, whoever asks", async (provider) => {
+    const { ensureLocalAiReady } = await loadRuntime();
+    await expect(ensureLocalAiReady(provider)).rejects.toThrow(/external AI engine/);
+    expect(startLlamaCppServerMock).not.toHaveBeenCalled();
+    expect(queryLlamaCppModelsMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("ensureLocalAiReady fails fast when llama.cpp was not started", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    externalSelectedMock.mockResolvedValue(false);
     getLlamaCppProvisioningStatusMock.mockResolvedValue({ modelAvailable: true });
     queryLlamaCppModelsMock.mockResolvedValue([]);
   });

@@ -1,0 +1,539 @@
+/**
+ * OpenClaw's system/agent credentials, written the way OpenClaw 2026.11.3
+ * takes them (docs/cli/models.md, "Auth profiles", in the pinned core).
+ *
+ * While a gateway owns the state directory, 2026.11.3's CLI refuses every
+ * `models auth` command but two: `paste-api-key` WITHOUT `--profile-id`,
+ * which it hands to the gateway's `models.authSetApiKey`, and `login`. The
+ * rest — `list`, `logout`, `order …`, `paste-token` — "require exclusive
+ * offline ownership of the selected local state". 2026.10.9 ran all of them
+ * locally beside a running gateway, which is what ClawBox did.
+ *
+ * So, with the gateway up, ClawBox asks the gateway itself, over the socket
+ * it already holds (`gatewayWsCall`, operator.admin):
+ *
+ *   models.authSetApiKey {provider, apiKey}       the key, into the provider's
+ *                                                 API-key profile
+ *   models.authLogout    {provider, profileIds}   saved profiles out
+ *   models.authOrderSet  {provider, profileIds?}  the order; omitted = clear
+ *
+ * and only a gateway that is not there to answer — stopped for a sign-in
+ * lane or doctor, the installer, the gateway's own pre-start — gets the CLI,
+ * offline, exactly as before. A gateway that answered with a refusal is never
+ * retried through the CLI: the CLI would be refused for the same state.
+ *
+ * `paste-token` has no RPC (its credential type and expiry cannot be said
+ * through the API-key one), so `withOpenclawGatewayStopped` runs it the way
+ * the docs say: the gateway stopped through its service owner, the command
+ * run offline, the gateway started again.
+ */
+
+import { spawnOpenclawCli, restartGateway, gatewayIsAbsent, gatewayReadyWaitMs } from "@/lib/openclaw-config";
+import { gatewayWsCall, GatewayWsUnavailableError, waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
+import { readGatewayProviderAuth } from "@/lib/openclaw-auth-store";
+import { readUnitState, runUnitJob, unitIsStopped, UNIT_JOB_SETTLE_BUDGET_MS } from "@/lib/gateway-unit-job";
+import { DATA_DIR } from "@/lib/config-store";
+import fs from "fs";
+import path from "@/lib/runtime-path";
+import { processStore } from "@/lib/process-store";
+
+/**
+ * On disk while ClawBox holds the gateway stopped for offline work (a memory
+ * index pass): a web server that exits in between leaves it behind, and its
+ * next start puts the gateway back (`restoreOpenclawGatewayAfterCrash`).
+ */
+const OFFLINE_HOLD_PATH = path.join(DATA_DIR, ".openclaw-offline-hold.json");
+
+/**
+ * Who in THIS process has the gateway stopped, or is about to: a memory index
+ * pass (`pass`, from the moment it asks for the stop until it has started the
+ * gateway again) and the short windows of `withOpenclawGatewayStopped`
+ * (`windows`, each from before its stop until after its start).
+ *
+ * The two end by STARTING the gateway, so they must never overlap: a window
+ * that passed its check a moment before a pass took its hold would otherwise
+ * finish under the pass and bring the gateway up over it. The hold record on
+ * disk cannot rule that out — it is written by the pass, after the window has
+ * looked. So ownership is claimed here, synchronously (no `await` between the
+ * look and the claim): a window is refused while a pass owns the gateway, and
+ * a pass waits for the windows already open to finish before it stops
+ * anything. In the process store, not a module-level `let`: the boot hook and
+ * the route handlers load two copies of this module (see process-store.ts).
+ */
+function offlineOwnership(): { pass: boolean; windows: number; waiters: Array<() => void> } {
+  return processStore(`openclaw-auth-ops.offline:${OFFLINE_HOLD_PATH}`, () => ({ pass: false, windows: 0, waiters: [] as Array<() => void> }));
+}
+
+
+/** One CLI start-up on a Jetson is 10-12 s; the gateway's own write is quicker. */
+const AUTH_TIMEOUT_MS = 60_000;
+
+/**
+ * How long a stop whose client gave up is waited for (a key save): with the
+ * client's own 15 s, a minute. A tunnel gives up near 100 s, and "still
+ * stopping" is then the honest answer. The account pool's window and a memory
+ * index pass are the exceptions (`waitOutStop`, `stopOpenclawGatewayForOffline`).
+ */
+const STOP_SETTLE_MS = 45_000;
+
+export interface AuthOpsDeps {
+  gatewayAuthRpc: (method: string, params: Record<string, unknown>, timeoutMs: number) => Promise<unknown>;
+  offlineAuthCli: (args: string[], options: { stdinData?: string; timeoutMs: number }) => Promise<string>;
+  /** The provider's profile ids in the gateway's store, or null when it cannot be read. */
+  storeProfiles: (provider: string) => string[] | null;
+  /** `waitOut`: wait for a slow stop as long as the unit may take (`withOpenclawGatewayStopped`'s `waitOutStop`). */
+  stopGateway: (waitOut?: boolean) => Promise<void>;
+  startGateway: () => Promise<void>;
+  /**
+   * Is a gateway up or coming up, i.e. does one own (or is about to own) the
+   * state? Only a unit that is down lets the CLI work offline.
+   */
+  gatewayUnitUp: () => Promise<boolean>;
+  /**
+   * Is the gateway unit running or starting (active, activating, reloading)?
+   * Boot recovery's question, the other way round from `gatewayUnitUp`: a unit
+   * that is stopping, down or cannot be read may stay stopped, so it is started.
+   */
+  gatewayUnitRunning: () => Promise<boolean>;
+  /**
+   * Is the gateway unit KNOWN to be down or stopping (inactive, failed,
+   * deactivating)? The offline hold's question: a unit that cannot be read is
+   * not known to be down, so a leftover hold record beside it holds nothing.
+   */
+  gatewayUnitDown: () => Promise<boolean>;
+  /** Wait for a gateway that is coming up to answer; false when it did not in time. */
+  waitForGateway: () => Promise<boolean>;
+}
+
+const defaultDeps: AuthOpsDeps = {
+  gatewayAuthRpc: (method, params, timeoutMs) => gatewayWsCall(method, params, { timeoutMs }),
+  offlineAuthCli: (args, options) => spawnOpenclawCli(args, options),
+  storeProfiles: (provider) => {
+    const read = readGatewayProviderAuth(provider);
+    if (read.kind === "no-store") return [];
+    if (read.kind !== "present") return null;
+    return read.profiles.map((p) => p.profileId);
+  },
+  stopGateway: async (waitOut = false) => {
+    const stop = await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+      unit: "clawbox-gateway.service",
+      timeoutMs: 15_000,
+      // The unit may take TimeoutStopSec=330 to stop (OpenClaw drains what it
+      // is answering, and is killed at the end of it): UNIT_JOB_SETTLE_BUDGET_MS
+      // covers that.
+      settleBudgetMs: waitOut ? UNIT_JOB_SETTLE_BUDGET_MS : STOP_SETTLE_MS,
+    });
+    if (stop.kind === "in-flight") throw new Error("the gateway is still stopping");
+    // A start or restart asked for while the stop was pending takes its place
+    // (gateway-unit-job.ts, `unitJobWasCanceled`): no job is left and the unit
+    // is UP. Offline work must not run beside it — the CLI is refused, and the
+    // account pool renews tokens on the strength of the gateway being down.
+    if (stop.kind === "settled" && !unitIsStopped(stop.state)) throw new Error("the gateway did not stay stopped");
+  },
+  startGateway: async () => {
+    try {
+      await restartGateway();
+    } catch (err) {
+      // The unit was started and may still be coming up (a Jetson after heavy
+      // work can take longer than the ready wait): not yet a failure of the
+      // offline work. A refused start throws at once.
+      // By name, not `instanceof`: every module this one reaches is imported by
+      // suites that mock openclaw-config, and a name needs no class there.
+      if (err instanceof Error && err.name === "GatewayNotReadyError") {
+        // Waited for once more, so the work's caller (a memory pass reporting
+        // "done", a key save answering) does not hand the owner an assistant
+        // that cannot answer yet. Nothing answering past that is a start that
+        // failed (a gateway that crashed while starting looks the same), and
+        // the caller is told so.
+        console.warn("[openclaw-auth] the gateway was started again and is still coming up; waiting for it");
+        if (await waitForGatewayRpcReady(gatewayReadyWaitMs() * 3)) return;
+        console.warn("[openclaw-auth] the gateway did not answer after the extra wait either");
+      }
+      throw err;
+    }
+  },
+  gatewayUnitUp: async () => {
+    const state = await readUnitState("clawbox-gateway.service");
+    // A unit that cannot be asked is treated as up: the gateway's refusal is
+    // honest, a CLI write around a live owner is not.
+    if (!state) return true;
+    return ["active", "activating", "reloading", "deactivating"].includes(state.activeState);
+  },
+  gatewayUnitRunning: async () => {
+    const state = await readUnitState("clawbox-gateway.service");
+    return !!state && ["active", "activating", "reloading"].includes(state.activeState);
+  },
+  gatewayUnitDown: async () => {
+    const state = await readUnitState("clawbox-gateway.service");
+    return !!state && ["inactive", "failed", "deactivating"].includes(state.activeState);
+  },
+  waitForGateway: () => waitForGatewayRpcReady(gatewayReadyWaitMs()),
+};
+
+let deps: AuthOpsDeps = defaultDeps;
+
+/** Tests only. */
+export function _setAuthOpsDepsForTests(next: Partial<AuthOpsDeps> | null): void {
+  deps = next ? { ...defaultDeps, ...next } : defaultDeps;
+  if (!next) {
+    const owner = offlineOwnership();
+    owner.pass = false;
+    owner.windows = 0;
+    owner.waiters.length = 0;
+  }
+}
+
+/** An agent named for the gateway request, or nothing (the core's default agent). */
+function agentParam(agentId: string | undefined): { agentId?: string } {
+  return agentId ? { agentId } : {};
+}
+
+/** The same agent for the offline CLI. */
+function agentArgs(agentId: string | undefined): string[] {
+  return agentId ? ["--agent", agentId] : [];
+}
+
+export type Online<T> = { answered: true; result: T } | { answered: false };
+
+/** Thrown when a gateway owns the state but did not come up to take the request in time. */
+export class OpenclawGatewayNotReadyError extends Error {
+  constructor(method: string) {
+    super(`The assistant is starting and did not answer ${method} in time. Try again in a minute.`);
+    this.name = "OpenclawGatewayNotReadyError";
+  }
+}
+
+/**
+ * The gateway's answer, or `answered: false` when NO gateway owns the state
+ * (its unit is down), which is when the offline CLI may run. A socket that
+ * does not answer is not proof of that: a gateway that is starting already
+ * owns the state (2026.11.3 refuses the CLI then too), so it is waited for and
+ * asked again.
+ */
+async function askGatewayForAuth<T>(method: string, params: Record<string, unknown>): Promise<Online<T>> {
+  return askOpenclawGateway<T>(method, params, AUTH_TIMEOUT_MS);
+}
+
+/**
+ * Any gateway request with the same rule: answered by the gateway, or
+ * `answered: false` only when no gateway owns the state (its unit is down);
+ * a gateway that is starting is waited for and asked again.
+ */
+export async function askOpenclawGateway<T>(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<Online<T>> {
+  if (gatewayIsAbsent()) return { answered: false };
+  const ask = async (): Promise<Online<T>> => ({ answered: true, result: (await deps.gatewayAuthRpc(method, params, timeoutMs)) as T });
+  try {
+    return await ask();
+  } catch (err) {
+    if (!(err instanceof GatewayWsUnavailableError)) throw err;
+  }
+  if (!(await deps.gatewayUnitUp())) return { answered: false };
+  if (!(await deps.waitForGateway())) throw new OpenclawGatewayNotReadyError(method);
+  try {
+    return await ask();
+  } catch (err) {
+    if (err instanceof GatewayWsUnavailableError) throw new OpenclawGatewayNotReadyError(method);
+    throw err;
+  }
+}
+
+export interface SavedApiKey {
+  via: "gateway" | "cli";
+  /** The profile the key landed in (the gateway picks the provider's API-key profile). */
+  profileId: string;
+  warning?: string;
+}
+
+/**
+ * Save an API key for `provider` at `profileId` (ClawBox names
+ * `<provider>:default`, the profile the gateway itself picks for a provider
+ * with no other API-key profile). The key never touches argv.
+ */
+export async function saveOpenclawApiKey(provider: string, profileId: string, key: string): Promise<SavedApiKey> {
+  // The gateway's models.authSetApiKey takes no profile id: it writes over
+  // the provider's API-key profile, or — when the store holds none — creates
+  // `<provider>:manual` (2026.11.3's resolveDefaultTokenProfileId), not the id
+  // ClawBox names and checks. So the gateway takes the key only when the store
+  // already holds `profileId`; a first save at it runs the documented offline
+  // way (`paste-api-key --profile-id`), with the gateway stopped and started
+  // again around it when one is up.
+  const held = gatewayIsAbsent() ? null : deps.storeProfiles(provider);
+  if (held === null || held.includes(profileId)) {
+    const answer = await askGatewayForAuth<{ profileId?: unknown; warning?: unknown }>("models.authSetApiKey", { provider, apiKey: key });
+    if (answer.answered) {
+      const landed = typeof answer.result?.profileId === "string" && answer.result.profileId ? answer.result.profileId : profileId;
+      const warning = typeof answer.result?.warning === "string" && answer.result.warning ? answer.result.warning : undefined;
+      if (landed === profileId) return { via: "gateway", profileId: landed, ...(warning ? { warning } : {}) };
+      // A provider with a `models.providers` entry gets `<provider>:manual`
+      // from the gateway even beside an existing API-key profile (measured on
+      // a board). The copy it just made goes again — never one it held
+      // before — and the key is saved at ClawBox's id the offline way.
+      console.warn(`[openclaw-auth] the gateway saved the ${provider} key at ${landed}, not ${profileId}; saving it at ${profileId} offline`);
+      if (held !== null && !held.includes(landed)) {
+        await askGatewayForAuth("models.authLogout", { provider, profileIds: [landed] });
+      }
+      await withOpenclawGatewayStopped(() => pasteOffline(provider, profileId, key));
+      return { via: "cli", profileId };
+    }
+    await pasteOffline(provider, profileId, key);
+    return { via: "cli", profileId };
+  }
+  if (await deps.gatewayUnitUp()) {
+    await withOpenclawGatewayStopped(() => pasteOffline(provider, profileId, key));
+  } else {
+    await pasteOffline(provider, profileId, key);
+  }
+  return { via: "cli", profileId };
+}
+
+/** `paste-api-key --profile-id`, which 2026.11.3 runs only with no gateway owning the state. */
+async function pasteOffline(provider: string, profileId: string, key: string): Promise<void> {
+  await deps.offlineAuthCli(["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId], {
+    stdinData: key + "\n",
+    timeoutMs: AUTH_TIMEOUT_MS,
+  });
+}
+
+/** The provider a profile id names (`deepseek:default` → `deepseek`). */
+export function providerOfProfileId(profileId: string): string {
+  return profileId.split(":")[0]?.trim().toLowerCase() ?? "";
+}
+
+/**
+ * Take saved profiles out of the gateway's store. Ids the store does not hold
+ * are left out of the request (the gateway refuses a request naming one); an
+ * id held only in openclaw.json metadata is the caller's to unset.
+ * Returns the ids asked for.
+ */
+export async function logoutOpenclawAuthProfiles(provider: string, profileIds: string[], agentId?: string): Promise<string[]> {
+  const ids = [...new Set(profileIds.filter((id) => typeof id === "string" && id.trim()))];
+  if (ids.length === 0) return [];
+  const held = deps.storeProfiles(provider);
+  const wanted = held === null ? ids : ids.filter((id) => held.includes(id));
+  if (wanted.length === 0) return [];
+  const answer = await askGatewayForAuth("models.authLogout", { provider, profileIds: wanted, ...agentParam(agentId) });
+  if (answer.answered) return wanted;
+  for (const id of wanted) {
+    await deps.offlineAuthCli(["models", "auth", "logout", id, "--yes", ...agentArgs(agentId)], { timeoutMs: AUTH_TIMEOUT_MS });
+  }
+  return wanted;
+}
+
+/**
+ * Set the provider's profile order (`order` first, in that order), or clear
+ * it (`null` or empty). The gateway takes an order only when it names every
+ * profile it holds for the provider, so the store's other profiles follow
+ * the ones asked for, and ids it does not hold are dropped.
+ */
+export async function setOpenclawAuthOrder(provider: string, order: string[] | null, agentId?: string): Promise<void> {
+  const asked = [...new Set((order ?? []).filter((id) => typeof id === "string" && id.trim()))];
+  const held = asked.length > 0 ? deps.storeProfiles(provider) : null;
+  const full = asked.length === 0 ? [] : held === null ? asked : [...asked.filter((id) => held.includes(id)), ...held.filter((id) => !asked.includes(id))];
+  const answer = await askGatewayForAuth("models.authOrderSet", { provider, ...(full.length > 0 ? { profileIds: full } : {}), ...agentParam(agentId) });
+  if (answer.answered) return;
+  if (full.length > 0) {
+    await deps.offlineAuthCli(["models", "auth", "order", "set", "--provider", provider, ...full, ...agentArgs(agentId)], { timeoutMs: AUTH_TIMEOUT_MS });
+  } else {
+    await deps.offlineAuthCli(["models", "auth", "order", "clear", "--provider", provider, ...agentArgs(agentId)], { timeoutMs: AUTH_TIMEOUT_MS });
+  }
+}
+
+/**
+ * Stop the gateway through its service owner for offline work that runs on
+ * its own lifecycle (a memory index pass); `startOpenclawGatewayAfterOffline`
+ * starts it again. Neither does anything on a box with no gateway.
+ */
+export async function stopOpenclawGatewayForOffline(): Promise<void> {
+  if (gatewayIsAbsent()) return;
+  // Claimed before anything is awaited: from here no new window opens (see
+  // `offlineOwnership`), and the ones already open are let finish — their own
+  // start included — so that start does not land under the pass.
+  const owner = offlineOwnership();
+  owner.pass = true;
+  try {
+    while (owner.windows > 0) await new Promise<void>((resolve) => { owner.waiters.push(resolve); });
+    // No record, no stop: a gateway held stopped with nothing on disk to say so
+    // would stay stopped if this server exited before starting it again.
+    fs.writeFileSync(OFFLINE_HOLD_PATH, JSON.stringify({ pid: process.pid, at: Date.now() }) + "\n", { mode: 0o600 });
+  } catch (err) {
+    // Nothing was stopped, so nothing will be started again to release this.
+    owner.pass = false;
+    throw err;
+  }
+  // Waited out, like the account pool's window. A gateway that is answering
+  // turns drains for as long as its unit allows (TimeoutStopSec=330) and is
+  // killed at the end of it; the minute this used to wait was over long before
+  // that, so the pass gave up, the caller started the gateway again behind the
+  // same stop, and the assistant was down for six minutes with nothing indexed
+  // (the owner's box, 2026-11-15, three times in one day). The pass's claim on
+  // the run record is re-stamped while this waits (`startMemoryIndex`).
+  await deps.stopGateway(true);
+}
+
+/**
+ * Is the gateway held stopped right now for offline work of a live web server
+ * (a memory index pass between `stopOpenclawGatewayForOffline` and
+ * `startOpenclawGatewayAfterOffline`)?
+ *
+ * The record alone does not say so. It outlives a start that was issued but
+ * not answered in time (`startOpenclawGatewayAfterOffline` removes it only
+ * after the gateway answered, and on a box with large agent databases that
+ * wait runs out), so a hold beside a gateway that is up or coming up is a
+ * leftover, and reading it as a hold would refuse every token paste and key
+ * save from then on. Held means: the record, a live holder, AND a unit that is
+ * down or stopping. A hold left by a server that has exited is not one either:
+ * `restoreOpenclawGatewayAfterCrash` deals with that at start-up. A pass of
+ * this very process counts from the moment it asked for its stop, before the
+ * record exists (`offlineOwnership`).
+ */
+export async function openclawGatewayHeldOffline(): Promise<boolean> {
+  // A pass of this very process, from before its stop: the record below is
+  // written only once the windows it waits for have closed.
+  if (offlineOwnership().pass) return true;
+  let hold: { pid?: unknown } | null = null;
+  try {
+    hold = JSON.parse(fs.readFileSync(OFFLINE_HOLD_PATH, "utf8")) as { pid?: unknown };
+  } catch {
+    return false;
+  }
+  const pid = typeof hold?.pid === "number" ? hold.pid : 0;
+  if (pid <= 0) return false;
+  if (pid !== process.pid) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return false;
+    }
+  }
+  return deps.gatewayUnitDown();
+}
+
+/** Offline work was asked for while another piece of offline work holds the gateway stopped. */
+export class OpenclawGatewayHeldOfflineError extends Error {
+  constructor() {
+    super("the gateway is held stopped for other offline work");
+    this.name = "OpenclawGatewayHeldOfflineError";
+  }
+}
+
+/**
+ * Is the gateway's unit up (running, starting or reloading)? False on a box
+ * with no gateway, and where the unit cannot be asked.
+ */
+export async function openclawGatewayRuns(): Promise<boolean> {
+  if (gatewayIsAbsent()) return false;
+  return deps.gatewayUnitRunning();
+}
+
+/** Start the gateway after `stopOpenclawGatewayForOffline`. */
+export async function startOpenclawGatewayAfterOffline(): Promise<void> {
+  if (gatewayIsAbsent()) return;
+  try {
+    await deps.startGateway();
+    fs.rmSync(OFFLINE_HOLD_PATH, { force: true });
+  } finally {
+    // The pass is over whether or not the gateway answered in time: other
+    // offline work may have the gateway again (and starts it itself).
+    offlineOwnership().pass = false;
+  }
+}
+
+/**
+ * At the web server's start: an offline hold left by a server that exited
+ * during it (its pid is gone) means the gateway may still be stopped, so it is
+ * started again. A hold of this very process, or none, does nothing.
+ */
+export async function restoreOpenclawGatewayAfterCrash(): Promise<boolean> {
+  let hold: { pid?: unknown } | null = null;
+  try {
+    hold = JSON.parse(fs.readFileSync(OFFLINE_HOLD_PATH, "utf8")) as { pid?: unknown };
+  } catch {
+    return false;
+  }
+  const pid = typeof hold?.pid === "number" ? hold.pid : 0;
+  if (pid === process.pid) return false;
+  if (pid > 0) {
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch {
+      /* gone: the hold is an orphan */
+    }
+  }
+  // A server that exited after writing the hold but before (or without)
+  // stopping the gateway leaves a running gateway: that one is left alone and
+  // only the hold goes. One still stopping (the server died while the stop
+  // drained) or whose state cannot be read is started.
+  if (await deps.gatewayUnitRunning()) {
+    fs.rmSync(OFFLINE_HOLD_PATH, { force: true });
+    return false;
+  }
+  console.warn("[openclaw-auth] the gateway was held stopped by a web server that has since exited; starting it again");
+  await startOpenclawGatewayAfterOffline();
+  return true;
+}
+
+/**
+ * Run `work` (CLI commands that 2026.11.3 accepts only offline) with the
+ * gateway stopped through its service owner, and start the gateway again
+ * whatever `work` did. A box with no gateway answering runs `work` as it is.
+ *
+ * Refused with `OpenclawGatewayHeldOfflineError`, and nothing stopped or
+ * started, while a memory index pass holds the gateway stopped.
+ *
+ * `waitOutStop`: a stop that is still running after a minute is waited for as
+ * long as the unit may take, instead of given up on. Giving up starts the
+ * gateway again with `work` not run — the assistant went down for nothing,
+ * and the caller has to stop it once more to try again. For work that cannot
+ * be left undone: the account pool's token pastes (a token is renewed by
+ * then, and Anthropic refuses the gateway's copy of it). The pool asks for it
+ * on every pass, the owner's own "use these accounts for the chat" request
+ * and the swap consumer (which stops waiting at four minutes while the pass
+ * goes on) included: giving up answered them no sooner — the start that
+ * follows waits behind the same stop — and left nothing pasted.
+ */
+export async function withOpenclawGatewayStopped<T>(work: () => Promise<T>, options: { waitOutStop?: boolean } = {}): Promise<T> {
+  if (gatewayIsAbsent()) return work();
+  // A memory index pass holds the gateway stopped for as long as it runs, and
+  // holds the state the CLI below would need: `work` would be refused, and the
+  // start in the `finally` would bring the gateway up under the pass. Refused
+  // here, before anything is stopped or started; the caller tries again later.
+  // The look and the claim are one synchronous step, so a pass cannot take
+  // its hold in between (`offlineOwnership`).
+  const owner = offlineOwnership();
+  if (owner.pass) throw new OpenclawGatewayHeldOfflineError();
+  owner.windows += 1;
+  try {
+    // Another web server's pass (its record on disk, beside a unit that is down).
+    if (await openclawGatewayHeldOffline()) throw new OpenclawGatewayHeldOfflineError();
+    return await stoppedAround(work, options);
+  } finally {
+    owner.windows -= 1;
+    if (owner.windows === 0) for (const wake of owner.waiters.splice(0)) wake();
+  }
+}
+
+/** The stop, the work and the start of one `withOpenclawGatewayStopped` window. */
+async function stoppedAround<T>(work: () => Promise<T>, options: { waitOutStop?: boolean }): Promise<T> {
+  // The stop is inside the `try`: a stop that throws (a job still running when
+  // its client gave up) may still stop the unit afterwards, and the gateway
+  // must be started again on every way out. A start issued while that stop is
+  // pending cancels it; `work` then meets a gateway that owns the state, and
+  // says so, rather than leaving the assistant stopped.
+  let failure: { error: unknown } | null = null;
+  try {
+    await deps.stopGateway(options.waitOutStop === true);
+    return await work();
+  } catch (err) {
+    failure = { error: err };
+    throw err;
+  } finally {
+    try {
+      await deps.startGateway();
+    } catch (startErr) {
+      // The first failure is the one to report; the start's is logged.
+      if (!failure) throw startErr;
+      console.error("[openclaw-auth] the gateway did not start again:", startErr instanceof Error ? startErr.message : startErr);
+    }
+  }
+}

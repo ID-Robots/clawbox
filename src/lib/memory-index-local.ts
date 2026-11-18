@@ -32,6 +32,7 @@
  */
 
 import crypto from "crypto";
+import { isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import fs from "fs/promises";
 import { constants as fsConstants } from "fs";
 import path from "@/lib/runtime-path";
@@ -738,6 +739,13 @@ async function embedBatchOnce(
     assertEmbedEndpointAllowed(embedder.source, embedder.baseUrl);
   } catch (err) {
     throw new EmbeddingUnavailableError(err instanceof Error ? err.message : String(err));
+  }
+  // The local-only AI lock (TASK-2501), asked before EVERY cloud request: a
+  // pass resolves its embedder once, and the owner can turn the lock on in the
+  // middle of it. Not retryable — the pass stops; vectors from the box's own
+  // model are never mixed into an index stamped for the cloud one.
+  if (embedder.source === "cloud" && (await isCloudAiLocked())) {
+    throw new EmbeddingUnavailableError("local-only AI is on, so no document is sent to the cloud embedder");
   }
   if (!embedderUsable(embedder)) {
     // Pointed at the cloud with no credential on the box. Said out loud rather

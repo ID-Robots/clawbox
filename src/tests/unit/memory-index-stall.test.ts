@@ -12,6 +12,7 @@ import {
   startStallWatchdog,
 } from "@/lib/memory-index-stall";
 import type { LocalIndexPassOptions, LocalIndexPassResult, LocalIndexProgressReporter } from "@/lib/memory-index-local";
+import { processStartKey } from "@/lib/process-identity";
 
 /**
  * TASK-2431: no cap on how long a Memory Shard pass runs, and a stall
@@ -469,19 +470,30 @@ describe("a running record this process is not supervising", () => {
     return Number(child.stdout);
   }
 
+  /**
+   * A record this build wrote: it names the process that supervised the pass
+   * (by default one that is gone — the case where a reader here judges the
+   * pass itself) beside the pass's own process.
+   */
   async function writeRunning(fields: Record<string, unknown>): Promise<void> {
     await fsp.writeFile(statePath(), JSON.stringify({
       status: "running", mode: "full", trigger: "manual",
       finishedAtMs: 0, durationMs: 0, error: "", errorCode: "", progress: null,
+      supervisorPid: deadPid(), supervisorStartKey: "a-boot-before-this-one:1",
       ...fields,
     }));
     await fsp.mkdir(lockPath(), { recursive: true });
   }
 
+  /** The record's fields for `pid` as the process it is now (`processStartKey`). */
+  function child(pid: number) {
+    return { childPid: pid, childStartKey: processStartKey(pid) };
+  }
+
   it("keeps a live one that moved recently, however long ago it started — no age rule", async () => {
     // Five hours in, last moved a minute ago: the two-hour rule called this
     // interrupted and freed the lock under a working pass.
-    await writeRunning({ startedAtMs: Date.now() - 5 * HOUR, progressAtMs: Date.now() - MIN, childPid: process.pid });
+    await writeRunning({ startedAtMs: Date.now() - 5 * HOUR, progressAtMs: Date.now() - MIN, ...child(process.pid) });
     const { readMemoryRunState, startMemoryIndex } = await lib();
     expect((await readMemoryRunState()).status).toBe("running");
     expect((await startMemoryIndex("full", "manual")).declined).toBe("running");
@@ -489,7 +501,7 @@ describe("a running record this process is not supervising", () => {
   });
 
   it("calls a live one that has not moved for the window stalled, and frees the lock for the next pass", async () => {
-    await writeRunning({ startedAtMs: Date.now() - 3 * HOUR, progressAtMs: Date.now() - 31 * MIN, childPid: process.pid });
+    await writeRunning({ startedAtMs: Date.now() - 3 * HOUR, progressAtMs: Date.now() - 31 * MIN, ...child(process.pid) });
     const { readMemoryRunState } = await lib();
     const run = await readMemoryRunState();
     expect(run).toMatchObject({ status: "failed", errorCode: "stalled" });
@@ -497,15 +509,19 @@ describe("a running record this process is not supervising", () => {
     expect(fs.existsSync(lockPath())).toBe(false);
   });
 
-  it("judges one an older build wrote — no progress on record — from its start", async () => {
-    await writeRunning({ startedAtMs: Date.now() - 31 * MIN, childPid: process.pid });
+  it("judges one a build before the stall rule wrote — no supervisor, no progress mark — by its process alone", async () => {
+    // There is nothing to judge a stall by, so the process decides, as it did
+    // for the build that wrote the record (childStartKey).
+    await writeRunning({ startedAtMs: Date.now() - 3 * HOUR, supervisorPid: 0, supervisorStartKey: "", ...child(process.pid) });
     const { readMemoryRunState } = await lib();
-    expect(await readMemoryRunState()).toMatchObject({ status: "failed", errorCode: "stalled" });
+    expect((await readMemoryRunState()).status).toBe("running");
+    await writeRunning({ startedAtMs: Date.now() - 3 * HOUR, supervisorPid: 0, supervisorStartKey: "", ...child(deadPid()) });
+    expect(await readMemoryRunState()).toMatchObject({ status: "failed", errorCode: "interrupted" });
   });
 
   it("uses the configured window", async () => {
     process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = String(10 * MIN);
-    await writeRunning({ startedAtMs: Date.now() - HOUR, progressAtMs: Date.now() - 11 * MIN, childPid: process.pid });
+    await writeRunning({ startedAtMs: Date.now() - HOUR, progressAtMs: Date.now() - 11 * MIN, ...child(process.pid) });
     const { readMemoryRunState } = await lib();
     expect((await readMemoryRunState()).errorCode).toBe("stalled");
   });
@@ -517,7 +533,7 @@ describe("a running record this process is not supervising", () => {
   });
 
   it("lets a new pass take over from a stalled record at once", async () => {
-    await writeRunning({ startedAtMs: Date.now() - HOUR, progressAtMs: Date.now() - 40 * MIN, childPid: process.pid });
+    await writeRunning({ startedAtMs: Date.now() - HOUR, progressAtMs: Date.now() - 40 * MIN, ...child(process.pid) });
     pass.impl = async () => RESULT;
     const { startMemoryIndex } = await lib();
     // The pre-lock read reconciles it; the lock is then free to take.
@@ -529,14 +545,15 @@ describe("a running record this process is not supervising", () => {
   it("ends a stalled record's indexer that outlived its supervisor before freeing the lock", async () => {
     // A server stopped some other way than through its unit leaves its
     // OpenClaw child running, holding the embed lock: every later pass would
-    // end `migration_busy`. Verified as that indexer before it is signalled.
+    // end `migration_busy`. Verified as that process (its start key) before
+    // it is signalled.
     process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1000";
     // Past the window and the record's write lag (RECORD_LAG_MS, 5 s).
     const startedAtMs = Date.now() - 8_000;
     const orphan = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)", "memory", "index", "--agent", "main"], { stdio: "ignore" });
     const exited = new Promise<NodeJS.Signals | null>((resolve) => orphan.once("exit", (_code, signal) => resolve(signal)));
     try {
-      await writeRunning({ startedAtMs, progressAtMs: 0, childPid: orphan.pid });
+      await writeRunning({ startedAtMs, progressAtMs: 0, ...child(orphan.pid as number) });
       vi.spyOn(console, "warn").mockImplementation(() => {});
       const { readMemoryRunState } = await lib();
       expect((await readMemoryRunState()).errorCode).toBe("stalled");
@@ -548,13 +565,16 @@ describe("a running record this process is not supervising", () => {
     }
   });
 
-  it("never signals a live process that is not that indexer, whatever pid the record names", async () => {
+  it("never signals a live process that is not the one the record names, whatever pid it names", async () => {
+    // The pid is alive, but its start key is not the recorded one: some
+    // process that was handed the number (after a power cut). The pass is
+    // lost, and the bystander is left alone.
     process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1000";
     const bystander = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     try {
-      await writeRunning({ startedAtMs: Date.now() - 8_000, progressAtMs: 0, childPid: bystander.pid });
+      await writeRunning({ startedAtMs: Date.now() - 8_000, progressAtMs: 0, childPid: bystander.pid, childStartKey: "a-boot-before-this-one:1" });
       const { readMemoryRunState } = await lib();
-      expect((await readMemoryRunState()).errorCode).toBe("stalled");
+      expect((await readMemoryRunState()).errorCode).toBe("interrupted");
       expect(bystander.exitCode).toBeNull();
       expect(bystander.signalCode).toBeNull();
       expect(bystander.pid && (() => { try { process.kill(bystander.pid, 0); return true; } catch { return false; } })()).toBe(true);
@@ -576,7 +596,14 @@ describe("a running record this process is not supervising", () => {
     // written before any spawn, is what that reader goes by.
     const supervisor = otherSupervisor();
     try {
-      await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now(), childPid: deadPid(), supervisorPid: supervisor.pid });
+      await until(async () => processStartKey(supervisor.pid), (v) => v !== "", "the supervisor's start key");
+      await writeRunning({
+        startedAtMs: Date.now() - MIN,
+        progressAtMs: Date.now(),
+        childPid: deadPid(),
+        supervisorPid: supervisor.pid,
+        supervisorStartKey: processStartKey(supervisor.pid),
+      });
       const { readMemoryRunState } = await lib();
       expect((await readMemoryRunState()).status).toBe("running");
       expect(fs.existsSync(lockPath())).toBe(true);
@@ -599,14 +626,14 @@ describe("a running record this process is not supervising", () => {
     // process that started the pass lives, its own watchdog judges it.
     const supervisor = otherSupervisor();
     try {
-      const { readMemoryRunState, processStartedAtMs } = await lib();
-      await until(async () => processStartedAtMs(supervisor.pid), (v) => v !== null, "the supervisor's start time");
+      const { readMemoryRunState } = await lib();
+      await until(async () => processStartKey(supervisor.pid), (v) => v !== "", "the supervisor's start key");
       await writeRunning({
         startedAtMs: Date.now() - 3 * HOUR,
         progressAtMs: Date.now() - 2 * HOUR,
         childPid: deadPid(),
         supervisorPid: supervisor.pid,
-        supervisorStartedAtMs: processStartedAtMs(supervisor.pid),
+        supervisorStartKey: processStartKey(supervisor.pid),
       });
       expect((await readMemoryRunState()).status).toBe("running");
       expect(fs.existsSync(lockPath())).toBe(true);
@@ -618,15 +645,15 @@ describe("a running record this process is not supervising", () => {
   it("does not take a pid another process has been given for that supervisor", async () => {
     const supervisor = otherSupervisor();
     try {
-      const { readMemoryRunState, processStartedAtMs } = await lib();
-      await until(async () => processStartedAtMs(supervisor.pid), (v) => v !== null, "the supervisor's start time");
+      const { readMemoryRunState } = await lib();
       await writeRunning({
         startedAtMs: Date.now() - 3 * HOUR,
         progressAtMs: Date.now() - 2 * HOUR,
-        childPid: deadPid(),
+        // The pass's own process is still there and has not moved for hours.
+        ...child(process.pid),
         supervisorPid: supervisor.pid,
-        // The pid's process started an hour away from the recorded supervisor.
-        supervisorStartedAtMs: Number(processStartedAtMs(supervisor.pid)) - HOUR,
+        // The pid's process is not the recorded supervisor: another start key.
+        supervisorStartKey: "a-boot-before-this-one:1",
       });
       expect((await readMemoryRunState()).errorCode).toBe("stalled");
     } finally {
@@ -635,7 +662,7 @@ describe("a running record this process is not supervising", () => {
   });
 
   it("calls it lost once the supervisor is gone as well", async () => {
-    await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now(), childPid: deadPid(), supervisorPid: deadPid() });
+    await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now(), childPid: deadPid(), supervisorPid: deadPid(), supervisorStartKey: "" });
     const { readMemoryRunState } = await lib();
     expect(await readMemoryRunState()).toMatchObject({ status: "failed", errorCode: "interrupted" });
   });
@@ -643,10 +670,10 @@ describe("a running record this process is not supervising", () => {
   it("does not read the record's own write lag as a stall under a window of seconds", async () => {
     // Progress lands on the record at most every 1.5 s, and a write takes time.
     process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1000";
-    await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now() - 2_500, childPid: process.pid });
+    await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now() - 2_500, ...child(process.pid) });
     const { readMemoryRunState } = await lib();
     expect((await readMemoryRunState()).status).toBe("running");
-    await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now() - 7_000, childPid: process.pid });
+    await writeRunning({ startedAtMs: Date.now() - MIN, progressAtMs: Date.now() - 7_000, ...child(process.pid) });
     expect((await readMemoryRunState()).errorCode).toBe("stalled");
   });
 

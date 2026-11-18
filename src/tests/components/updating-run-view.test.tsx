@@ -22,6 +22,13 @@ import type { StepState, UpdateState } from "@/lib/updater";
 
 let locale: "en" | "de" = "en";
 
+// The panel streams from the box and draws with xterm; its own suite
+// (update-raw-log.test.tsx) covers that. Here: where it opens, and when.
+vi.mock("@/components/UpdateRawLog", () => ({
+  default: ({ id, label, live }: { id: string; label: string; live: boolean }) => (
+    <section id={id} aria-label={label} data-live={String(live)} data-testid="update-raw-log" />
+  ),
+}));
 vi.mock("@/lib/i18n", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/i18n")>()),
   I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -857,73 +864,60 @@ describe("/updating and the drift a run was started over", () => {
 
 /**
  * The owner's x64 laptop test (2026-11-10): the terminal button in the steps
- * panel's header opens the full update log and closes it again, on /updating
- * as in the window — for a live run and a finished one. The box sends the page
- * no journal, so the log is what the status poll delivered: each step's
- * outcome and every line a step reported while this screen watched.
+ * panel's header opens the update's log and closes it again, on /updating as
+ * in the window — for a live run and a finished one. Since TASK-2428 that log
+ * is the RAW one, every byte the steps printed, streamed from the box
+ * (UpdateRawLog, its own suite); the step list beside it is unchanged.
  */
-describe("/updating's full update log", () => {
+describe("/updating's raw update log", () => {
   /** RUNNING, with the restart step on line `detail`. */
   const on = (detail: string): Answer => ({ body: { ...RUNNING, steps: steps(7, { status: "running", detail }) } });
 
-  it("opens on the terminal button and closes on the next click, keeping each line a step reported", async () => {
+  it("opens on the terminal button for a live run, follows it, and closes on the next click", async () => {
     stubBox(inOrder(on("Fetching the new build"), on("Building the web app")));
     const view = render(<UpdatingPage />);
     await advance();
 
     const toggle = within(view.getByTestId("update-steps-panel")).getByRole("button", { name: "Full update log" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
-    expect(view.queryByTestId("update-full-log")).toBeNull();
+    expect(view.queryByTestId("update-raw-log")).toBeNull();
 
-    // The next poll: the step is on its next line, and the list shows only that one.
     await advance(2_000);
     expect(view.getByTestId("update-step-detail")).toHaveTextContent("Building the web app");
-    expect(view.queryByTestId("update-full-log")).toBeNull();
 
     fireEvent.click(toggle);
-    const log = view.getByTestId("update-full-log");
+    const log = view.getByTestId("update-raw-log");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
-    const rows = within(log).getAllByTestId("update-full-log-step");
-    expect(rows).toHaveLength(8);
-    expect(rows[0]).toHaveTextContent("Completed");
-    expect(rows[5]).toHaveAttribute("data-status", "running");
-    expect(rows[5]).toHaveTextContent("Updating ClawBox and restarting");
-    expect(rows[5]).toHaveTextContent("In progress");
-    expect(within(rows[5]).getAllByTestId("update-full-log-detail").map((line) => line.textContent)).toEqual([
-      "› Fetching the new build",
-      "› Building the web app",
-    ]);
-    expect(rows[6]).toHaveTextContent("Waiting");
+    expect(log).toHaveAttribute("data-live", "true");
+    expect(log).toHaveAccessibleName("Full update log");
+    // The step list is the same with the log open.
+    expect(view.getByTestId("update-step-detail")).toHaveTextContent("Building the web app");
 
     fireEvent.click(toggle);
-    expect(view.queryByTestId("update-full-log")).toBeNull();
+    expect(view.queryByTestId("update-raw-log")).toBeNull();
     expect(toggle).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("is there for a finished run too", async () => {
+  it("is there for a finished run too, read to its end", async () => {
     stubBox(() => ({ body: COMPLETED }));
     const view = render(<UpdatingPage />);
     await advance();
 
     const toggle = view.getByRole("button", { name: "Full update log" });
-    expect(view.queryByTestId("update-full-log")).toBeNull();
+    expect(view.queryByTestId("update-raw-log")).toBeNull();
     fireEvent.click(toggle);
-    const rows = within(view.getByTestId("update-full-log")).getAllByTestId("update-full-log-step");
-    expect(rows.map((row) => row.getAttribute("data-status"))).toEqual(Array(8).fill("completed"));
+    expect(view.getByTestId("update-raw-log")).toHaveAttribute("data-live", "false");
     fireEvent.click(toggle);
-    expect(view.queryByTestId("update-full-log")).toBeNull();
+    expect(view.queryByTestId("update-raw-log")).toBeNull();
   });
 
-  it("says itself in the owner's language", async () => {
+  it("is named in the owner's language", async () => {
     locale = "de";
-    // Stopped at a step the screen lists (FAILED stops at a hidden one).
     stubBox(() => ({ body: INTERRUPTED }));
     const view = render(<UpdatingPage />);
     await advance();
     fireEvent.click(view.getByRole("button", { name: translations.de["update.fullLog"] }));
-    const log = view.getByTestId("update-full-log");
-    expect(log).toHaveTextContent(translations.de["update.stepFailed"]);
-    expect(log).toHaveTextContent(translations.de["update.stepCompleted"]);
+    expect(view.getByTestId("update-raw-log")).toHaveAccessibleName(translations.de["update.fullLog"]);
     expect(document.body.textContent).not.toMatch(/\bupdate\.[a-zA-Z]/);
   });
 });

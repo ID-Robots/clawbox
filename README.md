@@ -37,6 +37,14 @@
   <img src="docs-site/images/4.3/desktop.webp" alt="The ClawBox desktop: app icons down the left, Files open on a project folder, and the Coding Agent in front, its live chart showing a run and its reviewer at work on that project" width="920" />
 </p>
 
+<p align="center">
+  <a href="https://youtu.be/GlAdIWvbpBs">
+    <img src="https://i.ytimg.com/vi/GlAdIWvbpBs/hqdefault.jpg" alt="Watch the video: ClawBox: Your AI Employee That Works 24/7" width="480" />
+  </a>
+  <br/>
+  <a href="https://youtu.be/GlAdIWvbpBs">▶ Watch: <b>ClawBox: Your AI Employee That Works 24/7</b></a>
+</p>
+
 ---
 
 ## What is ClawBox?
@@ -492,7 +500,6 @@ it checks, how cleanup works and how to add a test:
 | `TERMINAL_WS_PORT` | `3006` | Terminal WebSocket PTY port |
 | `NOVNC_WS_PORT` | `6080` | noVNC WebSocket port (remote desktop) |
 | `NETWORK_INTERFACE` | `wlP1p1s0` | WiFi interface for AP |
-| `CANONICAL_ORIGIN` | `http://clawbox.local` | Default redirect origin |
 | `ALLOWED_HOSTS` | `clawbox.local,10.42.0.1,10.43.0.1,localhost` | Trusted hostnames |
 | `SESSION_SECRET` | Auto-generated | Session cookie signing key, persisted in `data/.session-secret` |
 | `CLAWBOX_MCP_TOKEN` | Auto-generated | Bearer token the MCP server uses on `/setup-api`, persisted in `data/.mcp-token` |

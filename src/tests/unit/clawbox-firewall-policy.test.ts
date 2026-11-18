@@ -94,6 +94,8 @@ function runFirewall(opts: {
   withoutUfw?: boolean;
   /** dpkg-query exit/output, to exercise the NFS guard on rpcbind. */
   nfsInstalled?: boolean;
+  /** An NFS package that is installed and on hold: dpkg's `${Status}` is "hold ok installed". */
+  nfsHeld?: boolean;
 }): Run {
   root = mkdtempSync(path.join(tmpdir(), "clawbox-fw-"));
   const bin = path.join(root, "bin");
@@ -148,7 +150,9 @@ function runFirewall(opts: {
   // bug this stub exists to catch.
   stub(
     "dpkg-query",
-    opts.nfsInstalled ? "echo 'install ok installed'\nexit 1" : "echo 'unknown'\nexit 1",
+    opts.nfsHeld
+      ? "echo 'hold ok installed'\nexit 1"
+      : opts.nfsInstalled ? "echo 'install ok installed'\nexit 1" : "echo 'unknown'\nexit 1",
   );
 
   // PATH contains ONLY the sandbox: the script must never reach the developer's
@@ -400,6 +404,13 @@ describe("the ClawBox firewall policy", () => {
       // Closing the port at the firewall is still in force either way.
       const run = runFirewall({ nfsInstalled: true });
       expect(run.systemctlCalls.join("\n")).not.toMatch(/mask rpcbind/);
+      expect(run.stdout).toMatch(/rpcbind left alone/);
+    });
+
+    it("is left alone when that package is on hold, as when it is installed", () => {
+      // A held package is installed: dpkg reports it as "hold ok installed".
+      const run = runFirewall({ nfsHeld: true });
+      expect(run.systemctlCalls.join("\n")).not.toMatch(/(disable|mask)\b.*rpcbind/);
       expect(run.stdout).toMatch(/rpcbind left alone/);
     });
   });

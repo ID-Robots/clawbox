@@ -60,6 +60,7 @@ import { DESKTOP_CHROME_APP_ID, openDesktopChrome, useDesktopChrome } from "@/li
 import { useMonitorLayoutSync } from "@/lib/use-monitor-layout";
 import MonitorIdentifyOverlay from "@/components/MonitorIdentifyOverlay";
 import { OWNER_ONLY_NOTICE, ownerOnlyAppIds } from "@/lib/non-owner-scope";
+import { desktopNoticePolicy, isOrgMember, orgHiddenAppIds } from "@/lib/org-mode";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import { isShowableCustomWallpaper, readWallpaperFile, useUndecodableImage } from "@/lib/wallpaper-image";
 import {
@@ -687,6 +688,22 @@ function ChromeDesktopInner() {
   // flickers.)
   const ownerApiAccess = useMayUseOwnerApis();
   const ownerApis = ownerApiAccess === true;
+  // Who is signed in: `undefined` until /users/me answers (see below, where
+  // the desktop draws from it).
+  const settledSessionUser = useSettledSessionUser();
+  const viewerKnown = settledSessionUser !== undefined;
+  // An organisation box (src/lib/org-mode.ts): a member of staff's desktop is
+  // Chat, Files and their own Settings, and asks the box for nothing else —
+  // every other route answers them 403. `boxApis` is "may this desktop ask the
+  // box's own routes beyond those three": everyone's on a home box, the
+  // owner's alone on an organisation box, and nobody's until it is known who
+  // is signed in.
+  const orgMember = isOrgMember(settledSessionUser);
+  const boxApis = ownerApis && viewerKnown && !orgMember;
+  // Which notice cards this person may be shown: "Update available" and
+  // What's new are the owner's on every box; the ClawBox AI offer is nobody's
+  // on an organisation box. Held (`noticesHeld`) until it is known who this is.
+  const noticePolicy = desktopNoticePolicy(settledSessionUser);
   // A session that runs out takes the whole desktop to /login — every app's
   // request, not only the polls below, and the chat's socket with it.
   useSessionExpiryGuard();
@@ -705,14 +722,14 @@ function ChromeDesktopInner() {
   // lands on 4.3 until the owner dismisses it, which the box records for every
   // browser. Asked again when the ClawBox AI tier changes, so an upgrade made
   // in the portal drops the plan section without a reload.
-  const whatsNew = useWhatsNew(clawboxLogin.tier, ownerApis);
+  const whatsNew = useWhatsNew(clawboxLogin.tier, ownerApis && viewerKnown && noticePolicy.whatsNew);
   // The top-right notice cards — the ClawBox AI offer, an update, a Telegram
   // request, a finished coding run — wait while the dialog is up, and until
   // the box has said whether it will be: drawn beside it they ran under it on
   // a short screen, and the offer was drawn a moment before the dialog came
   // up over it. Their auto-hide clocks wait too, so each still gets its full
   // time on screen once the dialog is closed.
-  const noticesHeld = ownerApiAccess === null || !whatsNew.settled || whatsNew.visible;
+  const noticesHeld = ownerApiAccess === null || !viewerKnown || !whatsNew.settled || whatsNew.visible;
   // The kiosk bar's height while the x64 laptop's kiosk extension draws it
   // over this page, 0 on every other browser: top-anchored surfaces start
   // under it, and it is how this page knows it IS the kiosk.
@@ -723,7 +740,8 @@ function ChromeDesktopInner() {
   // notices live on the MAIN monitor; windows maximize on the one they are on.
   // Every signed-in user's desktop, once it is known who is signed in: the
   // route answers another user a positions-only view.
-  useMonitorLayoutSync(ownerApiAccess !== null);
+  // Not a member of staff's on an organisation box: the monitors are the box's.
+  useMonitorLayoutSync(ownerApiAccess !== null && viewerKnown && !orgMember);
   const deskScreens = useDeskScreens();
   const mainRect = deskScreens ? mainScreen() : null;
   const mainIns = deskScreens ? mainInsets() : { left: 0, top: 0, right: 0, bottom: 0 };
@@ -731,11 +749,11 @@ function ChromeDesktopInner() {
   // (src/lib/kiosk-tabs.ts). Owner-gated like every other poll here, and
   // polled only on the kiosk itself: every other box — every Jetson — sends
   // nothing.
-  const kiosk = useKioskTabs(ownerApis && onKiosk);
+  const kiosk = useKioskTabs(boxApis && onKiosk);
   // The ClawBox Desktop session's own screen: the Google Chrome icon
   // (src/lib/desktop-chrome-client.ts) — `missing` when the box has no Chrome
   // to start, and a click then says how to install it. Hidden elsewhere.
-  const desktopChrome = useDesktopChrome(ownerApis);
+  const desktopChrome = useDesktopChrome(boxApis);
   // A stable callback on its own, so the shelf's click handler can depend on
   // it rather than on the whole `kiosk` object, a new one every render.
   const activateKioskTab = kiosk.activate;
@@ -758,11 +776,14 @@ function ChromeDesktopInner() {
   // already have. Only show after setup is complete, the hook has
   // settled (avoid a transient pop on refresh), and no clawai
   // profile is configured.
+  // Never on an organisation box, for anyone (src/lib/org-mode.ts): a
+  // company's staff are not the ones to sell a plan to, and its owner chose
+  // the box's providers already.
   useEffect(() => {
-    if (setupRequired) { setShowClawAiOfferNotification(false); return; }
+    if (setupRequired || !noticePolicy.clawAiOffer) { setShowClawAiOfferNotification(false); return; }
     if (clawboxLogin.loading) return;
     setShowClawAiOfferNotification(!clawboxLogin.loggedIn);
-  }, [setupRequired, clawboxLogin.loading, clawboxLogin.loggedIn]);
+  }, [setupRequired, noticePolicy.clawAiOffer, clawboxLogin.loading, clawboxLogin.loggedIn]);
 
   // Queued behind the What's new dialog (see `noticesHeld`).
   const offerNoticeUp = showClawAiOfferNotification && !noticesHeld;
@@ -778,9 +799,15 @@ function ChromeDesktopInner() {
   useEffect(() => {
     Promise.all([
       syncSetupStatus(),
-      // The box's KV store is the owner's: another user's desktop keeps the
-      // in-memory cache empty rather than be refused it.
-      mayUseOwnerApis().then((may) => (may ? kv.init() : undefined)),
+      // The box's KV store is the owner's on an organisation box: a member of
+      // staff's desktop keeps its cache in memory rather than be refused it.
+      fetchSessionUser().then((who) => {
+        if (isOrgMember(who)) {
+          kv.keepLocal();
+          return undefined;
+        }
+        return mayUseOwnerApis().then((may) => (may ? kv.init() : undefined));
+      }),
     ])
       .then(() => setSetupChecked(true))
       .catch(() => setSetupChecked(true)); // If API fails, show desktop anyway
@@ -874,7 +901,6 @@ function ChromeDesktopInner() {
   // owner shares OpenClaw with every user (`openclawShared`). Until /users/me
   // answers the desktop draws as the owner's, so a single-user box never
   // flickers.
-  const settledSessionUser = useSettledSessionUser();
   const sessionUser = settledSessionUser ?? null;
   const isOwner = sessionUser?.isOwner !== false;
   const openclawShared = sessionUser?.openclawShared === true;
@@ -888,8 +914,10 @@ function ChromeDesktopInner() {
       ...(onKiosk ? [] : apps.filter((a) => a.kioskOnly).map((a) => a.id)),
       ...(desktopChrome !== "hidden" ? [] : [DESKTOP_CHROME_APP_ID]),
       ...(isOwner ? [] : ownerOnlyAppIds(openclawShared)),
+      // An organisation box: a member of staff sees Chat, Files and Settings.
+      ...(orgMember ? orgHiddenAppIds(BUILT_IN_APP_IDS) : []),
     ],
-    [activeHarness, isOwner, openclawShared, onKiosk, desktopChrome],
+    [activeHarness, isOwner, openclawShared, orgMember, onKiosk, desktopChrome],
   );
 
   // ─── Desktop shortcuts for built-in apps ───
@@ -907,10 +935,11 @@ function ChromeDesktopInner() {
   // diverge, a hidden app keeps its grid slot and leaves a gap.
   const visibleInstalledAppIds = useMemo(
     () =>
-      installedApps.filter(
+      // An organisation box's installed apps are the owner's: none for a member of staff.
+      orgMember ? [] : installedApps.filter(
         (id) => !hiddenInstalledApps.includes(id) && isInstalledAppVisible(installedMeta[id], activeHarness),
       ),
-    [installedApps, hiddenInstalledApps, installedMeta, activeHarness],
+    [orgMember, installedApps, hiddenInstalledApps, installedMeta, activeHarness],
   );
   const handleAddToDesktop = useCallback((appId: string) => {
     // The launcher hands over its own ids, which for an installed app carry
@@ -1180,7 +1209,7 @@ function ChromeDesktopInner() {
     busy: clawkeepBusy,
     restoring: clawkeepRestoring,
     refusal: clawkeepRefusal,
-  } = useClawkeepShieldStatus(ownerApis);
+  } = useClawkeepShieldStatus(boxApis);
 
   // Memoized with the wallpaper layers below, which take it as a dependency.
   const wpFitStyle = useMemo<React.CSSProperties>(() => (wpFit === "fill"
@@ -1787,7 +1816,7 @@ function ChromeDesktopInner() {
   // Public app links (TASK-1478): the owner's only, and only for webapps.
   // `ownerApis`, the strict owner signal: a second user's desktop must not ask
   // for a route that answers them 403, nor be offered a link it cannot make.
-  const publicAppLinks = usePublicAppLinks(ownerApis);
+  const publicAppLinks = usePublicAppLinks(boxApis);
   const [publicLinkDialogApp, setPublicLinkDialogApp] = useState<string | null>(null);
   const refreshPublicAppLinks = publicAppLinks.refresh;
   const ctxMenuAppId = ctxMenu?.appId;
@@ -1904,7 +1933,7 @@ function ChromeDesktopInner() {
 
   // The "+" tile after the last icon (create an app): the owner's desktop
   // only — the Create planner composes a message for the owner's assistant.
-  const showCreateTile = ownerApis;
+  const showCreateTile = boxApis;
   // Cells the grid draws: every icon, and the tile.
   const gridCellCount = allIconIds.length + (showCreateTile ? 1 : 0);
   // The tile's press: the Create planner — or, until the owner has been
@@ -2299,8 +2328,9 @@ function ChromeDesktopInner() {
   const getAllApps = useCallback((): AppDef[] => {
     const installedAppDefs: AppDef[] = [];
     // Installed apps reach the launcher, the shelf and openApp for every
-    // signed-in person, by the same rule as the icon grid.
-    for (const appId of installedApps) {
+    // signed-in person, by the same rule as the icon grid — none on an
+    // organisation box for a member of staff, whose apps are three.
+    for (const appId of orgMember ? [] : installedApps) {
       const meta = installedMeta[appId];
       // Store-installed OpenClaw skills are unusable on Hermes (see
       // isInstalledAppVisible) — they must not reach the launcher, the shelf,
@@ -2339,7 +2369,7 @@ function ChromeDesktopInner() {
         defaultHeight: 760,
       },
     ];
-  }, [installedApps, installedMeta, activeHarness, harnessHiddenAppIds]);
+  }, [orgMember, installedApps, installedMeta, activeHarness, harnessHiddenAppIds]);
   // The same list as one value per change of what it is built from: an
   // installed app's AppDef is built fresh by every call, and a window handed a
   // new one re-renders with its app (see DesktopWindow).
@@ -2640,8 +2670,12 @@ function ChromeDesktopInner() {
     // all get the owner's desktop). The /users/me branch is what a desktop
     // that could not be told it may use the box's routes falls back to, for
     // the one thing it needs from this poll, the update lock below.
-    if (ownerApiAccess === null) return;
-    const pollUrl = ownerApiAccess ? "/setup-api/kv?key=ui:pending-actions" : "/setup-api/users/me";
+    if (ownerApiAccess === null || !viewerKnown) return;
+    // A member of staff on an organisation box may not read the box's notice
+    // ring (`kv`): their desktop polls /users/me, which carries the update
+    // lock's header all the same.
+    const ringReadable = ownerApiAccess && !orgMember;
+    const pollUrl = ringReadable ? "/setup-api/kv?key=ui:pending-actions" : "/setup-api/users/me";
     let active = true;
     let polling = false;
     let lastSeenTs = Date.now() - 5_000;
@@ -2737,7 +2771,7 @@ function ChromeDesktopInner() {
       polling = true;
       try {
         const sentAt = Date.now();
-        const res = await (ownerApiAccess ? fetch(pollUrl) : fetch(pollUrl, { cache: "no-store" }));
+        const res = await (ringReadable ? fetch(pollUrl) : fetch(pollUrl, { cache: "no-store" }));
         // The desktop's most frequent question, owner or not: its answer's
         // Date header is what every "x ago" on the desktop is held to
         // (src/lib/box-clock.ts), so a browser whose clock is off does not
@@ -2771,7 +2805,7 @@ function ChromeDesktopInner() {
           void confirmSessionStillValid();
           return;
         }
-        if (res.ok && ownerApiAccess) {
+        if (res.ok && ringReadable) {
           // How old an entry is, judged on the one clock both sides agree on:
           // the response's own Date header, which is the BOX's clock — the same
           // clock that stamped the entry — so the skew this poll works around
@@ -2826,7 +2860,7 @@ function ChromeDesktopInner() {
     // own screen keeps the 2 s while hidden (`ringHiddenPollMs`).
     const stop = setVisibleInterval(poll, RING_POLL_MS, { hiddenMs: ringHiddenPollMs });
     return () => { active = false; stop(); };
-  }, [ownerApiAccess]);
+  }, [ownerApiAccess, viewerKnown, orgMember]);
 
   // Answers the KV requests framed webapps post — see src/lib/webapp-kv-bridge.ts.
   useEffect(() => attachWebappKvBridge(), []);
@@ -2864,8 +2898,9 @@ function ChromeDesktopInner() {
   const [updateNoticeHidden, setUpdateNoticeHidden] = useState(false);
 
   useEffect(() => {
-    // Updating the box is the owner's call, and so is the card offering it.
-    if (!ownerApis) return;
+    // Updating the box is the owner's call, and so is the card offering it:
+    // another user's desktop never asks (the update routes answer them 403).
+    if (!ownerApis || !viewerKnown || !noticePolicy.update) return;
     let active = true;
     const checkVersions = async () => {
       try {
@@ -2904,7 +2939,7 @@ function ChromeDesktopInner() {
     // the moment the page is visible again.
     const stop = setVisibleInterval(checkVersions, 30 * 60 * 1000);
     return () => { active = false; stop(); };
-  }, [applyUpdateAvailable, ownerApis]);
+  }, [applyUpdateAvailable, ownerApis, viewerKnown, noticePolicy.update]);
 
   const updateNoticeKeys = useMemo(
     () => (updateAvailable && !updateNoticeHidden && !noticesHeld ? ["update"] : []),
@@ -2934,7 +2969,7 @@ function ChromeDesktopInner() {
   // keeps one identity for the page's life: the chat takes it as a prop, and
   // `[openApp]` (a new openApp on every window focus or move) broke the chat's
   // memo() each time.
-  const openSettingsSection = useCallback((section: "ai" | "localAi" | "system" | "update") => {
+  const openSettingsSection = useCallback((section: "ai" | "localAi" | "system" | "update" | "appearance") => {
     (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = section;
     window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section } }));
     openAppRef.current("settings");
@@ -2999,7 +3034,7 @@ function ChromeDesktopInner() {
 
   useEffect(() => {
     // The Telegram bot is the owner's, and so is approving who may talk to it.
-    if (!ownerApis) return;
+    if (!boxApis) return;
     let active = true;
     let polling = false;
     const poll = async () => {
@@ -3033,7 +3068,7 @@ function ChromeDesktopInner() {
     // the poll waits, and the page asks at once when it is visible again.
     const stop = setVisibleInterval(poll, 20000);
     return () => { active = false; stop(); };
-  }, [loadDismissedPairCodes, ownerApis]);
+  }, [loadDismissedPairCodes, boxApis]);
 
   const approvePairingRequest = useCallback(async (code: string) => {
     if (!code) return;
@@ -3395,7 +3430,7 @@ function ChromeDesktopInner() {
   // Long work Settings started (an install, a model download), which runs on
   // whether or not Settings is open: one card each, with its steps, bar, time
   // left and log. Owner's routes started it, so the owner's desktop asks.
-  const backgroundTasks = useBackgroundTasks(ownerApis);
+  const backgroundTasks = useBackgroundTasks(boxApis);
 
   // Is a top-right card on screen at all?
   //
@@ -3470,7 +3505,7 @@ function ChromeDesktopInner() {
       {/* The owner's widgets mount only once the box has said this IS the
           owner (`ownerApis`): each asks an owner-only route the moment it
           mounts, and another user's session is refused every one of them. */}
-      {ownerApis && <TierUpgradeCelebration />}
+      {boxApis && <TierUpgradeCelebration />}
       {/* Drop overlay. No backdrop blur under the dim: a full-screen blur is
           redone over the whole desktop — 5120x1440 over a row of monitors — on
           every frame anything beneath it moves, and the mascot always does.
@@ -3501,9 +3536,9 @@ function ChromeDesktopInner() {
       {/* The Screenshot app's capture keys and its region overlay (TASK-1475),
           mounted with the desktop so they work with the app's window closed.
           Owner-only like the app: its saves go through an owner-only route. */}
-      {ownerApis && <ScreenshotOverlay />}
+      {boxApis && <ScreenshotOverlay />}
       {deskScreens && <MonitorIdentifyOverlay screens={deskScreens} />}
-      {ownerApis && <PowerApprovalPrompt />}
+      {boxApis && <PowerApprovalPrompt />}
       {/* "What's new in 4.3": a dialog over the desktop and the chat, with the
           notice column held back while it is up. */}
       {whatsNew.visible && whatsNew.state && (
@@ -4016,6 +4051,7 @@ function ChromeDesktopInner() {
           isOpen={chatOpen}
           onClose={closeChat}
           chatUser={chatUser}
+          orgMember={orgMember}
           onOpenSettingsSection={openSettingsSection}
           onPanelModeChange={handleChatPanelModeChange}
           initialPanelWidth={chatPanelWidth}
@@ -4214,9 +4250,12 @@ function ChromeDesktopInner() {
         onTrayClick={() => {
           setLauncherOpen(false);
           setTrayOpen(false);
-          openSettingsSection("system");
+          // System is the owner's on an organisation box: a member of staff's
+          // clock opens their own Settings instead.
+          openSettingsSection(orgMember ? "appearance" : "system");
         }}
-        onClawKeepShieldClick={openClawKeepOrAiProvider}
+        // ClawKeep (backups) is the owner's on an organisation box: no shield.
+        onClawKeepShieldClick={orgMember ? undefined : openClawKeepOrAiProvider}
         clawkeepStatus={{ protection: clawkeepProtection, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring, refusal: clawkeepRefusal }}
         onPowerClick={() => {
           setLauncherOpen(false);
@@ -4494,7 +4533,10 @@ function ChromeDesktopInner() {
  * browser is refused both the read and the write, so it is not asked.
  */
 function OwnerTimezoneAdopter() {
-  return useMayUseOwnerApis() === true ? <TimezoneAdopter /> : null;
+  const may = useMayUseOwnerApis() === true;
+  const who = useSettledSessionUser();
+  // Nor a member of staff on an organisation box, whose browser's zone is not the box's.
+  return may && who !== undefined && !isOrgMember(who) ? <TimezoneAdopter /> : null;
 }
 
 export default function ChromeDesktop() {

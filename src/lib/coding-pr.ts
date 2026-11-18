@@ -83,9 +83,11 @@ export function boxHostNames(): string[] {
  * Text the box is about to put on GitHub BY ITSELF — a pull request's title or
  * body, a comment — with the owner's private details taken out (see
  * ./publish-redaction for what, and why). Never applied to what a run is told.
+ * `quotedValues` is for the call that sends the text, after every cut (see
+ * PublishRedactionOptions.quotedValues).
  */
-export function redactForGitHub(text: string): string {
-  return redactForPublishing(text, { hostNames: boxHostNames() });
+export function redactForGitHub(text: string, { quotedValues = false }: { quotedValues?: boolean } = {}): string {
+  return redactForPublishing(text, { hostNames: boxHostNames(), quotedValues });
 }
 
 /**
@@ -252,8 +254,8 @@ export async function openPullRequest(input: {
   // Redacted HERE as well as wherever the caller composed them: this is the one
   // call that publishes a pull request, and the project page's "Create PR"
   // (commit subjects, which carry the task's first line) comes through it too.
-  const title = redactForGitHub(input.title);
-  const body = redactForGitHub(input.body);
+  const title = redactForGitHub(input.title, { quotedValues: true });
+  const body = redactForGitHub(input.body, { quotedValues: true });
   const args = ["pr", "create", "--base", input.base, "--head", input.branch, "--title", title, "--body", body];
   let created = await run("gh", input.draft ? [...args, "--draft"] : args, dir);
   // Drafts need a plan that has them: a private repository on a free account

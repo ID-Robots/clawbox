@@ -91,7 +91,7 @@ Two harnesses can sit under the OS: OpenClaw (the gateway at `127.0.0.1:18789`, 
 
 ### Environment Variables
 
-See `.env.example` for full list. Key variables: `PORT`, `GATEWAY_PORT`, `NETWORK_INTERFACE`, `CANONICAL_ORIGIN`, `ALLOWED_HOSTS`, `SESSION_SECRET`, `OLLAMA_HOST`, `CLAWBOX_ROOT`.
+See `.env.example` for full list. Key variables: `PORT`, `GATEWAY_PORT`, `NETWORK_INTERFACE`, `ALLOWED_HOSTS`, `SESSION_SECRET`, `OLLAMA_HOST`, `CLAWBOX_ROOT`.
 
 ## Where to read more
 
@@ -99,12 +99,12 @@ The area files under `docs/agents/` (moved verbatim out of this file on 2026-10-
 
 - [setup-api.md](docs/agents/setup-api.md) — read this when you touch a route under `src/app/setup-api/` that no feature file below owns, or `src/middleware.ts`.
 - [core-libraries.md](docs/agents/core-libraries.md) — read this when you touch module-level state, a `path` import, the config or KV store, auth, i18n, or any `src/lib/` module no area below owns.
-- [multi-user.md](docs/agents/multi-user.md) — read this when you touch sessions, `/login`, users, or the access rule of any new route (owner-only is the default).
+- [multi-user.md](docs/agents/multi-user.md) — read this when you touch sessions, `/login`, users, organisation mode (`org_mode`), or the access rule of any new route (owner-only is the default).
 - [setup-wizard.md](docs/agents/setup-wizard.md) — read this when you touch the first-boot wizard, `setup/*` or the unified image's edition choice.
 - [harness-openclaw.md](docs/agents/harness-openclaw.md) — read this when you touch `openclaw.json`, the gateway's auth store, the OpenClaw CLI, `gateway-pre-start.sh` or the agent's persona and first-run ritual.
 - [harness-hermes.md](docs/agents/harness-hermes.md) — read this when you touch `hermes-*.ts` (but `hermes-pets.ts` is in desktop.md), the `hermes/*` routes or anything ClawBox writes under `~/.hermes`.
 - [harness-swap.md](docs/agents/harness-swap.md) — read this when you touch the `harness/*` routes, the edition swap or the device-tools (MCP) switch.
-- [ai-providers.md](docs/agents/ai-providers.md) — read this when you touch `ai-models/*`, `providers/*`, `ollama/*`, OAuth sign-ins or the ClawBox AI login state.
+- [ai-providers.md](docs/agents/ai-providers.md) — read this when you touch `ai-models/*`, `providers/*`, `ollama/*`, OAuth sign-ins, the ClawBox AI login state or the Anthropic account pool.
 - [chat.md](docs/agents/chat.md) — read this when you touch `ChatApp.tsx`, `ChatPopup.tsx`, `chat-*` libraries (but `chat-hold-to-talk.ts` is in voice.md) or the `chat/*` routes.
 - [voice.md](docs/agents/voice.md) — read this when you touch `tts`, `stt`, spoken replies, hold-to-talk, Kokoro or Whisper.
 - [email.md](docs/agents/email.md) — read this when you touch `email/*`, `email-*.ts`, the SMTP/IMAP clients or draft approval.
@@ -124,7 +124,7 @@ The area files under `docs/agents/` (moved verbatim out of this file on 2026-10-
 - [update-and-install.md](docs/agents/update-and-install.md) — read this when you touch `update/*`, `updater.ts`, `install.sh`, a root step, `config/*.service`, the AP or `production-server.js`.
 - [testing-and-ci.md](docs/agents/testing-and-ci.md) — read this when you touch a workflow, `e2e-install` or the triage and review bots.
 
-Elsewhere in the tree: `mcp/README.md` (the MCP tool list, kept in step with the code), `src/lib/prime-radiant/README.md`, `scripts/x64-migration/README.md`, `docs/nano-hardware-tests.md`, `docs/clawbox-bench.md`, `docs/root-exec-mirror.md`, `docs/update-launcher-transition.md`, `docs/updater-legacy-handover.md`, `docs/hermes-reasoning-levels.md`, `docs/clawkeep-backup-mgmt-spec.md`, `CONTRIBUTING.md` and `.env.example`.
+Elsewhere in the tree: `mcp/README.md` (the MCP tool list, kept in step with the code), `src/lib/prime-radiant/README.md`, `scripts/x64-migration/README.md`, `docs/nano-hardware-tests.md`, `docs/clawbox-bench.md`, `docs/root-exec-mirror.md`, `docs/update-launcher-transition.md`, `docs/updater-legacy-handover.md`, `docs/hermes-reasoning-levels.md`, `docs/clawkeep-backup-mgmt-spec.md`, `docs/workstation-update-channel.md`, `CONTRIBUTING.md` and `.env.example`.
 
 <!-- BEGIN:nextjs-agent-rules -->
 

@@ -455,6 +455,7 @@ function healthyOpenclaw(): Record<string, string> {
     "clawbox-gateway.service": "enabled:active",
     "clawbox-heartbeat.timer": "enabled:active",
     "clawbox-ap-watchdog.timer": "enabled:active",
+    "clawbox-gateway-watchdog.timer": "enabled:active",
     "clawbox-codex-auth-sync.timer": "enabled:active",
     "clawbox-heartbeat.service": "static:inactive",
     "clawbox-browser.service": "disabled:inactive",
@@ -462,6 +463,7 @@ function healthyOpenclaw(): Record<string, string> {
     "clawbox-tunnel.service": "disabled:inactive",
     "clawbox-root-update@.service": "static:inactive",
     "clawbox-ap-watchdog.service": "static:inactive",
+    "clawbox-gateway-watchdog.service": "static:inactive",
     "clawbox-wifi-failover.service": "static:inactive",
     "clawbox-codex-auth-sync.service": "static:inactive",
     "clawbox-build-heal.service": "enabled:inactive",
@@ -542,12 +544,13 @@ d("step_validate_services sees units belonging to another edition", () => {
     const withoutHermes = runValidator("openclaw", healthyOpenclaw());
     const total = /All (\d+) checks healthy/.exec(withoutHermes.stdout)?.[1];
     expect(total).toBeDefined();
-    // 5 active (test mode drops clawbox-ap + clawbox-performance) + 8 installed
-    // (clawbox-embed.service among them, on demand and never enabled, and
-    // clawbox-build-heal.service, the boot-time oneshot of TASK-1316) + 1 probe
+    // 6 active (test mode drops clawbox-ap + clawbox-performance; the gateway
+    // watchdog's timer is one, TASK-2490) + 9 installed (clawbox-embed.service
+    // among them, on demand and never enabled, clawbox-build-heal.service, the
+    // boot-time oneshot of TASK-1316, and the watchdog's oneshot) + 1 probe
     // (test mode drops the WiFi probe) + 1 on-device TTS verdict (openclaw
     // only — Hermes has no TTS step) + 3 foreign-unit checks.
-    expect(Number(total)).toBe(19);
+    expect(Number(total)).toBe(21);
   });
 });
 

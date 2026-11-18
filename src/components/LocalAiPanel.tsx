@@ -13,6 +13,9 @@ import { BUTTON, FOCUS_RING as PANEL_FOCUS_RING, PRIMARY_BUTTON } from "@/compon
 import { BackgroundTaskInline, queuedLine } from "@/components/BackgroundTaskProgress";
 import EmbeddingModelCard from "@/components/local-ai/EmbeddingModelCard";
 import WhisperSizesCard from "@/components/local-ai/WhisperSizesCard";
+import SttEndpointCard from "@/components/local-ai/SttEndpointCard";
+import ExternalEngineCard from "@/components/local-ai/ExternalEngineCard";
+import { EXTERNAL_ENGINE_PROVIDER } from "@/lib/external-engine-shared";
 
 /**
  * Settings → Local AI: a plain inventory of everything that runs on the box
@@ -231,6 +234,9 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
   }, [t]);
   const [snapshot, setSnapshot] = useState<LocalModelsSnapshot | null>(null);
   const [roles, setRoles] = useState<Roles>({});
+  // An external AI engine holds the Local AI slot (TASK-2376): the on-device
+  // model keeps Install / Uninstall, but nothing here may wire it to the chat.
+  const [externalSelected, setExternalSelected] = useState(false);
   /**
    * Whether the ClawBox cloud is behind the transcription row's OTHER engine.
    *
@@ -242,6 +248,9 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
    * nothing until there is a cloud to fall back to.
    */
   const [sttCloudReady, setSttCloudReady] = useState(true);
+  // Bumped on every read of the transcription status, so the speech-server
+  // card reads it again when a sibling (Whisper's Use) changed the engine.
+  const [sttVersion, setSttVersion] = useState(0);
   const [localOnly, setLocalOnly] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Not an error: a change that WENT THROUGH, which the box then qualified.
@@ -307,13 +316,27 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       read("/setup-api/stt"),
     ]);
     const rows = Array.isArray(providers?.providers) ? providers.providers as { section: string; state: string; isDefault: boolean }[] : [];
-    // The provider list already says which row is the on-device one.
-    const local = rows.find((r) => r.section === "localAi");
+    // The provider list already says which row is the on-device one — and
+    // whether the slot is the owner's external engine instead, whose row is
+    // not this panel's llama.cpp.
+    const local = rows.find((r) => r.section === "localAi" && (r as { id?: string }).id !== EXTERNAL_ENGINE_PROVIDER);
+    // Only an ANSWER changes it: a failed read is not "no engine selected",
+    // and taking it as one would offer Gemma's Enable for a 409.
+    if (Array.isArray(providers?.providers)) {
+      setExternalSelected(rows.some((r) => (r as { id?: string }).id === EXTERNAL_ENGINE_PROVIDER));
+    }
     const llm: Role = !local ? null : local.isDefault ? "primary" : local.state === "connected" ? "fallback" : null;
     const localVoice = Array.isArray(tts?.engines) && (tts.engines as { id: string; configured: boolean }[]).some((e) => e.id === "local" && e.configured);
     const ttsRole: Role = !localVoice ? null : tts?.choice === "local" ? "primary" : "fallback";
     const localStt = stt?.engines?.local?.installed === true;
-    const sttRole: Role = !localStt ? null : stt?.primary === "local" ? "primary" : "fallback";
+    // A fallback only while the box's engine is in the chain: under the
+    // local-only AI lock the chain is the chosen engine alone (TASK-2501), so
+    // with the owner's own speech server chosen Whisper is neither.
+    const sttRole: Role = !localStt
+      ? null
+      : stt?.primary === "local"
+        ? "primary"
+        : !Array.isArray(stt?.chain) || (stt.chain as unknown[]).includes("local") ? "fallback" : null;
     // Explicitly `!== false`, so a server that predates the field — or one whose
     // read failed — leaves the action where it has always been rather than
     // hiding it on a box that can use it. And the cloud has to be IN the chain:
@@ -324,6 +347,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     const sttChain: unknown[] | null = Array.isArray(stt?.chain) ? stt.chain : null;
     setSttCloudReady(stt?.engines?.cloud?.configured !== false && (sttChain === null || sttChain.includes("cloud")));
     setRoles({ llm, tts: ttsRole, stt: sttRole });
+    setSttVersion((v) => v + 1);
   }, []);
 
   const refresh = useCallback(async () => {
@@ -631,6 +655,14 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     switch (entry.kind) {
       case "llm": {
         if (entry.id !== "llamacpp") break;
+        if (externalSelected) {
+          // Uninstall only. Install, Enable and Make primary all end in the
+          // configure route, which refuses the on-device model while the
+          // engine holds the slot (409 `external_engine_selected`) — the
+          // engine's own Remove comes first.
+          if (entry.installed) uninstall = removal("/setup-api/llamacpp/models?engine=1");
+          break;
+        }
         if (!entry.installed) {
           install = { id: "install", labelKey: "localModels.menu.install", streams: true, run: () => post("/setup-api/llamacpp/install", { scope: "local" }) };
           break;
@@ -813,6 +845,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
           </button>
         </div>
       )}
+
+      {/* The owner's own OpenAI-compatible server as Local AI (TASK-2376), on
+          both editions. */}
+      <ExternalEngineCard onChanged={afterInstall} />
 
       {GROUPS.map((group) => {
         const entries = snapshot.models.filter((m) => m.kind === group.kind);
@@ -1021,6 +1057,10 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
               })}
             </ul>
             {card && <div className="mt-3">{card}</div>}
+            {/* The owner's own speech server (TASK-2501 PR-D), whether or not
+                Whisper is on the box: it is the engine a box without one
+                transcribes with under the local-only AI lock. */}
+            {group.kind === "stt" && <div className="mt-3"><SttEndpointCard onChanged={afterInstall} refreshSignal={sttVersion} /></div>}
           </section>
         );
       })}

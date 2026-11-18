@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withProviderChangeLock } from "@/lib/provider-change-lock";
+import { cloudAiLockedResponse, isCloudAiLocked, isLocalAiModelRef } from "@/lib/ai-cloud-lock";
 import { getActiveHarness } from "@/lib/harness";
 import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { getAll } from "@/lib/config-store";
@@ -34,6 +35,7 @@ import {
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { DEFAULT_LLAMACPP_CONTEXT_WINDOW, getLlamaCppContextWindow } from "@/lib/llamacpp";
+import { EXTERNAL_ENGINE_PROVIDER, externalEngineDisplayName, isExternalEngineRef } from "@/lib/external-engine-shared";
 import { llamaCppModelName } from "@/lib/local-models";
 import { CLAWBOX_AI_CHAT_MODEL } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
@@ -49,6 +51,7 @@ import {
 } from "@/lib/provider-models";
 import {
   DISABLED_PROVIDERS_KEY,
+  chatgptSignInFenced,
   claudeSignInFenced,
   credentialedProviders,
   normalizeProviderId,
@@ -84,6 +87,7 @@ import {
   profileProviderId,
 } from "@/lib/chatgpt-subscription";
 import type { AuthProfileEntries } from "@/lib/subscription-surface";
+import { readCloudProvidersHidden } from "@/lib/cloud-providers-server";
 import {
   chatgptSupportedModelsSentence,
   isClaudeSubscriptionOnly,
@@ -97,6 +101,9 @@ import {
 export const dynamic = "force-dynamic";
 
 const PRIMARY_MODEL_KEY = "chat:primary-provider-model";
+
+/** Why a cloud chat model is refused under the local-only AI lock (TASK-2501). */
+const CHAT_MODEL_LOCKED_MESSAGE = "Local-only AI is on: the chat can only use a model on this box or your External engine.";
 
 type ChatModelSource = "primary" | "local";
 
@@ -203,6 +210,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   ollama: "Ollama Local",
   llamacpp: "Gemma 4 Local",
   deepseek: "ClawBox AI",
+  [EXTERNAL_ENGINE_PROVIDER]: "External engine",
 };
 
 const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter", "xai"] as const;
@@ -235,8 +243,13 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
 // namespace — both auth modes write `openai/<id>` — so both routes pass the
 // answer in (src/lib/chatgpt-subscription.ts).
 
+/**
+ * The Local AI slot: the on-device runtimes, and the owner's external AI
+ * engine when one is selected in their place (TASK-2376) — the picker offers
+ * it as THE local row, and "back to primary" leaves it like the on-device one.
+ */
 function isLocalModel(model: string | null | undefined): boolean {
-  return !!model && (model.startsWith("llamacpp/") || model.startsWith("ollama/"));
+  return !!model && (model.startsWith("llamacpp/") || model.startsWith("ollama/") || isExternalEngineRef(model));
 }
 
 const OLLAMA_PREFIX = "ollama/";
@@ -281,6 +294,8 @@ function labelForProvider(provider: string | null, fallback: string): string {
  * no name.
  */
 function localModelLabel(provider: string | null, model: string): string {
+  // The external engine is named for its model, as the owner's engine lists it.
+  if (provider === EXTERNAL_ENGINE_PROVIDER) return externalEngineDisplayName(model);
   if (provider === "llamacpp") {
     const name = llamaCppModelName(model);
     if (name) return `${name} Local`;
@@ -712,7 +727,7 @@ function sortPrimaryOptions(options: ChatModelOption[]) {
  * after the write, so asking the gateway twice per switch bought nothing and,
  * on a slow gateway, cost the connect and method deadlines twice over.
  */
-async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLevels?: boolean } = {}) {
+async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLevels?: boolean; hideCloud?: boolean } = {}) {
   const [configStore, openclawConfig, storedPrimaryModel, gatewayThinkingLevels, newestRefs] = await Promise.all([
     getAll(),
     preloaded ?? readConfig().catch(() => ({} as OpenClawConfig)),
@@ -960,6 +975,12 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
   if (claudeOption && claudeSignInFenced(openclawConfig)) {
     configuredPrimaryOptions.set("anthropic", { ...claudeOption, available: false, reauthRequired: true });
   }
+  // The ChatGPT sign-in, by the same rule and the same function the strip asks
+  // (SUP-1023): a dead refresh marker where the credential was.
+  const chatgptOption = configuredPrimaryOptions.get(CHATGPT_UI_PROVIDER);
+  if (chatgptOption && chatgptSignInFenced(openclawConfig)) {
+    configuredPrimaryOptions.set(CHATGPT_UI_PROVIDER, { ...chatgptOption, available: false, reauthRequired: true });
+  }
 
   // When Local-only mode is on, the cloud providers are intentionally
   // disabled — dropping them from the dropdown is the UX that matches
@@ -968,6 +989,13 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
   // pick GPT/Claude/DeepSeek in the chat dropdown while Local-only is
   // lit up, and the chat then quietly talks to the cloud provider.
   const localOnlyMode = !!configStore.local_only_mode;
+  // "Hide cloud AI providers" (src/lib/cloud-providers.ts): no cloud row and
+  // no "AI Provider - Set up in Settings" row either — the box's own AI is
+  // the only choice the picker offers. Only on the picker's own read (GET asks
+  // for it): a POST, the engine's own removal and every other caller still see
+  // every row, or the box could not move the chat back to a cloud model it
+  // had been on ("Selected AI provider is not configured").
+  const cloudHidden = read.hideCloud === true && await readCloudProvidersHidden();
 
   // The owner's per-provider switch. A switched-off provider STAYS in the
   // list, greyed and carrying the reason, rather than vanishing: a row that
@@ -982,9 +1010,8 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
       : option;
   };
 
-  const primaryOptions = localOnlyMode
-    ? []
-    : sortPrimaryOptions([...configuredPrimaryOptions.values()]).map(applyOwnerSwitch);
+  const allPrimaryOptions = sortPrimaryOptions([...configuredPrimaryOptions.values()]).map(applyOwnerSwitch);
+  const primaryOptions = localOnlyMode || cloudHidden ? [] : allPrimaryOptions;
   const localOption: ChatModelOption = applyOwnerSwitch(localModel
     ? {
         id: localModel,
@@ -1011,7 +1038,7 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
         isLocal: true,
       });
 
-  const options = primaryOptions.length > 0
+  const options = primaryOptions.length > 0 || cloudHidden
     ? [...primaryOptions, localOption]
     : [{
         id: "__setup_ai__",
@@ -1052,7 +1079,16 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
           && (!activeUiProvider || option.provider === activeUiProvider),
       ) ?? options.find((option) => option.model === activeModel) ?? null
     : null;
-  const activeLabel = activeOption?.label ?? null;
+  // A cloud model the chat is still running while its rows are hidden is NAMED,
+  // not offered: the header says where the chat is answering, and no hidden
+  // cloud row is in the list to pick.
+  const hiddenActiveOption = !activeOption && cloudHidden && activeModel
+    ? allPrimaryOptions.find(
+        (option) => option.model === canonicalChatModel(activeModel)
+          && (!activeUiProvider || option.provider === activeUiProvider),
+      ) ?? null
+    : null;
+  const activeLabel = activeOption?.label ?? hiddenActiveOption?.label ?? null;
 
   return {
     activeOptionId: activeOption?.id ?? null,
@@ -1077,6 +1113,9 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
       label: localLabel,
       model: localModel,
       contextWindow: localModelContextWindow(openclawConfig, localModel),
+      // The slot is the owner's external engine, not a model on this box: no
+      // load wait, no on-device notes (TASK-2376).
+      ...(localProvider === EXTERNAL_ENGINE_PROVIDER ? { external: true as const } : {}),
     },
     subscriptionProviders,
   };
@@ -1216,7 +1255,7 @@ export async function GET() {
     const verdicts = await readProviderRunnable().catch(
       () => new Map<string, ProviderRunnable>(),
     );
-    const state = withoutUnrunnableProviders(await loadChatModelState(), verdicts);
+    const state = withoutUnrunnableProviders(await loadChatModelState(undefined, { hideCloud: true }), verdicts);
     return NextResponse.json(state, {
       headers: { "Cache-Control": "no-store" },
     });
@@ -1287,6 +1326,16 @@ async function postChatModel(request: Request) {
           : null;
     const disabledRefusal = refuseDisabledProvider(state, requestedModel);
     if (disabledRefusal) return disabledRefusal;
+    // The local-only AI lock (TASK-2501): only a model on the box or the
+    // owner's External engine may become the chat model. Before any write —
+    // the compat branch below registers a model on its way to an answer. An
+    // explicit `model` wins over `source` there, so it is the model that is
+    // judged; only `{"source":"local"}` with no Local AI configured passes
+    // here, and is refused below as "Local AI is not configured".
+    const cloudLocked = await isCloudAiLocked();
+    if (cloudLocked && !isLocalAiModelRef(requestedModel) && !(requestedModel === null && body.source === "local")) {
+      return cloudAiLockedResponse(CHAT_MODEL_LOCKED_MESSAGE);
+    }
 
     // Which ROW the pick was made on, as the picker's own id. The ChatGPT
     // subscription and the OpenAI API key are both `openai/<id>` on OpenClaw
@@ -1544,6 +1593,11 @@ async function postChatModel(request: Request) {
         { error: body.source === "primary" ? "AI provider is not configured" : "Local AI is not configured" },
         { status: 400 },
       );
+    }
+    // And the model the pick resolved to, before the primary is written: the
+    // check above judged what was asked, this judges what would be written.
+    if (cloudLocked && !isLocalAiModelRef(targetModel)) {
+      return cloudAiLockedResponse(CHAT_MODEL_LOCKED_MESSAGE);
     }
 
     // The other two doors — an id already in `state.options`, and a pick

@@ -1,6 +1,6 @@
 "use client";
 
-import { ReactNode, useState, useEffect, useRef, useCallback, useSyncExternalStore } from "react";
+import { ReactNode, WheelEvent, useState, useEffect, useRef, useCallback, useSyncExternalStore } from "react";
 import { useT } from "@/lib/i18n";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import { mainInsets } from "@/lib/desktop-screens";
@@ -48,6 +48,51 @@ const SHELF_FILL = "rgba(17, 24, 39, 0.8)";
  * opaque only darkens the bar further from the glass's tone.
  */
 const PHONE_BAR_FILL = "rgba(17, 24, 39, 0.93)";
+
+/**
+ * THE ROOM A BAR HAS, NOT THE DEVICE IT IS ON.
+ *
+ * The bar is a row of three: the launcher, the apps and the tray. The tray is
+ * in the row — it takes the width its buttons need and the apps are what give
+ * way: they shrink and scroll (`APP_ROW`) instead of sliding under it, however
+ * many are pinned or open. Nothing here asks which phone, fold or window it is.
+ *
+ * A tray with everything in it is wider than a small bar can spare, though, so
+ * the buttons the bar can do without leave it, lowest value first, as the
+ * BAR's own width falls: a CSS container query on the row, not a media query on
+ * the viewport, so zoom, a narrow window and a docked panel all count the same.
+ * It never sheds the chat crab (a phone's way back to the assistant),
+ * fullscreen, the signed-in user or power.
+ *
+ * Each width below is the room the bar needs to keep that button AND leave the
+ * apps three icons, counting every button at its widest:
+ *
+ *   launcher + divider ........................ 57px   (44 + 13)
+ *   three app icons, 4px apart, in their row .. 148px  (3 x 44 + 2 x 4 + 8)
+ *   chat, fullscreen, user, power ............. 172px  (4 x 40 + 3 x 4)
+ *   + shield .................................. 44px   -> needs 421px, 26.25rem
+ *   + clock, "12:34 PM" ....................... 92px   -> needs 513px, 32rem
+ *   + screenshot and battery, "100%" .......... 110px  -> needs 623px, 39rem
+ *
+ * Rounded to a tidy rem, within a pixel; a bar narrower than it gives that button up (a
+ * Tailwind `@max-[X]` is a strict `width < X`). The count is the same for
+ * both bars (the phone's launcher is the narrower, so it sheds a hair sooner
+ * than it must), and it is by width alone — never by how many apps are open —
+ * so opening an app never moves the tray.
+ */
+const SHED_FIRST = "@max-[39rem]:hidden"; // screenshot, battery: a bar under 624px
+const SHED_CLOCK = "@max-[32rem]:hidden"; // the clock: under 512px
+const SHED_LAST = "@max-[26.25rem]:hidden"; // the shield: under 420px
+
+/**
+ * The app row of either bar. `min-w-0` lets it shrink below its icons and
+ * `overflow-x-auto` scrolls the rest (a wheel is turned sideways below), with
+ * `justify-center-safe` so a row that fits sits in the middle and one that does
+ * not starts at its first app instead of losing it off the left edge. The
+ * scrollbar is hidden: it would take 15px of a 56px bar on a desktop browser.
+ */
+const APP_ROW =
+  "min-w-0 flex items-center justify-center-safe gap-1 overflow-x-auto overflow-y-hidden px-1 py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden";
 
 /**
  * What the shield says out loud for each way a box can be unprotected. The
@@ -164,7 +209,7 @@ function ShelfClock({ className }: { className: string }) {
  * only while the desktop's capture overlay is mounted (the owner's desktop,
  * like the app), since nothing else would answer the click.
  */
-function ShelfScreenshotButton({ iconSize }: { iconSize: number }) {
+function ShelfScreenshotButton({ iconSize, className = "" }: { iconSize: number; className?: string }) {
   const { t } = useT();
   const available = useSyncExternalStore(subscribeOverlays, desktopOverlayMounted, () => false);
   if (!available) return null;
@@ -174,7 +219,7 @@ function ShelfScreenshotButton({ iconSize }: { iconSize: number }) {
     <button
       type="button"
       onClick={() => requestCapture(quickCaptureRequest("region"))}
-      className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+      className={`flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer ${className}`}
       title={label}
       aria-label={label}
       data-testid="shelf-screenshot-button"
@@ -211,19 +256,23 @@ export default function ChromeShelf({
   const isFullscreen = useIsFullscreen();
   const canFullscreen = useCanRequestFullscreen();
   const [isMobile, setIsMobile] = useState(false);
-  // Phone portrait: hide the ClawKeep shield and the clock to fit the bar.
-  // The chat crab STAYS — a phone lands in the chat and this is its way back
-  // from the desktop. Tablet portrait and phone landscape keep the full bar.
-  const [isPortraitPhone, setIsPortraitPhone] = useState(false);
+  // The app whose name is showing, drawn below at the bar's level (see
+  // `renderApp`): not inside the app row, which scrolls and so would clip it.
+  const [appTip, setAppTip] = useState<{ id: string; name: string; x: number; y: number } | null>(null);
   const deskScreens = useDeskScreens();
   const mainIns = deskScreens ? mainInsets() : null;
 
   useEffect(() => {
+    // Only the bar's FLAVOUR hangs on the width (the phone bar lists Settings
+    // and the open apps; the desktop one every pinned app). What fits in it
+    // never does: the row and the tray below are sized by the room the bar
+    // has, whatever the device, orientation or zoom.
     const checkLayout = () => {
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-      setIsMobile(w < 768);
-      setIsPortraitPhone(w < 500 && h > w);
+      setIsMobile(window.innerWidth < 768);
+      // The icons move (or the other bar replaces them) under a resting
+      // pointer, which fires no mouseleave: a name left showing would float
+      // where its icon no longer is.
+      setAppTip(null);
     };
     checkLayout();
     window.addEventListener("resize", checkLayout);
@@ -396,13 +445,13 @@ export default function ChromeShelf({
   } as const;
   const style = SHIELD_STYLE[mode];
   const shieldInteractive = typeof onClawKeepShieldClick === "function";
-  const renderShieldButton = () => {
+  const renderShieldButton = (extraClass = "") => {
     if (!shieldInteractive) return null;
     const iconSize = isMobile ? 22 : 18;
     return (
       <button
         onClick={onClawKeepShieldClick}
-        className="relative flex items-center justify-center w-10 h-10 rounded-full transition-colors hover:bg-white/10 active:bg-white/15 cursor-pointer"
+        className={`relative flex items-center justify-center w-10 h-10 rounded-full transition-colors hover:bg-white/10 active:bg-white/15 cursor-pointer ${extraClass}`}
         title={style.tooltip}
         aria-label={style.tooltip}
         data-testid="shelf-clawkeep-shield-button"
@@ -428,14 +477,28 @@ export default function ChromeShelf({
       key={app.id}
       data-crab-platform="true"
       data-testid={`shelf-app-${app.id}`}
-      onClick={() => onAppClick(app.id)}
+      onClick={() => {
+        // A tap is a hover that never ends: the name goes with the click.
+        setAppTip(null);
+        onAppClick(app.id);
+      }}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
         openedAt.current = Date.now();
+        setAppTip(null);
         setCtxMenu({ x: e.clientX, y: e.clientY, app });
       }}
-      className="relative shrink-0 w-11 h-11 flex items-center justify-center rounded-lg hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer group"
+      // The name shows ABOVE the icon, so it cannot live inside the app row: a
+      // row that scrolls clips whatever sticks out of it, and the name sits
+      // wholly outside. It is one fixed element drawn once below the bar,
+      // placed from the icon's own box.
+      onMouseEnter={(e) => {
+        const box = e.currentTarget.getBoundingClientRect();
+        setAppTip({ id: app.id, name: app.name, x: box.left + box.width / 2, y: box.top });
+      }}
+      onMouseLeave={() => setAppTip(null)}
+      className="relative shrink-0 w-11 h-11 flex items-center justify-center rounded-lg hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
       title={app.name}
       aria-label={app.name}
     >
@@ -462,14 +525,66 @@ export default function ChromeShelf({
           )}
         </div>
       )}
-
-      {/* Tooltip — hide when context menu is open */}
-      {!ctxMenu && (
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 bg-[#1e2939] text-white text-xs rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap border border-white/10">
-          {app.name}
-        </div>
-      )}
     </button>
+  );
+
+  // A wheel has no sideways: turn it into the row's own scroll, so a mouse can
+  // reach an app the row has scrolled away. A trackpad's sideways swipe (any
+  // deltaX) already scrolls it and is left alone.
+  const scrollRowWithWheel = (e: WheelEvent<HTMLDivElement>) => {
+    if (e.deltaX !== 0 || e.deltaY === 0) return;
+    // `deltaMode`: Firefox reports a notch of a wheel as a few LINES, not
+    // pixels; a page is the row's own width.
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? e.currentTarget.clientWidth : 1;
+    e.currentTarget.scrollLeft += e.deltaY * unit;
+  };
+
+  // The tray's buttons, for BOTH bars from one list so the two cannot drift:
+  // only the glyph sizes differ. The ones the bar can do without carry the
+  // `SHED_*` class that a narrow bar hides them by; each is a direct child of
+  // the tray, so a button that draws nothing (no battery on this box, no
+  // shield without a handler) leaves no empty cell behind to take a gap.
+  const renderTray = (phone: boolean) => (
+    <>
+      {showChatButton && (
+        <button
+          onClick={onChatClick}
+          data-testid="shelf-chat-button"
+          className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+          title={t("shelf.chat")}
+          aria-label={t("shelf.chat")}
+        >
+          <img src="/clawbox-crab.png" alt="Chat" className="w-[21px] h-[21px] object-contain" />
+        </button>
+      )}
+      {renderShieldButton(SHED_LAST)}
+      <ShelfScreenshotButton iconSize={phone ? 22 : 18} className={SHED_FIRST} />
+      {/* The laptop's battery, left of the clock; renders nothing on a box
+          without one. */}
+      <BatteryIndicator className={SHED_FIRST} />
+      {/* As wide as the time it shows (`min-w-10`, not `w-10`): a 12-hour
+          clock is wider than a 40px circle and spilled over its neighbours. */}
+      <button
+        onClick={onTrayClick}
+        className={`flex items-center justify-center h-10 min-w-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer ${phone ? "px-1" : "px-3"} ${SHED_CLOCK}`}
+        title={t("shelf.systemSettings")}
+        aria-label={t("shelf.systemSettings")}
+        data-testid="shelf-tray-button"
+      >
+        <ShelfClock className={phone ? "text-xs text-white/80 font-medium tabular-nums" : "text-sm text-white/80 font-medium"} />
+      </button>
+      {renderFullscreenButton(phone ? 20 : 18)}
+      {renderUserBadge(22)}
+      <button
+        onClick={onPowerClick}
+        className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+        title={t("shelf.power")}
+        aria-label={t("shelf.power")}
+        data-testid="shelf-power-button"
+      >
+        <span className="material-symbols-rounded text-white/60" style={{ fontSize: phone ? 20 : 18 }}>power_settings_new</span>
+      </button>
+    </>
   );
 
   return (
@@ -499,6 +614,11 @@ export default function ChromeShelf({
           setShelfMenu({ x: e.clientX, y: e.clientY });
         }}
       >
+        {/* The bar's one container. `@container` makes ITS width, not the
+            viewport's, what the tray's `SHED_*` queries read — and it is a flex
+            row of launcher, apps and tray, all in flow, so what the tray takes
+            is what the apps do not get. */}
+        <div className="@container flex w-full min-w-0 items-center">
         {isMobile ? (
           <>
             {/* Every mobile bar button shares a 40×40 container for a single
@@ -523,11 +643,12 @@ export default function ChromeShelf({
                 `unpinnedApps` are filtered for above and that this bar never
                 drew: nothing said which apps were open, and an app minimized
                 with "Switch app" vanished without a trace. It scrolls past
-                what it cannot fit, centred `safe` so the first entry stays
-                reachable once it overflows. */}
+                what it cannot fit (`APP_ROW`). */}
             <div
-              className="flex-1 min-w-0 flex items-center justify-center-safe gap-1 overflow-x-auto px-1"
+              className={`flex-1 ${APP_ROW}`}
               data-testid="shelf-mobile-apps"
+              onWheel={scrollRowWithWheel}
+              onScroll={() => setAppTip(null)}
             >
               {pinnedApps.map(renderApp)}
               {unpinnedApps.map(renderApp)}
@@ -536,45 +657,8 @@ export default function ChromeShelf({
                 fixed, never in the row: with a handful of apps open the row
                 overflows, and the one button that opens the assistant would
                 scroll out of sight with them. */}
-            <div className="flex-none flex items-center gap-1">
-              {showChatButton && (
-                <button
-                  onClick={onChatClick}
-                  data-testid="shelf-chat-button"
-                  className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-                  title={t("shelf.chat")}
-                  aria-label={t("shelf.chat")}
-                >
-                  <img src="/clawbox-crab.png" alt="Chat" className="w-[21px] h-[21px] object-contain" />
-                </button>
-              )}
-              {!isPortraitPhone && renderShieldButton()}
-              {!isPortraitPhone && <ShelfScreenshotButton iconSize={22} />}
-              {/* The laptop's battery, left of the clock as on the desktop
-                  bar; renders nothing on a box without one. */}
-              {!isPortraitPhone && <BatteryIndicator />}
-              {!isPortraitPhone && (
-                <button
-                  onClick={onTrayClick}
-                  className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-                  title={t("shelf.systemSettings")}
-                  aria-label={t("shelf.systemSettings")}
-                  data-testid="shelf-tray-button"
-                >
-                  <ShelfClock className="text-xs text-white/80 font-medium tabular-nums" />
-                </button>
-              )}
-              {renderFullscreenButton(20)}
-              {renderUserBadge(22)}
-              <button
-                onClick={onPowerClick}
-                className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-                title={t("shelf.power")}
-                aria-label={t("shelf.power")}
-                data-testid="shelf-power-button"
-              >
-                <span className="material-symbols-rounded text-white/60" style={{ fontSize: 20 }}>power_settings_new</span>
-              </button>
+            <div className="flex-none flex items-center gap-1" data-testid="shelf-tray">
+              {renderTray(true)}
             </div>
           </>
         ) : <>
@@ -585,76 +669,84 @@ export default function ChromeShelf({
             strict-locator failure for a test and a duplicated "App Launcher"
             control for assistive tech. */}
 
-        {/* Centered: pinned + open apps */}
-        <div className="flex items-center gap-1">
-          {/* Launcher button — desktop only (inline) */}
-          <button
-            onClick={onLauncherClick}
-            className="w-11 h-11 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-            title={t("shelf.appLauncher")}
-            aria-label={t("shelf.appLauncher")}
-            data-testid="shelf-launcher-button"
-          >
-            <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-br from-white/20 to-white/5 border border-white/10">
-              <span className="material-symbols-rounded text-white/80" style={{ fontSize: 22 }}>apps</span>
-            </div>
-          </button>
+        {/* Launcher, divider and apps sit in the MIDDLE of the bar when there is
+            room: the two `flex-1` cells either side of them are equal, the
+            tray's cell no narrower than the tray (`min-w-max`). With less room
+            the left cell goes first and the group slides toward the tray, and
+            with less still the apps shrink and scroll, the launcher and the tray
+            staying whole. The tray used to be `absolute`: nothing reserved its
+            width, so a centred row of several apps ran under it. */}
+        <div className="flex-1 min-w-0" aria-hidden="true" />
 
-          {/* Separator (desktop only) */}
-          <div className="w-px h-8 bg-white/10 mx-1 hidden sm:block" />
+        {/* Launcher button — desktop only (inline). It stays put: only the
+            apps beside it scroll. */}
+        <button
+          onClick={onLauncherClick}
+          className="flex-none w-11 h-11 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+          title={t("shelf.appLauncher")}
+          aria-label={t("shelf.appLauncher")}
+          data-testid="shelf-launcher-button"
+        >
+          <div className="w-10 h-10 rounded-full flex items-center justify-center bg-gradient-to-br from-white/20 to-white/5 border border-white/10">
+            <span className="material-symbols-rounded text-white/80" style={{ fontSize: 22 }}>apps</span>
+          </div>
+        </button>
 
+        {/* Separator (desktop only) */}
+        <div className="flex-none w-px h-8 bg-white/10 ml-2 mr-1" />
+
+        {/* Centered: pinned + open apps. Wide as its icons while they fit
+            (`flex-initial`), and no wider than the room beside the tray when
+            they do not. */}
+        <div
+          className={`flex-initial ${APP_ROW}`}
+          data-testid="shelf-desktop-apps"
+          onWheel={scrollRowWithWheel}
+          onScroll={() => setAppTip(null)}
+        >
           {/* Pinned apps */}
           {pinnedApps.map(renderApp)}
 
           {/* Separator between pinned and unpinned open apps */}
           {unpinnedApps.length > 0 && (
-            <div className="w-px h-8 bg-white/10 mx-1" />
+            <div className="flex-none w-px h-8 bg-white/10 mx-1" />
           )}
 
           {/* Unpinned open apps */}
           {unpinnedApps.map(renderApp)}
         </div>
 
-        {/* Right side: system tray */}
-        <div className="absolute right-2 flex items-center gap-1">
-          {showChatButton && (
-            <button
-              onClick={onChatClick}
-              data-testid="shelf-chat-button"
-              className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-              title={t("shelf.chat")}
-              aria-label={t("shelf.chat")}
-            >
-              <img src="/clawbox-crab.png" alt="Chat" className="w-[21px] h-[21px] object-contain" />
-            </button>
-          )}
-          {renderShieldButton()}
-          <ShelfScreenshotButton iconSize={18} />
-          {/* The battery on an x64 laptop; nothing anywhere else. */}
-          <BatteryIndicator />
-          <button
-            onClick={onTrayClick}
-            className="hidden sm:flex items-center h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-            title={t("shelf.systemSettings")}
-            aria-label={t("shelf.systemSettings")}
-            data-testid="shelf-tray-button"
-          >
-            <ShelfClock className="text-sm text-white/80 font-medium" />
-          </button>
-          {renderFullscreenButton(18)}
-          {renderUserBadge(22)}
-          <button
-            onClick={onPowerClick}
-            className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-            title={t("shelf.power")}
-            aria-label={t("shelf.power")}
-            data-testid="shelf-power-button"
-          >
-            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 18 }}>power_settings_new</span>
-          </button>
+        {/* Right side: system tray, in the row. As wide as its buttons at the
+            least (`min-w-max`), so the apps never get to draw under it, and its
+            buttons sit at the bar's right edge. */}
+        <div className="flex-1 min-w-max flex items-center justify-end gap-1" data-testid="shelf-tray">
+          {renderTray(false)}
         </div>
         </>}
+        </div>
       </div>
+
+      {/* The hovered app's name. Fixed and drawn here, not inside the app row,
+          which scrolls and would clip it; hidden while a menu is open and once
+          the app it names is no longer DRAWN — pinned or listed as open, which
+          is narrower than being in `apps` (a closed app stays there) — since no
+          mouseleave fires for a button that unmounts under a resting pointer. `aria-hidden`: the button
+          already carries the name, so a screen reader hears it once. */}
+      {appTip && !ctxMenu && !shelfMenu && [...pinnedApps, ...unpinnedApps].some((a) => a.id === appTip.id) && (
+        <div
+          data-testid="shelf-tooltip"
+          aria-hidden="true"
+          className="fixed px-2 py-1 bg-[#1e2939] text-white text-xs rounded pointer-events-none whitespace-nowrap border border-white/10"
+          style={{
+            zIndex: DESKTOP_LAYERS.shelf,
+            left: appTip.x,
+            top: appTip.y - 8,
+            transform: "translate(-50%, -100%)",
+          }}
+        >
+          {appTip.name}
+        </div>
+      )}
 
       {/* Shelf context menu. No backdrop blur under its fill: #2d2d2d is
           opaque, so the blur could not be seen, and it was still a render pass

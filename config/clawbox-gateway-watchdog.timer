@@ -1,0 +1,16 @@
+[Unit]
+Description=Probe the OpenClaw gateway every minute and restart it after a sustained hang (TASK-2490)
+
+[Timer]
+# The gateway's own start can take minutes on a cold Jetson; the script also
+# gives every fresh gateway a start-up grace before it probes it.
+OnBootSec=3min
+# One probe a minute. A restart needs several consecutive failures spanning at
+# least four minutes (scripts/gateway-watchdog.sh), so this cadence is what
+# turns "N failures" into "N minutes".
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=clawbox-gateway-watchdog.service
+
+[Install]
+WantedBy=timers.target

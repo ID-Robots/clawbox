@@ -48,8 +48,17 @@ function readConfig(): Record<string, unknown> {
  */
 function readConfigStrict(): Record<string, unknown> {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(CONFIG_PATH)) return {};
-  const parsed: unknown = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+  // Only ENOENT is an absent store. `existsSync` answered false for EACCES
+  // and every other stat failure as well, which read an unreadable store as
+  // an empty one — the very guess this reader exists to refuse.
+  let raw: string;
+  try {
+    raw = fs.readFileSync(CONFIG_PATH, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return {};
+    throw err;
+  }
+  const parsed: unknown = JSON.parse(raw);
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("data/config.json does not hold a JSON object");
   }
@@ -212,6 +221,19 @@ export function readFailureKind(err: unknown): string {
 
 /** One key, tri-state: `known: false` when the store could not be read. */
 export async function getKnown(key: string): Promise<{ value: unknown; known: boolean }> {
+  try {
+    return { value: held(readConfigStrict(), key), known: true };
+  } catch (err) {
+    console.error("[config-store] data/config.json could not be read:", readFailureKind(err));
+    return { value: undefined, known: false };
+  }
+}
+
+/**
+ * `getKnown`, synchronously: for a decision made inside a synchronous step
+ * (a coding run's exit handler deciding whether to start a second process).
+ */
+export function getKnownSync(key: string): { value: unknown; known: boolean } {
   try {
     return { value: held(readConfigStrict(), key), known: true };
   } catch (err) {

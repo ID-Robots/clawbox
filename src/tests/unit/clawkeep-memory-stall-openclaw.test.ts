@@ -29,6 +29,19 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/openclaw-config")>(),
   openclawIsAbsent: () => false,
 }));
+// The gateway a pass runs without (OpenClaw 2026.11.3 indexes offline): no
+// unit is up here, its stop and start are recorded, and a test may make the
+// start after the pass slow.
+const { gateway } = vi.hoisted(() => ({ gateway: { stops: 0, starts: 0, startDelayMs: 0 } }));
+vi.mock("@/lib/openclaw-auth-ops", () => ({
+  askOpenclawGateway: async () => ({ answered: false }),
+  openclawGatewayRuns: async () => false,
+  stopOpenclawGatewayForOffline: async () => { gateway.stops += 1; },
+  startOpenclawGatewayAfterOffline: async () => {
+    gateway.starts += 1;
+    if (gateway.startDelayMs) await new Promise((resolve) => setTimeout(resolve, gateway.startDelayMs));
+  },
+}));
 
 const ENV = [
   "CLAWKEEP_DATA_DIR",
@@ -44,6 +57,9 @@ let tmpDir = "";
 
 beforeEach(async () => {
   shard.enabled = true;
+  gateway.stops = 0;
+  gateway.starts = 0;
+  gateway.startDelayMs = 0;
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "memory-stall-openclaw-"));
   process.env.CLAWKEEP_DATA_DIR = tmpDir;
   process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
@@ -180,6 +196,32 @@ describe("an OpenClaw pass that stops moving", () => {
     expect(run).toMatchObject({ status: "succeeded", errorCode: "" });
     expect(existsSync(fake.termed)).toBe(false);
     expect((await readMemoryRunState()).durationMs).toBeGreaterThan(4_000);
+  });
+});
+
+describe("the gateway an OpenClaw pass runs without", () => {
+  it("is stopped before a pass the watchdog ends, and started again after it", async () => {
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1500";
+    noTerminal();
+    await fakeIndexer({ hang: true });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "failed", errorCode: "stalled" });
+    expect(gateway).toMatchObject({ stops: 1, starts: 1 });
+  });
+
+  it("is started again after the pass without the watchdog reading that start as a stall", async () => {
+    // The pass is over and moves nothing while the gateway comes back; a
+    // start slower than the window must not turn a finished pass `stalled`.
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1000";
+    gateway.startDelayMs = 3_000;
+    const fake = await fakeIndexer({ steps: 2, stepMs: 200 });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_500 })).toMatchObject({ status: "succeeded", errorCode: "" });
+    expect(existsSync(fake.termed)).toBe(false);
+    expect(gateway.starts).toBe(1);
   });
 });
 

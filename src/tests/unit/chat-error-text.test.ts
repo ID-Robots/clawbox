@@ -24,6 +24,20 @@ function leaks(text: string): boolean {
 }
 
 describe("describeChatFailure", () => {
+  it("does not answer a requested model's failure with the reload note a fallback attempt carried", () => {
+    const shown = describeChatFailure("All models failed (2): anthropic/claude-opus-5-5: No API key found for provider \"anthropic\" (auth) | deepseek/deepseek-v4-flash: Error: Skills discovery was retired before publication");
+    expect(shown).not.toMatch(/reloading its settings/);
+  });
+
+  it("tells a turn OpenClaw 2026.11.3 lost to a settings reload to send it again, and leaks nothing", () => {
+    const raw = "Error: Skills discovery was retired before publication";
+    const shown = describeChatFailure(raw);
+    expect(shown).toMatch(/reloading its settings/);
+    expect(shown).toMatch(/Send it again/);
+    expect(leaks(shown)).toBe(false);
+    expect(shown).not.toContain("Skills discovery");
+  });
+
   it("never renders the session-takeover error a customer actually saw", () => {
     for (const raw of [TAKEOVER_RAW, FOLLOWUP_RAW]) {
       const shown = describeChatFailure(raw);
@@ -508,6 +522,23 @@ describe("the provider's own words, scrubbed with the repo's one inventory", () 
       // The refusal is still explained, not swallowed into the generic line.
       expect(shown).toMatch(/gpt-5\.5/);
     }
+  });
+
+  it("keeps the mark that says the quoted sentence was cut, where the cut falls inside a quoted value", () => {
+    const shown = detailWith(`Login refused for {"password": "${"word ".repeat(80)}"} on the proxy`);
+    expect(shown).not.toMatch(/word word/);
+    expect(shown).toMatch(/"…”/);
+  });
+
+  it("takes a quoted value under a credential name out of the quoted sentence", () => {
+    const shown = detailWith('Login refused for {"password": "correct horse battery staple"} on the proxy');
+    expect(shown).not.toMatch(/correct|horse|battery|staple/);
+    expect(shown).toMatch(/gpt-5\.5/);
+  });
+
+  it("still falls back to its own sentence where the provider's words are refused whole", () => {
+    // The whole-message check reads the sentence before the quoted-value pass.
+    expect(detailWith('Key check failed: api_key: "see /srv/keys/api.txt" for org acme')).not.toMatch(/acme|api\.txt/);
   });
 
   it("strips a bearer token whole and keeps what the provider said around it", () => {

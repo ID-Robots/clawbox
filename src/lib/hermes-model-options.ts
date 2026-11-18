@@ -33,6 +33,7 @@ import {
 } from "@/lib/hermes-dashboard-control";
 import { get, set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
+import { EXTERNAL_ENGINE_PROVIDER, EXTERNAL_ENGINE_STORE_KEY, externalEngineDisplayName, isExternalEngineRef } from "@/lib/external-engine-shared";
 import { createSerialLock } from "@/lib/serial-lock";
 import { CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-models";
 import { isRetiredClawboxAiModel } from "@/lib/clawbox-ai-retired-models";
@@ -454,6 +455,9 @@ async function configuredLocalModelId(): Promise<string> {
   try {
     const stored = await get("local_ai_model");
     if (typeof stored !== "string") return "";
+    // An external engine in the Local AI slot is not the on-device model, and
+    // its id must not seed `clawlocal` (TASK-2376) — see externalEngineSeed.
+    if (isExternalEngineRef(stored)) return "";
     const bare = stored.split("/").pop() || "";
     return isSafeModelId(bare) ? bare : "";
   } catch {
@@ -533,7 +537,32 @@ export async function isMoaConfigured(): Promise<boolean> {
   }
 }
 
-function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesProviderRow | null {
+/**
+ * The external engine (TASK-2376) as its `clawext` row should read: the model
+ * it was saved with and its name. Hermes lists what the endpoint's /models
+ * answers, which needs the engine up; the saved id is offered even when it is
+ * not, exactly like the on-device id below — it is the configured model, not
+ * a guess.
+ */
+interface ExternalEngineSeed { modelId: string; name: string }
+
+async function externalEngineSeed(): Promise<ExternalEngineSeed | null> {
+  try {
+    const raw = await get(EXTERNAL_ENGINE_STORE_KEY);
+    if (!raw || typeof raw !== "object") return null;
+    const modelId = (raw as { modelId?: unknown }).modelId;
+    if (typeof modelId !== "string" || !isSafeModelId(modelId)) return null;
+    return { modelId, name: externalEngineDisplayName(modelId) };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRow(
+  raw: DashboardProviderRow,
+  localModelId: string,
+  external: ExternalEngineSeed | null = null,
+): HermesProviderRow | null {
   const id = asString(raw.slug);
   if (!isPlausibleHermesProviderId(id)) return null;
 
@@ -602,18 +631,23 @@ function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesPr
     seen.add(localModelId);
     models.push({ id: localModelId, description: "on-device" });
   }
+  const isExternal = id === EXTERNAL_ENGINE_PROVIDER && external !== null;
+  if (isExternal && !seen.has(external.modelId)) {
+    seen.add(external.modelId);
+    models.unshift({ id: external.modelId, description: "external engine" });
+  }
 
   const warning = asString(raw.warning);
   return {
     id,
-    name: asString(raw.name) || id,
+    name: isExternal ? external.name : (asString(raw.name) || id),
     authenticated: typeof raw.authenticated === "boolean" ? raw.authenticated : null,
     verified: typeof raw.verified === "boolean" ? raw.verified : null,
     isUserDefined: typeof raw.is_user_defined === "boolean" ? raw.is_user_defined : null,
     source: asString(raw.source) || "unknown",
     // `total_models` is the dashboard's count; after seeding it would understate
     // what we actually offer, so report the list we return.
-    total: id === CLAWAI_PROVIDER || id === HERMES_LOCAL_PROVIDER
+    total: id === CLAWAI_PROVIDER || id === HERMES_LOCAL_PROVIDER || isExternal
       ? models.length
       : (typeof raw.total_models === "number" ? raw.total_models : models.length),
     models,
@@ -646,9 +680,9 @@ async function fetchFromDashboard(refresh: boolean): Promise<ModelOptionsPayload
 
   const providers: HermesProviderRow[] = [];
   const moaReady = await isMoaConfigured();
-  const localModelId = await configuredLocalModelId();
+  const [localModelId, external] = await Promise.all([configuredLocalModelId(), externalEngineSeed()]);
   for (const raw of body.providers) {
-    const row = normalizeRow((raw ?? {}) as DashboardProviderRow, localModelId);
+    const row = normalizeRow((raw ?? {}) as DashboardProviderRow, localModelId, external);
     if (!row) continue;
     // Mixture of Agents is a VIRTUAL provider: the dashboard always reports it
     // as authenticated with a single placeholder model called "default",

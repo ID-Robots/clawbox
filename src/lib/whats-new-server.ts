@@ -13,6 +13,7 @@ import { CONFIG_ROOT, get, set } from "@/lib/config-store";
 import { readEditionSource, type EditionSource } from "@/lib/edition-source";
 import { readSwapPlan, swapAllowed, swapTargetFor } from "@/lib/harness-swap";
 import { planGateFor } from "@/lib/paid-plan-gate";
+import { readPlanEntitlement } from "@/lib/plan-entitlement";
 import {
   isWhatsNewVersion,
   NO_PLAN_CTA,
@@ -21,6 +22,7 @@ import {
   type WhatsNewPlanCta,
   type WhatsNewState,
 } from "@/lib/whats-new";
+import { readOrgMode } from "@/lib/org-mode-server";
 
 /**
  * The config-store key holding the release whose card the owner dismissed
@@ -73,15 +75,22 @@ export async function readFreeMonthCode(): Promise<string | null> {
  * the Harness card's own `swapAllowed` (Max).
  */
 async function readPlanCta(source: EditionSource): Promise<WhatsNewPlanCta> {
+  // An organisation box sells nothing (src/lib/org-mode.ts): its ClawBox AI
+  // offers are hidden for everyone, the owner included.
+  if (await readOrgMode()) return { ...NO_PLAN_CTA };
   // A plan that cannot be read offers NOTHING (TASK-1198). Either read failing
   // used to fail the whole route with a 500, and the desktop drew no card at
   // all over a question only its plan section asks. The card still announces
   // the release; it just sells nothing it cannot check the owner lacks.
   try {
-    const plan = await readSwapPlan();
+    // The paid features are judged on the gate's own reader, which also counts
+    // a subscription linked for its plan alone (TASK-2501) — the card must not
+    // upsell what such a box can already switch on. The edition switch stays
+    // on the ClawBox AI plan the Harness card reads.
+    const [plan, entitlement] = await Promise.all([readSwapPlan(), readPlanEntitlement()]);
     const target = swapTargetFor(source);
     return {
-      paidFeatures: !planGateFor(plan.tier).satisfied,
+      paidFeatures: !planGateFor(entitlement.tier).satisfied,
       editionSwitch: target !== null && !swapAllowed(plan) ? target : null,
     };
   } catch (err) {

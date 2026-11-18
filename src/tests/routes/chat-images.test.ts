@@ -104,6 +104,27 @@ describe("POST /setup-api/chat/images", () => {
     });
   });
 
+  it("records a picture drawn for a member of staff as theirs, and the owner's as nobody's", async () => {
+    // TASK-2435 review: on an organisation box the media route serves a member
+    // only what is recorded as theirs (src/lib/chat-media-owners.ts).
+    const ownersFile = path.join(tmpHome, "data", "chat-media-owners.json");
+    const picture = path.join(tmpHome, "drawn.png");
+    fs.writeFileSync(picture, "png");
+    generate.mockResolvedValue({ path: picture, media: "/setup-api/chat/media?path=%2Fdrawn.png" });
+
+    expect((await POST(request({ prompt: "the owner's" }))).status).toBe(200);
+    expect(fs.existsSync(ownersFile)).toBe(false);
+
+    vi.doMock("@/lib/owner-session", () => ({
+      personSession: async () => ({ username: "alice", isOwner: false }),
+    }));
+    vi.resetModules();
+    const memberPOST = (await import("@/app/setup-api/chat/images/route")).POST;
+    expect((await memberPOST(request({ prompt: "alice's", sessionKey: "desktop-user-alice" }))).status).toBe(200);
+    expect(JSON.parse(fs.readFileSync(ownersFile, "utf8"))).toEqual({ [fs.realpathSync(picture)]: "alice" });
+    vi.doUnmock("@/lib/owner-session");
+  });
+
   it("records the request BEFORE the upstream call, so a dead generation is visible", async () => {
     // The order is the property, not the count: a service that restarts under a
     // 15-second call must leave a question with no answer, which reads as

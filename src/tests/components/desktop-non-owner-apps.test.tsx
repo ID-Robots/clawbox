@@ -208,13 +208,16 @@ describe("the desktop's requests — only what the signed-in user may ask", () =
         "GET /setup-api/preferences?all=1",
         "GET /setup-api/kv",
         "/setup-api/harness/active",
-        "/setup-api/update/versions",
         "/setup-api/ai-models/status",
         "/setup-api/clawkeep",
       ]) {
         expect(asked(fragment), fragment).toBe(true);
       }
     });
+    // Updating the box is the owner's on every box (TASK-2435): a user's
+    // desktop asks nothing about it, and so never draws the card.
+    expect(asked("/setup-api/update/versions")).toBe(false);
+    expect(asked("/setup-api/whats-new")).toBe(false);
     // The assistant (their own chat), the mascot and the timezone adopter are mounted.
     expect(mounted.chat).toBeGreaterThan(0);
     expect(mounted.mascot).toBeGreaterThan(0);

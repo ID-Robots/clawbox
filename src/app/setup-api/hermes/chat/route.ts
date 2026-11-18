@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { spawn } from "child_process";
+import fsp from "fs/promises";
 import path from "@/lib/runtime-path";
 import { StringDecoder } from "string_decoder";
 import { HERMES_BIN } from "@/lib/harness";
@@ -40,7 +41,7 @@ import {
   readCurrentFromCli,
   type ModelOptionsPayload,
 } from "@/lib/hermes-model-options";
-import { appendTranscript } from "@/lib/harness/transcript-store";
+import { appendTranscript, clearTranscript } from "@/lib/harness/transcript-store";
 import {
   beginLiveTurn,
   liveTurnResponse,
@@ -50,19 +51,26 @@ import {
   type LiveTurnFrame,
   type LiveTurnListenerOptions,
 } from "@/lib/harness/hermes-live-turn";
-import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
+import { FRESH_SESSION_NOTICE, isSlashCommandMessage, typedResetCommand } from "@/lib/chat-slash-commands";
 import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
 import { hermesSessionFor, noteHermesSession, transcriptKeyFor } from "@/lib/chat-scope-server";
+import { chatKeyUser } from "@/lib/chat-scope";
+import { isMediaOwnedBy, recordMediaOwner } from "@/lib/chat-media-owners";
+import { orgMemberStrictOf, readOrgMode } from "@/lib/org-mode-server";
+import { staffCommandRefusal, staffMessageVerdict } from "@/lib/org-staff-policy";
+import { ensureStaffHermesProfile, staffGuardLoaded, staffHermesProfilePaths, type StaffHermesProfile } from "@/lib/hermes-staff-profile";
+import { recordMemberReplyMedia } from "@/lib/chat-reply-media";
 import { personSession } from "@/lib/owner-session";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
-import { resolveInMediaRoot } from "@/lib/harness/media-root";
+import { chatMediaRoot, resolveInMediaRoot } from "@/lib/harness/media-root";
 import { hermesDocumentPrompt } from "@/lib/harness/hermes-document-prompt";
-import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
+import { boundedFiles, mediaUrl, splitAssistantMedia, splitMediaDirectives } from "@/lib/chat-media";
 import { splitEmailRefs } from "@/lib/chat-email-refs";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
 import {
   readHermesBillingProvider,
   readHermesTurn,
+  withHermesStateHome,
   readHermesUsageMarks,
 } from "@/lib/harness/hermes-turn-record";
 import { recordProviderVerified } from "@/lib/provider-verified";
@@ -97,6 +105,8 @@ import {
   SESSION_REFUSED_PICTURE_MESSAGE,
   waitForDashboard,
 } from "@/lib/hermes-session-refusal";
+import { admitChatRequest, chatLimitSentence } from "@/lib/user-limits";
+import { readUserLimits } from "@/lib/user-limits-server";
 
 /**
  * How many images one turn may carry — the same number the composer is told,
@@ -348,6 +358,12 @@ interface TurnPayload {
   toolCalls?: readonly unknown[];
   sessionId?: string;
   /**
+   * Set on the answer to a typed `/new` or `/reset`: the conversation has no
+   * session any more, and the next turn opens one. A caller that threads
+   * `sessionId` drops the one it holds.
+   */
+  freshSession?: true;
+  /**
    * The model that actually served this turn, and its provider.
    *
    * Recorded because the alternative was proven to hide a real defect: with the
@@ -362,6 +378,52 @@ interface TurnPayload {
 
 /** A page's turn id: its own uuid, and nothing that could be a path or a flag. */
 const TURN_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * Is a `MEDIA:` payload something the chat media route
+ * (src/app/setup-api/chat/media/route.ts) serves `username`? A local file only
+ * when it resolves inside one of `roots` and is recorded as theirs; a remote
+ * URL is not a file of this box and is always let through; a relative path
+ * never is.
+ */
+async function servedToMember(username: string, roots: ReadonlyArray<string | null>): Promise<(payload: string) => Promise<boolean>> {
+  const realRoots = (await Promise.all(
+    roots.map((root) => (root ? fsp.realpath(/* turbopackIgnore: true */ root).catch(() => null) : null)),
+  )).filter((root): root is string => root !== null);
+  return async (payload) => {
+    const local = payload.toLowerCase().startsWith("file://") ? payload.slice("file://".length) : payload;
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(local)) return true;
+    if (!path.isAbsolute(local)) return false;
+    const real = await fsp.realpath(/* turbopackIgnore: true */ local).catch(() => null);
+    if (!real) return false;
+    return realRoots.some((root) => {
+      const rel = path.relative(root, real);
+      return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel) && isMediaOwnedBy(username, real, root);
+    });
+  };
+}
+
+/**
+ * A member's caption with every `MEDIA:` line dropped that `served` refuses:
+ * such a line would only become a card that answers 404. Fenced code is never
+ * touched.
+ */
+async function memberServableCaption(caption: string, served: (payload: string) => Promise<boolean>): Promise<string> {
+  if (!/media:/i.test(caption)) return caption;
+  const kept: string[] = [];
+  let inFence = false;
+  let dropped = false;
+  for (const line of caption.split("\n")) {
+    if (/^(?:```|~~~)/.test(line.trim())) inFence = !inFence;
+    const payload = inFence ? undefined : splitMediaDirectives(line).media[0];
+    if (payload !== undefined && !(await served(payload))) {
+      dropped = true;
+      continue;
+    }
+    kept.push(line);
+  }
+  return dropped ? kept.join("\n").replace(/\n{3,}/g, "\n\n").trim() : caption;
+}
 
 /** Did the caller ask to be streamed to, rather than handed a finished turn? */
 function wantsStream(request: Request): boolean {
@@ -401,6 +463,8 @@ async function settleTurn(
   consoleText: string,
   streamedReasoning: string,
   served: { model?: string; provider?: string } = {},
+  /** When this turn began (`LiveTurn.startedAt`): the files its reply names are a member's only if written since. */
+  turnStartedAt: number | null = null,
 ): Promise<TurnPayload> {
   // Which person's conversation this Hermes session now carries, so only
   // they may resume it (src/lib/chat-scope-server.ts).
@@ -422,11 +486,18 @@ async function settleTurn(
   // working. Everything else has to earn its card through adoption.
   const servableRoot = await servableMediaRoot();
   const { text: caption, sources: mentioned } = reclaimImageMentions(spoken, servableRoot);
+  // A member of staff's turn on an organisation box: what this turn writes
+  // into the media tree is recorded as theirs (src/lib/chat-media-owners.ts),
+  // so only the pictures the agent's own image tool drew are adopted — never
+  // a path the model merely named, which a member can talk it into naming.
+  const chatUser = chatKeyUser(sessionKey);
+  const memberTurn = chatUser !== null && (await readOrgMode());
   const drawn = await adoptHermesGeneratedImages(
-    [...(record?.generatedImages ?? []), ...mentioned],
+    memberTurn ? [...(record?.generatedImages ?? [])] : [...(record?.generatedImages ?? []), ...mentioned],
     // The SAME root the caption was judged against, so the two halves cannot
     // disagree about which tree is already servable.
     servableRoot,
+    { cacheOnly: memberTurn },
   );
   // A picture the AGENT drew, said the way every other picture in this chat is
   // said. Hermes has no `MEDIA:` convention of its own — the backend saves the
@@ -497,8 +568,50 @@ async function settleTurn(
   const spokenClip = (await getVoiceAutoReply()) && (await hermesSpeaksReplies())
     ? await speakHermesReply(splitEmailRefs(caption).text)
     : null;
+  // What this turn wrote into the media tree for a ClawBox user other than the
+  // owner is theirs: served back to them on an organisation box, and to no
+  // other member (src/lib/chat-media-owners.ts).
+  if (chatUser) recordMediaOwner(chatUser, [...drawn, spokenClip]);
+  // A file the member's own turn produced — a document an owner-granted MCP
+  // tool wrote — named on a `MEDIA:` line of the reply is theirs too
+  // (TASK-2516): only a fresh regular file in the media tree or their own
+  // profile folder, never through a link, never one already someone else's.
+  // A picture of theirs that the reclaiming above took out of the caption
+  // (an image a tool wrote into their own folder), said again once recorded.
+  const claimedImages: string[] = [];
+  let shownCaption = caption;
+  if (memberTurn && chatUser) {
+    const ownFolder = staffHermesProfilePaths(chatUser)?.folder ?? null;
+    // Their own profile folder only: a file in the shared media tree is made
+    // theirs by the relay that ran their tool call, never by a reply naming
+    // it (scripts/chat-reply-media.js). Synchronous and never throws. Read
+    // from the reply AS WRITTEN: the caption has lost its image lines to the
+    // reclaiming above, and a member's image is never adopted.
+    const { recorded, refused } = recordMemberReplyMedia({
+      username: chatUser,
+      text: spoken,
+      ownFolder,
+      since: turnStartedAt,
+    });
+    if (recorded.length > 0 || refused.length > 0) {
+      console.log(`[hermes chat] a member's reply named files: ${recorded.length} recorded as theirs, ${refused.length} not (${[...new Set(refused.map((r) => r.reason))].join(", ") || "-"})`);
+    }
+    // A card only for a file the member is served — recorded as theirs now or
+    // on an earlier turn, in the chat media tree or their own folder. One they
+    // are not would be a 404 (src/app/setup-api/chat/media/route.ts).
+    const served = await servedToMember(chatUser, [await chatMediaRoot().catch(() => null), ownFolder]);
+    for (const source of mentioned) {
+      // Said by its real path, the one its ownership is recorded under.
+      const real = path.isAbsolute(source) ? await fsp.realpath(/* turbopackIgnore: true */ source).catch(() => null) : null;
+      if (real && !claimedImages.includes(real) && !drawn.includes(real) && (await served(real))) claimedImages.push(real);
+    }
+    // The same rule for every other file the caption still names (a document,
+    // a picture in the shared tree).
+    shownCaption = await memberServableCaption(caption, served);
+  }
   const answer = [
-    caption,
+    shownCaption,
+    ...claimedImages.map((file) => `MEDIA:${file}`),
     ...drawn.map((file) => `MEDIA:${file}`),
     ...(spokenClip ? [`MEDIA:${spokenClip}`] : []),
   ]
@@ -527,6 +640,8 @@ async function settleTurn(
     timestamp: Date.now(),
     ...(reply.images.length ? { media: reply.images } : {}),
     ...(reply.audio.length ? { audio: reply.audio } : {}),
+    // A document the reply named (a tool's .docx): its download card survives a refresh.
+    ...(reply.files.length ? { files: boundedFiles(reply.files) } : {}),
     // Persisted beside the answer, never inside it: replay has to be able to
     // collapse the monologue the same way the live turn did.
     ...(settledReasoning ? { reasoning: settledReasoning } : {}),
@@ -932,6 +1047,7 @@ async function runStreamedTurn(
           final.text,
           final.reasoning,
           await servedPair(final, turn, threaded, usageBefore),
+          live.startedAt,
         ),
       );
     }
@@ -993,6 +1109,7 @@ async function runStreamedTurn(
             recovered.text,
             "",
             await servedPair(null, turn, threaded, usageBefore),
+            live.startedAt,
           ),
         );
         return;
@@ -1200,8 +1317,42 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "message is required" }, { status: 400 });
   }
 
-  const rawModel = typeof body.model === "string" ? body.model.trim() : "";
-  const rawProvider = typeof body.provider === "string" ? body.provider.trim() : "";
+  // ── A member of staff on an organisation box (TASK-2444, TASK-2445) ──────
+  //
+  // Their turn runs on THEIR OWN Hermes profile (src/lib/hermes-staff-profile.ts):
+  // the staff toolsets of config/org-staff-policy.json, their own memory and
+  // sessions, their own folder. Refused before anything is recorded: a command
+  // other than /new and /reasoning, and — fail closed — a turn whose profile
+  // could not be prepared. The model is the box's: what the composer names is
+  // not theirs to change.
+  const memberState = await orgMemberStrictOf(request);
+  if (memberState === "unknown") {
+    return NextResponse.json(
+      { error: "This ClawBox's settings could not be read. Try again in a minute.", code: "org_mode_unknown" },
+      { status: 503 },
+    );
+  }
+  const member = memberState;
+  let staff: StaffHermesProfile | null = null;
+  if (member) {
+    const verdict = staffMessageVerdict(message, { inline: false });
+    if (!verdict.ok) {
+      return NextResponse.json({ error: staffCommandRefusal(verdict.command), code: "staff_command_refused" }, { status: 403 });
+    }
+    staff = await ensureStaffHermesProfile(member.username);
+    // The running dashboard must have LOADED the staff guard, not only have it
+    // on disk: refused (and the dashboard asked to reload) until it has.
+    if (staff && (await staffGuardLoaded()) === false) staff = null;
+    if (!staff) {
+      return NextResponse.json(
+        { error: "Your assistant is being set up on this ClawBox. Try again in a minute.", code: "staff_profile_unavailable" },
+        { status: 503 },
+      );
+    }
+  }
+
+  const rawModel = staff ? "" : typeof body.model === "string" ? body.model.trim() : "";
+  const rawProvider = staff ? "" : typeof body.provider === "string" ? body.provider.trim() : "";
   let rawReasoning = typeof body.reasoning === "string" ? body.reasoning.trim() : "";
   const requestedSessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
   if (requestedSessionId && !SESSION_ID_RE.test(requestedSessionId)) {
@@ -1216,6 +1367,23 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: which.error, code: which.code }, { status: which.status });
   }
   const sessionKey = which.key;
+  // A user other than the owner is held to the owner's chat limits
+  // (src/lib/user-limits.ts) — the same count the OpenClaw relay keeps. A
+  // typed /new or /reset that names no file is answered below without a turn
+  // of the model's (the words after it come back as a turn of their own,
+  // which is counted then), so it is the one message never counted. One that
+  // names a file — even an empty entry — is a turn, and counts.
+  const namesFile = [body.imagePaths, body.documentPaths].some((v) => v !== undefined && v !== null && !(Array.isArray(v) && v.length === 0));
+  const resetOnly = !namesFile && typedResetCommand(message) !== null;
+  if (!which.principal.isOwner && !resetOnly) {
+    const verdict = admitChatRequest(which.principal.username, await readUserLimits());
+    if (!verdict.ok) {
+      return NextResponse.json(
+        { error: chatLimitSentence(verdict), code: "rate_limited", retryAfterSeconds: verdict.retryAfterSeconds },
+        { status: 429, headers: { "Retry-After": String(verdict.retryAfterSeconds) } },
+      );
+    }
+  }
   // A Hermes session another person's chat opened is not resumed: the turn
   // starts a fresh one instead.
   const rawSessionId = hermesSessionFor(which.principal, requestedSessionId);
@@ -1337,8 +1505,11 @@ export async function POST(request: Request) {
     // `-t` is a whitelist over the BUILT-IN toolsets only (verified against
     // agent_init.py / model_tools.py); MCP tools are merged separately, so the
     // ClawBox device tools survive it. See src/lib/local-model-profile.ts.
+    // Never for a member of staff: `-t` names toolsets over their profile's
+    // own selection, and the slim list is the owner's (web search included).
     if (
-      effectiveProvider === HERMES_LOCAL_REASONING_PROVIDER
+      !staff
+      && effectiveProvider === HERMES_LOCAL_REASONING_PROVIDER
       && slimLocalProfileEnabled()
       && isSmallLocalModel({ modelId: rawModel || payload.current.model })
     ) {
@@ -1386,6 +1557,46 @@ export async function POST(request: Request) {
     }
   }
 
+  // ── /new and /reset (TASK-2520) ─────────────────────────────────────────
+  //
+  // The one command `slash.exec` cannot run: Hermes leaves "start a new
+  // session" to its client (its own TUI opens the session), so the slash
+  // worker sat on it until it gave up — 45 seconds, then "slash worker timed
+  // out", and the conversation exactly where it was, for the owner and every
+  // other user alike. This chat is the client here, and starting its fresh
+  // session is what the new-chat control already does in three requests: the
+  // conversation's running turn stopped, its stored transcript cleared, the
+  // Hermes session id forgotten. A typed command does the same in this one —
+  // here, AFTER everything above has had its say (a member of staff's `/reset`
+  // or `/new <anything>` was refused before anything of theirs was cleared) —
+  // and `freshSession` tells the caller to drop the id it threads.
+  //
+  // Words after the command are the first message of the fresh conversation,
+  // as on the OpenClaw edition; the chat sends them as a turn of their own
+  // once this has answered (`HermesAdapter.sendTurn`), so nothing is recorded
+  // for them here. The bare command is recorded with its answer, like any
+  // other command's output. A turn carrying a file is left alone: no command
+  // is read off one below either.
+  const carriesFile = (Array.isArray(body.imagePaths) && body.imagePaths.length > 0)
+    || (Array.isArray(body.documentPaths) && body.documentPaths.length > 0);
+  const fresh = carriesFile ? null : typedResetCommand(message);
+  if (fresh) {
+    await stopLiveTurns(sessionKey);
+    try {
+      await clearTranscript(sessionKey);
+    } catch (err) {
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "Could not start a new session" },
+        { status: 500 },
+      );
+    }
+    if (!fresh.tail) {
+      await appendTranscript({ role: "user", text: message, timestamp: Date.now() }, sessionKey);
+      await appendTranscript({ role: "assistant", text: FRESH_SESSION_NOTICE, timestamp: Date.now() }, sessionKey);
+    }
+    return NextResponse.json({ text: FRESH_SESSION_NOTICE, harness: "hermes", freshSession: true } satisfies TurnPayload);
+  }
+
   // A message starting with "-" gets a leading space so hermes reads it as the
   // prompt value (the UI shows ClawBox's own copy of the message, not this one).
   const safeMessage = message.startsWith("-") ? ` ${message}` : message;
@@ -1416,6 +1627,13 @@ export async function POST(request: Request) {
   // Every path is re-resolved against the staging root here rather than
   // trusted from the body: it is about to become an argv element, and the
   // agent opens any readable absolute path it is handed.
+  // A member of staff on an organisation box hands the agent only files of
+  // their OWN chat: a path in the shared media tree that is recorded as
+  // someone else's — or as nobody's, the owner's — is dropped like a missing
+  // one (src/lib/chat-media-owners.ts). Otherwise naming another person's
+  // upload here would have the agent read it into the member's conversation.
+  const memberRootReal = member ? await fsp.realpath(/* turbopackIgnore: true */ await chatMediaRoot()).catch(() => null) : null;
+  const theirs = (safe: string) => !member || (memberRootReal !== null && isMediaOwnedBy(member.username, safe, memberRootReal));
   const requestedImages = Array.isArray(body.imagePaths)
     ? body.imagePaths.filter((entry): entry is string => typeof entry === "string").slice(0, MAX_IMAGES_PER_TURN)
     : [];
@@ -1426,7 +1644,7 @@ export async function POST(request: Request) {
     // The alternative is worse than it sounds: the staging tree is swept on a
     // retention schedule, so a file that aged out between being attached and
     // being sent would turn an ordinary message into a failed one.
-    if (safe && !imagePaths.includes(safe)) imagePaths.push(safe);
+    if (safe && theirs(safe) && !imagePaths.includes(safe)) imagePaths.push(safe);
   }
   const [firstImage, ...extraImages] = imagePaths;
 
@@ -1446,7 +1664,7 @@ export async function POST(request: Request) {
   const documentPaths: string[] = [];
   for (const requested of requestedDocuments) {
     const safe = await resolveInMediaRoot(requested);
-    if (safe && !documentPaths.includes(safe) && !imagePaths.includes(safe)) documentPaths.push(safe);
+    if (safe && theirs(safe) && !documentPaths.includes(safe) && !imagePaths.includes(safe)) documentPaths.push(safe);
   }
   const documentLines = await hermesDocumentPrompt(documentPaths);
 
@@ -1520,9 +1738,16 @@ export async function POST(request: Request) {
     // attachment, the user turn above has already been recorded WITH its media,
     // and a branch that ran the command and dropped the file would show the owner
     // their screenshot in the transcript over an answer that never saw it.
-    if (imagePaths.length === 0 && documentPaths.length === 0 && isSlashCommandMessage(message)) {
+    //
+    // Never `/new` or `/reset`: the slash worker cannot run them (see "/new and
+    // /reset" above, which answers every one that named no file). One that
+    // gets this far named a file — and is a turn for the transports like any
+    // other that does, also when none of its files could be read from staging
+    // and the lists above came out empty.
+    if (imagePaths.length === 0 && documentPaths.length === 0 && isSlashCommandMessage(message) && !typedResetCommand(message)) {
       const ran = await runHermesSlashCommand({
         command: message.trim(),
+        ...(staff ? { profile: staff.profile } : {}),
         ...(rawSessionId ? { sessionId: rawSessionId } : {}),
         ...(rawModel ? { model: rawModel } : {}),
         ...(wantsProvider ? { provider: rawProvider } : {}),
@@ -1629,6 +1854,7 @@ export async function POST(request: Request) {
           ...(reportedUserDefined === undefined ? {} : { providerIsUserDefined: reportedUserDefined }),
           ...(rawReasoning ? { reasoning: rawReasoning } : {}),
           ...(rawSessionId ? { sessionId: rawSessionId } : {}),
+          ...(staff ? { profile: staff.profile, cwd: staff.folder, denyApprovals: true } : {}),
           signal: live.signal,
           onOpenFailure: (failure) => {
             lastOpen.failure = failure;
@@ -1653,9 +1879,11 @@ export async function POST(request: Request) {
         console.log(`[hermes chat] Hermes would not switch this conversation to ${turn.refusedModel}; `
           + `its own model ${turn.model || "(unnamed)"} answers`);
       }
-      return streamed
+      // A member's session, record and billing rows are in their own
+      // profile's state.db: every read the turn makes opens that one.
+      return withHermesStateHome(staff?.home, () => (streamed
         ? streamTurn(turn, rawSessionId, sessionKey, wantsProvider, live, listening)
-        : settledTurnResponse(turn, rawSessionId, sessionKey, wantsProvider, live, listening);
+        : settledTurnResponse(turn, rawSessionId, sessionKey, wantsProvider, live, listening)));
     };
     // ── The one retry ───────────────────────────────────────────────────────
     //
@@ -1701,6 +1929,10 @@ export async function POST(request: Request) {
     // The CLI's argv is built here, beside its one use, rather than before the
     // dashboard is tried: only the fallback reads it.
     const args = ["chat", "-q", promptWithImages, "-Q"];
+    // A member of staff's turn runs on their own profile here too: the CLI's
+    // global `--profile`, ahead of the subcommand, where Hermes reads it before
+    // anything else (hermes_cli/main.py).
+    if (staff) args.unshift(`--profile=${staff.profile}`);
     if (firstImage) args.push("--image", firstImage);
     // The creation flags below go on a NEW conversation only. From Hermes v0.22.4
     // `hermes chat` runs through the gateway, and a resume keeps the session's
@@ -1762,7 +1994,7 @@ export async function POST(request: Request) {
       // config.yaml's pairing, which is the same read the validation above makes
       // when it has a reason to: recorded too, because a blank under a reply the
       // box knows the model of is a false unknown, not modesty.
-      const answered = await settleTurn(threaded, sessionKey, text, "", cliServed);
+      const answered = await withHermesStateHome(staff?.home, () => settleTurn(threaded, sessionKey, text, "", cliServed, live.startedAt));
       live.emit("done", answered);
       // The one-shot answer is held to the same rule as the stream: a session
       // that ran out while the CLI was answering is signed out rather than

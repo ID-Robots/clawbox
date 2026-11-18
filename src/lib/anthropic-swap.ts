@@ -379,6 +379,17 @@ function answeredActive(consumer: Exclude<SwapConsumerName, "retries">, pool: Po
 }
 
 /**
+ * Would a bare rate limit on this account (null: the gateway's own sign-in,
+ * as reportAnthropicFailure files it) be its SECOND inside the throttle
+ * window — its cap, which reportAnthropicFailure takes the limit's way? Reads
+ * the throttles seen; records nothing.
+ */
+export function throttleSeenRecently(accountId: string | null, now: number = Date.now()): boolean {
+  const seen = runtime().throttles.get(accountId ?? "own");
+  return !!seen && now - seen.at <= THROTTLE_WINDOW_MS;
+}
+
+/**
  * A consumer that is not the coding runner saw a turn fail — the chat, a cron
  * run. If it is an Anthropic limit or a refused credential: record it on the
  * account it was on, let the pool move the active account (which fans the swap

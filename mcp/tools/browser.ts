@@ -501,11 +501,11 @@ export function registerBrowserTools(reg: Registrar): void {
   // looks at a file it saved (run-d8816d78 built a viewer.html and drove the
   // device browser at it just to see its own frames); on the assistant's own
   // server it reads a screenshot or photo on disk the same way. The backend
-  // answers a clean error when ClawBox AI is not linked, so this never trips
-  // the circuit breaker for a healthy box.
+  // answers a clean error when ClawBox AI is not linked (or the box's own
+  // model cannot see), so this never trips the circuit breaker for a healthy box.
   reg.tool(
     "describe_image",
-    "Get a written description of a local image file (.png, .jpg, .jpeg, .webp) from the device's ClawBox AI model, to check a picture or screenshot you saved.",
+    "Get a written description of a local image file (.png, .jpg, .jpeg, .webp) from the device's vision model (ClawBox AI, or the model on this box where it runs its own), to check a picture or screenshot you saved.",
     {
       path: zText(512, "Image file to describe. Relative paths resolve against the working folder."),
       prompt: zText(600, "What to look for, in one sentence. Omit for a general description.").optional(),

@@ -13,7 +13,7 @@ const realHostname = osModule.hostname;
 
 // gateway-proxy.ts's redirectToSetup() reflects the request's own origin
 // back into the /setup redirect URL when the host is trusted, instead of
-// always falling back to CANONICAL_ORIGIN. This exercises the NEW trusted
+// always falling back to a relative /setup. This exercises the NEW trusted
 // control-UI origins path: unlike the pre-existing ALLOWED_HOSTS/mDNS/IP
 // matching (host-only, scheme/port-agnostic), a configured origin from
 // control-ui-origins.json must match scheme+host+port EXACTLY.
@@ -74,9 +74,8 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     });
     const response = gatewayProxy.redirectToSetup(request);
 
-    // Falls through to CANONICAL_ORIGIN default, not the request's own host.
-    expect(response.headers.get("location")).not.toContain("custom.example.com:9999");
-    expect(response.headers.get("location")).toContain("clawbox.local");
+    // Falls through to a relative /setup, not the request's own host.
+    expect(response.headers.get("location")).toBe("/setup");
   });
 
   it("does NOT reflect the same configured hostname on a different scheme", async () => {
@@ -89,8 +88,7 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     });
     const response = gatewayProxy.redirectToSetup(request);
 
-    expect(response.headers.get("location")).not.toContain("custom.example.com");
-    expect(response.headers.get("location")).toContain("clawbox.local");
+    expect(response.headers.get("location")).toBe("/setup");
   });
 
   it("reflects when the exact scheme is also configured separately", async () => {
@@ -127,8 +125,7 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     });
     const response = gatewayProxy.redirectToSetup(request);
 
-    expect(response.headers.get("location")).not.toContain("untrusted.example.com");
-    expect(response.headers.get("location")).toContain("clawbox.local");
+    expect(response.headers.get("location")).toBe("/setup");
   });
 
   it("enforces exact scheme and port for a configured non-default origin", async () => {
@@ -143,7 +140,7 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     const wrongPort = gatewayProxy.redirectToSetup(
       createRequest("http://box.example.com:9999/", { host: "box.example.com:9999" }),
     );
-    expect(wrongPort.headers.get("location")).toContain("clawbox.local");
+    expect(wrongPort.headers.get("location")).toBe("/setup");
 
     const wrongScheme = gatewayProxy.redirectToSetup(
       createRequest("http://box.example.com:8080/", {
@@ -151,7 +148,7 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
         "x-forwarded-proto": "https",
       }),
     );
-    expect(wrongScheme.headers.get("location")).toContain("clawbox.local");
+    expect(wrongScheme.headers.get("location")).toBe("/setup");
   });
 
   it("keeps broad reflection for a default host even when a matching origin is configured", async () => {
@@ -194,7 +191,7 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     const stale = gatewayProxy.redirectToSetup(
       createRequest("http://first.example.com/", { host: "first.example.com" }),
     );
-    expect(stale.headers.get("location")).toContain("clawbox.local");
+    expect(stale.headers.get("location")).toBe("/setup");
   });
 
   it("retains existing ALLOWED_HOSTS/IP reflection when no origins are configured", async () => {
@@ -238,15 +235,15 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     );
     expect(renamed.headers.get("location")).toBe("http://kitchen/setup");
 
-    // Still narrow: a name that is not this box's falls back to the canonical
-    // origin rather than being reflected.
+    // Still narrow: a name that is not this box's falls back to a relative
+    // /setup rather than being reflected.
     const foreign = gatewayProxy.redirectToSetup(
       createRequest("http://intranet/", { host: "intranet" }),
     );
-    expect(foreign.headers.get("location")).toContain("clawbox.local");
+    expect(foreign.headers.get("location")).toBe("/setup");
   });
 
-  it("falls back to the canonical origin on a malformed Host port instead of throwing", async () => {
+  it("falls back to a relative /setup on a malformed Host port instead of throwing", async () => {
     process.env[ENV_VAR] = path.join(dir, "absent.json");
     await importFresh();
 
@@ -256,8 +253,7 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
     const request = createRequest("http://clawbox.local/", { host: "clawbox.local:99999" });
     expect(() => gatewayProxy.redirectToSetup(request)).not.toThrow();
     const location = gatewayProxy.redirectToSetup(request).headers.get("location");
-    expect(location).toContain("clawbox.local");
-    expect(location).not.toContain("99999");
+    expect(location).toBe("/setup");
   });
 
   it("an invalid origins file yields no extras and does not affect existing host reflection", async () => {
@@ -275,7 +271,7 @@ describe("gateway-proxy trusted control UI origin reflection", () => {
       host: "untrusted.example.com",
     });
     const untrustedResponse = gatewayProxy.redirectToSetup(untrustedRequest);
-    expect(untrustedResponse.headers.get("location")).not.toContain("untrusted.example.com");
+    expect(untrustedResponse.headers.get("location")).toBe("/setup");
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("not valid JSON"));
   });
 });

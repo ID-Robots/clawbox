@@ -157,6 +157,13 @@ describe("memory_shard_reindex", () => {
     out = await harness().call("memory_shard_reindex", { mode: "incremental" });
     expect(out.isError && out.error.next).toMatch(/memory_shard_enable/);
 
+    // On OpenClaw the running gateway does an incremental pass by itself; the
+    // box no longer stops the assistant for one, and says there is nothing to do.
+    routes({ [`POST ${BASE}/index`]: refusal(409, { accepted: false, kind: "gateway_indexes", run: { status: "idle" } }) });
+    out = await harness().call("memory_shard_reindex", { mode: "incremental" });
+    expect(out.isError && out.error.code).toBe("CONFLICT");
+    if (out.isError) expect(out.error.next).toMatch(/keeps this index up to date by itself/);
+
     // An older build that still keeps the routes to the owner, or a request
     // that carried no bearer: refused 403, said as the owner's to do.
     routes({ [`POST ${BASE}/index`]: refusal(403, { kind: "owner_only", error: "Starting an index run needs a signed-in browser session." }) });

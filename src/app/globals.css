@@ -61,11 +61,18 @@
   font-display: swap;
   unicode-range: U+2190-23FF, U+2500-27BF, U+2B00-2BFF, U+E000-F8FF, U+F0000-FFFFD;
 }
+/* The icon font, by a RELATIVE url(): the bundler emits it under
+   /_next/static/media with a content hash, which Next caches `immutable` and
+   sends as stored (WOFF2 is already compressed). From public/ it was
+   revalidated on every load, and as a TTF gzipped again on every uncached
+   request. Made from the TTF next to the WOFF2 (docs/agents/desktop.md has
+   the command). `block`: the glyphs are ligatures, so any other value paints
+   their names in the fallback face until the font arrives. */
 @font-face {
   font-family: "Material Symbols Rounded";
   font-style: normal;
   font-weight: 400;
-  src: url("/fonts/material-symbols-rounded.ttf") format("truetype");
+  src: url("../assets/fonts/material-symbols-rounded.woff2") format("woff2");
   font-display: block;
 }
 

@@ -97,6 +97,11 @@ describe("the owner's edit and clear", () => {
     expect(readRunNotes(project)).toBe("");
   });
 
+  it("saves notes that only mention a credential field in quotes, as before", async () => {
+    const notes = 'The login form rejects password: "must be at least 8 characters" until the field has a digit.';
+    await expect(writeRunNotes(project, notes)).resolves.toBe(notes);
+  });
+
   it("clears, and an empty save is a clear too", async () => {
     await writeRunNotes(project, "- one");
     clearRunNotes(project);
@@ -148,6 +153,13 @@ describe("vetting one lesson", () => {
     expect(vetLesson(42)).toMatchObject({ ok: false, refusal: { reason: "not_text" } });
     expect(vetLesson("use bun")).toMatchObject({ ok: false, refusal: { reason: "too_short" } });
     expect(vetLesson("x".repeat(MAX_LESSON_CHARS + 1))).toMatchObject({ ok: false, refusal: { reason: "too_long" } });
+  });
+
+  it("keeps a lesson that only mentions a credential field in quotes, as before", () => {
+    for (const lesson of [
+      'The signup check refuses token: "expired session" until the page reloads',
+      'The secret: "rotate monthly" policy applies to the deploy keys',
+    ]) expect(vetLesson(lesson)).toEqual({ ok: true, lesson });
   });
 
   it("drops a credential by shape, and never quotes it back", () => {

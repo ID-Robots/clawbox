@@ -38,6 +38,13 @@ carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
        switch off too, because it compacts nothing itself: the compaction it
        counts is one already recorded — a "Run now", or a start while the
        switch was on — and with none recorded since the copy, the copy stays.
+       The core's own standalone ``doctor --fix`` retires its sealed standalone
+       Doctor captures once they are over 30 days old, and "incomplete
+       captures and update captures are never retired automatically" (pinned
+       docs, docs/cli/update/repair-and-recovery.md "Original state
+       captures"). So for a sealed Doctor capture this clean-up is the EARLY
+       path, and for an incomplete capture or an update capture it is the only
+       one. The captures it keeps are counted in one line, not listed.
 
 ``start-guard`` (run by scripts/gateway-pre-start.sh, first, gateway stopped)
     A single row the core refuses in the default agent's database (or the
@@ -60,8 +67,16 @@ carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
     override took first. Then measures the databases the core would migrate and
     refuses (exit 3) when the filesystem cannot hold the migration's copies.
 
-``record-doctor`` (run by install.sh after ``doctor --fix``)
-    Records the migration verdict for the status file.
+``record-doctor`` (run by install.sh after ``doctor --fix``, and by the update's
+gateway check after its own ``doctor --fix`` completed)
+    Records the migration verdict for the status file. ``--source`` says which.
+
+``doctor-due`` (run by the update's gateway check after its own ``doctor --fix``
+did not complete)
+    Keeps the recorded verdict and core, which install.sh's fast path reads,
+    and drops the run's time, which only the update's gateway check reads: that
+    check then runs doctor again at the next update, as it did at every update
+    before it learnt to skip a recent run.
 
 ``maintain`` (Settings "Run now" and the CLI, whatever the owner's switch
 says; the web server's nightly slot only while it is on)
@@ -104,7 +119,12 @@ every change is the core's own command. The one thing deleted by hand is the
 migration's rollback copies, and only under the verification above — the core's
 own ``openclaw update cleanup`` is asked first, but it keeps every group until
 its OWN updater has recorded a later successful update, which ClawBox, which
-installs the pinned core with npm, never does. Two things are MOVED by hand. A
+installs the pinned core with npm, never does. The core's own standalone
+``doctor --fix`` retires its sealed standalone Doctor captures once they are
+over 30 days old, and never an incomplete capture or an update capture (pinned
+docs, docs/cli/update/repair-and-recovery.md "Original state captures"), so this
+clean-up is the EARLY path for the first and the only one for the other two.
+Two things are MOVED by hand. A
 database newer than the core being installed, under the owner's override only:
 OpenClaw has no downgrade of its own (its docs: install a build that supports
 the schema, restore a backup matching the older build, or give the older build
@@ -1058,22 +1078,74 @@ def cleanup(args, dbs, core, status, record, deadline):
         freed = remove_files([b["path"] for b in db["backups"]])
         removed += freed
         log("removed the pre-migration copy of %s (%s): the migrated database passed its integrity check" % (label(db), human(freed)))
+
+    def written_and_size(run):
+        # tree_time() and tree_bytes() in ONE walk: every kept capture is
+        # walked on every gateway start, and its size is only for the line below.
+        latest, total = 0.0, 0
+        for base, dirs, files in os.walk(run, followlinks=False):
+            for name in [""] + files + dirs:
+                try:
+                    st = os.lstat(os.path.join(base, name) if name else base)
+                except OSError:
+                    continue
+                latest = max(latest, st.st_mtime, st.st_ctime)
+                if stat.S_ISREG(st.st_mode):
+                    total += st.st_size
+        return latest, total
+
+    # The captures kept are counted, not listed: with compaction off (the
+    # default) this keeps every one of them, and a line each was most of what
+    # every gateway start printed.
+    unchecked_n = no_dbs_n = unstarted_n = kept_bytes = unknown_age_n = 0
+    waiting_on = []
+    oldest = None
     for run in runs:
         # A capture is a copy of the whole state: it goes only when EVERY
         # database passed a compaction after it was written — and never when
         # there are no databases left, where it may be the only copy there is.
-        written = tree_time(run)
+        written, size = written_and_size(run)
         unchecked = [db for db in dbs if not verified_since(db, record, written)]
-        if not dbs or unchecked:
-            log("update capture %s kept until %s has passed a compaction's integrity check" % (
-                os.path.basename(run), label(unchecked[0]) if unchecked else "a database"))
+        if not dbs:
+            no_dbs_n += 1
+        elif unchecked:
+            unchecked_n += 1
+            if label(unchecked[0]) not in waiting_on:
+                waiting_on.append(label(unchecked[0]))
+        elif not started_since(guard, written):
+            unstarted_n += 1
+        else:
+            freed = remove_tree(run)
+            removed += freed
+            log("removed the update capture %s (%s)" % (os.path.basename(run), human(freed)))
             continue
-        if not started_since(guard, written):
-            log("update capture %s kept until the gateway has started on the migrated databases" % os.path.basename(run))
-            continue
-        freed = remove_tree(run)
-        removed += freed
-        log("removed the update capture %s (%s)" % (os.path.basename(run), human(freed)))
+        kept_bytes += size
+        # 0.0 is a capture the walk could not read, not one from 1970.
+        if written > 0:
+            oldest = written if oldest is None else min(oldest, written)
+        else:
+            unknown_age_n += 1
+    kept = unchecked_n + no_dbs_n + unstarted_n
+    if kept:
+        def waits(n):
+            return "%d %s" % (n, "waits" if n == 1 else "wait")
+
+        reasons = []
+        if unchecked_n:
+            reasons.append("%s for a compaction's integrity check (%s)" % (waits(unchecked_n), ", ".join(waiting_on)))
+        if no_dbs_n:
+            reasons.append("%d kept with no databases left (it may be the only copy there is)" % no_dbs_n)
+        if unstarted_n:
+            reasons.append("%s for a gateway start on the migrated databases" % waits(unstarted_n))
+        ages = []
+        if oldest is not None:
+            days = int(max(0.0, time.time() - oldest) // 86400)
+            ages.append("oldest %d day%s" % (days, "" if days == 1 else "s"))
+        if unknown_age_n:
+            ages.append("%d of unknown age" % unknown_age_n)
+        log("update captures: %d kept (%s, %s): %s; OpenClaw's own standalone doctor --fix"
+            " retires sealed Doctor captures once they are over 30 days old" % (
+                kept, human(kept_bytes), ", ".join(ages), ", ".join(reasons)))
     if runs and os.path.isdir(root):
         try:
             leftover = [n for n in os.listdir(root) if n != CAPTURE_MARKER]
@@ -1874,9 +1946,26 @@ def cmd_record_doctor(args):
     previous["doctor"] = {"core": (core or {}).get("version"), "verdict": args.verdict, "at": iso(time.time())}
     dbs = inventory(args.state_dir, args.config)
     status = migration_status(dbs, core, previous)
-    status["source"] = "install"
-    write_json(status_path, status)
+    status["source"] = args.source
+    if not write_json(status_path, status):
+        return 1
     log("recorded the migration as %s (%s)" % (args.verdict, status["state"]))
+    return 0
+
+
+def cmd_doctor_due(args):
+    """doctor's recorded run, due again: the verdict and core stay, the time goes."""
+    status_path = os.path.join(args.data_dir, STATUS_FILE)
+    status = read_json(status_path)
+    doctor = status.get("doctor") if isinstance(status, dict) else None
+    if not isinstance(doctor, dict) or doctor.get("at") is None:
+        log("doctor's recorded run is already due")
+        return 0
+    status["doctor"] = dict(doctor, at=None)
+    status["source"] = "update"
+    if not write_json(status_path, status):
+        return 1
+    log("doctor's recorded run is due again")
     return 0
 
 
@@ -2724,6 +2813,10 @@ def main(argv=None):
     p = sub.add_parser("record-doctor")
     common(p)
     p.add_argument("--verdict", choices=("complete", "incomplete"), required=True)
+    p.add_argument("--source", choices=("install", "update"), default="install")
+
+    p = sub.add_parser("doctor-due")
+    common(p)
 
     def maintenance(p):
         # Every path defaults to the box's own (default_paths), for the CLI.
@@ -2806,6 +2899,7 @@ def main(argv=None):
         "start-guard": cmd_start_guard,
         "preflight": cmd_preflight,
         "record-doctor": cmd_record_doctor,
+        "doctor-due": cmd_doctor_due,
         "maintain": cmd_maintain,
         "status": cmd_status,
         "memory-rebuild": cmd_memory_rebuild,

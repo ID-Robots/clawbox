@@ -32,13 +32,24 @@
 //     the user was shown) pass as they are; everything else is refused with
 //     the gateway's own error frame shape, so the chat reports it like any
 //     other refusal.
-//   * `sessions.reset` (the chat's /new and /reset) is the one exception to
+//   * `sessions.reset` (the chat's "new chat" button) is the one exception to
 //     "never admin": OpenClaw requires `operator.admin` from any caller that
 //     declares scopes before it resets a session, so the user's socket can
 //     never do it. Once the key has passed the same ownership check, the relay
 //     runs that one reset on a short-lived socket of its own that declares
 //     admin, sends nothing else on it, and closes it. The browser's socket
 //     keeps its scopes; the user can reset only their own sessions.
+//   * A TYPED `/new` or `/reset` is that same reset. The chat sends it as the
+//     text of a `chat.send`, and the core answers a caller without
+//     `operator.admin` "You are not authorized to reset this session" — so a
+//     user could never start a fresh conversation by typing the command the
+//     catalogue offers them. The relay reads the command off the message
+//     (`typedResetCommand`), runs the reset as above — the key and the reason
+//     only — and then finishes the turn the way the core would: a bare command
+//     is answered with the core's own notice ("New session started."), and
+//     text after the command (`/new hello`) goes out as an ordinary
+//     `chat.send` on the USER's socket, into the fresh session. Nothing the
+//     user typed reaches the admin socket.
 //   * Every event the gateway broadcasts is dropped unless it names one of the
 //     user's sessions, so the owner's turns never stream into a user's window.
 //
@@ -46,11 +57,42 @@
 // account for everyone, and its tools reach what that account reaches. What
 // it guarantees is that a user's chat, its history and its live stream are
 // theirs, and that the owner's are not on the wire to them.
+//
+// ON AN ORGANISATION BOX (org_mode, src/lib/org-mode.ts) a member of staff's
+// conversations live on THEIR OWN agent, `clawbox-staff-<name>`
+// (src/lib/org-staff-agents.ts): its own workspace and memory, and the tool
+// allow-list of config/org-staff-policy.json enforced by the gateway itself.
+// The relay is what holds them to it (`staffAgent` in the state):
+//
+//   * the hello names `agent:clawbox-staff-<name>:clawbox-user-<name>`, and
+//     only keys on that agent pass — never their old key on the owner's agent;
+//   * a turn goes out only while that agent is configured with the staff
+//     policy (`staffReady`), so a missing or widened entry fails closed rather
+//     than running with the core's defaults;
+//   * `/new` and `/reasoning` are the only commands they may send, and no
+//     inline directive (`/model x` mid-sentence) reaches the gateway; the
+//     catalogue they are shown is cut to those two;
+//   * a session patch carries only the thinking and reasoning levels and a
+//     label — never a model, a tool override or an elevated level;
+//   * a `chat.send` carries only the fields ClawBox's chat sends.
+//
+// The owner turning the switch while the socket is open closes it, so the
+// next hello is the right one.
 
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const { openclawUserMainKey, userMayUseKey } = require("./chat-scope.js");
+const { agentIdOfKey, openclawUserMainKey, userMayUseKey } = require("./chat-scope.js");
+const { historyClaims, replyMediaPaths } = require("./chat-reply-media.js");
+const { chatLimitSentence } = require("./user-limits.js");
+const {
+  STAFF_GUARD_PLUGIN_ID,
+  isStaffCatalogueCommand,
+  staffAgentConfigured,
+  staffCommandRefusal,
+  staffGuardEnabled,
+  staffMessageVerdict,
+} = require("./org-staff-policy.js");
 
 /** The client the relay connects as: the same identity the browser's chat uses. */
 const RELAY_CLIENT = Object.freeze({ id: "openclaw-control-ui", mode: "webchat", platform: "linux", version: "clawbox-user-relay" });
@@ -104,20 +146,155 @@ function refusalFrame(id, message) {
   };
 }
 
+/** A turn past the user's chat limit (scripts/user-limits.js): the same shape, its own code and the wait. */
+function chatLimitFrame(id, verdict) {
+  return {
+    type: "res",
+    id,
+    ok: false,
+    error: { code: "RATE_LIMITED", message: chatLimitSentence(verdict), retryAfterMs: verdict.retryAfterSeconds * 1000 },
+  };
+}
+
+/**
+ * The core's `/new` and `/reset`, as its command parser reads the start of a
+ * message (`normalizeCommandBody`, then `/^\/(new|reset)(?:\s|$)/i` in
+ * commands-reset.ts of the pinned core): the bare word, the word and a
+ * message after white space (a new line included), or its `/new: message`
+ * colon form.
+ */
+const RESET_COMMAND_RE = /^\/(new|reset)(?:\s*:|(?=\s)|$)/i;
+/** `/reset soft …`: the core's in-place reset that keeps the transcript. */
+const SOFT_RESET_RE = /^soft(?:\s|$)/i;
+
+/**
+ * A chat message that is a typed `/new` or `/reset`: `{ action, tail }` — the
+ * command, and the message that followed it ("" for the bare command) — or
+ * null for anything else. The CommonJS copy of `typedResetCommand` in
+ * src/lib/chat-slash-commands.ts (which the Hermes chat reads the command
+ * with); src/tests/unit/chat-slash-commands.test.ts runs one table through both.
+ *
+ * `/reset soft` is "anything else": the gateway's `sessions.reset` is the hard
+ * reset, so running it for a soft one would archive a transcript the user
+ * asked to keep. It travels as it is and the core answers it.
+ */
+function typedResetCommand(message) {
+  if (typeof message !== "string") return null;
+  const text = message.trim();
+  const match = RESET_COMMAND_RE.exec(text);
+  if (!match) return null;
+  const action = match[1].toLowerCase();
+  const tail = text.slice(match[0].length).trim();
+  if (action === "reset" && SOFT_RESET_RE.test(tail)) return null;
+  return { action, tail };
+}
+
+/**
+ * What the chat is told once a bare typed `/new` or `/reset` has reset the
+ * session: the frames the core itself answers that command with — the
+ * `chat.send` acknowledged under its run, then that run's final, the core's
+ * own status notice. So the chat shows what the owner's chat shows.
+ */
+function resetNoticeFrames(id, { runId, sessionKey, action }) {
+  const text = action === "reset" ? "✅ Session reset." : "✅ New session started.";
+  return [
+    { type: "res", id, ok: true, payload: { runId, status: "started" } },
+    {
+      type: "event",
+      event: "chat",
+      payload: {
+        runId,
+        sessionKey,
+        seq: 1,
+        state: "final",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text, openclawStatusNotice: true }],
+          timestamp: Date.now(),
+          stopReason: "stop",
+          idempotencyKey: runId,
+        },
+      },
+    },
+  ];
+}
+
 /**
  * The per-connection state: who the socket belongs to, what is in flight.
  * `gatewayMainKey` arrives with the hello; until then the user's main is
  * derived from `main`, which the hello then corrects.
  */
-function createRelayState(username) {
+function createRelayState(username, options = {}) {
   return {
     username,
+    // A member of staff on an organisation box: their own agent's id, else null.
+    staffAgent: typeof options.staffAgent === "string" && options.staffAgent ? options.staffAgent.toLowerCase() : null,
+    // Whether that agent is configured with the staff policy right now.
+    staffReady: typeof options.staffReady === "function" ? options.staffReady : () => false,
+    // The owner's chat limits for this user (scripts/user-limits.js): asked
+    // once per turn the user starts; null counts nothing.
+    admitChat: typeof options.admitChat === "function" ? options.admitChat : null,
     connectId: null,
     connected: false,
     challenge: null,
     pending: new Map(),
     questions: new Set(),
+    // sessionKey → when this socket last sent a turn on it (TASK-2516: the
+    // files a reply names are a member's only if written during their turn).
+    turnStarts: new Map(),
   };
+}
+
+/**
+ * May this connection use the session behind `key`? The user's own key, and
+ * for a member of staff only on their own agent.
+ */
+function mayUseKey(state, key) {
+  if (!userMayUseKey(state.username, key)) return false;
+  return !state.staffAgent || agentIdOfKey(key.trim()) === state.staffAgent;
+}
+
+/** The fields of a member of staff's `chat.send` that travel: what ClawBox's chat sends, nothing that routes, binds tools or claims system input. */
+const STAFF_CHAT_SEND_FIELDS = Object.freeze(["sessionKey", "message", "idempotencyKey", "attachments", "thinking", "timeoutMs"]);
+
+/** The session settings a member of staff may change: the thinking and reasoning levels (`/reasoning`), and a label. */
+const STAFF_PATCH_FIELDS = Object.freeze(["thinkingLevel", "reasoningLevel", "label", "autoLabel"]);
+
+/**
+ * A member of staff's request, narrowed: `{ params }` to pass on, or
+ * `{ refuse }` with the sentence they read. Called after the key check.
+ */
+function staffRequest(state, method, params) {
+  if (params.agentId !== undefined && (typeof params.agentId !== "string" || params.agentId.toLowerCase() !== state.staffAgent)) {
+    return { refuse: "That assistant belongs to someone else on this ClawBox." };
+  }
+  if (method === "chat.send") {
+    const verdict = staffMessageVerdict(params.message, { inline: true });
+    if (!verdict.ok) return { refuse: staffCommandRefusal(verdict.command) };
+    if (!state.staffReady()) return { refuse: "Your assistant is being set up on this ClawBox. Try again in a minute." };
+    const out = { deliver: false };
+    for (const field of STAFF_CHAT_SEND_FIELDS) if (params[field] !== undefined) out[field] = params[field];
+    return { params: out };
+  }
+  if (method === "sessions.patch") {
+    const out = { key: params.key };
+    let changes = 0;
+    for (const field of STAFF_PATCH_FIELDS) {
+      if (params[field] !== undefined) {
+        out[field] = params[field];
+        changes += 1;
+      }
+    }
+    // The chat sends the ClawBox AI model beside the level to repair old
+    // session pins; that half is the administrator's and is dropped. A patch
+    // that was ONLY a model (or a tool override, an elevated level…) is refused.
+    if (changes === 0) return { refuse: "This setting is chosen by your administrator on this organisation's ClawBox." };
+    return { params: out };
+  }
+  if (method === "commands.list") {
+    return { params: { ...params, agentId: state.staffAgent } };
+  }
+  return { params };
 }
 
 function isRecord(value) {
@@ -129,6 +306,11 @@ function isRecord(value) {
  * `{ toGateway }` to pass it on, `{ toClient }` to answer it here, `{ reset }`
  * to run a reset of the user's own session on the relay's admin socket, or
  * `{}` to drop it.
+ *
+ * A `reset` that came from a typed command carries `chat`, what follows the
+ * reset once it has succeeded: `{ send }`, the message after the command as an
+ * ordinary `chat.send` for the user's own socket, or `{ notice }`, the bare
+ * command's answer (`resetNoticeFrames`).
  */
 function filterClientFrame(state, frame) {
   if (!isRecord(frame) || frame.type !== "req" || typeof frame.id !== "string" || typeof frame.method !== "string") {
@@ -140,9 +322,28 @@ function filterClientFrame(state, frame) {
   }
   const params = isRecord(frame.params) ? frame.params : {};
   const keyParam = KEYED_METHODS[method];
-  if (keyParam) {
-    if (!userMayUseKey(state.username, params[keyParam])) {
+  let forwarded = frame;
+  if (state.staffAgent && (keyParam || KEYLESS_METHODS.has(method))) {
+    if (keyParam && !mayUseKey(state, params[keyParam])) {
       return { toClient: refusalFrame(id, "That conversation belongs to someone else on this ClawBox.") };
+    }
+    const narrowed = staffRequest(state, method, params);
+    if (narrowed.refuse) return { toClient: refusalFrame(id, narrowed.refuse) };
+    forwarded = { type: "req", id, method, params: narrowed.params };
+  }
+  if (keyParam) {
+    if (!mayUseKey(state, params[keyParam])) {
+      return { toClient: refusalFrame(id, "That conversation belongs to someone else on this ClawBox.") };
+    }
+    if (method === "chat.send" && state.admitChat) {
+      // Counted against the owner's chat limits for this user, and refused
+      // here — before the model is asked — past them. A bare /new or /reset
+      // starts no turn of the model's and is never counted.
+      const typed = typedResetCommand(params.message);
+      if (!typed || typed.tail) {
+        const verdict = state.admitChat();
+        if (verdict && verdict.ok === false) return { toClient: chatLimitFrame(id, verdict) };
+      }
     }
     if (method === "sessions.reset") {
       // Only the key and the reason travel: nothing else of the browser's frame
@@ -150,6 +351,24 @@ function filterClientFrame(state, frame) {
       const resetParams = { key: params.key };
       if (typeof params.reason === "string") resetParams.reason = params.reason.slice(0, 32);
       return { reset: { id, params: resetParams } };
+    }
+    if (method === "chat.send") {
+      // A typed /new or /reset — for a member of staff already judged above,
+      // so only their bare /new arrives here. The same reset, of the same
+      // key that just passed the ownership check; the admin socket is given
+      // the key and the command's name and nothing else of the message.
+      const typed = typedResetCommand(params.message);
+      if (typed) {
+        const resetParams = { key: params.sessionKey, reason: typed.action };
+        if (typed.tail) {
+          // The message after the command: what `forwarded` would have sent,
+          // without the command, for the user's own socket once the reset is done.
+          const send = { type: "req", id, method, params: { ...forwarded.params, message: typed.tail } };
+          return { reset: { id, params: resetParams, chat: { send } } };
+        }
+        const runId = typeof params.idempotencyKey === "string" && params.idempotencyKey ? params.idempotencyKey.slice(0, 128) : crypto.randomUUID();
+        return { reset: { id, params: resetParams, chat: { notice: { runId, sessionKey: params.sessionKey, action: typed.action } } } };
+      }
     }
     if (method === "progressCard.put") {
       // The chat's only write to the card is the trash: a clear of the user's
@@ -172,13 +391,52 @@ function filterClientFrame(state, frame) {
     return { toClient: refusalFrame(id, `"${method}" is not available to this ClawBox user's chat.`) };
   }
   state.pending.set(id, method);
-  return { toGateway: frame };
+  if (method === "chat.send" && typeof params.sessionKey === "string") {
+    // Bounded: a socket that sends on many sessions keeps the latest few.
+    if (state.turnStarts.size >= 64) state.turnStarts.delete(state.turnStarts.keys().next().value);
+    state.turnStarts.set(params.sessionKey, Date.now());
+  }
+  return { toGateway: forwarded };
+}
+
+/**
+ * The files the gateway frame's assistant replies name, for a member of staff
+ * only (TASK-2516; scripts/chat-reply-media.js decides what may be recorded):
+ * `[{ paths, since, until }]`. A `chat` event's final message (the turn this
+ * socket started, or "recent" when it opened mid-turn), a `session.message`
+ * of the assistant's, and every assistant message of a `chat.history` answer
+ * (each turn's own times — a reply that finished while the member's browser
+ * was closed is recorded when their chat loads it). Called BEFORE the frame
+ * is filtered, so the request a response answers is still known; only frames
+ * about the member's own keys count.
+ */
+function replyMediaClaims(state, frame) {
+  if (!state.staffAgent || !isRecord(frame)) return [];
+  if (frame.type === "res" && typeof frame.id === "string") {
+    if (!frame.ok || state.pending.get(frame.id) !== "chat.history" || !isRecord(frame.payload)) return [];
+    const key = frame.payload.sessionKey;
+    if (key !== undefined && !mayUseKey(state, key)) return [];
+    return historyClaims(frame.payload.messages);
+  }
+  if (frame.type !== "event" || (frame.event !== "chat" && frame.event !== "session.message")) return [];
+  const payload = isRecord(frame.payload) ? frame.payload : {};
+  if (!mayUseKey(state, payload.sessionKey)) return [];
+  if (frame.event === "chat" && payload.state !== "final") return [];
+  const paths = replyMediaPaths(payload.message);
+  if (paths.length === 0) return [];
+  return [{ paths, since: state.turnStarts.get(payload.sessionKey) ?? null, until: Date.now() }];
+}
+
+/** A `commands.list` answer cut to what a member of staff may send: /new and /reasoning. */
+function staffCommands(payload) {
+  if (!isRecord(payload) || !Array.isArray(payload.commands)) return { commands: [] };
+  return { ...payload, commands: payload.commands.filter((c) => isRecord(c) && isStaffCatalogueCommand(c.name)) };
 }
 
 /** The pending questions of a `question.list` answer, cut to this user's sessions. */
 function userQuestions(state, payload) {
   if (!isRecord(payload) || !Array.isArray(payload.questions)) return { questions: [] };
-  const questions = payload.questions.filter((q) => isRecord(q) && userMayUseKey(state.username, q.sessionKey));
+  const questions = payload.questions.filter((q) => isRecord(q) && mayUseKey(state, q.sessionKey));
   for (const q of questions) if (typeof q.id === "string") state.questions.add(q.id);
   return { ...payload, questions };
 }
@@ -203,7 +461,8 @@ function userHello(state, payload) {
   out.snapshot = {
     sessionDefaults: {
       ...defaults,
-      mainSessionKey: openclawUserMainKey(gatewayMain, state.username),
+      // A member of staff's main is on their own agent, whatever the gateway's is.
+      mainSessionKey: openclawUserMainKey(state.staffAgent ? `agent:${state.staffAgent}:main` : gatewayMain, state.username),
     },
   };
   return out;
@@ -226,6 +485,9 @@ function filterGatewayFrame(state, frame) {
     if (method === "question.list" && frame.ok) {
       return { toClient: { ...frame, payload: userQuestions(state, frame.payload) } };
     }
+    if (method === "commands.list" && frame.ok && state.staffAgent) {
+      return { toClient: { ...frame, payload: staffCommands(frame.payload) } };
+    }
     return { toClient: frame };
   }
   // A type test, written as a refusal: harness-contract reads `.event === "<literal>"`
@@ -239,7 +501,7 @@ function filterGatewayFrame(state, frame) {
   }
   const fields = KEYED_EVENTS[frame.event];
   if (!fields) return {};
-  const mine = fields.some((field) => userMayUseKey(state.username, payload[field]));
+  const mine = fields.some((field) => mayUseKey(state, payload[field]));
   if (!mine) return {};
   if (frame.event === "question.requested" && typeof payload.id === "string") state.questions.add(payload.id);
   return { toClient: frame };
@@ -411,9 +673,9 @@ const MAX_QUEUED_FRAMES = 64;
  * Relay one user's chat socket. `clientWs` is the browser's socket (already
  * upgraded), `connectUpstream()` opens the gateway's.
  */
-function relayUserChat({ clientWs, username, connectUpstream, token, identity, log = () => {} }) {
+function relayUserChat({ clientWs, username, connectUpstream, token, identity, staffAgent = null, staffReady, admitChat = null, stillCurrent = () => true, onReplyMedia = null, log = () => {} }) {
   const WebSocket = require("ws");
-  const state = createRelayState(username);
+  const state = createRelayState(username, { staffAgent, staffReady, admitChat });
   const queued = [];
   let upstream;
   let closed = false;
@@ -445,6 +707,14 @@ function relayUserChat({ clientWs, username, connectUpstream, token, identity, l
   const handleClient = (raw) => {
     let frame;
     try { frame = JSON.parse(String(raw)); } catch { return; }
+    // The owner turned the organisation switch since this socket opened: the
+    // hello it was given names the wrong agent. Closed, the chat reconnects
+    // and is handed the right one.
+    if (!stillCurrent()) {
+      log("the organisation switch moved; closing the user's chat socket");
+      closeBoth(1001, "This ClawBox's settings changed. Reconnecting.");
+      return;
+    }
     if (!state.connectId) {
       if (!isRecord(frame) || frame.type !== "req" || frame.method !== "connect" || typeof frame.id !== "string") return;
       state.connectId = frame.id;
@@ -461,9 +731,24 @@ function relayUserChat({ clientWs, username, connectUpstream, token, identity, l
         return;
       }
       resetInFlight = true;
-      runAdminReset({ ...out.reset, connectUpstream, token, identity })
+      const { id, params, chat } = out.reset;
+      runAdminReset({ id, params, connectUpstream, token, identity })
         .then((res) => {
-          if (!closed) sendClient(res);
+          if (closed) return;
+          // A `sessions.reset` is answered with the gateway's own answer. So is
+          // a typed command whose reset failed: the chat reports the send as
+          // failed, and nothing of the message goes out to a session that was
+          // not reset.
+          if (!chat || !res.ok) {
+            sendClient(res);
+            return;
+          }
+          if (chat.send) {
+            state.pending.set(id, "chat.send");
+            sendGateway(chat.send);
+            return;
+          }
+          for (const frame of resetNoticeFrames(id, chat.notice)) sendClient(frame);
         })
         .finally(() => {
           resetInFlight = false;
@@ -493,6 +778,17 @@ function relayUserChat({ clientWs, username, connectUpstream, token, identity, l
     if (isRecord(frame) && frame.type === "event" && frame.event === "connect.challenge") {
       state.challenge = isRecord(frame.payload) ? frame.payload : null;
     }
+    // Recorded before the browser sees the reply, so the download card the
+    // reply draws is already the member's when it asks for the file.
+    if (typeof onReplyMedia === "function") {
+      for (const claim of replyMediaClaims(state, frame)) {
+        try {
+          onReplyMedia(claim);
+        } catch (err) {
+          log(`could not record a reply's files: ${err && err.message ? err.message : err}`);
+        }
+      }
+    }
     const out = filterGatewayFrame(state, frame);
     if (out.toClient) sendClient(out.toClient);
   });
@@ -503,6 +799,46 @@ function relayUserChat({ clientWs, username, connectUpstream, token, identity, l
   });
 }
 
+// ── A member of staff's agent ───────────────────────────────────────────────
+
+/**
+ * `staffReady` for production-server.js: is `agentId` configured with the
+ * staff policy in openclaw.json right now, AND is the staff guard installed
+ * and enabled beside it (its file tools reach past the member's folder
+ * without it)? Re-read when the file changes (its mtime), so a roster the
+ * owner's switch just wrote is seen on the next turn; an unreadable file is
+ * "not ready".
+ */
+function staffReadyReader(configPath, agentId) {
+  const guard = path.join(path.dirname(configPath), "extensions", STAFF_GUARD_PLUGIN_ID, "index.mjs");
+  let seen = null;
+  let ready = false;
+  return () => {
+    try {
+      // ONE descriptor for the stat and the read, so the mtime remembered is
+      // the mtime of the bytes judged (no check-then-use race on the path).
+      const fd = fs.openSync(configPath, "r");
+      try {
+        const mtimeMs = fs.fstatSync(fd).mtimeMs;
+        if (seen !== mtimeMs) {
+          const config = JSON.parse(fs.readFileSync(fd, "utf-8"));
+          seen = mtimeMs;
+          ready = staffAgentConfigured(config, agentId) && staffGuardEnabled(config);
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+      if (!ready) return false;
+      // The guard's own entry point, opened rather than looked for.
+      fs.closeSync(fs.openSync(guard, "r"));
+      return true;
+    } catch {
+      seen = null;
+      return false;
+    }
+  };
+}
+
 module.exports = {
   RELAY_SCOPES,
   RESET_SCOPES,
@@ -510,12 +846,16 @@ module.exports = {
   KEYED_METHODS,
   KEYLESS_METHODS,
   createRelayState,
+  typedResetCommand,
+  resetNoticeFrames,
   filterClientFrame,
   filterGatewayFrame,
+  replyMediaClaims,
   userHello,
   buildRelayConnect,
   relayDeviceParams,
   loadOrCreateRelayIdentity,
   readGatewayToken,
   relayUserChat,
+  staffReadyReader,
 };

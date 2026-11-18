@@ -678,6 +678,18 @@ export async function register() {
     console.error('[instrumentation] Could not start the Hermes plugin watcher:', err instanceof Error ? err.message : err)
   }
   try {
+    // OpenClaw 2026.11.3 indexes memory only with the gateway stopped; a web
+    // server that exited during such a pass left the gateway stopped and a
+    // hold on disk saying so (src/lib/openclaw-auth-ops.ts).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { restoreOpenclawGatewayAfterCrash } = require('./lib/openclaw-auth-ops')
+    void restoreOpenclawGatewayAfterCrash().catch((err: unknown) => {
+      console.error('[instrumentation] Could not start the gateway after an interrupted offline hold:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not check for an interrupted offline hold:', err instanceof Error ? err.message : err)
+  }
+  try {
     // On the OpenClaw arm the memory-status probe boots a whole OpenClaw
     // process (~8 s on a Jetson), so it is paid once, after the boot rush
     // (gateway restart, schedulers, Next's own warm-up) has passed, and the
@@ -723,6 +735,29 @@ export async function register() {
       })
     }, 15_000)
     rearm.unref?.()
+    // An external AI engine as Local AI (TASK-2376): the on-device chat
+    // runtimes stay down while it is selected — systemd starts ollama.service
+    // at boot and an update's post step restarts it later, so this looks again
+    // every few minutes. Nothing happens on a box with no engine.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { standDownChatRuntimesForExternalEngine, EXTERNAL_ENGINE_STAND_DOWN_MS } = require('./lib/local-ai-runtime')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { withLocalAiTransitionLock } = require('./lib/local-ai-transition-lock')
+    const standDown = () => {
+      // Under the engine's own transition lock: a Remove that starts Ollama
+      // again must not be undone by a check that read "selected" before it.
+      void withLocalAiTransitionLock(() => standDownChatRuntimesForExternalEngine()).then((stopped: { ollama: boolean; llamacpp: boolean }) => {
+        if (stopped.ollama || stopped.llamacpp) {
+          console.log(`[instrumentation] external AI engine selected: stopped ${[stopped.ollama && 'ollama', stopped.llamacpp && 'llama.cpp'].filter(Boolean).join(' and ')}`)
+        }
+      }).catch((err: unknown) => {
+        console.warn('[instrumentation] external engine stand-down failed:', err instanceof Error ? err.message : err)
+      })
+    }
+    const firstStandDown = setTimeout(standDown, 30_000)
+    firstStandDown.unref?.()
+    const standDownTimer = setInterval(standDown, EXTERNAL_ENGINE_STAND_DOWN_MS)
+    standDownTimer.unref?.()
   } catch (err) {
     console.error('[instrumentation] Could not load the local AI runtime:', err instanceof Error ? err.message : err)
   }

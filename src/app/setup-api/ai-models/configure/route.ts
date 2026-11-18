@@ -1,10 +1,13 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { cloudAiLockedResponse, isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { spawn } from "child_process";
 import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
 import { getAll, set as setConfigKey, setMany } from "@/lib/config-store";
+import { externalEngineSelected } from "@/lib/external-engine";
+import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
@@ -46,12 +49,19 @@ import {
 } from "@/lib/gateway-hot-apply";
 import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 import {
+  DOCTOR_TAIL_CHARS,
+  doctorFailureIsRetryable,
+  doctorFailureTail,
+  pauseBeforeDoctorRetry,
+} from "@/lib/openclaw-doctor-recovery";
+import {
   putGatewayOAuthProfile,
   readGatewayAuthProfile,
   type GatewayAuthProfileCopy,
   type GatewayAuthProfileRead,
   type GatewayOAuthBundle,
 } from "@/lib/openclaw-auth-store";
+import { logoutOpenclawAuthProfiles, providerOfProfileId, saveOpenclawApiKey, setOpenclawAuthOrder } from "@/lib/openclaw-auth-ops";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
@@ -202,6 +212,10 @@ const CLAWBOX_AI_PROXY_URL = process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https:
 /** Portal-token prefix — the entitlement marker both writers gate on. */
 const CLAWBOX_AI_TOKEN_PREFIX = "claw_";
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
+
+/** Why a cloud provider save is refused under the local-only AI lock (TASK-2501). */
+const CONFIGURE_LOCKED_MESSAGE =
+  "Local-only AI is on: cloud AI providers cannot be connected. Turn the lock off in Settings → Local AI first.";
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 const CLAWBOX_AI_PROFILE_KEY = "deepseek:default";
 /**
@@ -628,34 +642,17 @@ async function pasteAuthApiKey(provider: string, profileId: string, key: string)
 }
 
 async function pasteApiKeyOnce(provider: string, profileId: string, key: string): Promise<void> {
-  await spawnOpenclawCli(
-    [
-      "models", "auth", "paste-api-key",
-      // NO `--agent`. ClawBox used to pin `main` here — and in the sign-in
-      // guard and the order write — on the argument that the CLI resolves a
-      // READ and a WRITE differently, so an unpinned pair could address two
-      // stores. Measured against the installed core (2026.8.1) with a sole
-      // `pro-agent` roster and the flag omitted, that is not what happens:
-      //
-      //   models auth list --json     -> "agentId": "pro-agent"
-      //   paste-api-key …             -> agents/pro-agent/agent/openclaw-agent.sqlite
-      //
-      // The two resolvers only diverge on a roster with SEVERAL agents, and
-      // there `main` was never the right answer either. What the pin actually
-      // did was write this device's ClawBox AI credential into an agent store
-      // the gateway does not read — leaving whatever the real store held,
-      // however stale, to keep serving turns, which is TASK-730 — or, when
-      // `main` is not in the roster at all, fail the whole save outright:
-      //
-      //   $ openclaw models auth paste-api-key --agent main …
-      //   Unknown agent id "main". Use "openclaw agents list" to see configured agents.
-      //
-      // So the target is the harness's to choose, and this asks it to.
-      "--provider", provider,
-      "--profile-id", profileId,
-    ],
-    { stdinData: key + "\n", timeoutMs: 60_000 },
-  );
+  // NO agent is named, here or in the gateway request. ClawBox used to pin
+  // `main` (`--agent main`), which wrote this device's ClawBox AI credential
+  // into an agent store the gateway does not read on a roster without `main`
+  // as its sole agent (TASK-730), or failed the save outright ("Unknown agent
+  // id"). The target is the harness's to choose, and this asks it to.
+  //
+  // OpenClaw 2026.11.3: while the gateway runs the key goes to its own
+  // `models.authSetApiKey` — the CLI refuses `--profile-id` then, and the
+  // gateway itself picks `<provider>:default`, the id ClawBox names — and a
+  // gateway that is not there gets the offline `paste-api-key --profile-id`.
+  await saveOpenclawApiKey(provider, profileId, key);
 }
 
 /**
@@ -719,8 +716,10 @@ async function releaseClawboxAiSlot(profileId: string, holder: "store" | "metada
   console.warn(`[configure] a sign-in holds ${profileId} (${holder}); taking the slot over for the ClawBox AI key`);
   try {
     // Unpinned, like the paste: the core resolves the same agent for both.
-    await spawnOpenclawCli(["models", "auth", "logout", profileId, "--yes"], { timeoutMs: 60_000 });
-    return;
+    // Through the gateway while it runs (2026.11.3 refuses the CLI's logout
+    // then); a slot the store does not hold is left to the unset below.
+    const removed = await logoutOpenclawAuthProfiles(providerOfProfileId(profileId), [profileId]);
+    if (removed.length > 0) return;
   } catch (err) {
     console.warn(
       `[configure] models auth logout ${profileId} failed:`,
@@ -795,61 +794,20 @@ class SignInWouldBeLostError extends Error {
  * of seconds.
  */
 async function assertNoSignInAt(profileId: string): Promise<void> {
-  // Nothing to lose where there is no OpenClaw auth store: the Hermes SKU
-  // keeps its credentials in the harness's own config and never reaches
-  // `paste-api-key` at all.
   if (openclawIsAbsent()) return;
-  let raw: string;
-  try {
-    // Unpinned, like the paste this guards and the auth order beside it: all
-    // three let the core pick the agent, so all three address one store on
-    // every box where a save can succeed (see `pasteAuthApiKey`). The response
-    // names the agent it answered for (`agentId`, `agentDir`), so a box that
-    // disagrees can still be told apart in a log.
-    //
-    // KNOWN LIMIT, measured: before an agent has a store of its own the core
-    // answers from the shared one (`authStatePath` pointed at `agents/main/`
-    // while `agentId` was `pro-agent`), so this can see an inherited profile
-    // the paste would only have shadowed. It refuses in that case, which is
-    // the safe direction — and strictly better than what it replaces, since
-    // the same box previously failed the whole save with
-    // `Unknown agent id "main"`.
-    raw = await spawnOpenclawCli(
-      ["models", "auth", "list", "--json"],
-      { captureStdout: true, timeoutMs: 60_000 },
-    );
-  } catch (err) {
-    console.warn(
-      "[configure] could not read the auth profiles before pasting a key:",
-      err instanceof Error ? logSafe(err.message) : err,
-    );
+  // The store itself, read-only: OpenClaw 2026.11.3's `models auth list`
+  // needs the gateway stopped ("its loaders can initialize persistent state",
+  // docs/cli/models.md), and this guard runs beside a running gateway. A store
+  // that cannot be read leaves the save unguarded, as a failed list did.
+  const stored = readGatewayAuthProfile(profileId);
+  if (stored?.kind !== "present") {
+    if (stored?.kind === "unreadable") console.warn("[configure] could not read the auth profiles before pasting a key; the key paste is unguarded");
     return;
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    console.warn("[configure] `models auth list --json` was not JSON; the key paste is unguarded");
-    return;
-  }
-  // `JSON.parse("null")` succeeds and `null.profiles` throws, which the
-  // handler's own catch would turn into a 500 — the opposite of the fail-open
-  // this guard promises, over a save that is perfectly good.
-  if (!parsed || typeof parsed !== "object") return;
-  const profiles = (parsed as { profiles?: unknown }).profiles;
-  if (!Array.isArray(profiles)) return;
-  // The store's own shape, measured on 2026.8.1:
-  // `{profiles: [{id, provider, type, label, expiresAt}]}`, `type` being
-  // `oauth` or `api_key`. Any OAuth row AT THIS ID counts, whatever provider it
-  // names: the paste replaces the row, so what it would destroy is the
-  // question, not who owns it.
-  const holdsSignIn = profiles.some((row) => {
-    if (!row || typeof row !== "object") return false;
-    const entry = row as { id?: unknown; type?: unknown };
-    return entry.id === profileId && isOauthProfile({ mode: String(entry.type ?? "") });
-  });
-  if (holdsSignIn) throw new SignInWouldBeLostError(profileId);
+  const copies = [stored, stored.sharedCopy].filter((copy): copy is GatewayAuthProfileCopy => !!copy);
+  if (copies.some((copy) => isOauthProfile({ mode: copy.type }))) throw new SignInWouldBeLostError(profileId);
 }
+
 
 /**
  * Record the box's OpenAI auth preference with the core's own per-provider
@@ -906,7 +864,9 @@ async function applyOpenAiAuthOrder(
     ? ["models", "auth", "order", "set", "--provider", CHATGPT_PROVIDER, ...order]
     : ["models", "auth", "order", "clear", "--provider", CHATGPT_PROVIDER];
   try {
-    await spawnOpenclawCli(args, { timeoutMs: 60_000 });
+    // The gateway's `models.authOrderSet` while it runs (OpenClaw 2026.11.3
+    // refuses the CLI's `order` then), the CLI offline otherwise.
+    await setOpenclawAuthOrder(CHATGPT_PROVIDER, shouldSet ? order : null);
     // The marker follows the write that succeeded, so a later save knows
     // whether there is anything of ours to clear.
     await setMany({ [OPENAI_AUTH_ORDER_KEY]: shouldSet ? true : undefined });
@@ -2260,8 +2220,11 @@ async function ensureFallbackModel(
         console.warn("[AI Config] Failed to configure fallback model:", err instanceof Error ? logSafe(err.message) : err),
     },
     async () => {
-      // ClawBox AI is the last resort, and the owner's switch reaches it too.
-      const clawaiSwitchedOff = (await readDisabledProviders()).has("clawai");
+      // ClawBox AI is the last resort, and the owner's switch reaches it too —
+      // as does the local-only AI lock (TASK-2501): an on-device model saved
+      // under it gets no cloud model behind it. `configureClawboxAi` reads the
+      // stored token itself, so the lock is asked here rather than through it.
+      const clawaiSwitchedOff = (await readDisabledProviders()).has("clawai") || (await isCloudAiLocked());
       const fallbackConfigured = !clawaiSwitchedOff
         && await configureClawboxAi(true, preferredClawboxAiToken);
       if (fallbackConfigured) {
@@ -2534,6 +2497,9 @@ export async function POST(request: Request) {
   if (isLocalProviderRow(row) || isLocalProviderRow(normalizeProviderId(asked) ?? asked)) {
     return configureNow(own());
   }
+  // Refused here, before a sign-in task is started for a save that cannot
+  // land (TASK-2501); `configureNow` says the same for the direct path.
+  if (await isCloudAiLocked()) return cloudAiLockedResponse(CONFIGURE_LOCKED_MESSAGE);
   return tasks.providerAuthStartResponse(tasks.startProviderSignInTask({
     provider: row,
     label: providerRowLabel(harness, row),
@@ -2543,7 +2509,37 @@ export async function POST(request: Request) {
 }
 
 /** The save itself, answered as one JSON body once it is done. */
+/**
+ * Turning the on-device model on is a Local AI transition (TASK-2376): it runs
+ * under the lock an external engine's save and remove take, so its "no engine
+ * selected" check and its writes cannot interleave with them.
+ */
 async function configureNow(request: Request): Promise<Response> {
+  const onDevice = await isOnDeviceConfigure(request);
+  // The local-only AI lock (TASK-2501): no cloud provider is connected while
+  // it is on — ClawBox AI included. The on-device engines still are.
+  if (!onDevice && (await isCloudAiLocked())) return cloudAiLockedResponse(CONFIGURE_LOCKED_MESSAGE);
+  if (onDevice) {
+    return withLocalAiTransitionLock(() => configureNowUnlocked(request));
+  }
+  return configureNowUnlocked(request);
+}
+
+/** The two engines this route turns on that run on the box itself. */
+function isOnDeviceProviderId(provider: unknown): boolean {
+  return provider === "llamacpp" || provider === "ollama";
+}
+
+async function isOnDeviceConfigure(request: Request): Promise<boolean> {
+  try {
+    const body = await request.clone().json() as { provider?: unknown } | null;
+    return isOnDeviceProviderId(body?.provider);
+  } catch {
+    return false;
+  }
+}
+
+async function configureNowUnlocked(request: Request): Promise<Response> {
   const gateway: GatewayTracker = { state: "untouched" };
   let response: Response;
   try {
@@ -2733,6 +2729,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     }
 
     const { provider, apiKey, authMode = "token", idToken, refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
+    // The local-only AI lock (TASK-2501), asked again on the provider that will
+    // actually be written: an OAuth handoff replaces `body.provider` above with
+    // the one its tokens were minted for, after `configureNow` judged the body
+    // as it arrived. Before any write; the handoff file is left for a retry.
+    if (!isOnDeviceProviderId(provider) && (await isCloudAiLocked())) {
+      return cloudAiLockedResponse(CONFIGURE_LOCKED_MESSAGE);
+    }
     // The storage mode is the documented client contract (api-key vs OAuth
     // bundle) — but only these four spellings exist ("local" is what the
     // Ollama hook and the llama.cpp installer send; the route treats it as
@@ -2784,6 +2787,18 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
         { status: 400 }
+      );
+    }
+    // An external AI engine holds the Local AI slot (TASK-2376). Turning the
+    // on-device model on beside it would hand the chat back to a runtime the
+    // proxy refuses to start; the engine's own Remove is the way back.
+    if ((isOllama || isLlamaCpp) && await externalEngineSelected()) {
+      return NextResponse.json(
+        {
+          error: "An external AI engine is selected as Local AI. Remove it in Settings → Local AI → External engine before turning on the on-device model.",
+          code: "external_engine_selected",
+        },
+        { status: 409 },
       );
     }
     // A `claw_…` key authenticates to the ClawBox AI proxy and to nothing else.
@@ -3580,7 +3595,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // passes, as it does for that guard, because refusing a sign-in nobody
       // can disprove would lock its owner out.
       const stored = await readXaiStoredProfiles();
-      if (stored && !stored.some((row) => row.id === config.profileKey && row.type === "oauth")) {
+      // Any xAI sign-in row: on OpenClaw 2026.11.3 the login runs through the
+      // gateway, which names the profile itself (`--profile-id` is refused
+      // online); the core's default for it is the id this route writes.
+      const signIn = stored?.find((row) => row.type === "oauth");
+      if (signIn && signIn.id !== config.profileKey) {
+        console.warn(`[configure] the xAI sign-in is stored at ${signIn.id}, not ${config.profileKey}`);
+      }
+      if (stored && !signIn) {
         return NextResponse.json(
           {
             error: "The xAI sign-in did not reach this box's credential store. Sign in again.",
@@ -3679,6 +3701,59 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // on past the catch), not a blocked outcome, and not the `undefined` the
       // note below exempts.
       let outcome: OpenclawDoctorFixOutcome | undefined;
+      // Which sign-in lanes ask the gateway's store whether the credential
+      // landed (the gate below): Claude's, where it was measured, and ChatGPT's
+      // — the same migration, the same "only adds ids the store lacks" rule, a
+      // stale or fenced `openai:chatgpt` kept in place of the new sign-in. The
+      // ClawBox AI device login pastes and never reaches this branch.
+      const storeChecked = !isClawAI && (ocProvider === "anthropic" || isChatgptSubscription);
+      // Set when doctor exited non-zero AFTER it had imported the file (it is
+      // gone) and a second run did not change that: the gate below is then the
+      // judge of whether the sign-in landed, and "I could not look" is a no.
+      let doctorFailedAfterImport = false;
+      const doctorStartedAt = Date.now();
+      // The rollback, once, for every way into it: the doctor's own failure
+      // below, and the gate after it when doctor failed and the store cannot
+      // vouch for the sign-in. It archives the legacy file this request wrote
+      // (an OpenClaw 2 gateway refuses to start beside one) and answers 502.
+      const rollBackSignIn = async (): Promise<NextResponse> => {
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+        await fs.rename(AUTH_PROFILES_PATH, `${AUTH_PROFILES_PATH}.failed-${stamp}`).catch(() => {});
+        return NextResponse.json(
+          {
+            // Both outcomes named, in the order the owner meets them. The
+            // boot path moves a clearable blocker aside on the next start —
+            // but a file that provably holds approvals of HIS is left alone
+            // by design (TASK-737), and for that box a restart changes
+            // nothing. Leading with "restart and retry" alone would send
+            // exactly those owners round a loop.
+            error: doctorBlockedBy === "blocked-by-legacy-exec-approvals"
+              ? "Credential migration is blocked by a legacy exec-approvals file, so the subscription sign-in"
+                + " was rolled back. Restart the device and sign in again: the gateway moves that file aside on"
+                + " its next start unless it holds approvals of yours. If the sign-in is refused again, the"
+                + " gateway boot log names the file to move aside by hand."
+              // The third outcome, and the one this box's owner met: doctor
+              // refused to start because it could not confirm who owns the
+              // gateway service. ClawBox now tells it, so reaching this
+              // sentence means the declaration did not arrive — an older
+              // core that has no such setting. A device update is the fix,
+              // and it is the one thing the Terminal advice never said.
+              : doctorBlockedBy === "blocked-by-service-ownership"
+              ? "Credential migration could not start: this device's OpenClaw could not confirm that ClawBox"
+                + " manages the gateway service, so the subscription sign-in was rolled back. Restart the device"
+                + " and sign in again. If it is refused again, install the latest device update — older OpenClaw"
+                + " versions cannot be told that ClawBox owns the gateway."
+              // Doctor was deliberately not run beside a gateway that was not
+              // down, so the Terminal advice below would be for a command
+              // that never ran. The restore below brings the gateway back.
+              : doctorBlockedBy === "gateway-still-stopping" || doctorBlockedBy === "gateway-not-stopped"
+              ? "The assistant was busy restarting, so its credential migration was not run and the"
+                + " subscription sign-in was rolled back. Sign in again in a few minutes."
+              : "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal.",
+          },
+          { status: 502 },
+        );
+      };
       try {
         // TWO rules at once, and they pull in opposite directions.
         //
@@ -3705,64 +3780,94 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           throw new Error(`openclaw doctor --fix is ${outcome}`);
         }
       } catch (doctorErr) {
-        const siblings = await fs.readdir(path.dirname(AUTH_PROFILES_PATH)).catch(() => [] as string[]);
-        const migratedStore = siblings.some((name) => name.startsWith("auth-profiles.json.migrated-"));
+        // The END of what doctor said, not the start: its verdict is its last
+        // line, and until SUP-1023 this line carried only the head of stderr —
+        // Node's deprecation warnings — so a rolled-back sign-in left nothing
+        // that told a refused config write from a locked store.
         console.error(
           "[configure] doctor --fix failed after the OAuth store write:",
-          doctorErr instanceof Error ? JSON.stringify(logSafe(doctorErr.message)) : doctorErr,
+          doctorErr instanceof Error ? JSON.stringify(logSafe(doctorFailureTail(doctorErr, DOCTOR_TAIL_CHARS), DOCTOR_TAIL_CHARS)) : doctorErr,
         );
-        let mustRollBack = migratedStore;
-        if (!mustRollBack) {
+        // SUP-1023, "Credential migration failed" with the sign-in done. Doctor
+        // imports the legacy file FIRST and exits 1 for what comes after
+        // (a config write another writer collided with, a plugin that does not
+        // load), or before it, when that same collision lands an instant
+        // earlier. An exit code is not the migration's verdict; so, in order:
+        //
+        //   1. A second run, for the failures a second run can change — the
+        //      collision is over, a half-finished earlier run's receipts get
+        //      finalised. Never for a refusal doctor named (those are outcomes,
+        //      not errors, and are final) nor a run killed at its budget.
+        //   2. The file this request wrote is GONE, which only the migration
+        //      does: ask the gateway's store (the gate below) whether the
+        //      sign-in is in it, and replace what is there when it is not.
+        //   3. Neither: roll back, as before.
+        let failure: unknown = doctorErr;
+        // A first run that was REFUSED (a named outcome) never imported anything,
+        // so a missing file is no sign of one; a first run that THREW may have.
+        const firstRunRefused = doctorBlockedBy !== null;
+        if (doctorBlockedBy === null && doctorFailureIsRetryable(doctorErr, Date.now() - doctorStartedAt)) {
+          console.warn("[configure] running doctor --fix once more after its first run failed");
+          await pauseBeforeDoctorRetry();
           try {
-            mustRollBack = await installedOpenclawUsesSqliteAuthStore();
-          } catch (versionErr) {
-            // An unknown generation cannot prove that the legacy file is safe.
-            // Credential writes fail closed; the owner can retry once the CLI
-            // is healthy instead of receiving success with a dead gateway.
-            mustRollBack = true;
+            const again = await runOpenclawDoctorFix();
+            if (again === "gateway-still-stopping" || again === "gateway-not-stopped") gateway.gatewayBusy = true;
+            if (again === undefined || again === "completed") {
+              // `undefined` is the inert answer of the suites' factories, exactly as above.
+              outcome = again;
+              failure = null;
+              console.warn("[configure] doctor --fix completed on its second run");
+            } else {
+              doctorBlockedBy = again;
+              failure = new Error(`openclaw doctor --fix is ${again}`);
+            }
+          } catch (retryErr) {
+            failure = retryErr;
             console.error(
-              "[configure] could not verify OpenClaw generation after doctor failure:",
-              versionErr instanceof Error ? JSON.stringify(logSafe(versionErr.message)) : versionErr,
+              "[configure] doctor --fix failed again:",
+              retryErr instanceof Error ? JSON.stringify(logSafe(doctorFailureTail(retryErr, DOCTOR_TAIL_CHARS), DOCTOR_TAIL_CHARS)) : retryErr,
             );
           }
         }
-        if (mustRollBack) {
-          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-          await fs.rename(AUTH_PROFILES_PATH, `${AUTH_PROFILES_PATH}.failed-${stamp}`).catch(() => {});
-          return NextResponse.json(
-            {
-              // Both outcomes named, in the order the owner meets them. The
-              // boot path moves a clearable blocker aside on the next start —
-              // but a file that provably holds approvals of HIS is left alone
-              // by design (TASK-737), and for that box a restart changes
-              // nothing. Leading with "restart and retry" alone would send
-              // exactly those owners round a loop.
-              error: doctorBlockedBy === "blocked-by-legacy-exec-approvals"
-                ? "Credential migration is blocked by a legacy exec-approvals file, so the subscription sign-in"
-                  + " was rolled back. Restart the device and sign in again: the gateway moves that file aside on"
-                  + " its next start unless it holds approvals of yours. If the sign-in is refused again, the"
-                  + " gateway boot log names the file to move aside by hand."
-                // The third outcome, and the one this box's owner met: doctor
-                // refused to start because it could not confirm who owns the
-                // gateway service. ClawBox now tells it, so reaching this
-                // sentence means the declaration did not arrive — an older
-                // core that has no such setting. A device update is the fix,
-                // and it is the one thing the Terminal advice never said.
-                : doctorBlockedBy === "blocked-by-service-ownership"
-                ? "Credential migration could not start: this device's OpenClaw could not confirm that ClawBox"
-                  + " manages the gateway service, so the subscription sign-in was rolled back. Restart the device"
-                  + " and sign in again. If it is refused again, install the latest device update — older OpenClaw"
-                  + " versions cannot be told that ClawBox owns the gateway."
-                // Doctor was deliberately not run beside a gateway that was not
-                // down, so the Terminal advice below would be for a command
-                // that never ran. The restore below brings the gateway back.
-                : doctorBlockedBy === "gateway-still-stopping" || doctorBlockedBy === "gateway-not-stopped"
-                ? "The assistant was busy restarting, so its credential migration was not run and the"
-                  + " subscription sign-in was rolled back. Sign in again in a few minutes."
-                : "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal.",
-            },
-            { status: 502 },
-          );
+        if (failure !== null && storeChecked && !firstRunRefused) {
+          // Whatever the SECOND run answered, even a refusal it named: the file
+          // is gone because the FIRST run imported it, and the credential is
+          // then in the store whatever that run exited with.
+          // ENOENT only: a file that cannot be asked about (EACCES) is no proof of anything.
+          let legacyFileGone = false;
+          try {
+            await fs.access(AUTH_PROFILES_PATH);
+          } catch (accessErr) {
+            legacyFileGone = (accessErr as NodeJS.ErrnoException | undefined)?.code === "ENOENT";
+          }
+          if (legacyFileGone) {
+            doctorFailedAfterImport = true;
+            failure = null;
+            console.warn(
+              "[configure] doctor --fix exited non-zero after it had imported the sign-in file;"
+              + ` asking the gateway's auth store whether the ${config.profileKey} sign-in landed`,
+            );
+          }
+        }
+        if (failure !== null) {
+          const siblings = await fs.readdir(path.dirname(AUTH_PROFILES_PATH)).catch(() => [] as string[]);
+          const migratedStore = siblings.some((name) => name.startsWith("auth-profiles.json.migrated-"));
+          let mustRollBack = migratedStore;
+          if (!mustRollBack) {
+            try {
+              mustRollBack = await installedOpenclawUsesSqliteAuthStore();
+            } catch (versionErr) {
+              // An unknown generation cannot prove that the legacy file is safe.
+              // Credential writes fail closed; the owner can retry once the CLI
+              // is healthy instead of receiving success with a dead gateway.
+              mustRollBack = true;
+              console.error(
+                "[configure] could not verify OpenClaw generation after doctor failure:",
+                versionErr instanceof Error ? JSON.stringify(logSafe(versionErr.message)) : versionErr,
+              );
+            }
+          }
+          if (mustRollBack) return rollBackSignIn();
         }
       }
       // DID THE SIGN-IN LAND? (the incident of 2026-10-10.) "completed" was
@@ -3801,12 +3906,24 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // healed by the retry both sentences ask for, and recorded here rather
       // than fixed).
       //
-      // Claude's sign-in only: it is the profile this was measured on.
+      // Claude's sign-in, where this was measured (2026-10-10), and ChatGPT's
+      // (SUP-1023): the same migration puts `openai:chatgpt` through the same
+      // "keeps what is there" rule, so a re-sign-in over an expired or fenced
+      // ChatGPT credential answered 200 and stored nothing new. Measured on
+      // 2026.11.3 in a throwaway home: the migration drops the bundle's `id`
+      // (the id_token) in either case, so the replace below writes the shape the
+      // migration itself produces. Both are `storeChecked` above.
       // The ClawBox AI device login no longer reaches this branch (it pastes,
       // see `isClawaiDeviceLogin`); it stays excluded by name, not only by the
       // provider id it rides today, so a future route back here cannot put an
       // OAuth row where its CLI paste belongs.
-      if (outcome === "completed" && oauthBundle && ocProvider === "anthropic" && !isClawAI) {
+      //
+      // ALSO AFTER A DOCTOR THAT EXITED NON-ZERO once it had imported the file
+      // (`doctorFailedAfterImport`): then the store is the only judge, and the
+      // two "cannot look" answers below stop passing — with no store to read
+      // and no legacy file left, nothing shows the credential is anywhere, and
+      // passing would answer 200 for a sign-in that is nowhere.
+      if ((outcome === "completed" || doctorFailedAfterImport) && oauthBundle && storeChecked) {
         const fingerprint = tokenFingerprint(oauthBundle.access);
         const expires = oauthBundle.expires;
         const isSignIn = (copy: GatewayAuthProfileCopy) =>
@@ -3835,8 +3952,23 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         let cannotLook: "no-store" | "unreadable" | null = null;
         if (stored.kind === "no-store" || stored.kind === "unreadable") {
           cannotLook = stored.kind;
+        } else if (!landed(stored) && doctorFailedAfterImport && gateway.gatewayBusy) {
+          // The second doctor run found the gateway up or still stopping, so a
+          // write to its store now races the flush the module's own rule 1
+          // warns of ("THE GATEWAY MUST BE STOPPED when the write runs"). Read
+          // only: the store does not hold the sign-in, and nothing is written
+          // beside a running gateway.
+          console.error(
+            `[configure] the ${config.profileKey} sign-in is not in the gateway's auth store`
+            + ` (${held(stored)}), doctor --fix had failed and the gateway is not stopped: rolling the sign-in back`,
+          );
+          return rollBackSignIn();
         } else if (!landed(stored)) {
-          const put = putGatewayOAuthProfile(config.profileKey, oauthBundle);
+          // What the migration itself stores for this profile: no `id` (the
+          // id_token), which it drops. Claude's bundle never had one.
+          const storeBundle: GatewayOAuthBundle = { ...oauthBundle };
+          delete storeBundle.id;
+          const put = putGatewayOAuthProfile(config.profileKey, storeBundle);
           // No second look when nothing was committed: there is nothing new to find.
           const after = put.ok ? readGatewayAuthProfile(config.profileKey) : null;
           if (!put.ok && put.reason === "no-store") {
@@ -3845,7 +3977,8 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             cannotLook = "no-store";
           } else if (after && landed(after)) {
             console.warn(
-              `[configure] doctor --fix completed without storing the new ${config.profileKey} sign-in`
+              `[configure] doctor --fix ${doctorFailedAfterImport ? "failed after importing the file, without storing" : "completed without storing"}`
+              + ` the new ${config.profileKey} sign-in`
               + ` (the gateway's auth store was left as it was: ${held(stored)}); ClawBox replaced it in place`,
             );
           } else {
@@ -3875,9 +4008,25 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
           // where node:sqlite cannot load makes this gate inert on every
           // sign-in, and this is the only place that would show.
           const cause = stored.kind === "unreadable" && stored.cause ? `: ${JSON.stringify(logSafe(stored.cause))}` : "";
+          if (doctorFailedAfterImport) {
+            // Doctor said it failed and nothing shows the credential is
+            // anywhere: that is the failure it reported, so it is answered as
+            // one (the file it imported is gone, and `rollBackSignIn` knows it).
+            console.error(
+              `[configure] could not verify that the ${config.profileKey} sign-in reached the gateway's auth store`
+              + ` (${cannotLook})${cause}, and doctor --fix had failed: rolling the sign-in back`,
+            );
+            return rollBackSignIn();
+          }
           console.warn(
             `[configure] could not verify that the ${config.profileKey} sign-in reached the gateway's auth store`
             + ` (${cannotLook})${cause}; carrying on with what doctor --fix reported`,
+          );
+        }
+        if (doctorFailedAfterImport) {
+          console.warn(
+            `[configure] the ${config.profileKey} sign-in is in the gateway's auth store; `
+            + "the failure doctor --fix reported came after the migration and does not undo it",
           );
         }
       }

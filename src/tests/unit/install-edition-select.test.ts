@@ -5,6 +5,9 @@ import os from "os";
 import path from "path";
 
 import { testEnv } from "@/tests/helpers/env";
+import {
+  accountOnlyHome, CAN_LOCK_HOME, shellFunctionIfPresent, unlockTree,
+} from "../helpers/account-only-home";
 import { failureReason } from "@/lib/root-step-follow";
 import { SELF_UPDATING_ROOT_STEPS, UI_ROOT_STEPS, WEB_ROOT_STEPS } from "@/lib/root-steps";
 
@@ -203,7 +206,7 @@ interface StepRun {
 function runStep(
   recorded: string,
   extra: Record<string, string> = {},
-  { systemdRunFails = false }: { systemdRunFails?: boolean } = {},
+  { systemdRunFails = false, prelude = "", lock = false }: { systemdRunFails?: boolean; prelude?: string; lock?: boolean } = {},
 ): StepRun {
   const script = [
     "set -euo pipefail",
@@ -228,7 +231,12 @@ function runStep(
     'gateway_port_listening() { [ "${STUB_GATEWAY_LISTENING:-1}" = 1 ]; }',
     'gateway_unit_running_or_starting() { [ "${STUB_GATEWAY_TRYING:-1}" = 1 ]; }',
     "sleep() { :; }",
+    // The service account removes the request it wrote: here, this suite's user.
+    'as_clawbox() { "$@"; }',
+    prelude,
+    shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
     ...SELECT_FUNCTIONS.map(extractShellFunction),
+    ...(lock ? ["__ao_lock"] : []),
     "step_edition_select",
   ].join("\n");
   const r = spawnSync("bash", ["-c", script], {
@@ -416,6 +424,148 @@ d("step_edition_select on a unified-image box", () => {
     } finally {
       fs.chmodSync(binDir, 0o755);
     }
+  });
+});
+
+/**
+ * The request sits in data/, the service account's: the account removes it.
+ * Run against a checkout only `as_clawbox` can write to
+ * (src/tests/helpers/account-only-home.ts): a root `rm` there fails with
+ * EACCES, and a root command on a checkout path is logged.
+ */
+(CAN_RUN && CAN_LOCK_HOME ? describe : describe.skip)("step_edition_select removes the request as the service account", () => {
+  function runLocked(recorded: string, prelude = "") {
+    const aux = path.join(tmp, "aux");
+    fs.mkdirSync(aux, { recursive: true });
+    const account = accountOnlyHome(projectDir, aux);
+    const r = runStep(recorded, {}, { prelude: `${account.shell}\n${prelude}`, lock: true });
+    unlockTree(projectDir);
+    return { ...r, rootInHome: account.rootInHome(), asClawbox: account.asClawbox() };
+  }
+
+  it("answers 'nothing to do' on a box that already finished, and the account removes the request", () => {
+    writeRequest("openclaw");
+    const r = runLocked("openclaw");
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("  Already set up with OpenClaw — nothing to do\n");
+    expect(r.requestLeft).toBe(false);
+    expect(r.asClawbox).toEqual([`rm -f -- ${requestFile}`]);
+    expect(r.rootInHome.filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
+  });
+
+  it("removes the request as the account once the choice is set up", () => {
+    layDownBoth();
+    writeRequest("hermes");
+    const r = runLocked("unselected");
+    expect(r.status, r.out).toBe(0);
+    expect(r.phases).toEqual(["check", "lock", "provision", "cleanup", "done"]);
+    expect(r.out).toContain("  This box is now set up with Hermes\n");
+    expect(r.requestLeft).toBe(false);
+    expect(r.asClawbox).toContain(`rm -f -- ${requestFile}`);
+    expect(r.rootInHome.filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
+  });
+
+  it("finishes as before, with a warning, when the account cannot remove the request", () => {
+    writeRequest("openclaw");
+    const r = runLocked("openclaw", 'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"\n'
+      + 'as_clawbox() { [ "$1" = rm ] && return 1; __real_as_clawbox "$@"; }');
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("  Already set up with OpenClaw — nothing to do\n");
+    expect(r.out).toContain(`  Warning: could not remove ${requestFile}\n`);
+    expect(r.requestLeft).toBe(true);
+  });
+
+  it("reports a finished setup as finished, with a warning, when the account cannot remove the request after it", () => {
+    // The box is already set up with its choice by then: under errexit, a
+    // failed removal must not turn that into a failed step, nor skip the web
+    // server's restart. Only the request's removal fails.
+    layDownBoth();
+    writeRequest("hermes");
+    const failRequestRm = 'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"\n'
+      + `as_clawbox() { [ "$1" = rm ] && [ "\${@: -1}" = ${JSON.stringify(requestFile)} ] && return 1; __real_as_clawbox "$@"; }`;
+    const r = runLocked("unselected", failRequestRm);
+    expect(r.status, r.out).toBe(0);
+    expect(r.phases).toEqual(["check", "lock", "provision", "cleanup", "done"]);
+    expect(r.out).toContain(`  Warning: could not remove ${requestFile}\n`);
+    expect(r.out).toContain("  This box is now set up with Hermes\n");
+    expect(r.out).toContain("  The web server restarts in 10 s to load Hermes\n");
+    expect(r.systemdRun).toHaveLength(1);
+    expect(r.requestLeft).toBe(true);
+    expect(r.rootInHome.filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
+  });
+});
+
+/**
+ * What the clawbox user's own removal leaves (a root-owned __pycache__ from a
+ * root probe) is handed back to it from the home down, and it removes that
+ * itself: ~/.local and ~/.npm-global are entries it controls, so root's own
+ * `rm -rf` there could be pointed elsewhere. Root's `chown` here does what a
+ * hand-over makes possible — the tree becomes the account's to remove — and
+ * root's file commands on a home path are logged.
+ */
+(CAN_RUN && !IS_ROOT ? describe : describe.skip)("edition_select_remove_other removes the other agent as the service account only", () => {
+  function runRemove(target: string, { handOverHelps = true } = {}) {
+    const aux = path.join(tmp, "aux");
+    fs.mkdirSync(aux, { recursive: true });
+    const account = accountOnlyHome(home, aux, { lock: false });
+    const script = [
+      "set -euo pipefail",
+      `CLAWBOX_HOME=${JSON.stringify(home)}`,
+      "CLAWBOX_USER=clawbox",
+      `NPM_PREFIX=${JSON.stringify(npmPrefix)}`,
+      account.shell,
+      // The hand-over, modelled: what it is handed becomes the account's to change.
+      handOverHelps ? 'chown() { [ "$1" = -R ] && command chmod -R u+w -- "${@: -1}"; return 0; }' : "chown() { :; }",
+      // Marks the run as the service account only when -u names it: a switch to
+      // root must still read as root.
+      'runuser() { local who=""; [ "${1:-}" = "-u" ] && [ "${2:-}" = "$CLAWBOX_USER" ] && who=1; '
+        + 'shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=$who "$@"; }',
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+      account.recordHandOvers,
+      extractShellFunction("edition_select_remove_other"),
+      `rc=0; edition_select_remove_other ${target} || rc=$?; echo "rc=$rc"`,
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: testEnv({ PATH: process.env.PATH ?? "" }) });
+    return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, rootInHome: account.rootInHome(), sequence: account.sequence() };
+  }
+  /** A tree the account cannot empty until it is handed back: a read-only directory in it. */
+  const stuck = (dir: string) => {
+    fs.mkdirSync(path.join(dir, "__pycache__"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "__pycache__", "x.pyc"), "");
+    fs.chmodSync(path.join(dir, "__pycache__"), 0o555);
+  };
+
+  afterEach(() => unlockTree(home));
+
+  it("hands back what the account's removal left, then removes it as the account again", () => {
+    layDownBoth();
+    stuck(path.join(home, ".hermes", "hermes-agent"));
+    const hermesHome = path.join(home, ".hermes");
+
+    const r = runRemove("openclaw");
+
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain(`  Removed ${hermesShim}\n`);
+    expect(r.out).toContain(`  Removed ${hermesHome}\n`);
+    expect(r.out).toContain("rc=0");
+    expect(fs.existsSync(hermesHome)).toBe(false);
+    expect(r.sequence).toEqual([`hand-over hand_over_home_path -R ${hermesHome}`]);
+    expect(r.rootInHome).toEqual([]);
+  });
+
+  it("warns and reports the miss when the tree still cannot be removed", () => {
+    layDownBoth();
+    const hermesHome = path.join(home, ".hermes");
+    stuck(path.join(hermesHome, "hermes-agent"));
+
+    // A hand-over that cannot help: the tree stays as it was.
+    const r = runRemove("openclaw", { handOverHelps: false });
+
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain(`  Warning: could not remove ${hermesHome} — it stays on disk, unused\n`);
+    expect(r.out).toContain("rc=1");
+    expect(r.sequence).toEqual([`hand-over hand_over_home_path -R ${hermesHome}`]);
+    expect(r.rootInHome).toEqual([]);
   });
 });
 

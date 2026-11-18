@@ -10,6 +10,16 @@ const store = vi.hoisted(() => new Map<string, unknown>());
 vi.mock("@/lib/config-store", () => ({
   get: async (key: string) => store.get(key),
   set: async (key: string, value: unknown) => { store.set(key, value); },
+  // The local-only AI lock (`cloudAiLockOn`) reads the store failing closed:
+  // a reader that is not there reads as LOCKED, so the mock answers it.
+  getKnown: async (key: string) => ({ value: store.get(key), known: true }),
+  resolveConfigRoot: () => "/home/testbox/clawbox", // public-hygiene: allow a fixture path in a test
+  setMany: async (entries: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(entries)) {
+      if (value === undefined) store.delete(key);
+      else store.set(key, value);
+    }
+  },
 }));
 
 // Whether this box holds a ClawBox AI credential is half of what decides the
@@ -119,9 +129,10 @@ describe("the stored primary", () => {
     expect(await lib.getSttPrimary()).toBe("cloud");
   });
 
-  it("only knows the two engines", () => {
+  it("knows the three engines", () => {
     expect(lib.isSttEngine("cloud")).toBe(true);
     expect(lib.isSttEngine("local")).toBe(true);
+    expect(lib.isSttEngine("endpoint")).toBe(true);
     expect(lib.isSttEngine("Cloud")).toBe(false);
     expect(lib.isSttEngine(undefined)).toBe(false);
   });
@@ -250,5 +261,69 @@ describe("cloudTranscribeProblem — the chat microphone's half", () => {
     expect(lib.cloudTranscribeProblem(TOKEN, null)).toBeNull();
     // A dual box whose openclaw.json holds no ClawBox AI token of its own.
     expect(lib.cloudTranscribeProblem(TOKEN, { auth: { profiles: {} } })).toBeNull();
+  });
+});
+
+// TASK-2501 PR-D: the owner's own speech server, and the local-only AI lock.
+const ENDPOINT_RECORD = { baseUrl: "http://192.168.1.20:8000/v1", model: "whisper-1" }; // public-hygiene: allow a private-range address the test needs to exercise the local-only rule
+
+describe("the owner's own speech server and the local-only AI lock", () => {
+  it("is first only when chosen AND saved; a removed server hands the box back to the old rule", () => {
+    expect(lib.resolveSttPrimary("endpoint", true, true, true)).toBe("endpoint");
+    expect(lib.resolveSttPrimary("endpoint", false, false, true)).toBe("endpoint");
+    expect(lib.resolveSttPrimary("endpoint", true, true, false)).toBe("local");
+    expect(lib.resolveSttPrimary("endpoint", true, false, false)).toBe("cloud");
+    // A saved server nobody chose changes nothing.
+    expect(lib.resolveSttPrimary("cloud", true, true, true)).toBe("cloud");
+    expect(lib.resolveSttPrimary(undefined, true, true, true)).toBe("local");
+  });
+
+  it("never answers the cloud under the lock", () => {
+    expect(lib.resolveSttPrimary("cloud", true, true, false, true)).toBe("local");
+    expect(lib.resolveSttPrimary("cloud", true, true, true, true)).toBe("endpoint");
+    expect(lib.resolveSttPrimary(undefined, true, false, false, true)).toBe("local");
+    expect(lib.resolveSttPrimary("local", true, true, true, true)).toBe("local");
+    // A `local` pick whose engine is gone goes to the owner's server rather than nowhere.
+    expect(lib.resolveSttPrimary("local", true, false, true, true)).toBe("endpoint");
+    expect(lib.resolveSttPrimary("endpoint", true, true, true, true)).toBe("endpoint");
+  });
+
+  it("orders the server first with the old chain behind it, and the lock to the primary alone", () => {
+    expect(lib.sttEngineOrder("endpoint")).toEqual(["endpoint", "local", "cloud"]);
+    expect(lib.sttEngineOrder("local")).toEqual(["local", "cloud"]);
+    expect(lib.sttEngineOrder("cloud")).toEqual(["cloud", "local"]);
+    expect(lib.sttEngineOrder("endpoint", true)).toEqual(["endpoint"]);
+    expect(lib.sttEngineOrder("local", true)).toEqual(["local"]);
+    expect(lib.sttEngineOrder("cloud", true)).toEqual([]);
+  });
+
+  it("takes an unlocked order to the lock's single local engine", () => {
+    expect(lib.lockedSttOrder(["cloud", "local"], false)).toEqual(["local"]);
+    expect(lib.lockedSttOrder(["cloud", "local"], true)).toEqual(["endpoint"]);
+    expect(lib.lockedSttOrder(["local", "cloud"], true)).toEqual(["local"]);
+    expect(lib.lockedSttOrder(["endpoint", "local", "cloud"], true)).toEqual(["endpoint"]);
+    expect(lib.lockedSttOrder([], false)).toEqual(["local"]);
+  });
+
+  it("writes the server as the CLI row of the app's own client script, only when saved", () => {
+    const row = {
+      type: "cli",
+      command: "/usr/bin/python3",
+      args: [expect.stringMatching(/scripts\/stt-endpoint-client\.py$/), "{{MediaPath}}"],
+      timeoutSeconds: 120,
+      capabilities: ["audio"],
+    };
+    expect(lib.buildAudioModels(["endpoint", "local", "cloud"], true, true, true)).toEqual([row, LOCAL, CLOUD]);
+    expect(lib.buildAudioModels(["endpoint"], true, true, false)).toEqual([]);
+  });
+
+  it("reads the route under the lock without asking for the ClawBox AI credential", async () => {
+    store.set("ai_cloud_lock", true);
+    store.set("stt_primary", "cloud");
+    store.set("stt_endpoint", ENDPOINT_RECORD);
+    token.value = "claw_test";
+    expect(await lib.getSttRoute()).toEqual({ primary: "endpoint", order: ["endpoint"], locked: true });
+    store.set("ai_cloud_lock", false);
+    expect(await lib.getSttRoute()).toEqual({ primary: "cloud", order: ["cloud", "local"], locked: false });
   });
 });

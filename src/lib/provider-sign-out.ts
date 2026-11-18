@@ -66,7 +66,7 @@ import { clearClawAiSession, isClawAiSessionConfiguring, readClawAiSession } fro
 import { get as getConfigValue, getKnown, setMany } from "@/lib/config-store";
 import { EXPLICIT_MODEL_PICKS_KEY, explicitPicksFrom, forgetProviderPicks } from "@/lib/explicit-model-pick";
 import { getActiveHarnessSource, type Edition, type Harness } from "@/lib/harness";
-import { forgetClawaiCredentialRefusal, hasClawaiToken, resolveClawaiToken } from "@/lib/harness/credentials";
+import { forgetClawaiCredentialRefusal, hasClawaiEntitlementToken, resolveClawaiEntitlementToken } from "@/lib/harness/credentials";
 import { resolveHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { HERMES_AUTO_PROVIDER } from "@/lib/hermes-providers";
 import { readConfigStrict } from "@/lib/openclaw-config";
@@ -213,7 +213,9 @@ async function refusalBeforeSignOut(harness: Harness, row: string, label: string
         .then(({ getBackgroundTask }) => getBackgroundTask(session.taskId as string)?.state !== "running")
         .catch(() => false)
       : false;
-    if (session && !taskEnded && isClawAiSessionConfiguring(session)) {
+    // A subscription linked for its plan alone (TASK-2501) writes no ClawBox AI
+    // credential, so it cannot sign the box back in behind this sign-out.
+    if (session && session.scope !== "entitlement" && !taskEnded && isClawAiSessionConfiguring(session)) {
       return {
         ok: false,
         kind: "sign_in_in_progress",
@@ -300,7 +302,8 @@ export async function signOutOfProvider(providerId: string): Promise<ProviderSig
   const removed = await withProviderChangeLock(async () => {
     const refusal = await refusalBeforeSignOut(harness, row, label);
     if (refusal) return refusal;
-    const token = row === CLAWAI_ROW ? await resolveClawaiToken() : null;
+    // Signing out revokes the credential itself, lock or not.
+    const token = row === CLAWAI_ROW ? await resolveClawaiEntitlementToken() : null;
     const storedToken = row === CLAWAI_ROW ? await getConfigValue(CLAWAI_TOKEN_KEY).catch(() => undefined) : undefined;
     const halves = [await prepareHalf(harness, row, token, true)];
     if (row === CLAWAI_ROW && source.edition === "dual") {
@@ -352,7 +355,7 @@ export async function signOutOfProvider(providerId: string): Promise<ProviderSig
   }
   // And the row's own reader, which is what the list will say: a copy in a
   // home neither half looked in is still a sign-in to the owner.
-  if (row === CLAWAI_ROW && !left.length && (await hasClawaiToken().catch(() => false))) left.push("the box's ClawBox AI sign-in");
+  if (row === CLAWAI_ROW && !left.length && (await hasClawaiEntitlementToken().catch(() => false))) left.push("the box's ClawBox AI sign-in");
 
   // The coding agent hears a ClawBox AI token that is gone whatever the
   // answer below: a refusal can come after the token was cleared.

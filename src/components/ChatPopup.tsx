@@ -339,6 +339,12 @@ interface ChatPopupProps {
    * as it was before multi-user.
    */
   chatUser?: string | null
+  /**
+   * A member of staff on an organisation box (src/lib/org-mode.ts): their
+   * chat is a chat and nothing more — no coding-run cards, no "create an
+   * app", no owner's email drafts, whose routes answer them 403.
+   */
+  orgMember?: boolean
   onOpenFull?: () => void
   onOpenSettingsSection?: (section: 'ai' | 'localAi') => void
   onThinkingChange?: (thinking: boolean) => void
@@ -420,6 +426,14 @@ export function stoppedMarker(): ChatMessage {
 }
 
 /**
+ * The status line under a running turn: when it started (the clock counts from
+ * here), what the harness last said it was doing, the spinner verb picked for
+ * it, and whether the model has been heard from. Kept with a tab its owner
+ * leaves mid-run, so coming back shows the same turn's line (TASK-2494).
+ */
+type TurnLine = { startedAt: number; status: string | null; verb: string | null; heardFrom: boolean }
+
+/**
  * Whether the latest question already has this answer under it — a followed
  * turn's reply that the history read had already brought in (see `attachTurn`).
  */
@@ -470,8 +484,9 @@ interface ChatModelState {
     thinkingLevels?: string[]
   }>
   primary: { available: boolean; label: string | null; model: string | null }
-  /** `contextWindow`: what OpenClaw sizes a local turn against (TASK-2127). */
-  local: { available: boolean; label: string | null; model: string | null; contextWindow?: number | null }
+  /** `contextWindow`: what OpenClaw sizes a local turn against (TASK-2127).
+   *  `external`: the slot holds the owner's external AI engine (TASK-2376). */
+  local: { available: boolean; label: string | null; model: string | null; contextWindow?: number | null; external?: boolean }
   /** Providers this box authenticates to by SUBSCRIPTION only. The catalogue's
    * `availableOnSubscription` stamp says what a provider's subscription
    * surface carries; this says whether that applies to this device. Optional
@@ -582,6 +597,7 @@ import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
 import VoiceSecureNotice from '@/components/VoiceSecureNotice'
 import { chatProviderPillLabel, shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
+import { isLocalAiProviderId } from '@/lib/cloud-providers'
 import {
   chatKeepsEarlierModel,
   conversationModelFor,
@@ -995,7 +1011,7 @@ function shownCodingCardIds(transcript: HTMLElement | null): string[] {
   return Array.from(transcript.querySelectorAll(CODING_CARD_SELECTOR), el => el.getAttribute('data-run-id') ?? '')
 }
 
-function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
+function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t, locale } = useT()
   const tr = useTr()
   // The kiosk bar's height on the laptop (0 everywhere else): the docked panel
@@ -1198,8 +1214,22 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // than pick a verb (see `onLocalAi`). Latched for the turn, so a stream
   // that is cleared between tool steps does not bring the words back.
   const [turnHeardFrom, setTurnHeardFrom] = useState(false)
+  // The line as it stands, for the tab switch to put down with the tab it
+  // leaves (TASK-2494): a turn still running there keeps its own clock and
+  // words, and coming back picks them up instead of starting a new count.
+  const turnLineRef = useRef<TurnLine>({ startedAt: 0, status: null, verb: null, heardFrom: false })
   useEffect(() => {
+    turnLineRef.current = { startedAt: turnStartedAt, status: turnStatus, verb: turnVerbRef.current, heardFrom: turnHeardFrom }
+  }, [turnStartedAt, turnStatus, turnHeardFrom])
+  // Set by `switchSession` when the tab it enters has a run still going; the
+  // line is already back on screen, so the `sending` flip that comes with the
+  // switch must not restart it. Read once — any later flip clears it.
+  const resumedTurnRef = useRef(false)
+  useEffect(() => {
+    const resumed = resumedTurnRef.current
+    resumedTurnRef.current = false
     if (!sending) { setTurnStatus(null); setTurnStartedAt(0); setTurnHeardFrom(false); return }
+    if (resumed) return
     turnVerbRef.current = pickSpinnerVerb(turnVerbRef.current)
     setTurnStartedAt(Date.now())
   }, [sending])
@@ -1234,7 +1264,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // still in the document; moved once the chip is.
   const restoreChipRef = useRef<HTMLButtonElement>(null)
   const focusRestoreChipRef = useRef(false)
-  const codingCards = useCodingChatCards(isOpen, (id) => {
+  const codingCards = useCodingChatCards(isOpen && !orgMember, (id) => {
     const focused = document.activeElement?.closest('[data-testid="coding-agent-activity"], [data-testid="coding-team-activity"]')
     if (focused?.getAttribute('data-run-id') === id || (focused?.getAttribute('data-team-id') && `team:${focused.getAttribute('data-team-id')}` === id)) focusRestoreChipRef.current = true
   })
@@ -2091,7 +2121,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // The composer a tab was left with: its draft and the turns queued behind
   // its running one. Restored when the tab is shown again, so text typed for
   // one conversation is never sent into another.
-  const tabStashRef = useRef<Map<string, { input: string; queuedSends: QueuedSend[]; attachments: ChatAttachment[]; runId: string | null; voiceTurnKey: string | null; askedTurnKey: string | null }>>(new Map())
+  const tabStashRef = useRef<Map<string, { input: string; queuedSends: QueuedSend[]; attachments: ChatAttachment[]; runId: string | null; voiceTurnKey: string | null; askedTurnKey: string | null; turn?: TurnLine | null }>>(new Map())
   // A run that died in a background tab leaves NOTHING in the transcript to
   // explain itself — the error line is client-side only. It is kept here when
   // the terminal event goes by and handed over when the tab is next shown.
@@ -2525,7 +2555,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // idle, so the chat says so: a note at the top (LocalAiChatBanner) and,
   // until the turn's first token, "Loading the local model…" in place of a
   // spinner verb.
-  const onLocalAi = harnessLoaded && chatOnLocalAi(harnessId, hermesProvider, chatModelState?.activeSource)
+  // An external engine in the Local AI slot is not on this box: no load note,
+  // no on-device long-chat handling (TASK-2376).
+  const onLocalAi = harnessLoaded
+    && chatOnLocalAi(harnessId, hermesProvider, chatModelState?.activeSource, chatModelState?.local?.external === true)
   const [localAiBannerDismissed, dismissLocalAiBanner] = useLocalAiBannerDismissed()
   const localAiLoadingLabel = useLocalAiLoadingLabel()
   // A long conversation on Local AI (TASK-2127): measured between turns, held
@@ -3522,6 +3555,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
               // first is a race — merging them put two players on one answer
               // whenever the box spoke for the chat first. The chat's clip
               // stays in its ring, which releases it.
+              // Its run rides along: a read that painted this reply first — the
+              // one a tab switch makes on return (TASK-2494) — has it under the
+              // same run, and the append below then changes nothing.
+              const finalRun = typeof payload.runId === 'string' && payload.runId ? payload.runId : undefined
               const reply: ChatMessage = {
                 role: 'assistant',
                 text,
@@ -3529,6 +3566,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
                 images,
                 audio,
                 ...(files.length ? { files } : {}),
+                ...(finalRun ? { idempotencyKey: finalRun } : {}),
               }
               setMessages(prev => withAssistantReply(prev, reply, { ownClips: new Set(spokenUrlsRef.current) }))
               // The picture reached us over the socket after all — nothing
@@ -4307,7 +4345,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // whether the frame belongs to the run this popup is showing, and a tab
     // returned to with the id dropped would take its own reply as a stranger's
     // and stop painting it.
-    if (oldKey) tabStashRef.current.set(oldKey, { input, queuedSends, attachments, runId: runIdRef.current, voiceTurnKey: voiceTurnKeyRef.current, askedTurnKey: askedTurnKeyRef.current })
+    // The status line of a run left going rides with it too: its clock counts
+    // from when the turn started, not from when the owner came back (TASK-2494).
+    const turn = sendingRef.current && turnLineRef.current.startedAt > 0 ? { ...turnLineRef.current, verb: turnVerbRef.current } : null
+    if (oldKey) tabStashRef.current.set(oldKey, { input, queuedSends, attachments, runId: runIdRef.current, voiceTurnKey: voiceTurnKeyRef.current, askedTurnKey: askedTurnKeyRef.current, turn })
     voiceTurnKeyRef.current = null
     // Rides with the tab for the same reason: a question typed in THIS tab and
     // still running is owed its clip when the owner comes back, and a single
@@ -4379,6 +4420,16 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       runIdRef.current = stash?.runId ?? null
       voiceTurnKeyRef.current = stash?.voiceTurnKey ?? null
       askedTurnKeyRef.current = stash?.askedTurnKey ?? null
+      // Its status line as it was left — the same start, the harness's own
+      // words, the same verb — set here rather than by the `sending` effect,
+      // which does not run at all when the tab left was busy too.
+      // A run whose start this popup never saw counts from now, as before.
+      const turn = stash?.turn
+      resumedTurnRef.current = true
+      turnVerbRef.current = turn?.verb ?? pickSpinnerVerb(turnVerbRef.current)
+      setTurnStartedAt(turn?.startedAt || Date.now())
+      setTurnStatus(turn?.status ?? null)
+      setTurnHeardFrom(turn?.heardFrom ?? false)
     }
     // A spoken question whose run finished while the owner was elsewhere:
     // the reply is in the history about to load, and it is still owed aloud.
@@ -5911,6 +5962,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
    * for the turn-end caller and `recoverEmailDrafts` for the scheduled one.
    */
   const collectEmailDrafts = useCallback(async () => {
+    // The box's mail is the owner's; an organisation box's staff have none here.
+    if (orgMember) return
     const read = ++emailQueueReadSeq.current
     try {
       // `no-store`, and not because the route is slow to change: the route's
@@ -5988,7 +6041,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // The queue could not be read. Nothing is waiting as far as this surface
       // is concerned, and Settings → Email is unaffected.
     }
-  }, [])
+  }, [orgMember])
 
   /**
    * The turn-end caller: collect at once, but only for a turn that asked to
@@ -6488,11 +6541,15 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // before answering, so that tab replays it on return; here it only went
     // from busy to unread (settleRun).
     if (sessionKeyRef.current !== keyAtSend) return
-    const hasMedia = (result.media?.length ?? 0) > 0 || (result.audio?.length ?? 0) > 0
-    // A followed turn can have landed in the transcript the page just read —
-    // it ended between that read and the attach — and the same answer twice
-    // is a second reply the agent never gave.
-    setMessages(prev => attach && answerAlreadyShown(prev, result.text) ? prev : [...prev, {
+    const hasMedia = (result.media?.length ?? 0) > 0 || (result.audio?.length ?? 0) > 0 || (result.files?.length ?? 0) > 0
+    // The answer can already be on screen from the transcript: the route writes
+    // it down and only then answers, so a followed turn that ended between the
+    // read and the attach, and a tab the owner left and came back to inside
+    // that window (TASK-2494), both read it before this promise settles. The
+    // same answer twice under one question is a second reply the agent never
+    // gave. Outside a follow only a text reply is skipped, so a picture or a
+    // clip the settled turn carries is never lost to the bubble the read drew.
+    setMessages(prev => (attach || !hasMedia) && answerAlreadyShown(prev, result.text) ? prev : [...prev, {
       role: 'assistant',
       // A reply that is nothing BUT a picture is still a real answer — don't
       // call it '(no response)'.
@@ -6500,6 +6557,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       timestamp: Date.now(),
       images: [...(result.media ?? [])],
       audio: boundedAudio([...(result.audio ?? [])]),
+      // A document the reply named: its download card, the same one the transcript replays.
+      ...(result.files?.length ? { files: [...result.files] } : {}),
       // Beside the answer, never folded into it — the live bubble and the one
       // replayed from the transcript have to be the same bubble.
       ...(result.reasoning ? { reasoning: result.reasoning } : {}),
@@ -7136,6 +7195,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         current?: unknown
         reasoning?: unknown
         stale?: unknown
+        cloudProvidersHidden?: unknown
       }
       // `aborted` alone is not enough: a response can resolve before the abort
       // lands, and `json()` adds a second await for a newer seed to start in.
@@ -7163,6 +7223,13 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // Keep what is rendered and go back for the real list; only a header with
       // nothing on offer yet falls back to the device's own provider.
       if (degraded && hermesProvidersRef.current.length > 0) {
+        // The setting is the box's own, not the dashboard's: a degraded answer
+        // carries it too, so rows already on screen follow it while the
+        // dashboard is away (src/lib/cloud-providers.ts).
+        if (mData?.cloudProvidersHidden === true) {
+          const kept = hermesProvidersRef.current.filter(p => isLocalAiProviderId(p.id))
+          if (kept.length !== hermesProvidersRef.current.length) setHermesProviders(kept)
+        }
         retryLater()
         return
       }
@@ -7172,6 +7239,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // `null` means the source couldn't tell — keep those.
       const rows: HermesChatProvider[] = reported
         .filter(p => typeof p?.id === 'string' && p.id && p.authenticated !== false)
+        // "Hide cloud AI providers" (src/lib/cloud-providers.ts): the box's
+        // own AI only.
+        .filter(p => mData?.cloudProvidersHidden !== true || isLocalAiProviderId(p.id))
         .map(p => ({
           id: p.id as string,
           name: typeof p.name === 'string' ? p.name : (p.id as string),
@@ -7181,7 +7251,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // The configured provider always belongs in the list even if Hermes
       // reports it unauthenticated — it is what this chat is running on,
       // so the header must be able to show it.
-      if (deviceProvider && !rows.some(r => r.id === deviceProvider)) {
+      // Not a cloud one while they are hidden: the header offers the box's own
+      // AI alone, and falls back to its plain label without a row.
+      if (deviceProvider && !rows.some(r => r.id === deviceProvider)
+        && (mData?.cloudProvidersHidden !== true || isLocalAiProviderId(deviceProvider))) {
         rows.unshift({ id: deviceProvider, name: deviceProvider })
       }
       setHermesProviders(rows)
@@ -9212,7 +9285,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         {/* Create: the Coding Agent's New app wizard, right here. The owner
             asked for it beside the attach and microphone buttons — the chat is
             where the handoff lands, so it is where the request should start. */}
-        <NewAppToggleButton card={newApp} />
+        {!orgMember && <NewAppToggleButton card={newApp} />}
         {/* Making a picture, where the AGENT cannot.
             Shown on the trigger and not on `canGenerateImages`, because the two
             answer different questions: the flag says a picture can be made
@@ -9383,7 +9456,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             const activeOption = chatModelState.options.find(o => o.id === activeId)
             const triggerLabel = activeOption
               ? getProviderPillText(activeOption)
-              : (unselectableActive ? t('chat.noChatModel') : activeId)
+              : (unselectableActive ? (chatModelState.activeLabel ?? t('chat.noChatModel')) : activeId)
             return (
               <HeaderDropdown
                 ariaLabel={tr('chat.pillChatProvider', 'Chat provider')}

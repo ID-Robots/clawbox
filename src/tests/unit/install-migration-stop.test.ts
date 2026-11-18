@@ -50,13 +50,18 @@ ensure_clawbox_bashrc_path() { :; }
 ensure_openclaw_node_engine() { :; }
 openclaw_version_is_v2() { [[ "$1" == 2026.8.* ]]; }
 chown() { :; }
+${fn("hand_over_home_path")}
 flush_core_to_disk() { :; }
 systemctl() { ctl system "$@"; }
+# The probes install.sh asks as the service account (runuser -u … -- cmd…).
+runuser() { shift 2; [ "\${1:-}" = "--" ] && shift; "$@"; }
 # npm is reached only when the core is being replaced, so its stub is the
 # CORE_REPLACEMENT sentinel — and it leaves npm's layout behind at the prefix
 # it was handed (the step stages the core, gates the launcher there, then
 # renames it into the live prefix): a launcher answering the version asked for.
 as_clawbox() {
+  # The staging prefix, emptied, made and removed by the account that owns it.
+  case "\${1:-}" in rm|mkdir) command "$@"; return ;; esac
   case "$*" in
     *'systemctl --user'*) shift 5; ctl user "$@" ;;
     *'doctor --fix'*) echo DOCTOR_CALLED; case "$SCENARIO" in v2-replacement|v2-current|setup-*) return 0 ;; *) return 42 ;; esac ;;

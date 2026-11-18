@@ -26,8 +26,13 @@ const {
   createUpgradeSessionWatch,
   recheckMsFromEnv,
 } = require("./scripts/upgrade-session-watch.js");
-const { loadOrCreateRelayIdentity, readGatewayToken, relayUserChat } = require("./scripts/gateway-user-relay.js");
+const { loadOrCreateRelayIdentity, readGatewayToken, relayUserChat, staffReadyReader } = require("./scripts/gateway-user-relay.js");
+const { claimReplyMedia } = require("./scripts/chat-reply-media.js");
+const { createMediaOwners } = require("./scripts/chat-media-owners.js");
+const { staffAgentId } = require("./scripts/org-staff-policy.js");
 const { OPENCLAW_SHARED_KEY, USER_CHAT_WS_PATH, openclawSharedFrom } = require("./scripts/openclaw-sharing.js");
+const { ORG_MODE_KEY, orgModeFrom, orgModeRefusesUpgrade } = require("./scripts/org-mode.js");
+const { USER_LIMITS_KEY, admitChatRequest, userLimitsFrom } = require("./scripts/user-limits.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // entry point is standalone CommonJS and cannot import the TypeScript helper:
@@ -168,11 +173,15 @@ function readSessionConfig() {
       gen,
       users: parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername()),
       openclawShared: openclawSharedFrom(parsed[OPENCLAW_SHARED_KEY]),
+      orgMode: orgModeFrom(parsed[ORG_MODE_KEY]),
+      // The owner's limits for every other user (TASK-2446): the relay counts
+      // each user's chat turns against them.
+      userLimits: userLimitsFrom(parsed[USER_LIMITS_KEY]),
     };
     sessionConfigCache = { mtimeMs: stat.mtimeMs, value };
     return value;
   } catch {
-    const value = { gen: 0, users: new Map(), openclawShared: false };
+    const value = { gen: 0, users: new Map(), openclawShared: false, orgMode: false, userLimits: userLimitsFrom(undefined) };
     sessionConfigCache = { mtimeMs: -1, value };
     return value;
   }
@@ -202,10 +211,23 @@ function upgradeSession(cookieHeader) {
  * null on an ungated route), or `{ ok: false, status }` to refuse it.
  */
 function authorizeUpgrade(gate, req) {
-  if (!gate.requireAuth) return { ok: true, identity: null };
+  if (!gate.requireAuth) {
+    // A project's own app (/apps/<id>) is answered without a session: its
+    // sandboxed document carries no cookie. One that DOES carry a member of
+    // staff's cookie on an organisation box is refused — their apps are three.
+    if (req.headers.cookie && readSessionConfig().orgMode) {
+      const who = upgradeSession(req.headers.cookie);
+      if (who && !who.isOwner) return { ok: false, status: 403 };
+    }
+    return { ok: true, identity: null };
+  }
   const identity = upgradeSession(req.headers.cookie);
   if (!identity) return { ok: false, status: 401 };
   if (gate.ownerOnly && !identity.isOwner) return { ok: false, status: 403 };
+  // An organisation box (scripts/org-mode.js): a member of staff's only socket
+  // is their own chat — never the Terminal, the remote desktop or the
+  // gateway's Control UI, whether or not the owner shares OpenClaw.
+  if (orgModeRefusesUpgrade(gate, identity, readSessionConfig().orgMode)) return { ok: false, status: 403 };
   return { ok: true, identity };
 }
 
@@ -227,14 +249,30 @@ const sharedGatewayWatch = createUpgradeSessionWatch({
   verify: (cookieHeader) => {
     const session = upgradeSession(cookieHeader);
     if (!session) return null;
-    return session.isOwner || readSessionConfig().openclawShared ? session : null;
+    if (session.isOwner) return session;
+    const { openclawShared, orgMode } = readSessionConfig();
+    return openclawShared && !orgMode ? session : null;
+  },
+  recheckMs: recheckMsFromEnv(process.env.CLAWBOX_WS_SESSION_RECHECK_MS),
+});
+
+// A non-owner's Terminal or remote desktop holds for as long as the session
+// AND the box is not an organisation box: the owner turning `org_mode` on
+// closes it on the next recheck, as a revoked session would be.
+const orgMemberWatch = createUpgradeSessionWatch({
+  verify: (cookieHeader) => {
+    const session = upgradeSession(cookieHeader);
+    if (!session) return null;
+    return session.isOwner || !readSessionConfig().orgMode ? session : null;
   },
   recheckMs: recheckMsFromEnv(process.env.CLAWBOX_WS_SESSION_RECHECK_MS),
 });
 
 /** The watch an admitted socket is held to. */
 function sessionWatchFor(gate, identity) {
-  return gate.gateway && identity && !identity.isOwner ? sharedGatewayWatch : upgradeSessionWatch;
+  if (!identity || identity.isOwner) return upgradeSessionWatch;
+  if (gate.gateway) return sharedGatewayWatch;
+  return gate.userChat ? upgradeSessionWatch : orgMemberWatch;
 }
 
 /**
@@ -272,6 +310,32 @@ const OPENCLAW_CONFIG_PATH = `${
   || `${process.env.HOME || "/home/clawbox"}/.openclaw`
 }/openclaw.json`;
 const RELAY_IDENTITY_PATH = path.join(process.env.CLAWBOX_ROOT || __dirname, "data", ".gateway-user-relay-device.json");
+// Whose chat a media file is (src/lib/chat-media-owners.ts): the relay records
+// the files a member of staff's reply names as theirs (TASK-2516), so the
+// download card in their chat opens for them and for nobody else.
+const chatMediaOwners = createMediaOwners(path.join(process.env.CLAWBOX_ROOT || __dirname, "data", "chat-media-owners.json"));
+const OPENCLAW_STATE_DIR = path.dirname(OPENCLAW_CONFIG_PATH);
+
+/** A member of staff's reply named files: record the ones that may be theirs (scripts/chat-reply-media.js). */
+function recordStaffReplyMedia(username, claim) {
+  const { recorded, refused } = claimReplyMedia({
+    username,
+    paths: claim.paths,
+    since: claim.since,
+    until: claim.until,
+    // Their own folder only — the staff agent's workspace
+    // (src/lib/org-staff-agents.ts staffWorkspaceDir), which nobody else's
+    // assistant writes into. A file in the shared media tree is made theirs
+    // by the staff MCP relay that ran their tool call (provenance), never by
+    // a reply naming it.
+    roots: [{ dir: path.join(OPENCLAW_STATE_DIR, "staff", username) }],
+    record: chatMediaOwners.recordMediaOwner,
+  });
+  if (recorded.length > 0 || refused.length > 0) {
+    // Counts and reasons only: a path can name a person's document.
+    console.log(`[user-chat-relay] a reply's files: ${recorded.length} recorded as the member's, ${refused.length} not (${[...new Set(refused.map((r) => r.reason))].join(", ") || "-"})`);
+  }
+}
 let relayIdentity = null;
 const userChatWss = new WebSocket.Server({ noServer: true });
 
@@ -286,7 +350,10 @@ const userChatWss = new WebSocket.Server({ noServer: true });
  */
 function relayedChatUser(gate, identity) {
   if (!gate.gateway || !identity || identity.isOwner) return null;
-  if (!gate.userChat && readSessionConfig().openclawShared) return null;
+  // An organisation box shares nothing (and refuses the root socket to a user
+  // before this is asked — authorizeUpgrade); relaying is the safe reading.
+  const { openclawShared, orgMode } = readSessionConfig();
+  if (!gate.userChat && openclawShared && !orgMode) return null;
   return identity.username;
 }
 
@@ -295,11 +362,29 @@ function relayUserChatUpgrade(req, socket, head, url, identity) {
     if (!relayIdentity) relayIdentity = loadOrCreateRelayIdentity(RELAY_IDENTITY_PATH);
     // The relay closes its gateway side when the browser's socket closes.
     endWsWithSession(clientWs, req, identity);
+    // On an organisation box a member of staff talks to their own agent, held
+    // to the staff tool policy (scripts/org-staff-policy.js); the socket lasts
+    // only as long as the switch stays where it was when it opened.
+    const orgMode = readSessionConfig().orgMode;
+    const staffAgent = orgMode ? staffAgentId(identity.username) : null;
+    if (orgMode && !staffAgent) {
+      // A member of staff whose name cannot be an agent id gets no chat at
+      // all rather than the home box's relay.
+      try { clientWs.close(1008, "This chat is not available."); } catch { /* gone */ }
+      return;
+    }
     relayUserChat({
       clientWs,
       username: identity.username,
       token: readGatewayToken(OPENCLAW_CONFIG_PATH),
       identity: relayIdentity,
+      staffAgent,
+      staffReady: staffAgent ? staffReadyReader(OPENCLAW_CONFIG_PATH, staffAgent) : undefined,
+      stillCurrent: () => readSessionConfig().orgMode === orgMode,
+      // Each turn the user starts is counted against the owner's chat limits
+      // for them, read fresh per turn (scripts/user-limits.js).
+      admitChat: () => admitChatRequest(identity.username, readSessionConfig().userLimits),
+      onReplyMedia: staffAgent ? (claim) => recordStaffReplyMedia(identity.username, claim) : null,
       connectUpstream: () => new WebSocket(`ws://127.0.0.1:${GATEWAY_PORT}${url}`, {
         // Port-less to satisfy the gateway's strict origin allowlist, as the
         // owner's pipe and the WSS proxy below send it.

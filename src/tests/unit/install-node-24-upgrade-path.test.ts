@@ -294,12 +294,22 @@ const SHIPPED = [
 /** The ambient helpers the sliced steps call, stubbed to do nothing of note. */
 const AMBIENT = [
   "wait_for_apt() { :; }",
+  // step_apt_update's logrotate install has a suite of its own
+  // (install-logrotate.test.ts); stubbed so this one never asks the runner's
+  // real dpkg-query or systemctl.
+  "ensure_logrotate() { :; }",
+  // The document libraries' read-back (install-logrotate.test.ts pins it);
+  // stubbed for the same reason, and answering "installed" keeps that line quiet.
+  "dpkg_installed() { return 0; }",
   "ensure_clawbox_bashrc_path() { :; }",
   "is_hermes_edition() { return 1; }",
   "chown() { :; }",
+  shellFunction("hand_over_home_path"),
   'systemctl() { printf "systemctl %s\\n" "$*" >> "$ST/calls"; }',
   // `as_clawbox -H cmd …` runs cmd as the service user; here it just runs it.
   'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; "$@"; }',
+  // The probes install.sh asks as the service account (runuser -u … -- cmd…).
+  'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; "$@"; }',
   // #818 stops both gateway units before the core install and restores them at
   // the end. Stubbed, not lifted: it is systemd and user-manager bookkeeping,
   // nothing to do with which Node the core lands on, and lifting it would drag

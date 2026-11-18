@@ -212,8 +212,9 @@ describe("nonOwnerVerdict — what stays the owner's", () => {
 });
 
 describe("the desktop apps that stay the owner's", () => {
-  it("are the harnesses' own consoles alone — every other built-in app is every signed-in user's", () => {
-    expect(OWNER_ONLY_APP_IDS).toEqual(["openclaw", "hermes"]);
+  it("are the harnesses' own consoles and System Update — every other built-in app is every signed-in user's", () => {
+    // System Update: updating the box is the owner's on every box (TASK-2435).
+    expect(OWNER_ONLY_APP_IDS).toEqual(["openclaw", "hermes", "system_update"]);
     const ids = apps.map((a) => a.id);
     for (const id of OWNER_ONLY_APP_IDS) expect(ids, id).toContain(id);
     // Their standalone pages are the owner's too.
@@ -295,9 +296,9 @@ describe("nonOwnerVerdict — the owner shares OpenClaw with every user", () => 
     }
   });
 
-  it("hides only Hermes from a non-owner's desktop while OpenClaw is shared", () => {
+  it("hides Hermes (and System Update) from a non-owner's desktop while OpenClaw is shared", () => {
     expect(ownerOnlyAppIds(false)).toEqual(OWNER_ONLY_APP_IDS);
-    expect(ownerOnlyAppIds(true)).toEqual(["hermes"]);
+    expect(ownerOnlyAppIds(true)).toEqual(["hermes", "system_update"]);
   });
 
   it("shares only on a literal true", () => {

@@ -1,8 +1,11 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { get, setMany } from "@/lib/config-store";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
+import { externalEngineSelected } from "@/lib/external-engine";
+import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
 import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, runOpenclawConfigSet, openclawIsAbsent } from "@/lib/openclaw-config";
 import { readGatewayConfigBaseline, restartGatewayAnsweringEarly, settleConfigWrite } from "@/lib/gateway-hot-apply";
 import { getActiveHarness } from "@/lib/harness";
@@ -27,6 +30,9 @@ function isLocalModelRef(ref: unknown): boolean {
  * so turning it off puts it back rather than leave the box with no backup.
  */
 async function clawboxAiFallback(config: Awaited<ReturnType<typeof readOpenClawConfig>>): Promise<string | null> {
+  // Never under the local-only AI lock (TASK-2501): no cloud model is put
+  // behind the chat while it is on.
+  if (await isCloudAiLocked()) return null;
   const apiKey = config.models?.providers?.[CLAWBOX_AI_PROVIDER]?.apiKey;
   if (typeof apiKey !== "string" || !apiKey.startsWith("claw_")) return null;
   if (parseDisabledProviders(await get(DISABLED_PROVIDERS_KEY)).has("clawai")) return null;
@@ -69,6 +75,25 @@ export async function POST(request: Request) {
 
   if (body.action !== "disable") {
     return NextResponse.json({ error: "Unsupported action" }, { status: 400 });
+  }
+
+  // A Local AI transition (TASK-2376): the engine check below and the writes
+  // after it run under the lock an engine's save and remove take.
+  return withLocalAiTransitionLock(disableLocalAi);
+}
+
+async function disableLocalAi(): Promise<NextResponse> {
+  // While an external AI engine is the Local AI (TASK-2376) its own Remove
+  // is "turn Local AI off": it puts back what the box had before, which this
+  // path cannot — it would clear the store keys that remember it.
+  if (await externalEngineSelected()) {
+    return NextResponse.json(
+      {
+        error: "An external AI engine is selected as Local AI. Use Remove in Settings → Local AI → External engine.",
+        code: "external_engine_selected",
+      },
+      { status: 409 },
+    );
   }
 
   try {

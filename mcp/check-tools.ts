@@ -181,9 +181,22 @@ const ALL_CAPABILITIES: Posture = {
   capabilities: { screenGrabber: "scrot", imageConvert: true, journal: true, du: true },
   emailCanRead: true,
   codingAgent: true,
+  // Not narrowed: the coding tools name every provider this build knows — the
+  // widest `provider` enum, and the `model` parameter, which a box narrowed to
+  // its own engine does not register (mcp/tools/coding-agent.ts).
+  codingProviders: null,
   canGenerateImages: true,
   providers: ["anthropic", "openai"],
 };
+
+/**
+ * Every capability on, under the local-only AI lock: the device offers its own
+ * engine alone (TASK-2501), so `coding_agent_run` carries a different
+ * `provider` description and no `model`, and the role settings a narrower enum.
+ * Those are shipped shapes no other posture builds, so this one feeds the
+ * contract set — like the dual install, and for the same reason.
+ */
+const LOCAL_ONLY: Posture = { ...ALL_CAPABILITIES, codingProviders: ["local"] };
 
 /**
  * Every capability off — the other end of each gate, spelled out rather than
@@ -199,6 +212,7 @@ const NO_CAPABILITIES: Posture = {
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   emailCanRead: false,
   codingAgent: false,
+  codingProviders: null,
   canGenerateImages: false,
   providers: [],
 };
@@ -425,6 +439,11 @@ async function check(): Promise<void> {
     const { reg: dualReg } = await buildServer(edition, "full", edition, ALL_CAPABILITIES, "dual");
     const dual = dualReg.list();
 
+    // A box under the local-only AI lock: the coding tools' schemas there are
+    // shapes no other posture builds. Contract set only, like `dual`.
+    const { reg: lockedReg } = await buildServer(edition, "full", edition, LOCAL_ONLY);
+    const localOnly = lockedReg.list();
+
     // Every gate the other way round. It carries the one tool that registers
     // where the box CANNOT do the thing (`image_generate`), and it is what the
     // negative half of each assertion below is made against.
@@ -436,7 +455,7 @@ async function check(): Promise<void> {
     // Same shape as the run posture below — the variable is read at
     // REGISTRATION time (mcp/tools/coding.ts), so it is set around this one
     // build and put back immediately, and `main()` has already cleared whatever
-    // the invoking shell had so the other five postures cannot see it either.
+    // the invoking shell had so the other six postures cannot see it either.
     // Without this posture the nine gated tools are built by NO posture at all:
     // the contract check would print "Tool contract OK" over nine shipped
     // descriptions and schemas it had never looked at, which is the same
@@ -493,7 +512,7 @@ async function check(): Promise<void> {
     // `schemaShapeViolations` exists to catch, a name-keyed run still printed
     // "Tool contract OK". One `toJSONSchema` per tool per posture; the whole
     // run is about a second.
-    for (const tool of [...enabled, ...disabled, ...probed, ...inRun, ...dual, ...codingOn]) {
+    for (const tool of [...enabled, ...disabled, ...probed, ...inRun, ...dual, ...localOnly, ...codingOn]) {
       const emitted = emittedSchema(tool);
       const key = `${tool.name}\u0000${tool.description}\u0000${emitted}`;
       if (seen.has(key)) continue;
@@ -772,7 +791,7 @@ async function main(): Promise<void> {
   // this BLOCKING step exited 1 with `"browser_view_local" is registered outside
   // a coding run` — a false failure blaming the code for the environment it was
   // invoked in, which is exactly the kind of check that gets switched off. It
-  // also removes the hazard in making the twelve builds concurrent: the run
+  // also removes the hazard in making the fourteen builds concurrent: the run
   // posture's variables are no longer the only thing separating it from the
   // others.
   const ambientKeys = [...Object.keys(RUN_ENV), CODING_TOOLS_ENV];

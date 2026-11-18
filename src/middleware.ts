@@ -21,6 +21,7 @@ import {
   requestIntent,
 } from "@/lib/non-owner-scope";
 import { sessionExpiredHeaders } from "@/lib/session-expiry";
+import { ORG_MODE_KEY, orgModeFrom } from "@/lib/org-mode";
 import { APP_PROXY_NEXT_URL_HEADER, APP_REOPEN_PAGE_CSP, appReopenPage } from "@/lib/app-window";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
@@ -54,6 +55,8 @@ interface ConfigSnapshot {
   users: ReadonlyMap<string, string>;
   /** The owner shares OpenClaw with every signed-in user (src/lib/non-owner-scope.ts). */
   openclawShared: boolean;
+  /** An organisation box: a user gets Chat, Files and their own Settings (src/lib/org-mode.ts). */
+  orgMode: boolean;
 }
 
 const NO_PUBLIC_WEBAPPS: ReadonlySet<string> = new Set();
@@ -101,6 +104,7 @@ function readConfigCached(): ConfigSnapshot {
       [UPDATE_LOCK_KEY]?: unknown;
       [USERS_CONFIG_KEY]?: unknown;
       [OPENCLAW_SHARED_KEY]?: unknown;
+      [ORG_MODE_KEY]?: unknown;
     };
     const sessionGen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
@@ -114,6 +118,7 @@ function readConfigCached(): ConfigSnapshot {
       publicWebapps: publicWebappIds(parsed["pref:installed_meta"]),
       users: registryVersions(parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername())),
       openclawShared: openclawSharedFrom(parsed[OPENCLAW_SHARED_KEY]),
+      orgMode: orgModeFrom(parsed[ORG_MODE_KEY]),
     };
     return configCache;
   } catch (err) {
@@ -142,6 +147,9 @@ function readConfigCached(): ConfigSnapshot {
       users: NO_USERS,
       // Closed like the users: an unreadable switch shares nothing.
       openclawShared: false,
+      // A home box: no user can sign in on an unreadable config anyway (users
+      // above), and this is the reading that hides nothing from the owner.
+      orgMode: false,
     };
     return configCache;
   } finally {
@@ -281,6 +289,14 @@ const LOOPBACK_PROXY_PREFIXES = [
   "/setup-api/local-ai/llamacpp",
   "/setup-api/local-ai/ollama",
   "/setup-api/local-ai/embed",
+  // Claude Code's Messages API on the box's engine, for `local` coding runs
+  // (TASK-2501 PR-E): the run holds no cookie, and the route checks the local
+  // coding token itself (src/lib/local-anthropic-route.ts) — none, 401.
+  "/setup-api/local-ai/anthropic",
+  // The staff MCP relay (TASK-2377): the gateway calls it for a member of
+  // staff's agent with that member's relay token, which the route checks
+  // itself (src/lib/staff-mcp-relay.ts) — no cookie, no token, 401.
+  "/setup-api/staff-mcp",
 ];
 
 // Which /setup-api/* routes are reachable during the first-boot bootstrap
@@ -682,6 +698,19 @@ export async function middleware(request: NextRequest) {
   // page it navigates to is not, and is reopened by the desktop instead
   // (appWindowReopen, step 5).
   if (isAppProxyPath(request.nextUrl.pathname) && (!isDocumentRequest(request.headers) || isOpaqueFrameRequest(request.headers))) {
+    // An organisation box's member of staff has no apps (src/lib/org-mode.ts):
+    // a request that carries THEIR cookie is refused. The sandboxed document's
+    // own requests carry none, so the owner's apps are untouched.
+    const appCookie = request.cookies.get("clawbox_session")?.value;
+    if (appCookie && readConfigCached().orgMode) {
+      const who = await verifySessionCookie(appCookie, currentSessionGeneration());
+      if (who && !who.isOwner) {
+        return NextResponse.json(
+          { error: "Only the box owner can open this.", code: "owner_only" },
+          { status: 403, headers: { "cache-control": "no-store" } },
+        );
+      }
+    }
     return passToAppProxy(request);
   }
 
@@ -793,7 +822,9 @@ export async function middleware(request: NextRequest) {
     // that" — `requestIntent`, not `isDocumentRequest`, because the box is
     // reached over plain HTTP, where browsers send no Sec-Fetch-Dest at all.
     // The owner's "Share OpenClaw with all users" switch rides in from the same
-    // cached config.json read, so turning it off holds from the next request.
+    // cached config.json read, so turning it off holds from the next request —
+    // and so does `org_mode` (src/lib/org-mode.ts), which narrows a user to
+    // Chat, Files and their own Settings on an organisation box.
     if (!identity.isOwner) {
       const verdict = nonOwnerVerdict({
         pathname: request.nextUrl.pathname,
@@ -802,6 +833,7 @@ export async function middleware(request: NextRequest) {
         intent: requestIntent(request.headers),
         username: identity.username,
         openclawShared: readConfigCached().openclawShared,
+        orgMode: readConfigCached().orgMode,
       });
       if (verdict === "redirect-home") {
         return NextResponse.redirect(new URL(NON_OWNER_HOME, request.url), {

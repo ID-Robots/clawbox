@@ -84,6 +84,19 @@ export function fail(code: string, error: string, status: number): NextResponse 
   return json({ error, code }, status);
 }
 
+/**
+ * What a route that starts the writer answers when no engine can write
+ * (flash-client `flashUnavailableReason`), before anything is read: 412
+ * `no_credential` on a box with neither ClawBox AI nor a model of its own;
+ * 409 `cloud_ai_locked` when the local-only AI lock is on and the box has no
+ * model of its own (the lock never falls back to the cloud).
+ */
+export function noEngineRefusal(reason: "cloud_ai_locked" | "no_credential"): NextResponse {
+  return reason === "cloud_ai_locked"
+    ? fail("cloud_ai_locked", "Local-only AI is on, and no model is set up on this box: set up Local AI first; Prime Radiant writes its pages with it.", 409)
+    : fail("no_credential", "Sign this box in to ClawBox AI, or set up Local AI on it, first; Prime Radiant writes its pages with one of them.", 412);
+}
+
 /** A failure inside the vault layer, logged with its reason and answered without it. */
 export function vaultFailure(where: string, err: unknown): NextResponse {
   console.error(`[prime-radiant] ${where}:`, err instanceof Error ? err.message : err);

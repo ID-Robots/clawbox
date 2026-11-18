@@ -151,6 +151,31 @@ const fenced = (items: Array<{ i: number }>, verdict = "compatible") =>
   "Here you go:\n```json\n" + JSON.stringify(items.map((it) => ({ i: it.i, verdict, why: "different regions", extra: { note: "x" } }))) + "\n```\nDone.";
 
 describe("contradiction pass: small batches", () => {
+  it("asks a batch too long for the box's own model again one pair a call, and defers only a pair still too long alone (TASK-2501 PR-C)", async () => {
+    const sizes: number[] = [];
+    const client: FlashClient = {
+      model: "llamacpp/gemma4-e2b-it-q4_0",
+      engine: "local",
+      budget: { contextTokens: 32_768, maxOutputTokens: 8_192, parallel: 1 },
+      async complete(request: FlashRequest) {
+        const items = readJudgeItems(request.user) ?? [];
+        sizes.push(items.length);
+        // Anything over one pair is too long; of the single pairs, every third one is too.
+        if (items.length > 1 || sizes.length % 3 === 0) throw new FlashCallError("too_long", "The model on this box did not answer within 15 minutes.");
+        return { text: fenced(items), model: "llamacpp/gemma4-e2b-it-q4_0", usage: { promptTokens: 500, completionTokens: 80, cacheHitTokens: 0 } };
+      },
+    };
+    const r = await runContradictionPass(manyClaims(), { stateVault: vaultDir(), scope: null, client, embedder: createHashEmbedder(), retry: noSleep, parallel: 8 });
+    expect(sizes[0]).toBeGreaterThan(1);
+    // Each first-round batch once, then every pair once on its own: none resent as it was.
+    const firstRound = Math.ceil(r.pairs / JUDGE_BATCH_PAIRS) - (r.pairs % JUDGE_BATCH_PAIRS === 1 ? 1 : 0);
+    expect(sizes.filter((n) => n > 1)).toHaveLength(firstRound);
+    expect(sizes.filter((n) => n === 1)).toHaveLength(r.pairs);
+    expect(r.judged).toBeGreaterThan(0);
+    expect(r.judged + r.failedBatches).toBe(r.pairs);
+    expect(r.skipped).toBeNull();
+  });
+
   it("sends at most JUDGE_BATCH_PAIRS pairs a call, within the parallelism it is given", async () => {
     const client = scripted((items) => fenced(items));
     const r = await runContradictionPass(manyClaims(), {

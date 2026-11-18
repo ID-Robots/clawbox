@@ -310,7 +310,7 @@ describe("WhatsNewCard", () => {
 
   it("names only icons the bundled Material Symbols subset carries", () => {
     // A ligature name the subset lacks renders as its literal text.
-    const font = readFileSync(path.join(process.cwd(), "public/fonts/material-symbols-rounded.ttf"), "latin1");
+    const font = readFileSync(path.join(process.cwd(), "src/assets/fonts/material-symbols-rounded.ttf"), "latin1");
     const lines = font.split("\n");
     for (const icon of [...WHATS_NEW_HIGHLIGHTS.map((h) => h.icon), "chevron_left", "chevron_right", "auto_awesome"]) {
       const word = new RegExp(`(^|[^A-Za-z0-9_])${icon}([^A-Za-z0-9_]|$)`);

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { readHermesVoiceStanddown, clearHermesVoiceStanddown } from "@/lib/hermes-voice-standdown";
+import { readHermesVoiceStanddown, clearHermesVoiceStanddown, rememberHermesVoiceStanddown, rememberHermesVoiceLock } from "@/lib/hermes-voice-standdown";
 
 describe("voice restoration history", () => {
   let home: string;
@@ -19,6 +19,26 @@ describe("voice restoration history", () => {
     expect(await readHermesVoiceStanddown()).toBeNull();
     await clearHermesVoiceStanddown();
   });
+  it("lets two spoken replies remember at once, each through its own temp file (TASK-2501)", async () => {
+    await Promise.all([
+      rememberHermesVoiceStanddown("shimmer"),
+      rememberHermesVoiceStanddown("nova"),
+      rememberHermesVoiceLock("elevenlabs"),
+      rememberHermesVoiceLock("elevenlabs"),
+    ]);
+    expect((await readHermesVoiceStanddown())?.cloudVoice).toMatch(/^(shimmer|nova)$/);
+    expect(JSON.parse(await fs.readFile(path.join(home, "config.yaml.clawbox-voice-lock.json"), "utf8"))).toEqual({ version: 1, provider: "elevenlabs" });
+    // No temp file is left behind.
+    expect((await fs.readdir(home)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("removes its own temp file when the rename fails", async () => {
+    // A directory where the marker goes: the rename cannot replace it.
+    await fs.mkdir(path.join(home, "config.yaml.clawbox-voice-lock.json"));
+    await expect(rememberHermesVoiceLock("elevenlabs")).rejects.toThrow();
+    expect((await fs.readdir(home)).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+
   it("invalid history never grants permission to move off the local voice", async () => {
     await fs.writeFile(path.join(home, "config.yaml.clawbox-voice-standdown.json"), "not json");
     expect(await readHermesVoiceStanddown()).toBeNull();

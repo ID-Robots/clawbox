@@ -45,8 +45,9 @@ line_matches() { grep -qE -- "$2" "$1"; }
 
 # ---- the stub nano-ci --------------------------------------------------------
 # `ssh` runs the command string locally the way the board's login shell would,
-# so lib.sh's board() is exercised end to end; every call is logged.
-mkdir -p "$WORK/bin"
+# in a home folder of the board's own (where run.sh keeps its suite claim), so
+# lib.sh's board() is exercised end to end; every call is logged.
+mkdir -p "$WORK/bin" "$WORK/board-home"
 cat > "$WORK/bin/nano-ci" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${NANO_STUB_LOG:?}"
@@ -54,13 +55,16 @@ case "$1" in
   ssh)
     shift 2
     [ -z "${NANO_STUB_BANNER:-}" ] || printf 'Welcome to %s\nok banner\n' "$NANO_STUB_BANNER"
-    exec bash -c "$*"
+    HOME=${NANO_STUB_HOME:?} exec bash -c "$*"
     ;;
   health) exit "${NANO_STUB_HEALTH:-0}" ;;
   *) exit 0 ;;
 esac
 STUB
 chmod +x "$WORK/bin/nano-ci"
+export NANO_STUB_HOME=$WORK/board-home
+# The suite claim run.sh holds on the board while it runs.
+CLAIMF=$NANO_STUB_HOME/.cache/clawbox-nano-tests/suite.claim
 export NANO_CI=$WORK/bin/nano-ci NANO_STUB_LOG=$WORK/nano-ci-calls.log NANO_SELFTEST_LIB=$LIB
 export NANO_KILL_GRACE=1 NANO_SHA=0123456789abcdef0123456789abcdef01234567
 unset GITHUB_ACTIONS NANO_RESULTS_DIR NANO_TESTS_DIR NANO_IP NANO_LAB NANO_RUN_ID
@@ -188,6 +192,17 @@ NANO_CI=$WORK/bin/no-such-helper NANO_TESTS_DIR=$B bash "$RUN" --results "$WORK/
 check "a missing nano-ci is an error (2)" test $? -eq 2
 check "...that names what is missing" contains "$WORK/out-nohelper.txt" "no-such-helper"
 
+# ---- a test that leaves the box unfit for the rest -------------------------
+STOP=$WORK/tests-stop
+fixture "$STOP" 10-first.sh 'echo "ok - fine"'
+fixture "$STOP" 20-stopper.sh 'echo "20-stopper left the box mid-update" > "$NANO_STOP_FILE"; echo "not ok - left the box mid-update"'
+fixture "$STOP" 30-after.sh 'touch "$NANO_RESULTS_DIR/../after-ran"; echo "ok - must not run after a stop"'
+NANO_TESTS_DIR=$STOP bash "$RUN" --results "$WORK/res-stop" SERIAL-20 > "$WORK/out-stop.txt" 2>&1
+check "a test that stops the suite still fails the run (1)" test $? -eq 1
+check "...the test after it does not run" test ! -e "$WORK/after-ran"
+check "...and is a skip that carries the stop's reason" line_matches "$WORK/out-stop.txt" '^ok 3 - 30-after \(0s\) # SKIP not run: 20-stopper left the box mid-update$'
+check "...while the one before it ran" line_matches "$WORK/out-stop.txt" '^ok 1 - 10-first '
+
 # ---- an interrupted run -----------------------------------------------------
 C=$WORK/tests-cancel
 fixture "$C" 10-pass.sh 'echo "ok - fine"'
@@ -203,6 +218,7 @@ kill -TERM "$RUNNER"
 wait "$RUNNER"
 RC=$?
 check "a cancelled run exits 130" test "$RC" -eq 130
+check "...and gives the board's suite claim back" test ! -e "$CLAIMF"
 jq_check "its summary is written and marked interrupted" "$WORK/res-cancel/summary.json" '
   .interrupted == true and .ok == false and .planned == 3 and .total == 2
   and .tests[1].name == "20-long" and .tests[1].status == "fail" and .tests[1].reason == "interrupted"'
@@ -403,6 +419,38 @@ check "a selection naming no test is a usage error (2)" test $? -eq 2
 check "...that names it" contains "$WORK/out-sel-bad.txt" "99-no-such-test"
 NANO_TESTS_SELECT='10-a;reboot' NANO_TESTS_DIR=$P bash "$RUN" --results "$WORK/res-sel-bad2" SERIAL-S > /dev/null 2>&1
 check "a selection that is not test names is refused (2)" test $? -eq 2
+
+# ---- one suite per board ---------------------------------------------------------
+O=$WORK/tests-claim
+fixture "$O" 10-claimed.sh 'read -r id expiry _ < "$NANO_STUB_HOME/.cache/clawbox-nano-tests/suite.claim"
+if [ "$id" = "$NANO_RUN_ID" ] && [ "${expiry:-0}" -gt "$(date +%s)" ]; then echo "ok - the board is claimed by this run"
+else echo "not ok - the claim is [$id $expiry], not one of this run"; fi'
+fixture "$O" 20-ran.sh 'touch "$NANO_RESULTS_DIR/../claim-ran"; echo "ok - ran"'
+check "no run left a claim on the board" test ! -e "$CLAIMF"
+NANO_TESTS_DIR=$O bash "$RUN" --results "$WORK/res-claim" SERIAL-C > "$WORK/out-claim.txt" 2>&1
+check "a run holds the board's suite claim while its tests run" test $? -eq 0
+check "...and gives it back when it ends" test ! -e "$CLAIMF"
+rm -f "$WORK/claim-ran"
+printf 'other-run %s\n' $(($(date +%s) + 600)) > "$CLAIMF"
+cp "$CLAIMF" "$WORK/claim-before"
+NANO_TESTS_DIR=$O bash "$RUN" --results "$WORK/res-claim-busy" SERIAL-C > "$WORK/out-claim-busy.txt" 2>&1
+check "a board another run has claimed is refused (2)" test $? -eq 2
+check "...naming that run" contains "$WORK/out-claim-busy.txt" "running another suite (run other-run, its claim lasts"
+check "...before any test starts" test ! -e "$WORK/claim-ran"
+check "...and its claim is left as it was" cmp -s "$CLAIMF" "$WORK/claim-before"
+printf 'gone-run %s\n' $(($(date +%s) - 5)) > "$CLAIMF"
+NANO_TESTS_DIR=$O bash "$RUN" --results "$WORK/res-claim-stale" SERIAL-C > "$WORK/out-claim-stale.txt" 2>&1
+check "a claim past its expiry (a run that died) is taken over" test $? -eq 0
+check "...and given back at the end" test ! -e "$CLAIMF"
+NANO_CI=$WORK/bin/nano-ci-down NANO_TESTS_DIR=$B bash "$RUN" --results "$WORK/res-claim-down" SERIAL-C > "$WORK/out-claim-down.txt" 2>&1
+check "a board that does not answer the claim still runs its tests" test $? -eq 0
+check "...saying so" contains "$WORK/out-claim-down.txt" "# the board did not answer the suite claim: running without one"
+check "...without printing what the failed hop said" lacks "$WORK/out-claim-down.txt" "no route"
+fixture "$WORK/tests-claim-none" 10-long.sh '# tier: long
+echo "ok - long ran"'
+calls=$(wc -l < "$NANO_STUB_LOG")
+NANO_TESTS_DIR=$WORK/tests-claim-none bash "$RUN" --results "$WORK/res-claim-none" SERIAL-C > /dev/null 2>&1
+check "a run whose every test is skipped claims nothing" test "$(wc -l < "$NANO_STUB_LOG")" -eq "$calls"
 
 echo "1..$N"
 if [ "$FAILS" -gt 0 ]; then

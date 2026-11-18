@@ -54,6 +54,13 @@ vi.mock("@/lib/named-tunnel", () => ({
   readTunnelMode: async () => "quick",
   readNamedTunnelCredential: async () => null,
 }));
+// A host whose web server holds no ambient capabilities, whatever the shell
+// running this suite holds: the real gate with that host's probes passes the
+// spawn through, so the argv assertions below pin that such a host spawns
+// exactly as before.
+const drop = vi.hoisted(() => ({ wrap: false, calls: [] as unknown[][] }));
+vi.mock("@/lib/capability-drop", async (importOriginal) =>
+  (await import("@/tests/helpers/capability-drop")).realGate(await importOriginal(), drop));
 
 type Route = { GET?: () => Promise<Response>; POST?: () => Promise<Response> };
 let enable: Route;

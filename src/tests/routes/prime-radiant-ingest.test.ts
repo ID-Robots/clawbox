@@ -225,6 +225,18 @@ describe("POST ingest: validation", () => {
     expect((await own.json()).code).toBe("folder_refused");
   });
 
+  it("answers 409 window_too_small when the box's own model cannot hold a page, starting nothing (TASK-2501 PR-C)", async () => {
+    const asked = vi.fn(async () => { throw new Error("never asked"); });
+    setFlashClientOverride({ model: "ollama/tiny", engine: "local", budget: { contextTokens: 2_048, maxOutputTokens: 1_024, parallel: 1 }, complete: asked });
+    const res = await ingest({ folders: ["Documents"] });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("window_too_small");
+    expect(body.error).toMatch(/2048 tokens/);
+    expect(asked).not.toHaveBeenCalled();
+    expect((await (await listGET(new Request(`${API}/ingest`))).json()).jobs).toEqual([]);
+  });
+
   it("answers 412 without a ClawBox AI sign-in, reading nothing", async () => {
     setFlashClientOverride(null);
     const res = await ingest({ folders: ["Documents"] });

@@ -386,6 +386,8 @@ function runStep(voiceExit: number, statusFileContents: string | null = null) {
     `OPENCLAW_BIN="${openclaw}"`,
     "CLAWBOX_USER=clawbox",
     'as_clawbox() { env "$@"; }',
+    // The hand-over walks the real home; this run has none.
+    "hand_over_voice_paths() { :; }",
     "is_hermes_edition() { return 1; }",
     `record_provision_failure() { printf '%s\\n' "$1" >> "${provisionLog}"; }`,
     extractShellFn(INSTALL_SH, "oc_config_set"),

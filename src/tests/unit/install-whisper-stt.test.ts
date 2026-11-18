@@ -261,6 +261,8 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
       'whisper_predownload_model() { note predownload; return 0; }',
       'kokoro_ld_path() { printf "/x/lib"; }',
       'activate_user_units() { note activate; }',
+      // The script's own helper when it is not root: the command itself.
+      'as_clawbox() { "$@"; }',
       `sed -n '/^whisper_stack_present() {/,/^}/p' "$1" > "${tmp}/f.sh"`,
       `sed -n '/^whisper_mark_installed() {/,/^}/p' "$1" >> "${tmp}/f.sh"`,
       `sed -n '/^write_whisper_unit() {/,/^}/p' "$1" >> "${tmp}/f.sh"`,

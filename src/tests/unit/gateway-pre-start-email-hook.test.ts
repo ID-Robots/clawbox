@@ -142,7 +142,7 @@ function readConfig(): OpenclawConfig {
  * subjects; an assertion about "did this block stay quiet" has to be about
  * this block.
  */
-const OTHER_HOOK_PLUGIN_IDS = ["clawbox-path-guard"];
+const OTHER_HOOK_PLUGIN_IDS = ["clawbox-path-guard", "clawbox-staff-guard"];
 
 function emailHookLines(stderr: string): string {
   return stderr

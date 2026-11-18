@@ -103,7 +103,7 @@ else
   BUN=""
 fi
 
-OPENCLAW_VERSION="2026.10.9"
+OPENCLAW_VERSION="2026.11.5"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
@@ -119,6 +119,28 @@ export PATH="$NODE_DIST_ROOT/bin:$PATH"
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 as_user() { sudo -u "$CLAWBOX_USER" "$@"; }
+
+# `openclaw config set` for a value that must stay off every argument list,
+# because sudo records its command line. Reads a `--batch-file` batch (a JSON
+# array of {"path", "value"}) on stdin, writes it as the service user to a 0600
+# file in a private directory, applies it, and removes the directory on every
+# exit, a stopping signal included. Every step on that directory runs as the
+# service user, its removal too. Returns the CLI's status. The body is a
+# subshell, so its traps are its own and the caller's stay as they were.
+as_user_config_set_batch() (
+  local dir rc=0
+  dir=$(as_user mktemp -d) || exit 1
+  trap 'as_user rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if as_user sh -c 'umask 077 && cat > "$1"' sh "$dir/batch.json"; then
+    as_user "$OPENCLAW_BIN" config set --batch-file "$dir/batch.json" || rc=$?
+  else
+    rc=1
+  fi
+  exit "$rc"
+)
 
 as_user_runtime() {
   sudo -u "$CLAWBOX_USER" -H env \
@@ -266,6 +288,11 @@ ensure_env_setting() {
   local key="$2"
   local value="$3"
   if ! grep -q "^${key}=" "$env_file" 2>/dev/null; then
+    # A hand-edited .env can end without a newline: the key must not be glued
+    # onto its last line, which would corrupt that key and leave this one unset.
+    if [ -s "$env_file" ] && [ -n "$(tail -c 1 "$env_file")" ]; then
+      printf '\n' >> "$env_file"
+    fi
     printf '%s=%s\n' "$key" "$value" >> "$env_file"
     echo "  Added ${key} to ${env_file}"
   fi
@@ -875,7 +902,9 @@ PY
   fi
   if [ "$GW_TOKEN_STRONG" -eq 0 ]; then
     GW_TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')
-    as_user "$OPENCLAW_BIN" config set gateway.auth.token "$GW_TOKEN" 2>/dev/null || true
+    # Hex only, so it needs no JSON escaping.
+    printf '[{"path":"gateway.auth.token","value":"%s"}]\n' "$GW_TOKEN" \
+      | as_user_config_set_batch 2>/dev/null || true
   fi
   as_user "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json 2>/dev/null || true
   as_user "$OPENCLAW_BIN" config set gateway.controlUi.dangerouslyDisableDeviceAuth true --json 2>/dev/null || true
@@ -1001,6 +1030,18 @@ seed_llamacpp_env() {
     ensure_env_setting "$ENV_FILE" "LLAMACPP_CONTEXT_WINDOW" "$LLAMACPP_WORKSTATION_CONTEXT_WINDOW"
     ensure_env_setting "$ENV_FILE" "LLAMACPP_SPEC_TYPE" "draft-mtp"
     ensure_env_setting "$ENV_FILE" "LLAMACPP_SPEC_DRAFT_N_MAX" "$LLAMACPP_WORKSTATION_SPEC_DRAFT_N_MAX"
+  fi
+  # TASK-2387: a workstation's chats all share ONE local engine, so the box is
+  # single-engine (gateway-pre-start.sh keeps self-learning's background review
+  # and memory dreaming off by default there). OUTSIDE the model guard on
+  # purpose: an update of a workstation that already has its model gets the
+  # flag too. Fills a missing key only — an owner's own value, `0` included,
+  # stays — and "missing" is judged in every form the gateway's reader takes:
+  # ensure_env_setting knows only `KEY=`, and a `1` appended after an owner's
+  # `export CLAWBOX_SINGLE_ENGINE=0` would win as the last assignment.
+  if llamacpp_workstation_host "${LLAMACPP_WORKSTATION_MEMINFO:-/proc/meminfo}" \
+    && ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?CLAWBOX_SINGLE_ENGINE[[:space:]]*=' "$ENV_FILE" 2>/dev/null; then
+    ensure_env_setting "$ENV_FILE" "CLAWBOX_SINGLE_ENGINE" "1"
   fi
   ensure_env_setting "$ENV_FILE" "LLAMACPP_BASE_URL" "http://127.0.0.1:8080/v1"
   ensure_env_setting "$ENV_FILE" "LLAMACPP_MODEL" "gemma4-e2b-it-q4_0"
@@ -2057,6 +2098,11 @@ Wants=network-online.target
 Type=oneshot
 ExecStart=/usr/local/libexec/clawbox/clawbox-root-step.sh %i
 TimeoutStartSec=1800
+# Every line kept: the update screen's raw log is this unit's journal. A
+# positive limit no step reaches; 0 would mean journald's default, not "off"
+# (config/clawbox-root-update@.service says why).
+LogRateLimitIntervalSec=1s
+LogRateLimitBurst=1000000
 UNIT
   chown root:root "/etc/systemd/system/clawbox-root-update@.service"
   chmod 0644 "/etc/systemd/system/clawbox-root-update@.service"

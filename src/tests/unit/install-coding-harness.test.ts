@@ -1,7 +1,20 @@
-import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync,
+  symlinkSync, writeFileSync,
+} from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
+import {
+  accountOnlyHome, CAN_LOCK_HOME, handOverOrder, shellFunctionIfPresent, unlockTree,
+} from "../helpers/account-only-home";
+
+// The wrapper's install starts a real bash: vitest's 5 s test and 10 s hook
+// defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 /**
  * How the coding harness actually reaches a device.
@@ -158,12 +171,116 @@ describe("the wrapper lands where the desktop expects it", () => {
     expect(extractShellFunction("step_coding_harness")).toContain("ensure_clawbox_bashrc_path");
   });
 
-  it("is owned by the clawbox user and executable", () => {
-    expect(fn).toMatch(/install -o "\$CLAWBOX_USER" -g "\$CLAWBOX_USER" -m 755/);
-  });
-
   it("copies rather than symlinks, so a half-checked-out repo cannot break the harness", () => {
     expect(fn).not.toContain("ln -s");
+  });
+});
+
+// Linux only (GNU stat and find), and not as root, whose writes the read-only
+// home of src/tests/helpers/account-only-home.ts cannot stop.
+const CAN_RUN_WRAPPER = CAN_LOCK_HOME && spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
+
+(CAN_RUN_WRAPPER ? describe : describe.skip)("the wrapper is written by the clawbox user", () => {
+  // ~/.local/bin is the clawbox user's: root's `install` there followed a link
+  // planted on the way, and `install -d` applied its owner and mode to a linked
+  // directory's target. Run against a home only `as_clawbox` can write to.
+  let sandbox: string;
+  let home: string;
+  let aux: string;
+  let src: string;
+
+  beforeEach(() => {
+    sandbox = mkdtempSync(path.join(os.tmpdir(), "clawbox-claude-ds-"));
+    home = path.join(sandbox, "home");
+    aux = path.join(sandbox, "aux");
+    src = path.join(sandbox, "src");
+    for (const dir of [home, aux, path.join(src, "scripts")]) mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(src, "scripts", CODING_HARNESS_COMMAND), WRAPPER, "utf-8");
+  });
+
+  afterEach(() => {
+    unlockTree(sandbox);
+    rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  const dest = () => path.join(home, CODING_HARNESS_WRAPPER_PATH);
+
+  function install() {
+    const account = accountOnlyHome(home, aux);
+    const script = [
+      "set -euo pipefail",
+      `CLAWBOX_HOME=${JSON.stringify(home)}`,
+      'CLAWBOX_USER="$(id -un)"',
+      `SRC_DIR=${JSON.stringify(src)}`,
+      account.shell,
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_home_path"),
+      account.recordHandOvers,
+      `${extractShellFunction("install_claude_ds_wrapper")}\n}`,
+      "__ao_lock",
+      // As step_coding_harness calls it: errexit off inside, the status read.
+      'if install_claude_ds_wrapper; then echo "RC=0"; else echo "RC=$?"; fi',
+    ].join("\n");
+    writeFileSync(path.join(aux, "run.sh"), script, "utf-8");
+    const r = spawnSync("bash", [path.join(aux, "run.sh")], { encoding: "utf-8", cwd: aux });
+    return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", rootInHome: account.rootInHome(), sequence: account.sequence() };
+  }
+
+  it("lands with the repo's bytes and mode 0755, and root writes nothing in the home", () => {
+    const r = install();
+
+    expect(r.rootInHome, "no install, mkdir or chown by root in the home").toEqual([]);
+    expect(r.stdout, r.stderr).toContain("RC=0");
+    expect(r.stdout).toContain(`claude-ds installed at ${dest()}`);
+    expect(readFileSync(dest(), "utf-8")).toBe(WRAPPER);
+    expect(statSync(dest()).mode & 0o777).toBe(0o755);
+    // The temp went with the rename.
+    expect(readdirSync(path.dirname(dest()))).toEqual([CODING_HARNESS_COMMAND]);
+    const { handOver, firstWrite } = handOverOrder(r.sequence, `hand_over_home_path ${path.dirname(dest())}`);
+    expect(handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
+  });
+
+  it("replaces a link at the target instead of writing through it", () => {
+    // An older box can have ~/.local/bin/claude-ds pointing back into the
+    // checkout; writing through it would rewrite the checkout's own file.
+    const target = path.join(sandbox, "checkout-claude-ds");
+    writeFileSync(target, "#!/bin/sh\necho old\n", "utf-8");
+    mkdirSync(path.dirname(dest()), { recursive: true });
+    symlinkSync(target, dest());
+
+    const r = install();
+
+    expect(r.stdout, r.stderr).toContain("RC=0");
+    expect(lstatSync(dest()).isSymbolicLink()).toBe(false);
+    expect(readFileSync(dest(), "utf-8")).toBe(WRAPPER);
+    expect(readFileSync(target, "utf-8")).toBe("#!/bin/sh\necho old\n");
+  });
+
+  it("refreshes a wrapper that is already there, still 0755", () => {
+    mkdirSync(path.dirname(dest()), { recursive: true });
+    writeFileSync(dest(), "stale\n", "utf-8");
+    chmodSync(dest(), 0o700);
+
+    const r = install();
+
+    expect(r.stdout, r.stderr).toContain("RC=0");
+    expect(readFileSync(dest(), "utf-8")).toBe(WRAPPER);
+    expect(statSync(dest()).mode & 0o777).toBe(0o755);
+    expect(r.rootInHome).toEqual([]);
+  });
+
+  it("says so, and answers non-zero, when the wrapper could not be written", () => {
+    // A failure the old `install` lines printed "installed" over: errexit is
+    // off inside the function, as step_coding_harness calls it with `|| true`.
+    mkdirSync(path.join(home, ".local"));
+    writeFileSync(path.join(home, ".local", "bin"), "not a directory\n", "utf-8");
+
+    const r = install();
+
+    expect(r.stdout).toContain("RC=1");
+    expect(r.stdout).toContain("WARN: could not install claude-ds");
+    expect(r.stdout).not.toContain("claude-ds installed at");
+    expect(existsSync(dest())).toBe(false);
   });
 });
 

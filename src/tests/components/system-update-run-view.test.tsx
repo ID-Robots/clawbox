@@ -1,4 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+// The panel streams from the box and draws with xterm; its own suite
+// (update-raw-log.test.tsx) covers that. Here: where it opens, and when.
+vi.mock("@/components/UpdateRawLog", () => ({
+  default: ({ id, label, live }: { id: string; label: string; live: boolean }) => (
+    <section id={id} aria-label={label} data-live={String(live)} data-testid="update-raw-log" />
+  ),
+}));
 import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import UpdatingPage from "@/app/updating/page";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
@@ -514,11 +522,12 @@ describe("Chromium and VNC — run by the updater, never listed on the screen", 
 /**
  * The owner's x64 laptop test (2026-11-10): the update screen showed the
  * steps and nothing of what was going on inside them. A small terminal button
- * in the steps panel's header opens the full update log — every listed step
- * with its number and outcome, the lines the steps reported, the warnings —
- * and closes it again. Closed until it is asked for.
+ * in the steps panel's header opens the update's RAW log — every byte the
+ * steps printed, in a read-only terminal (TASK-2428; UpdateRawLog has its own
+ * suite) — and closes it again. Closed until it is asked for, and the step
+ * list is the same with it open.
  */
-describe("the full update log behind the terminal button", () => {
+describe("the raw update log behind the terminal button", () => {
   it("is not there at first, is there after a click, and is gone after the next — on a stopped run in the window", async () => {
     const reason = "npm could not reach the registry";
     mount({
@@ -531,29 +540,23 @@ describe("the full update log behind the terminal button", () => {
     const toggle = within(panel).getByRole("button", { name: "Full update log" });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(toggle.textContent).toBe("terminal");
-    expect(screen.queryByTestId("update-full-log")).toBeNull();
+    expect(screen.queryByTestId("update-raw-log")).toBeNull();
     // The failed view's own log stays where it was, always on screen.
     expect(screen.getByTestId("update-log")).toBeInTheDocument();
+    const listed = within(panel).getByTestId("update-step-list").textContent;
 
     fireEvent.click(toggle);
-    const log = screen.getByTestId("update-full-log");
+    const log = screen.getByTestId("update-raw-log");
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(toggle.getAttribute("aria-controls")).toBe(log.id);
     expect(log).toHaveAccessibleName("Full update log");
     expect(panel.contains(log)).toBe(true);
-    const rows = within(log).getAllByTestId("update-full-log-step");
-    expect(rows.map((row) => row.textContent?.slice(0, 2))).toEqual(["01", "02", "03", "04", "05", "06", "07", "08"]);
-    expect(rows[0]).toHaveTextContent("Refreshing updater scripts");
-    expect(rows[0]).toHaveTextContent("Completed");
-    expect(rows[2]).toHaveAttribute("data-status", "failed");
-    expect(rows[2]).toHaveTextContent(`Updating OpenClaw: ${reason}`);
-    expect(rows[2]).toHaveTextContent("Failed");
-    expect(rows[3]).toHaveTextContent("Waiting");
-    for (const label of ["Installing Chromium", "Installing VNC (Remote Desktop)"]) expect(log.textContent).not.toContain(label);
-    expect(within(log).getByTestId("update-full-log-warning")).toHaveTextContent("The update pin was missing; ClawBox wrote one.");
+    // A stopped run: the stream is read to its end, not followed for a new one.
+    expect(log).toHaveAttribute("data-live", "false");
+    expect(within(panel).getByTestId("update-step-list").textContent).toBe(listed);
 
     fireEvent.click(toggle);
-    expect(screen.queryByTestId("update-full-log")).toBeNull();
+    expect(screen.queryByTestId("update-raw-log")).toBeNull();
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.getByTestId("update-log")).toBeInTheDocument();
   });

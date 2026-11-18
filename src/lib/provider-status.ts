@@ -43,6 +43,8 @@ import {
 } from "@/lib/plugin-repair";
 import { readProviderRunnable, type ProviderRunnable } from "@/lib/provider-runnable";
 import { llamaCppModelName } from "@/lib/local-models";
+import { EXTERNAL_ENGINE_PROVIDER, externalEngineDisplayName } from "@/lib/external-engine-shared";
+import { readExternalEngine } from "@/lib/external-engine";
 
 /**
  * What the strip paints, and the only five things it may say.
@@ -199,6 +201,9 @@ const LOCAL_PROVIDER_LABELS: Record<string, string> = {
   ollama: "Ollama Local",
   // Hermes registers the on-device model under its own slug.
   clawlocal: "Gemma 4 (on-device)",
+  // The owner's external AI engine in the Local AI slot (TASK-2376), the same
+  // id on both harnesses; the row is named for its model below.
+  [EXTERNAL_ENGINE_PROVIDER]: "External engine",
 };
 
 const LOCAL_PROVIDER_IDS = new Set(Object.keys(LOCAL_PROVIDER_LABELS));
@@ -211,11 +216,19 @@ const LOCAL_PROVIDER_IDS = new Set(Object.keys(LOCAL_PROVIDER_LABELS));
  * a box with no model stored.
  */
 function openclawLocalRowLabel(provider: string, storedModel: unknown): string {
+  if (provider === EXTERNAL_ENGINE_PROVIDER && typeof storedModel === "string" && storedModel) {
+    return externalEngineRowLabel(storedModel);
+  }
   if (provider === "llamacpp" && typeof storedModel === "string") {
     const name = llamaCppModelName(storedModel);
     if (name) return `${name} (on-device)`;
   }
   return LOCAL_PROVIDER_LABELS[provider];
+}
+
+/** "Qwen3-32B (external engine)" — the model first, as the chat header shows it. */
+function externalEngineRowLabel(modelOrRef: string): string {
+  return `${externalEngineDisplayName(modelOrRef)} (external engine)`;
 }
 
 /**
@@ -352,6 +365,10 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
   // with a working default as having no default at all.
   const ids: string[] = [CLAWAI_PROVIDER, ...HERMES_PANEL_PROVIDERS.map((p) => p.id)];
   if (defaultProvider && !ids.includes(defaultProvider)) ids.push(defaultProvider);
+  // The external engine is the Local AI slot (TASK-2376): listed while it is
+  // selected even when the chat is on a cloud provider, as the on-device row is.
+  const externalEngine = await readExternalEngine();
+  if (externalEngine && !ids.includes(EXTERNAL_ENGINE_PROVIDER)) ids.push(EXTERNAL_ENGINE_PROVIDER);
 
   // Asked once, outside the loop: it reads config and the config store, and the
   // answer is the same for every row that consults it.
@@ -420,7 +437,9 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
       : reported;
     return {
       id,
-      label: hermesProviderLabel(id, byId.get(id)?.name),
+      label: id === EXTERNAL_ENGINE_PROVIDER && externalEngine
+        ? externalEngineRowLabel(externalEngine.modelId)
+        : hermesProviderLabel(id, byId.get(id)?.name),
       state: id === CLAWAI_PROVIDER && clawaiRefused && credentialed === true
         ? "needs-reauth"
         : stateFor(credentialed, isDefault, awaitingProbe),
@@ -492,15 +511,51 @@ const ORPHANED_REFRESH_MS = 150_000;
  * header ask ONE function and cannot disagree.
  */
 export function claudeSignInFenced(config: OpenClawConfig): boolean {
+  return oauthSignInFenced(config, ANTHROPIC_PROVIDER);
+}
+
+/**
+ * Is this box's ChatGPT SIGN-IN one the gateway will never use? The same
+ * question as {@link claudeSignInFenced}, for the same reason, asked of the
+ * `openai` row's OAuth profile (`openai:chatgpt`): the mechanism is core's, not
+ * Claude's — it fences ANY OAuth credential before a refresh and makes the
+ * fence terminal on any refresh error — and it was met on a ChatGPT profile
+ * (SUP-1023, 2026.11.3: an `expires: 1` row whose access and refresh were
+ * markers, left by a refresh that could not reach the token endpoint).
+ *
+ * Without it a re-sign-in that was rolled back, or an expired renewal, left the
+ * OpenAI card reading "Connected" over a credential every turn died on. A key
+ * of the owner's own beside it (an OpenAI API key profile or provider key) means
+ * the gateway can still run, so this answers false; ClawBox AI's `claw_` token,
+ * which rides in the `openai` provider slot for images and voice, is not one.
+ */
+export function chatgptSignInFenced(config: OpenClawConfig): boolean {
+  return oauthSignInFenced(config, CHATGPT_ROW_PROVIDER, (key) => typeof key !== "string" || !isClawboxAiToken(key));
+}
+
+/** The row `normalizeProviderId` files every OpenAI credential under. */
+const CHATGPT_ROW_PROVIDER = "openai";
+
+/**
+ * The shared body: every OAuth profile filed under `provider` is a dead marker
+ * in the gateway's store, and nothing else of the owner's could answer.
+ * `countsAsKey` says which provider-definition keys are credentials of that
+ * provider's own (all of them, unless the caller knows better).
+ */
+function oauthSignInFenced(
+  config: OpenClawConfig,
+  provider: string,
+  countsAsKey: (key: unknown) => boolean = () => true,
+): boolean {
   for (const [wireId, definition] of Object.entries(config.models?.providers ?? {})) {
     const key = (definition as { apiKey?: unknown } | undefined)?.apiKey;
     // A string, or the SecretRef object core resolves (`{source, provider, id}`): either is a key of its own.
     const keyed = typeof key === "string" ? key.trim() !== "" : !!key && typeof key === "object" && Object.keys(key).length > 0;
-    if (keyed && normalizeProviderId(wireId) === ANTHROPIC_PROVIDER) return false;
+    if (keyed && countsAsKey(key) && normalizeProviderId(wireId) === provider) return false;
   }
   const signIns: string[] = [];
   for (const [profileKey, entry] of Object.entries(config.auth?.profiles ?? {})) {
-    if (normalizeProviderId(profileProviderId(profileKey, entry)) !== ANTHROPIC_PROVIDER) continue;
+    if (normalizeProviderId(profileProviderId(profileKey, entry)) !== provider) continue;
     // An API key or a setup token beside the sign-in is a credential of its
     // own, and the gateway can run on it whatever the sign-in's state.
     if (!isOauthProfile(entry)) return false;
@@ -579,6 +634,8 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
   if (await hasClawaiToken()) credentialed.add(CLAWAI_PROVIDER);
   // Asked once, and only of a row that would otherwise read Connected.
   const claudeFenced = credentialed.has(ANTHROPIC_PROVIDER) && claudeSignInFenced(config);
+  // And the ChatGPT sign-in, by the same rule (SUP-1023).
+  const chatgptFenced = credentialed.has(CHATGPT_ROW_PROVIDER) && chatgptSignInFenced(config);
 
   const primary = config.agents?.defaults?.model?.primary ?? null;
   const defaultProvider = normalizeProviderId(primary ? primary.split("/")[0] : null);
@@ -630,6 +687,7 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
       // rather than a probe state.
       state: (id === CLAWAI_PROVIDER && clawaiRefused && credentialed.has(id))
         || (id === ANTHROPIC_PROVIDER && claudeFenced)
+        || (id === CHATGPT_ROW_PROVIDER && chatgptFenced)
         ? "needs-reauth"
         : stateFor(credentialed.has(id), isDefault),
       isDefault,

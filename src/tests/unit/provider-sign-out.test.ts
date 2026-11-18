@@ -130,6 +130,16 @@ const cli = vi.hoisted(() => ({
 }));
 cli.CONFIG_PATH = `${tmp}/openclaw/openclaw.json`;
 vi.mock("@/lib/openclaw-config", () => cli);
+// OpenClaw 2026.11.3: the sign-out's logout goes to the gateway's
+// models.authLogout while it runs (src/lib/openclaw-auth-ops.ts, tested on its
+// own); here it takes the offline arm, one `models auth logout` per profile.
+vi.mock("@/lib/openclaw-auth-ops", () => ({
+  providerOfProfileId: (id: string) => id.split(":")[0]?.trim().toLowerCase() ?? "",
+  logoutOpenclawAuthProfiles: async (_provider: string, ids: string[]) => {
+    for (const id of ids) await cli.spawnOpenclawCli(["models", "auth", "logout", id, "--yes"], { timeoutMs: 60_000 });
+    return ids;
+  },
+}));
 vi.mock("@/lib/openclaw-auth-store", () => ({
   readGatewayAuthProfile: vi.fn((id: string) => (box.storeUnreadable
     ? { kind: "unreadable" }
@@ -178,7 +188,13 @@ const credentials = vi.hoisted(() => ({
   resolveClawaiToken: vi.fn(),
   hasClawaiToken: vi.fn(async () => false),
 }));
-vi.mock("@/lib/harness/credentials", () => credentials);
+// Signing out reads the credential the way "is this box linked" does — lock or
+// not (TASK-2501) — so the entitlement readers answer what these two do.
+vi.mock("@/lib/harness/credentials", () => ({
+  ...credentials,
+  resolveClawaiEntitlementToken: (...a: unknown[]) => (credentials.resolveClawaiToken as (...b: unknown[]) => unknown)(...a),
+  hasClawaiEntitlementToken: () => credentials.hasClawaiToken(),
+}));
 vi.mock("@/lib/harness", () => ({
   getActiveHarness: vi.fn(async () => box.harness),
   getActiveHarnessSource: vi.fn(async () => ({ active: box.harness, defaulted: false, edition: box.edition, locked: box.edition !== "dual" })),

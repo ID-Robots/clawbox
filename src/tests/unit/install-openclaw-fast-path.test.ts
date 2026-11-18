@@ -113,8 +113,10 @@ function makeBox(opts: {
   const target = opts.target ?? TARGET;
   // The pin, read from the mirror's config/openclaw-target.txt as on the box.
   write("src/config/openclaw-target.txt", `${target}\n`);
+  // Sourced by every launcher here, live or staged: who ran it, which one, with what.
+  write("said-who", `[ -n "\${AS_SERVICE_USER:-}" ] && who=service || who=root\necho "$who $0 $*" >> "${dir}/launcher-runs"\n`);
   // The managed core, answering --version the way the real launcher does.
-  write("npm-global/bin/openclaw", `#!/bin/sh\necho 'OpenClaw ${opts.core ?? target} (abc1234)'\n`, 0o755);
+  write("npm-global/bin/openclaw", `#!/bin/sh\n. "${dir}/said-who"\necho 'OpenClaw ${opts.core ?? target} (abc1234)'\n`, 0o755);
   write("npm-global/lib/node_modules/openclaw/package.json", JSON.stringify({ name: "openclaw", version: opts.core ?? target }));
   // The checkout clawbox-email-directives is copied out of.
   write("checkout/scripts/openclaw-plugins/clawbox-email-directives/package.json",
@@ -165,6 +167,8 @@ const AS_CLAWBOX = `as_clawbox() {
   while [ "\${1:-}" = "-H" ]; do shift; done
   # The plugin-list reader, run as the account whose files it opens.
   if [ "\${1:-}" = python3 ]; then event VERDICT_AS_CLAWBOX; "$@"; return; fi
+  # The staging prefix, emptied, made and removed by the account that owns it.
+  case "\${1:-}" in rm|mkdir) command "$@"; return ;; esac
   case "$*" in
     *"plugins list"*)
       event PLUGINS_LIST
@@ -194,7 +198,7 @@ const AS_CLAWBOX = `as_clawbox() {
         before="$b"
       done
       mkdir -p "$prefix/bin" "$prefix/lib/node_modules/openclaw"
-      printf '#!/bin/sh\\necho "OpenClaw %s (def5678)"\\n' "$want" > "$prefix/bin/openclaw"
+      printf '#!/bin/sh\\n. "%s"\\necho "OpenClaw %s (def5678)"\\n' "$BOX/said-who" "$want" > "$prefix/bin/openclaw"
       chmod 755 "$prefix/bin/openclaw"
       return 0 ;;
     *) echo "UNEXPECTED as_clawbox $*" >&2; return 99 ;;
@@ -225,6 +229,7 @@ function program(box: Box, entry: string, lift: string[] = []): string {
     "ensure_openclaw_node_engine() { event NODE_ENGINE; }",
     "remove_shadowing_system_openclaw() { event SHADOW_CLEANUP; }",
     "chown() { :; }",
+    shellFunction("hand_over_home_path"),
     "flush_core_to_disk() { :; }",
     // Suites of their own: install-openclaw-migration-preflight.test.ts and
     // install-migration-stop.test.ts.
@@ -251,6 +256,11 @@ function program(box: Box, entry: string, lift: string[] = []): string {
 }`,
     'gateway_port_listening() { [ "${GW_LISTENING:-1}" = 1 ]; }',
     AS_CLAWBOX,
+    // `runuser -u <account> -- env HOME=… cmd…`: cmd… as this user, marked as
+    // the service account's run only when -u names it: a switch to root must
+    // still read as root.
+    'runuser() { local who=""; [ "${1:-}" = "-u" ] && [ "${2:-}" = "$CLAWBOX_USER" ] && who=1; '
+      + 'shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=$who "$@"; }',
     shellFunction("openclaw_version_is_v2"),
     shellFunction("openclaw_is_v2"),
     shellFunction("openclaw_migration_complete"),
@@ -273,7 +283,9 @@ function program(box: Box, entry: string, lift: string[] = []): string {
 
 function run(box: Box, entry = "step_openclaw_install", env: Record<string, string> = {}, lift: string[] = []) {
   const eventsFile = path.join(box.dir, "events");
+  const runsFile = path.join(box.dir, "launcher-runs");
   rmSync(eventsFile, { force: true });
+  rmSync(runsFile, { force: true });
   const r = spawnSync("bash", ["-c", program(box, entry, lift)], {
     encoding: "utf-8",
     timeout: 25_000,
@@ -286,6 +298,8 @@ function run(box: Box, entry = "step_openclaw_install", env: Record<string, stri
     stderr: r.stderr,
     events: existsSync(eventsFile) ? readFileSync(eventsFile, "utf8").trim().split("\n") : [],
     marker: existsSync(markerFile) ? readFileSync(markerFile, "utf8") : null,
+    /** Every launcher run, in order: `<root|service> <launcher> <args>`. */
+    launcherRuns: existsSync(runsFile) ? readFileSync(runsFile, "utf8").trim().split("\n") : [],
   };
 }
 
@@ -347,8 +361,14 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the fast path", () => {
   });
 
   it("leaves the gateway running when the core, plugins, marker and gateway are all current", () => {
-    const r = run(makeBox());
+    const box = makeBox();
+    const r = run(box);
     expectFastPath(r);
+    // The core is asked its version as the service account, whose npm prefix
+    // it sits in — the only launcher run on this path, and never root's.
+    expect(r.launcherRuns).toEqual([`service ${box.dir}/npm-global/bin/openclaw --version`]);
+    expect(r.stdout).toContain(`  Installed: OpenClaw ${TARGET} (abc1234), Target: ${TARGET}\n`);
+    expect(r.stdout).toContain(`OpenClaw core is already at ${TARGET}; skipping npm install`);
     expect(pathLine(r)).toContain(`all at ${TARGET}, and the gateway is serving`);
     // The plugin list is asked once, by the check — not by a refresh.
     expect(r.events.filter((e) => e === "PLUGINS_LIST")).toHaveLength(1);
@@ -372,9 +392,18 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the fast path", () => {
   });
 
   it("still takes the full path, unchanged, when the pin moved", () => {
-    const r = run(makeBox({ core: OLDER }));
+    const box = makeBox({ core: OLDER });
+    const r = run(box);
     expectFullPath(r, `the core on the box answers ${OLDER}, not ${TARGET}`);
     expect(r.events).toContain("NPM");
+    expect(r.stdout).toContain(`  Installed: OpenClaw ${OLDER} (abc1234), Target: ${TARGET}\n`);
+    // This step's two questions — the live core's version, then the staged
+    // core's gate — go to the service account. Later runs are not this step's:
+    // the plugin refresh's generation check and this suite's record-doctor.
+    const prefix = `${box.dir}/npm-global`;
+    expect(r.launcherRuns[0]).toBe(`service ${prefix}/bin/openclaw --version`);
+    expect(r.launcherRuns.filter((l) => l.includes("/.openclaw-stage/")))
+      .toEqual([`service ${prefix}/.openclaw-stage/bin/openclaw --version`]);
     // Not a single fast-path question was asked of a core that is not current.
     expect(r.events.indexOf("PLUGINS_LIST")).toBeGreaterThan(r.events.indexOf("DOCTOR"));
   });
@@ -529,6 +558,8 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the fast path", () => {
   });
 
   describe("doctor's own record, which the marker alone does not prove current", () => {
+    // install.sh's fast path never reads doctor.at: the updater's doctor-due
+    // nulls it and relies on this path staying open (the doctor.at cases below).
     const recordFile = (box: Box) => path.join(box.dir, "checkout/data/openclaw-migration-status.json");
 
     it("a database is behind the core's schema although the marker names the target", () => {
@@ -579,6 +610,55 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the fast path", () => {
 
     it("the record is not an object", () => {
       expectFullPath(run(makeBox({ record: "[]" })), "the record of doctor's migration could not be read");
+    });
+
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    const doctorRunAt = (at: unknown) => makeBox({ record: doctorRecord(TARGET, { doctor: { core: TARGET, verdict: "complete", at } }) });
+    const DOCTOR_TIMES: [string, unknown][] = [
+      // What doctor-due writes; the same input as a record with no time, which
+      // the cases above already take the fast path on. Listed to say so.
+      ["null", null],
+      ["31 days old", new Date(Date.now() - 31 * DAY_MS).toISOString()],
+      ["a day in the future", new Date(Date.now() + DAY_MS).toISOString()],
+      ["not a date", "not a date"],
+      ["not a string", 0],
+    ];
+
+    it.each(DOCTOR_TIMES)("keeps the fast path whatever doctor.at holds: %s", (_what, at) => {
+      expectFastPath(run(doctorRunAt(at)));
+    });
+
+    // The cases above bite: the shipped check with the updater's own gate on
+    // doctor.at put in (doctorRecordRefusal: a UTC time, not later than now, at
+    // most 30 days old) sends every one of them to the full path, and a fresh
+    // time still to the fast one. Double quotes only: the program is a
+    // single-quoted bash string.
+    const AT_GATE_WHY = "doctor recorded run has no time in the last 30 days";
+    const AT_GATE = [
+      "import datetime",
+      "try:",
+      '    ran = datetime.datetime.fromisoformat(run.get("at").replace("Z", "+00:00"))',
+      "except Exception:",
+      "    ran = None",
+      "now = datetime.datetime.now(datetime.timezone.utc)",
+      "if ran is None or ran.tzinfo is None or ran > now or now - ran > datetime.timedelta(days=30):",
+      `    doubt("${AT_GATE_WHY}")`,
+      "",
+    ].join("\n");
+    const INJECTION_POINT = '\nif run.get("core") != target:\n';
+    function checkReadingDoctorAt(): string {
+      const shipped = shellFunction("openclaw_refresh_fast_path_check");
+      expect(shipped.split(INJECTION_POINT)).toHaveLength(2);
+      expect(AT_GATE).not.toContain("'");
+      return shipped.replace(INJECTION_POINT, `\n${AT_GATE}${INJECTION_POINT.slice(1)}`);
+    }
+
+    it.each(DOCTOR_TIMES)("takes the full path for doctor.at %s once the check reads it as the updater's gate does", (_what, at) => {
+      expectFullPath(run(doctorRunAt(at), `${checkReadingDoctorAt()}\nstep_openclaw_install`), AT_GATE_WHY);
+    });
+
+    it("keeps the fast path for a doctor.at one day old under that same gate", () => {
+      expectFastPath(run(doctorRunAt(new Date(Date.now() - DAY_MS).toISOString()), `${checkReadingDoctorAt()}\nstep_openclaw_install`));
     });
 
     it("is read as the clawbox account, before the plugin list", () => {
