@@ -2635,6 +2635,9 @@ function ptyHost(): string | null {
   return null;
 }
 
+/** How long an exited indexer's pipes may stay open under a descendant before they are let go. */
+const PIPES_AFTER_EXIT_MS = 10_000;
+
 /** How often the OpenClaw arm reads its progress. `publishProgress` throttles the writes. */
 const OPENCLAW_PROGRESS_POLL_MS = 1_000;
 /**
@@ -2877,15 +2880,30 @@ function startOpenclawAttempt(
   // "running" with a dead pid, and the reconcile later called it interrupted
   // — the one outcome `-E 75` exists to avoid. A spawn error is emitted on
   // the next tick, which without a listener is an unhandled event.
+  /** See the `exit` listener below. */
+  let pipesOpen: NodeJS.Timeout | undefined;
   const ended = new Promise<PassOutcome>((resolve) => {
     child.once("error", (err) => {
       stopPolling();
       resolve({ kind: "exit", code: (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1, signal: null });
     });
     child.once("close", (code, signal) => {
+      clearTimeout(pipesOpen);
       stopPolling();
       resolve({ kind: "exit", code, signal });
     });
+  });
+  // `close` waits for the child's pipes as well as its exit, and a descendant
+  // that inherited them can hold them open long after the indexer is gone.
+  // Once the indexer itself has exited, its pipes (and the reader on them)
+  // are let go PIPES_AFTER_EXIT_MS later, which closes them and ends the
+  // attempt with the exit's own code. Never while the indexer still runs.
+  child.once("exit", () => {
+    pipesOpen = setTimeout(() => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    }, PIPES_AFTER_EXIT_MS);
+    pipesOpen.unref?.();
   });
   return {
     pid: child.pid ?? 0,

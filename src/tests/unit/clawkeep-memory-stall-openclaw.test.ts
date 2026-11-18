@@ -107,8 +107,8 @@ interface FakeIndexer {
  *   lines the CLI prints whatever happened.
  */
 async function fakeIndexer(
-  { steps = 0, stepMs = 400, hang = false, lockHeldTimes = 0, chunks = false, replace = false }:
-  { steps?: number; stepMs?: number; hang?: boolean; lockHeldTimes?: number; chunks?: boolean; replace?: boolean } = {},
+  { steps = 0, stepMs = 400, hang = false, lockHeldTimes = 0, chunks = false, replace = false, holdPipe = "" }:
+  { steps?: number; stepMs?: number; hang?: boolean; lockHeldTimes?: number; chunks?: boolean; replace?: boolean; holdPipe?: string } = {},
 ): Promise<FakeIndexer> {
   const db = process.env.CLAWKEEP_MEMORY_AGENT_DB!;
   await fs.mkdir(path.dirname(db), { recursive: true });
@@ -142,6 +142,9 @@ async function fakeIndexer(
     `if (${JSON.stringify(hang)}) { setInterval(() => {}, 1000); } else {`,
     "  process.stderr.write('\\r\\x1b[2KMemory index updated (main): 3 files indexed.\\r\\n');",
     "  process.stderr.write('[state/agent-db] agent database clean-close receipt: active-leases\\r\\n');",
+    // `holdPipe`: a descendant that inherits stderr and outlives the indexer,
+    // its pid written to that file so the test can end it.
+    `  if (${JSON.stringify(holdPipe)}) { const { spawn } = await import('node:child_process'); const d = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], { stdio: ['ignore', 'ignore', 'inherit'] }); writeFileSync(${JSON.stringify(holdPipe)}, String(d.pid)); d.unref(); }`,
     "}",
     "",
   ].join("\n"), { mode: 0o755 });
@@ -305,6 +308,26 @@ describe("an OpenClaw pass off a terminal that rewrites chunks without adding an
     expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
     expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "failed", errorCode: "stalled" });
     expect(await fs.readFile(fake.termed, "utf8")).toBe("TERM");
+  });
+});
+
+describe("an OpenClaw pass whose descendant keeps its pipe open", () => {
+  it("ends once the indexer has exited, without waiting for the descendant", async () => {
+    // `close` waits for the pipes; a helper that inherited stderr held the
+    // attempt (and the lock, and the offline gateway) for as long as it lived.
+    noTerminal();
+    const holder = path.join(tmpDir, "holder.pid");
+    await fakeIndexer({ steps: 1, stepMs: 100, holdPipe: holder });
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    const startedAt = Date.now();
+    try {
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      expect(await settledMemoryRun(tmpDir, { tries: 1_500 })).toMatchObject({ status: "succeeded", errorCode: "" });
+      expect(Date.now() - startedAt).toBeLessThan(25_000);
+    } finally {
+      const pid = Number(await fs.readFile(holder, "utf8").catch(() => "0"));
+      if (pid > 0) { try { process.kill(pid, "SIGKILL"); } catch { /* gone */ } }
+    }
   });
 });
 
