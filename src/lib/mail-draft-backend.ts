@@ -372,7 +372,8 @@ export function normalizeDraft(json: unknown, requestedId: string): MailDraft | 
   if (!files) return null;
 
   // The hash binds the whole answer or there is no card: an answer too deep to
-  // canonicalise is refused here, before one is made for it.
+  // canonicalise, or with a number past the double range, is refused here,
+  // before one is made for it.
   let hash: string;
   try {
     hash = draftContentHash(json);
@@ -398,6 +399,14 @@ export class TooDeepToHash extends Error {
   }
 }
 
+/** A number in the answer outside the double range, which has no canonical form. Refused, never hashed. */
+export class UnhashableNumber extends Error {
+  constructor() {
+    super("the backend's answer has a number outside the range ClawBox canonicalises");
+    this.name = "UnhashableNumber";
+  }
+}
+
 /**
  * JSON with every object's keys in sorted order, so the same draft always
  * serialises to the same text however the backend ordered its fields.
@@ -415,6 +424,11 @@ export function canonicalJson(value: unknown, depth = 0): string {
     const keys = Object.keys(value as Record<string, unknown>).sort();
     return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalJson((value as Record<string, unknown>)[k], depth + 1)}`).join(",")}}`;
   }
+  // A number past the double range (`1e400`) parses to ±Infinity, which JSON
+  // cannot write: `JSON.stringify` would make it `null`, a value no backend
+  // following the documented rules (or RFC 8785) would produce. Refused, as an
+  // answer too deep is, rather than hashed as something it is not.
+  if (typeof value === "number" && !Number.isFinite(value)) throw new UnhashableNumber();
   return JSON.stringify(value) ?? "null";
 }
 

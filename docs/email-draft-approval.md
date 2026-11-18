@@ -368,10 +368,14 @@ the fields ClawBox shows. `canonical` writes it as follows:
   escapes are used.
 - **Numbers**: parsed as IEEE 754 doubles, then written the way ECMAScript's
   `Number.prototype.toString()` writes them. That means the shortest digits
-  that read back as the same double, `-0` written `0`, and an exponent
-  (`1e+21`, `5e-7`) only below 1e-6 or from 1e21. So `1.0` → `1`,
-  `1E2` → `100`, and `123456789012345678901` → `123456789012345680000`: the
-  shortest digits padded with zeros, not the double's exact integer value.
+  that read back as the same double, and `-0` written `0`. An exponent is used
+  only when the absolute value is below 1e-6 or at least 1e21: `1e+21`,
+  `-1e+21`, `5e-7`. So `1.0` → `1`, `1E2` → `100`, and
+  `123456789012345678901` → `123456789012345680000`: the shortest digits
+  padded with zeros, not the double's exact integer value.
+- A number outside the double range (such as `1e400`, which would parse to
+  infinity) has no canonical form. ClawBox refuses an answer that contains one
+  as an answer it could not read, so there is never a hash for it.
 - Nesting deeper than 64 levels is refused, never hashed.
 
 For an answer with no duplicate keys and no lone surrogates, this is the JSON

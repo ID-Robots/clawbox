@@ -19,6 +19,7 @@ import {
   normalizeDraft,
   probeBackend,
   sendDraft,
+  UnhashableNumber,
   BACKEND_MAX_BYTES,
   MAX_PREVIEW_CHARS,
 } from "@/lib/mail-draft-backend";
@@ -359,6 +360,20 @@ describe("what a card shows", () => {
     const ordinary = draftView(draftOf({ ...BASE, bodyType: "html", body: "<p>Hello Ivan,</p><p>the offer is attached.</p>" }));
     expect(ordinary.body).toBe("Hello Ivan,\n\nthe offer is attached.");
     expect(ordinary.bodyTruncated).toBe(false);
+  });
+});
+
+describe("an answer with a number past the double range", () => {
+  it("is refused, rather than hashed as null where the backend wrote a number", () => {
+    // `1e400` parses to Infinity, which JSON.stringify would have written as
+    // `null`: a hash no backend following the documented rules could compute.
+    for (const text of ['{"subject":"S","to":["x@example.com"],"body":"B","n":1e400}', '{"subject":"S","to":["x@example.com"],"body":"B","attachments":[{"name":"a","size":-1e400}]}']) {
+      const answer = JSON.parse(text) as unknown;
+      expect(() => canonicalJson(answer), text).toThrow(UnhashableNumber);
+      expect(normalizeDraft(answer, "d1"), text).toBeNull();
+    }
+    // The largest double is still an ordinary number.
+    expect(canonicalJson(JSON.parse('{"n":1.7976931348623157e308}'))).toBe('{"n":1.7976931348623157e+308}');
   });
 });
 
