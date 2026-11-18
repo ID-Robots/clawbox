@@ -20,7 +20,7 @@
 import fs from "fs";
 import path from "@/lib/runtime-path";
 import { MEMBER_HOME_ENTRY, type FilesFence } from "@/lib/files-scope";
-import { insideHome, measureHomeUsage, noteHomeChange, openQuotaWrite, unmeasuredQuotaWrite, withHomeLock, type QuotaWrite } from "@/lib/home-usage";
+import { insideHome, isGoneError, measureHomeUsage, noteHomeChange, openQuotaWrite, unmeasuredQuotaWrite, withHomeLock, type QuotaWrite } from "@/lib/home-usage";
 import { commitUploadTemp } from "@/lib/upload-temp";
 import { quotaExceededMessage, quotaUnmeasuredMessage, uploadTooLargeMessage } from "@/lib/user-limits";
 import { homeQuotaBytes, readUserLimits, uploadLimitBytes } from "@/lib/user-limits-server";
@@ -273,18 +273,25 @@ function quotaRefusal(quota: QuotaWrite): { status: number; body: UploadRefusalB
   };
 }
 
-/** Bytes the regular files at `abs` hold, and whether a folder's walk stopped short (then a floor). */
+/**
+ * Bytes the regular files at `abs` hold, and whether they could not be
+ * established (then a floor): a source that is gone moves nothing, but one
+ * that cannot be stated — or a folder whose walk stopped short or met an error
+ * — is not measured as empty (TASK-2663).
+ */
 async function bytesAt(abs: string): Promise<{ bytes: number; truncated: boolean }> {
+  let st: fs.Stats;
   try {
-    const st = await fs.promises.lstat(/* turbopackIgnore: true */ abs);
-    if (st.isFile()) return { bytes: st.size, truncated: false };
-    if (st.isDirectory()) {
-      const usage = await measureHomeUsage(abs);
-      return usage ? { bytes: usage.bytes, truncated: usage.truncated } : { bytes: 0, truncated: true };
-    }
-  } catch {
-    // gone: it moves nothing
+    st = await fs.promises.lstat(/* turbopackIgnore: true */ abs);
+  } catch (err) {
+    return { bytes: 0, truncated: !isGoneError(err) };
   }
+  if (st.isFile()) return { bytes: st.size, truncated: false };
+  if (st.isDirectory()) {
+    const usage = await measureHomeUsage(abs);
+    return usage ? { bytes: usage.bytes, truncated: usage.truncated } : { bytes: 0, truncated: true };
+  }
+  // A link or another kind of entry: it moves as itself, no regular file's bytes.
   return { bytes: 0, truncated: false };
 }
 

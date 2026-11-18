@@ -122,7 +122,7 @@ function figureHeld(k: string): boolean {
 }
 
 /** Did a filesystem call fail because what it named is no longer there? */
-function gone(err: unknown): boolean {
+export function isGoneError(err: unknown): boolean {
   const code = (err as NodeJS.ErrnoException | null)?.code;
   return code === "ENOENT" || code === "ENOTDIR";
 }
@@ -169,7 +169,7 @@ export async function measureHomeUsage(
   let visited = 0;
   // Something the walk could not account for (not merely gone): a floor.
   const unaccounted = (err: unknown) => {
-    if (!gone(err)) out.truncated = true;
+    if (!isGoneError(err)) out.truncated = true;
     return null;
   };
 

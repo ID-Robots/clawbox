@@ -420,6 +420,42 @@ describe("the home quota", () => {
     }
   });
 
+  it("does not measure a source it cannot state as empty (TASK-2663)", async () => {
+    const one = path.join(OWNER, "Shared", "one.bin");
+    fs.writeFileSync(one, Buffer.alloc(100 * KB));
+    const { guardedMove } = await import("@/lib/user-upload-guard");
+    const fence = await ivanFence();
+    const realLstat = fs.promises.lstat.bind(fs.promises);
+    const realOpendir = fs.promises.opendir.bind(fs.promises);
+    // The home measurable or not: either way the move is refused and nothing moves.
+    for (const homeReadable of [true, false]) {
+      resetUsage();
+      const stat = vi.spyOn(fs.promises, "lstat").mockImplementation(async (p, ...rest) => {
+        if (String(p) === one) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+        return realLstat(p as string, ...(rest as []));
+      });
+      const dir = vi.spyOn(fs.promises, "opendir").mockImplementation(async (p, ...rest) => {
+        if (!homeReadable && String(p) === IVAN) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+        return realOpendir(p as string, ...(rest as []));
+      });
+      let ran = false;
+      try {
+        const r = await guardedMove({ limitedUser: "ivan", fence, destAbs: IVAN, sources: [one] }, () => {
+          ran = true;
+          return "moved";
+        });
+        expect("refusal" in r ? r.refusal : null, `home readable: ${homeReadable}`).toMatchObject({ status: 507, body: { code: "quota_unmeasured" } });
+        expect(ran).toBe(false);
+      } finally {
+        stat.mockRestore();
+        dir.mockRestore();
+      }
+    }
+    // One that is gone moves nothing, and is no reason to refuse.
+    const gone = await guardedMove({ limitedUser: "ivan", fence, destAbs: IVAN, sources: [path.join(OWNER, "Shared", "gone.bin")] }, () => "moved");
+    expect(gone).toEqual({ value: "moved" });
+  });
+
   it("does not apply to the owner, nor without a quota", async () => {
     fs.writeFileSync(path.join(IVAN, "old.bin"), Buffer.alloc(Math.round(2.9 * MB)));
     setLimits({ uploadMaxMb: 1, homeQuotaMb: 0 });
