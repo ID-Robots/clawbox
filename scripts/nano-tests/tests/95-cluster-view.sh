@@ -79,7 +79,7 @@ fi
 # only when every step worked. SC2317/SC2329: run by the EXIT trap, so never
 # called by name.
 # shellcheck disable=SC2016,SC2317,SC2329
-restore() {
+restore_cluster_env() {
   local out line wait_s
   # The dashboard wait gets what is left once the restart, the removal and the
   # final health check have their share; never less than 10 s, never over 180 s.
@@ -174,7 +174,7 @@ restore() {
   [ "$health_s" -gt 0 ] && { wait_gateway_health "$health_s" >/dev/null 2>&1 || true; }
   exit "$NANO_TEST_FAILED"
 }
-trap restore EXIT
+trap restore_cluster_env EXIT
 # Stopped early (the runner's deadline, or an operator): exit, so the EXIT trap cleans up.
 trap 'exit 143' TERM
 trap 'exit 130' INT
