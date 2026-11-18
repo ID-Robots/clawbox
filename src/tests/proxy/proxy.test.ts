@@ -5,8 +5,8 @@ import os from "os";
 import path from "path";
 import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 
-describe("middleware", () => {
-  let middleware: typeof import("@/middleware").middleware;
+describe("proxy", () => {
+  let proxy: typeof import("@/proxy").proxy;
   let tmpRoot: string;
 
   /**
@@ -30,8 +30,8 @@ describe("middleware", () => {
     delete process.env.PORTAL_URL;
     delete process.env.SESSION_SECRET;
     delete process.env.CLAWBOX_TEST_MODE;
-    const mod = await import("@/middleware");
-    middleware = mod.middleware;
+    const mod = await import("@/proxy");
+    proxy = mod.proxy;
   });
 
   afterEach(() => {
@@ -81,7 +81,7 @@ describe("middleware", () => {
     it.each(["/setup/", "/login/", "/portal/", "/updating/", "/app/", "/apps/", "/chat/"])(
       "sends %s to the same path without the slash, not back to itself",
       async (pathname) => {
-        const response = await middleware(createRequest(pathname));
+        const response = await proxy(createRequest(pathname));
 
         expect(response.status).toBe(308);
         const target = new URL(response.headers.get("location")!, "http://localhost");
@@ -90,7 +90,7 @@ describe("middleware", () => {
     );
 
     it("collapses repeated trailing slashes in one hop", async () => {
-      const response = await middleware(createRequest("/setup///"));
+      const response = await proxy(createRequest("/setup///"));
 
       expect(response.status).toBe(308);
       expect(new URL(response.headers.get("location")!, "http://localhost").pathname).toBe("/setup");
@@ -101,13 +101,13 @@ describe("middleware", () => {
       // permanent redirect as durable. Both shipped boxes served the
       // self-referencing loop AS a permanent redirect, so without this a
       // browser that cached it stays broken after the box is updated.
-      const response = await middleware(createRequest("/setup/"));
+      const response = await proxy(createRequest("/setup/"));
 
       expect(response.headers.get("cache-control")).toBe("no-store");
     });
 
     it("keeps the query string", async () => {
-      const response = await middleware(createRequest("/login/?next=%2Fportal"));
+      const response = await proxy(createRequest("/login/?next=%2Fportal"));
 
       expect(response.status).toBe(308);
       const target = new URL(response.headers.get("location")!, "http://localhost");
@@ -126,7 +126,7 @@ describe("middleware", () => {
     async function follow(start: string, max = 6): Promise<string> {
       let pathname = start;
       for (let hop = 0; hop <= max; hop++) {
-        const response = await middleware(createRequest(pathname));
+        const response = await proxy(createRequest(pathname));
         const location = response.headers.get("location");
         if (response.status < 300 || response.status >= 400 || !location) return pathname;
         const next = new URL(location, "http://localhost").pathname;
@@ -157,7 +157,7 @@ describe("middleware", () => {
       // Without it the document's relative links resolve one level up and a
       // Vite build answers its own "did you mean /apps/<id>/?" 404, which the
       // owner saw as a bare page of upstream text.
-      const response = await middleware(createRequest("/apps/angry-pigs?debug=1"));
+      const response = await proxy(createRequest("/apps/angry-pigs?debug=1"));
 
       expect(response.status).toBe(308);
       const target = new URL(response.headers.get("location")!, "http://localhost");
@@ -170,7 +170,7 @@ describe("middleware", () => {
   describe("Android captive portal", () => {
     it("redirects /generate_204 to portal", async () => {
       const request = createRequest("/generate_204");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
@@ -178,7 +178,7 @@ describe("middleware", () => {
 
     it("redirects /gen_204 to portal", async () => {
       const request = createRequest("/gen_204");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
@@ -188,7 +188,7 @@ describe("middleware", () => {
   describe("Windows NCSI", () => {
     it("redirects /connecttest.txt to portal", async () => {
       const request = createRequest("/connecttest.txt");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
@@ -196,7 +196,7 @@ describe("middleware", () => {
 
     it("redirects /redirect to portal", async () => {
       const request = createRequest("/redirect");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
@@ -204,7 +204,7 @@ describe("middleware", () => {
 
     it("redirects /ncsi.txt to portal", async () => {
       const request = createRequest("/ncsi.txt");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
@@ -214,7 +214,7 @@ describe("middleware", () => {
   describe("Firefox captive portal", () => {
     it("redirects /canonical.html to portal", async () => {
       const request = createRequest("/canonical.html");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
@@ -222,7 +222,7 @@ describe("middleware", () => {
 
     it("redirects /success.txt to portal", async () => {
       const request = createRequest("/success.txt");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       expect(response.status).toBe(302);
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
@@ -232,7 +232,7 @@ describe("middleware", () => {
   describe("Apple captive portal", () => {
     it("returns HTML response for /hotspot-detect.html", async () => {
       const request = createRequest("/hotspot-detect.html");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       expect(response.status).toBe(200);
       expect(response.headers.get("Content-Type")).toBe("text/html");
@@ -244,7 +244,7 @@ describe("middleware", () => {
 
     it("returns HTML response for /library/test/success.html", async () => {
       const request = createRequest("/library/test/success.html");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       expect(response.status).toBe(200);
       expect(response.headers.get("Content-Type")).toBe("text/html");
@@ -254,7 +254,7 @@ describe("middleware", () => {
   describe("non-captive portal paths", () => {
     it("passes through other paths", async () => {
       const request = createRequest("/setup");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       // NextResponse.next() returns a response that continues to the route
       expect(response.status).toBe(200);
@@ -264,7 +264,7 @@ describe("middleware", () => {
       // No SESSION_SECRET = pre-setup state. /setup-api/* must work for the
       // wizard to bootstrap.
       const request = createRequest("/setup-api/wifi/scan");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       expect(response.status).toBe(200);
     });
@@ -273,14 +273,14 @@ describe("middleware", () => {
   describe("case insensitivity", () => {
     it("handles uppercase paths", async () => {
       const request = createRequest("/GENERATE_204");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       expect(response.status).toBe(302);
     });
 
     it("handles mixed case paths", async () => {
       const request = createRequest("/Hotspot-Detect.html");
-      const response = await middleware(request);
+      const response = await proxy(request);
 
       expect(response.status).toBe(200);
       expect(response.headers.get("Content-Type")).toBe("text/html");
@@ -291,10 +291,10 @@ describe("middleware", () => {
     it("uses custom PORTAL_URL when set", async () => {
       vi.resetModules();
       process.env.PORTAL_URL = "http://192.168.1.1/setup";
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const request = createRequest("/generate_204");
-      const response = await mod.middleware(request);
+      const response = await mod.proxy(request);
 
       expect(response.headers.get("Location")).toBe("http://192.168.1.1/setup");
     });
@@ -303,10 +303,10 @@ describe("middleware", () => {
       vi.resetModules();
       const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       process.env.PORTAL_URL = "not-a-valid-url";
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const request = createRequest("/generate_204");
-      const response = await mod.middleware(request);
+      const response = await mod.proxy(request);
 
       expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
       expect(consoleSpy).toHaveBeenCalled();
@@ -334,7 +334,7 @@ describe("middleware", () => {
     async function load() {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      return (await import("@/middleware")).middleware;
+      return (await import("@/proxy")).proxy;
     }
 
     it("serves a public webapp and its files to anyone, GET only", async () => {
@@ -374,7 +374,7 @@ describe("middleware", () => {
       markSetupComplete();
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      return (await import("@/middleware")).middleware;
+      return (await import("@/proxy")).proxy;
     }
 
     it("answers the request the provider sends — UI_LANGUAGE_READ.url — without a session", async () => {
@@ -428,30 +428,30 @@ describe("middleware", () => {
     it("allows public paths without auth", async () => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = createRequest("/login");
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
       expect(response.status).toBe(200);
     });
 
     it("allows requests when no session secret configured", async () => {
       delete process.env.SESSION_SECRET;
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = createRequest("/some-page");
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
       expect(response.status).toBe(200);
     });
 
     it("redirects unauthenticated page requests to login", async () => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = createRequest("/dashboard");
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
       expect(response.status).toBe(307);
       expect(response.headers.get("Location")).toContain("/login");
     });
@@ -459,12 +459,12 @@ describe("middleware", () => {
     it("returns 401 for unauthenticated API requests", async () => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = new NextRequest(new URL("http://localhost/api/data"), {
         headers: { accept: "application/json" },
       });
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
       expect(response.status).toBe(401);
     });
 
@@ -475,9 +475,9 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       markSetupComplete();
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const response = await mod.middleware(createRequest("/setup-api/system/info"));
+      const response = await mod.proxy(createRequest("/setup-api/system/info"));
       expect(response.status).toBe(401);
       await expect(response.json()).resolves.toEqual({ error: "Authentication required" });
     });
@@ -492,9 +492,9 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       markSetupComplete();
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const response = await mod.middleware(createRequest("/setup-api"));
+      const response = await mod.proxy(createRequest("/setup-api"));
       expect(response.status).toBe(401);
       await expect(response.json()).resolves.toEqual({ error: "Authentication required" });
     });
@@ -512,9 +512,9 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       markSetupComplete();
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const response = await mod.middleware(createRequest("/login-api/nope"));
+      const response = await mod.proxy(createRequest("/login-api/nope"));
       expect(response.status).toBe(200);
       expect(response.headers.get("location")).toBeNull();
     });
@@ -526,9 +526,9 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       markSetupComplete();
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const response = await mod.middleware(createRequest("/setup-apiary"));
+      const response = await mod.proxy(createRequest("/setup-apiary"));
       expect(response.status).toBe(307);
       expect(response.headers.get("location")).toContain("/login");
     });
@@ -536,10 +536,10 @@ describe("middleware", () => {
     it.each(["/login", "/setup", "/setup-api/setup/status", "/_next/chunk.js", "/fonts/test.woff", "/fonts/JetBrainsMono-Regular.woff2", "/manifest.json", "/sw.js", "/favicon.ico", "/portal/subscribe"])("allows public path %s", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = createRequest(p);
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
       expect(response.status).toBe(200);
     });
 
@@ -554,9 +554,9 @@ describe("middleware", () => {
       async (p) => {
         process.env.SESSION_SECRET = "test-secret";
         vi.resetModules();
-        const mod = await import("@/middleware");
+        const mod = await import("@/proxy");
 
-        const response = await mod.middleware(createRequest(p));
+        const response = await mod.proxy(createRequest(p));
         expect(response.status).toBe(307);
         expect(response.headers.get("location")).toContain("/login");
       },
@@ -567,7 +567,7 @@ describe("middleware", () => {
       // those paths. The matcher is compiled into the build's middleware
       // manifest, so the regex itself is the thing to pin: Next's own build
       // output stays excluded, nothing else does.
-      const { config } = await import("@/middleware");
+      const { config } = await import("@/proxy");
       const [pattern] = config.matcher;
       expect(pattern).toContain("_next/static");
       expect(pattern).toContain("_next/image");
@@ -583,14 +583,14 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       markSetupComplete();
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       // createRequest() sends no Accept header — exactly like a raw fetch()
       // (Accept: */*). Every /setup-api/* consumer parses JSON, so an expired
       // session must return a JSON 401, not an HTML login redirect that makes
       // the caller's .json() throw (#304).
       const req = createRequest(p);
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
       expect(response.status).toBe(401);
     });
 
@@ -605,8 +605,8 @@ describe("middleware", () => {
       // request three attempts inside two seconds and then gives up.
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
-      const response = await mod.middleware(createRequest(p));
+      const mod = await import("@/proxy");
+      const response = await mod.proxy(createRequest(p));
       expect(response.status).toBe(200);
     });
 
@@ -630,10 +630,10 @@ describe("middleware", () => {
       // "Failed to check update status" wizard breakage.
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = createRequest(p);
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
       expect(response.status).toBe(200);
     });
 
@@ -665,9 +665,9 @@ describe("middleware", () => {
     ])("gates %s even during setup wizard bootstrap", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const response = await mod.middleware(createRequest(p));
+      const response = await mod.proxy(createRequest(p));
       expect(response.status).toBe(401);
       await expect(response.json()).resolves.toEqual({ error: "Authentication required" });
     });
@@ -686,9 +686,9 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       writeConfig({ password_configured: true }); // setup_complete still absent
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const response = await mod.middleware(createRequest(p));
+      const response = await mod.proxy(createRequest(p));
       expect(response.status).toBe(401);
     });
 
@@ -701,22 +701,22 @@ describe("middleware", () => {
       fs.mkdirSync(dataDir, { recursive: true });
       fs.writeFileSync(path.join(dataDir, "config.json"), "{ this is not json");
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      expect((await mod.middleware(createRequest("/setup-api/update/run"))).status).toBe(401);
-      expect((await mod.middleware(createRequest("/setup-api/wifi/scan"))).status).toBe(401);
+      expect((await mod.proxy(createRequest("/setup-api/update/run"))).status).toBe(401);
+      expect((await mod.proxy(createRequest("/setup-api/wifi/scan"))).status).toBe(401);
     });
 
     it("re-locks /setup-api/* after config.json flips setup_complete", async () => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const open = await mod.middleware(createRequest("/setup-api/wifi/scan"));
+      const open = await mod.proxy(createRequest("/setup-api/wifi/scan"));
       expect(open.status).toBe(200);
 
       markSetupComplete();
-      const locked = await mod.middleware(createRequest("/setup-api/wifi/scan"));
+      const locked = await mod.proxy(createRequest("/setup-api/wifi/scan"));
       // Re-locked API surface returns a JSON 401 (not a login redirect) so
       // fetch() callers can detect the expired session — see #304.
       expect(locked.status).toBe(401);
@@ -726,10 +726,10 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       process.env.CLAWBOX_TEST_MODE = "1";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = createRequest("/setup-api/wifi/scan");
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
       // Pass-through, not a 307 redirect — the trusted test environment
       // exercises every /setup-api endpoint directly via fetch().
       expect(response.status).toBe(200);
@@ -743,10 +743,10 @@ describe("middleware", () => {
       process.env.CLAWBOX_TEST_MODE = "true";
       markSetupComplete();
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = createRequest("/setup-api/wifi/scan");
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
       // Auth still enforced -> /setup-api/* yields a JSON 401 (not a bypass).
       expect(response.status).toBe(401);
     });
@@ -757,10 +757,10 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       process.env.CLAWBOX_TEST_MODE = "1";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = createRequest("/");
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
       expect(response.status).toBe(307);
       expect(response.headers.get("Location")).toContain("/login");
     });
@@ -768,26 +768,26 @@ describe("middleware", () => {
     it("rejects invalid session cookie", async () => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = new NextRequest(new URL("http://localhost/dashboard"), {
         headers: { cookie: "clawbox_session=invalid.cookie" },
       });
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
       expect(response.status).toBe(307);
     });
 
     it("allows requests with a valid signed session cookie", async () => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = new NextRequest(new URL("http://localhost/dashboard"), {
         headers: {
           cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
         },
       });
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
 
       expect(response.status).toBe(200);
     });
@@ -795,14 +795,14 @@ describe("middleware", () => {
     it("rejects expired signed session cookies", async () => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = new NextRequest(new URL("http://localhost/dashboard"), {
         headers: {
           cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) - 60)}`,
         },
       });
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
 
       expect(response.status).toBe(307);
     });
@@ -815,12 +815,12 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       writeConfig({ setup_complete: true, session_generation: 3 });
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = new NextRequest(new URL("http://localhost/dashboard"), {
         headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future(), 3)}` },
       });
-      expect((await mod.middleware(req)).status).toBe(200);
+      expect((await mod.proxy(req)).status).toBe(200);
     });
 
     it("rejects a cookie from before the last password change", async () => {
@@ -828,24 +828,24 @@ describe("middleware", () => {
       // Generation bumped to 4; a cookie stamped gen 3 is now revoked.
       writeConfig({ setup_complete: true, session_generation: 4 });
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = new NextRequest(new URL("http://localhost/dashboard"), {
         headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future(), 3)}` },
       });
-      expect((await mod.middleware(req)).status).toBe(307);
+      expect((await mod.proxy(req)).status).toBe(307);
     });
 
     it("treats a legacy cookie with no generation as generation 0", async () => {
       process.env.SESSION_SECRET = "test-secret";
       writeConfig({ setup_complete: true }); // session_generation defaults to 0
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = new NextRequest(new URL("http://localhost/dashboard"), {
         headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future())}` },
       });
-      expect((await mod.middleware(req)).status).toBe(200);
+      expect((await mod.proxy(req)).status).toBe(200);
     });
   });
 
@@ -862,10 +862,10 @@ describe("middleware", () => {
         process.env.SESSION_SECRET = "test-secret";
         writeConfig({ setup_complete: true, password_configured: true });
         vi.resetModules();
-        const mod = await import("@/middleware");
+        const mod = await import("@/proxy");
         const { SESSION_EXPIRED_HEADER, isSessionExpiredResponse } = await import("@/lib/session-expiry");
 
-        const res = await mod.middleware(new NextRequest(new URL(`http://localhost${route}`), {
+        const res = await mod.proxy(new NextRequest(new URL(`http://localhost${route}`), {
           headers: { cookie: `clawbox_session=${await createSignedSessionCookie(past())}` },
         }));
         expect(res.status).toBe(401);
@@ -879,9 +879,9 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       writeConfig({ setup_complete: true, password_configured: true });
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const res = await mod.middleware(new NextRequest(new URL("http://localhost/setup-api/gateway/ws-config"), {
+      const res = await mod.proxy(new NextRequest(new URL("http://localhost/setup-api/gateway/ws-config"), {
         headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future())}` },
       }));
       expect(res.status).toBe(200);
@@ -938,9 +938,9 @@ describe("middleware", () => {
     ])("gates sensitive %s during the setup window", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const response = await mod.middleware(createRequest(p));
+      const response = await mod.proxy(createRequest(p));
       // Falls through to the session gate → JSON 401 (no valid cookie).
       expect(response.status).toBe(401);
     });
@@ -951,9 +951,9 @@ describe("middleware", () => {
       // gated.
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const response = await mod.middleware(createRequest("/setup-api/gateway/health"));
+      const response = await mod.proxy(createRequest("/setup-api/gateway/health"));
       expect(response.status).toBe(200);
     });
 
@@ -963,9 +963,9 @@ describe("middleware", () => {
       // gating the subtree would leave the mascot mute during setup.
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const response = await mod.middleware(createRequest("/setup-api/mascot-lines"));
+      const response = await mod.proxy(createRequest("/setup-api/mascot-lines"));
       expect(response.status).toBe(200);
     });
 
@@ -975,23 +975,23 @@ describe("middleware", () => {
       // sibling (it does no privileged work).
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const response = await mod.middleware(createRequest("/setup-api/portal/heartbeat-tick"));
+      const response = await mod.proxy(createRequest("/setup-api/portal/heartbeat-tick"));
       expect(response.status).toBe(200);
     });
 
     it("allows a sensitive route once a valid session is presented", async () => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = new NextRequest(new URL("http://localhost/setup-api/files"), {
         headers: {
           cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
         },
       });
-      const response = await mod.middleware(req);
+      const response = await mod.proxy(req);
       expect(response.status).toBe(200);
     });
   });
@@ -1013,9 +1013,9 @@ describe("middleware", () => {
     ])("gates %s during the setup window", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      expect((await mod.middleware(createRequest(p))).status).toBe(401);
+      expect((await mod.proxy(createRequest(p))).status).toBe(401);
     });
 
     it("still allows the wizard's /setup-api/harness/active during the setup window", async () => {
@@ -1023,9 +1023,9 @@ describe("middleware", () => {
       // before a password can exist, so it is on the bootstrap allow-list.
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      expect((await mod.middleware(createRequest("/setup-api/harness/active"))).status).toBe(200);
+      expect((await mod.proxy(createRequest("/setup-api/harness/active"))).status).toBe(200);
     });
 
     it.each([
@@ -1054,16 +1054,16 @@ describe("middleware", () => {
       // is broadcasting an OPEN AP for this whole window. TASK-443/446.
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      expect((await mod.middleware(createRequest(p))).status).toBe(401);
+      expect((await mod.proxy(createRequest(p))).status).toBe(401);
 
       const authed = new NextRequest(new URL(`http://localhost${p}`), {
         headers: {
           cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
         },
       });
-      expect((await mod.middleware(authed)).status).toBe(200);
+      expect((await mod.proxy(authed)).status).toBe(200);
     });
   });
 
@@ -1071,9 +1071,9 @@ describe("middleware", () => {
     it("serves /setup unauthenticated while the device has no owner", async () => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      expect((await mod.middleware(createRequest("/setup"))).status).toBe(200);
+      expect((await mod.proxy(createRequest("/setup"))).status).toBe(200);
     });
 
     it("redirects /setup to /login once a password is configured", async () => {
@@ -1083,9 +1083,9 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       writeConfig({ password_configured: true });
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      const response = await mod.middleware(createRequest("/setup"));
+      const response = await mod.proxy(createRequest("/setup"));
       expect(response.status).toBe(307);
       const location = new URL(response.headers.get("Location")!);
       expect(location.pathname).toBe("/login");
@@ -1096,14 +1096,14 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       writeConfig({ password_configured: true });
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       const req = new NextRequest(new URL("http://localhost/setup"), {
         headers: {
           cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
         },
       });
-      expect((await mod.middleware(req)).status).toBe(200);
+      expect((await mod.proxy(req)).status).toBe(200);
     });
 
     it("does not let the /setup prefix leak /setup-api past the gate", async () => {
@@ -1112,10 +1112,10 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       writeConfig({ setup_complete: true, password_configured: true });
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
-      expect((await mod.middleware(createRequest("/setup-api/system/info"))).status).toBe(401);
-      expect((await mod.middleware(createRequest("/setupmagic"))).status).toBe(307);
+      expect((await mod.proxy(createRequest("/setup-api/system/info"))).status).toBe(401);
+      expect((await mod.proxy(createRequest("/setupmagic"))).status).toBe(307);
     });
   });
 
@@ -1136,11 +1136,11 @@ describe("middleware", () => {
       async (p) => {
         process.env.CLAWBOX_EDITION_FILE = writeEditionFile("hermes");
         vi.resetModules();
-        const mod = await import("@/middleware");
+        const mod = await import("@/proxy");
 
         // The OpenClaw gateway is disabled+masked on this SKU, so the
         // next.config rewrite would 502 instead of serving ClawBox's own 404.
-        expect((await mod.middleware(createRequest(p))).status).toBe(404);
+        expect((await mod.proxy(createRequest(p))).status).toBe(404);
       },
     );
 
@@ -1149,26 +1149,26 @@ describe("middleware", () => {
       async (p) => {
         process.env.CLAWBOX_EDITION_FILE = writeEditionFile("openclaw");
         vi.resetModules();
-        const mod = await import("@/middleware");
+        const mod = await import("@/proxy");
 
-        expect((await mod.middleware(createRequest(p))).status).toBe(200);
+        expect((await mod.proxy(createRequest(p))).status).toBe(200);
       },
     );
 
     it("does not 404 ClawBox's own paths on hermes", async () => {
       process.env.CLAWBOX_EDITION_FILE = writeEditionFile("hermes");
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       for (const p of ["/", "/login", "/setup-api/setup/status", "/apiary", "/assetstore"]) {
-        expect((await mod.middleware(createRequest(p))).status).not.toBe(404);
+        expect((await mod.proxy(createRequest(p))).status).not.toBe(404);
       }
     });
   });
 
   describe("config export", () => {
     it("exports matcher config", async () => {
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
 
       expect(mod.config).toBeDefined();
       expect(mod.config.matcher).toBeDefined();
@@ -1187,13 +1187,13 @@ describe("middleware", () => {
     async function authed(pathname: string) {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
-      const mod = await import("@/middleware");
+      const mod = await import("@/proxy");
       const req = new NextRequest(new URL(`http://localhost${pathname}`), {
         headers: {
           cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
         },
       });
-      return mod.middleware(req);
+      return mod.proxy(req);
     }
 
     it("sends the desktop to the updating page while an update runs", async () => {
@@ -1278,7 +1278,7 @@ describe("middleware", () => {
       process.env.SESSION_SECRET = "test-secret";
       markSetupComplete();
       vi.resetModules();
-      return (await import("@/middleware")).middleware;
+      return (await import("@/proxy")).proxy;
     }
 
     function request(pathname: string, init: { method?: string; headers?: Record<string, string> } = {}) {

@@ -138,7 +138,7 @@ describe("hermes provider-OAuth relay routes", () => {
   describe("the owner's session (TASK-527)", () => {
     // Middleware refuses these paths without a session — they are not on the
     // bootstrap allow-list, so they are 401 from the moment the box boots
-    // (asserted in src/tests/middleware/middleware.test.ts). These cases pin the
+    // (asserted in src/tests/proxy/proxy.test.ts). These cases pin the
     // SECOND line: the handlers themselves refuse, so a gate that is ever wrong
     // in front of them does not hand a stranger on the open `ClawBox-Setup` AP a
     // provider sign-in session on the owner's dashboard.

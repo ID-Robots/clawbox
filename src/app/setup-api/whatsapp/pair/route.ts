@@ -19,7 +19,7 @@ export const dynamic = "force-dynamic";
  * Hermes, a rendered PNG of the same nonce on OpenClaw. Neither is a secret in
  * the credential sense (both are short-lived and single-use), but both are
  * enough to link a device, so this route stays behind the same session gate as
- * the rest of /setup-api/whatsapp (src/middleware.ts) and neither is ever
+ * the rest of /setup-api/whatsapp (src/proxy.ts) and neither is ever
  * logged.
  */
 

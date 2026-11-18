@@ -15,7 +15,7 @@
  * Adding a route no longer changes the security posture; opening one is an
  * explicit, reviewable edit to this file.
  *
- * NOTE the second half of the fix, in `middleware.ts`: this window is open only
+ * NOTE the second half of the fix, in `proxy.ts`: this window is open only
  * while the device has NO owner credential at all. The moment
  * `password_configured` flips true — even if `setup_complete` is still false,
  * i.e. a half-finished or resumed wizard — the window closes and the entire

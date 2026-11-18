@@ -1067,7 +1067,10 @@ describe("both stops an update performs have a start", () => {
     // already waiting through. Only that arm has a reboot reason, and test mode
     // never asks for one, so every other arm takes the resuming call.
     const STEP = shellCode(extractShellFunction("step_rebuild_reboot"));
-    expect(STEP).toMatch(/if \[ -n "\$reboot_reasons" \]; then\s*\n\s*do_rebuild --reboot-follows\s*\n\s*else\s*\n\s*do_rebuild\s*\n/);
+    // The restart arm outside test mode hands a gateway paused for the build to
+    // the update's second half (TASK-2517); every other engine is still
+    // resumed there. Test mode keeps the plain resuming call.
+    expect(STEP).toMatch(/if \[ -n "\$reboot_reasons" \]; then\s*\n\s*do_rebuild --reboot-follows\s*\n\s*elif ! is_test_mode; then\s*\n\s*do_rebuild --gateway-to-update\s*\n\s*else\s*\n\s*do_rebuild\s*\n/);
     const decision = STEP.slice(0, STEP.indexOf("do_rebuild --reboot-follows"));
     expect(decision, "test mode does not reboot, so it never asks for a reason")
       .toMatch(/if ! is_test_mode; then\s*\n\s*reboot_reasons="\$\(update_reboot_reasons\)"/);

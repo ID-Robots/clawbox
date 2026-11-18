@@ -56,7 +56,7 @@ function seedRepo(): void {
   git("update-ref", "refs/remotes/origin/beta", git("rev-parse", "HEAD"));
 }
 
-function stamp(): { dirty: boolean | null; untracked: number | null; branch: string | null } {
+function stamp(): { dirty: boolean | null; contentDirty: boolean | null; untracked: number | null; branch: string | null } {
   const run = spawnSync("node", [STAMPER], {
     cwd: repo,
     env: { ...process.env, CLAWBOX_ROOT: repo },
@@ -77,7 +77,7 @@ afterEach(() => {
 
 d("build-info.json `dirty` describes the tracked files the build came from", () => {
   it("is false on a clean tree", () => {
-    expect(stamp()).toMatchObject({ dirty: false, untracked: 0, branch: "beta" });
+    expect(stamp()).toMatchObject({ dirty: false, contentDirty: false, untracked: 0, branch: "beta" });
   });
 
   it("is false when the only difference is an untracked file, and counts it separately", () => {
@@ -92,6 +92,26 @@ d("build-info.json `dirty` describes the tracked files the build came from", () 
     fs.writeFileSync(path.join(repo, "README.md"), "edited over ssh\n");
 
     expect(stamp()).toMatchObject({ dirty: true });
+  });
+
+  it("says so in `contentDirty` too when a tracked file's contents changed (TASK-2517)", () => {
+    fs.writeFileSync(path.join(repo, "README.md"), "edited over ssh\n");
+
+    expect(stamp()).toMatchObject({ dirty: true, contentDirty: true });
+  });
+
+  it("leaves an executable bit out of `contentDirty` and keeps it in `dirty` (TASK-2517)", () => {
+    // The update's rebuild step makes every scripts/*.sh executable before it
+    // builds; on a checkout with core.fileMode=true that alone made `dirty`
+    // true on every update build, so the build could never be kept.
+    git("config", "core.fileMode", "true");
+    fs.mkdirSync(path.join(repo, "scripts"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "scripts", "x.sh"), "echo\n", { mode: 0o644 });
+    git("add", "-A");
+    git("commit", "-qm", "script");
+    fs.chmodSync(path.join(repo, "scripts", "x.sh"), 0o755);
+
+    expect(stamp()).toMatchObject({ dirty: true, contentDirty: false });
   });
 
   it("ignores gitignored paths, so a device's own data/ never reads as dirty", () => {

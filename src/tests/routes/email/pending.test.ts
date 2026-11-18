@@ -6,7 +6,7 @@
 // the one thing that must hold — "the agent's own token does not open this
 // door" — asserted by the mock rather than by the code.
 //
-// Why that matters: src/middleware.ts admits callers to /setup-api/* on EITHER
+// Why that matters: src/proxy.ts admits callers to /setup-api/* on EITHER
 // a session cookie OR the MCP bearer, and the agent holds the bearer. A route
 // that trusted middleware here would let a prompt-injected agent queue a draft
 // and approve it on the next tool call.
