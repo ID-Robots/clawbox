@@ -373,16 +373,21 @@ export async function extractDocuments(
     // when a newer pass may have written `out` from a newer revision of the
     // document — and a late write over it, newer than its source, would be
     // taken as current by every scan after.
-    // A short name of its own: the derived name can already be near the
-    // filesystem's 255-byte limit, and a longer one would fail the copy.
-    const part = path.join(derived, `.${crypto.randomUUID()}.part`);
+    // A folder of its own per conversion, short-named: LibreOffice writes its
+    // intermediate `<name>.txt` into the output's folder, so a shared folder
+    // let two passes converting the same document trade intermediates; and
+    // the derived name can already be near the filesystem's 255-byte limit.
+    signal?.throwIfAborted();
+    const work = path.join(derived, `.${crypto.randomUUID()}.work`);
+    await fs.mkdir(work);
+    const part = path.join(work, "text.part");
     let converted = false;
     try {
       converted = await extractOne(file, part);
       signal?.throwIfAborted();
       if (converted) await fs.rename(part, out);
     } finally {
-      await fs.rm(part, { force: true }).catch(() => { /* gone or never written */ });
+      await fs.rm(work, { recursive: true, force: true }).catch(() => { /* gone or never written */ });
     }
     if (converted) extracted += 1;
     else {

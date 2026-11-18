@@ -1212,8 +1212,9 @@ export async function runLocalIndexPass(
   let publishedAt = performance.now();
   /** A file was committed since the last publish. */
   let unpublished = false;
-  // Asked after every commit AND every embedded batch: a file committed just
-  // after a publish must not wait for a next file that takes ten minutes.
+  // Asked after every commit, every embedded batch and at every file: a file
+  // committed just after a publish must not wait for a next file that takes
+  // ten minutes, nor for the end of a long run of unchanged files.
   const publishCommitted = () => {
     if (!unpublished || performance.now() - publishedAt < PUBLISH_EVERY_MS) return;
     try {
@@ -1355,6 +1356,9 @@ export async function runLocalIndexPass(
       // there is. `filesDone` is therefore what is genuinely finished with,
       // never one ahead of it.
       report();
+      // A file boundary is a chance to publish too: thousands of unchanged
+      // files after one that was committed embed nothing and commit nothing.
+      publishCommitted();
       filesDone += 1;
       // ONE DESCRIPTOR for the size check, the skip decision and the read.
       // A path-level stat followed by a path-level readFile lets the file be

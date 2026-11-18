@@ -110,6 +110,16 @@ describe("derived file names", () => {
     expect(second.skipped).toBe(0);
   });
 
+  it("tells its caller about the entries it walks, folders and hidden ones included (TASK-2431)", async () => {
+    for (let i = 0; i < 70; i += 1) {
+      fs.mkdirSync(path.join(source, `empty-${i}`));
+      fs.mkdirSync(path.join(source, `.hidden-${i}`));
+    }
+    let beats = 0;
+    await extractDocuments(source, undefined, () => { beats += 1; });
+    expect(beats).toBe(2);
+  });
+
   it("never publishes a conversion that ends after its pass was given up on", async () => {
     // TASK-2431: a pass the stall watchdog or a stop gave up on can still be
     // inside a conversion, and a newer pass may have written the derived file

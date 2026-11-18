@@ -1626,8 +1626,13 @@ describe("a long pass and the searches beside it (TASK-2431)", () => {
     expect(storeMeta("generation")).toBe("1");
   });
 
-  it("counts folders and hidden entries it walks past, not only the files it yields", async () => {
-    for (let i = 0; i < 130; i += 1) fs.mkdirSync(path.join(source, "tree", `empty-${i}`), { recursive: true });
+  it("counts folders and hidden entries it walks past, not only the files it yields — in both walks", async () => {
+    // 141 entries in `tree`: each walk over the source (the extraction's and
+    // the index's) reads them and beats twice, so four beats need both.
+    for (let i = 0; i < 70; i += 1) {
+      fs.mkdirSync(path.join(source, "tree", `empty-${i}`), { recursive: true });
+      fs.mkdirSync(path.join(source, "tree", `.hidden-${i}`), { recursive: true });
+    }
     write("tree/only.md", "The one note in a tree of folders.");
     let reported = false;
     let walkBeats = 0;
@@ -1635,7 +1640,7 @@ describe("a long pass and the searches beside it (TASK-2431)", () => {
       mayDiscard: true,
       onHeartbeat: () => { if (!reported) walkBeats += 1; },
     });
-    expect(walkBeats).toBeGreaterThanOrEqual(2);
+    expect(walkBeats).toBeGreaterThanOrEqual(4);
   });
 
   it("tells the stall watchdog it is walking a large folder before it has a file count", async () => {

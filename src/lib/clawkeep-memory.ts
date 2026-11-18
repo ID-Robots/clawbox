@@ -3104,6 +3104,18 @@ export async function startMemoryIndex(
     for (const stamp of claimStamps) startingClaims().delete(stamp);
     claimStamps.clear();
   };
+  /**
+   * A start that failed before its pass was supervised, settled once the
+   * gateway has been started again (the claim stays registered all through
+   * that start, so no reader here frees the lock under it): the record —
+   * if it is still this claim's — and the claim's end, in one section.
+   */
+  const failStart = () => runRecordSection(async () => {
+    const onRecord = await readPersistedRunState();
+    const ours = onRecord.status === "running" && claimStamps.has(onRecord.startedAtMs);
+    endStartClaim();
+    if (ours) await markInterrupted(onRecord);
+  }).catch(() => undefined);
 
   // The one line that differs by edition. Everything above and below it — the
   // decline, the lock, the state file, the reconcile, the watchdog, the cache —
@@ -3245,13 +3257,8 @@ export async function startMemoryIndex(
       await stopOpenclawGatewayForOffline();
     } catch (err) {
       await releaseClaim();
-      endStartClaim();
       await startOpenclawGatewayAfterOffline().catch(() => undefined);
-      // The record as it stands, so markInterrupted recognises it as this run's.
-      const onRecord = await readPersistedRunState();
-      if (onRecord.status === "running" && ourStamps.has(onRecord.startedAtMs)) {
-        await runRecordSection(() => markInterrupted(onRecord)).catch(() => undefined);
-      }
+      await failStart();
       throw err;
     }
     // Still this run's? Every claim write issued so far has landed first;
@@ -3287,8 +3294,8 @@ export async function startMemoryIndex(
       }, noteMoved);
   } catch (err) {
     await releaseClaim();
-    endStartClaim();
     if (!localArm) await startOpenclawGatewayAfterOffline().catch(() => undefined);
+    await failStart();
     throw err;
   } finally {
     // Spawned (or not): the claim's last write lands before the record names the child.
@@ -3361,6 +3368,9 @@ export async function startMemoryIndex(
     // cannot write a final state over this cleanup.
     settled = true;
     pass.abandon();
+    // A report queued behind the naming write still runs: drained before the
+    // lock goes, so no stale "running" record lands over a next pass's.
+    await progressWritten.catch(() => undefined);
     // On the OpenClaw arm the gateway is started again behind the attempt's
     // end (SIGKILLed TERMINATE_GRACE_MS after the SIGTERM at the latest), and
     // the lock is held until that start is over: a next pass taking it
