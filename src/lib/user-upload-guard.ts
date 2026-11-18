@@ -117,6 +117,8 @@ export async function userUploadGuard(opts: {
   let writing: string | null = null;
   let quotaHome: string | null = null;
   let replaced = 0;
+  // The user's own home, quota or not: what lands there moves its figure.
+  const ownHome = limitedUser ? memberHome(fence) : null;
   if (limitedUser) {
     const limits = await readUserLimits();
     uploadLimit = uploadLimitBytes(limits);
@@ -124,7 +126,7 @@ export async function userUploadGuard(opts: {
     // The quota is the user's OWN home's: on an organisation box Files serves
     // it as their Home. Their writes into Shared, and a home box's users
     // writing into the owner's folders, are the disk's to bound.
-    const home = memberHome(fence);
+    const home = ownHome;
     if (quotaBytes !== null && home && insideHome(home, destPath)) {
       replaced = replacedBytes(destPath);
       quota = await openQuotaWrite(home, quotaBytes, replaced);
@@ -168,9 +170,15 @@ export async function userUploadGuard(opts: {
   const finish = (landedBytes: number | null, replacedAtCommit?: number) => {
     if (finished) return;
     finished = true;
+    const wrote = writing;
     if (writing) endWriting(writing);
     writing = null;
-    if (!quota) return;
+    if (!quota) {
+      // No quota counts it, but the home's figure — the owner's usage column,
+      // and the quota once it is switched on — must not miss it: walked again.
+      if (landedBytes !== null && ownHome && wrote && insideHome(ownHome, wrote)) noteHomeChange(ownHome);
+      return;
+    }
     const gaveBack = replacedAtCommit !== undefined && Number.isFinite(replacedAtCommit) ? Math.max(0, replacedAtCommit) : replaced;
     quota.finish(landedBytes === null ? 0 : landedBytes - gaveBack);
   };

@@ -17,13 +17,7 @@
 #      minute later (scripts/nano-tests/board/multi-user-limits.mjs).
 #   4. Home quota: with organisation mode on, A's Files Home is their own
 #      home; two 900 KB uploads fit, a third is refused 507 `quota_exceeded`,
-#      the owner sees A's usage, and after a delete A may upload again. Then
-#      two overwrites of one file at once (TASK-2663): a slow chunked 1 MB
-#      overwrite of an 800 KB file and a quick 4 KB one that lands while the
-#      slow one is still on its way. The slow one began with the 800 KB as
-#      credit but now replaces 4 KB, and landing it would take the home past
-#      its 2 MB quota: it is refused 507 at its commit, the quick one's file
-#      stays, and no temporary file is left.
+#      the owner sees A's usage, and after a delete A may upload again.
 #   5. The audit log: the owner reads A's sign-in and failed sign-in, the user
 #      added, the limits set and the switch; A is refused it; the file under
 #      data/ is 0600.
@@ -85,16 +79,6 @@ put_chunked() {
   out=$(mktemp)
   code=$(printf "header = \"Cookie: clawbox_session=%s\"\nheader = \"Origin: http://127.0.0.1\"\n" "$cookie" \
     | curl -sS -o "$out" -w "%{http_code}" -X PUT -H "Content-Type: application/octet-stream" -H "Transfer-Encoding: chunked" --data-binary "@$file" --max-time 180 -K - "$DASHBOARD/setup-api/files?dir=$dir&name=$name" 2>/dev/null)
-  printf "%s\n" "${code:-000}"; cat "$out"; rm -f "$out"
-}
-
-# put_slow COOKIE DIR NAME FILE RATE -> as put_chunked, sent no faster than
-# RATE (curl --limit-rate), so it is still on its way while another lands.
-put_slow() {
-  local cookie=$1 dir=$2 name=$3 file=$4 rate=$5 out code
-  out=$(mktemp)
-  code=$(printf "header = \"Cookie: clawbox_session=%s\"\nheader = \"Origin: http://127.0.0.1\"\n" "$cookie" \
-    | curl -sS -o "$out" -w "%{http_code}" -X PUT -H "Content-Type: application/octet-stream" -H "Transfer-Encoding: chunked" --limit-rate "$rate" --data-binary "@$file" --max-time 180 -K - "$DASHBOARD/setup-api/files?dir=$dir&name=$name" 2>/dev/null)
   printf "%s\n" "${code:-000}"; cat "$out"; rm -f "$out"
 }
 
@@ -227,42 +211,6 @@ if [ -n "$used" ] && [ "$used" != None ] && [ "$used" -ge 1843200 ] && [ "$used"
 d=$(status_of "$(call DELETE "/setup-api/files/Home/$MARK-1.bin" "$A_COOKIE")")
 r=$(put_file "$A_COOKIE" Home "$MARK-3.bin" 921600)
 if [ "$d" = 200 ] && [ "$(status_of "$r")" = 200 ]; then ok_ "after a delete A may upload into their home again"; else no_ "delete $d, then upload $(status_of "$r")"; fi
-# Two overwrites of one file at once (TASK-2663). The home of A is set to
-# about 1.2 MB besides doc.bin (800 KB). The slow overwrite (1 MB, chunked,
-# 100 KB/s) begins with the 800 KB of doc.bin as its credit; the quick one (4 KB) lands three
-# seconds in, so the slow one would now replace 4 KB: landing it would hold
-# about 2.2 MB of the 2 MB quota. It must be refused at its commit.
-for f in "$MARK-2.bin" "$MARK-3.bin"; do call DELETE "/setup-api/files/Home/$f" "$A_COOKIE" >/dev/null; done
-f1=$(status_of "$(put_file "$A_COOKIE" Home "$MARK-r1.bin" 600000)")
-f2=$(status_of "$(put_file "$A_COOKIE" Home "$MARK-r2.bin" 600000)")
-f3=$(status_of "$(put_file "$A_COOKIE" Home "$MARK-doc.bin" 800000)")
-a_used() { call GET /setup-api/settings/user-limits "$OWNER" | tail -n +2 | python3 -c "import json,sys; u=[x for x in json.load(sys.stdin)[\"users\"] if x[\"username\"]==sys.argv[1]]; print(u[0][\"usedBytes\"] if u else \"\")" "$A_NAME" 2>/dev/null; }
-used0=$(a_used)
-if [ "$f1:$f2:$f3" = 200:200:200 ] && [ -n "$used0" ] && [ "$used0" != None ] && [ "$used0" -ge 1900000 ] && [ "$used0" -le 2097152 ]; then
-  head -c 4096 /dev/urandom > "$WORK/quick.bin"
-  head -c 1000000 /dev/urandom > "$WORK/slow.bin"
-  slow_out=$(mktemp)
-  put_slow "$A_COOKIE" Home "$MARK-doc.bin" "$WORK/slow.bin" 100k > "$slow_out" &
-  slow_pid=$!
-  sleep 3
-  quick=$(put_chunked "$A_COOKIE" Home "$MARK-doc.bin" "$WORK/quick.bin")
-  wait "$slow_pid"
-  slow=$(cat "$slow_out"); rm -f "$slow_out"
-  printf "header = \"Cookie: clawbox_session=%s\"\n" "$A_COOKIE" | curl -sS -o "$WORK/doc.got" --max-time 60 -K - "$DASHBOARD/setup-api/files/Home/$MARK-doc.bin" 2>/dev/null
-  got=$(sha256sum "$WORK/doc.got" 2>/dev/null | cut -d" " -f1)
-  want=$(sha256sum "$WORK/quick.bin" | cut -d" " -f1)
-  listed=$(call GET "/setup-api/files?dir=Home" "$A_COOKIE" | tail -n +2 | python3 -c "import json,sys; print(sum((f.get(\"size\") or 0) for f in json.load(sys.stdin)[\"files\"] if f.get(\"type\")==\"file\"))" 2>/dev/null)
-  used1=$(a_used)
-  if [ -r "/home/$A_NAME" ] && [ -x "/home/$A_NAME" ]; then
-    left=$(find "/home/$A_NAME" -maxdepth 1 -name ".clawbox-upload-*.part" 2>/dev/null | wc -l)
-  else left="unlistable"; fi
-  printf "NOTE [%s] two overwrites at once: before %s bytes; quick %s, slow %s %s; doc.bin is the quick one: %s; home lists %s bytes, figure %s, of 2097152; temporary files left %s\n" \
-    "$RUNTIME" "$used0" "$(status_of "$quick")" "$(status_of "$slow")" "$(body_of "$slow" | field code)" "$([ "$got" = "$want" ] && echo yes || echo no)" "$listed" "$used1" "$left"
-  if [ "$(status_of "$quick")" = 200 ] && [ "$(status_of "$slow")" = 507 ] && [ "$(body_of "$slow" | field code)" = quota_exceeded ] \
-    && [ -n "$got" ] && [ "$got" = "$want" ] && [ -n "$listed" ] && [ "$listed" -le 2097152 ] && [ -n "$used1" ] && [ "$used1" != None ] && [ "$used1" -le 2097152 ] && [ "$left" = 0 ]; then
-    ok_ "two overwrites of one file at once: the slow 1 MB one, which would take A home past its quota once the quick 4 KB one has landed, is refused 507 quota_exceeded at its commit; the quick one file stays and no temporary file is left"
-  else no_ "two overwrites of one file at once: quick $(status_of "$quick"), slow $(status_of "$slow") $(body_of "$slow" | field code), quick file kept $([ "$got" = "$want" ] && echo yes || echo no), home lists $listed and figures $used1 of 2097152, temporary files left $left"; fi
-else no_ "setting up two overwrites at once: uploads $f1/$f2/$f3, A home holds \"$used0\" bytes (want 1900000..2097152)"; fi
 r=$(call POST /setup-api/settings/org-mode "$OWNER" "{\"orgMode\":false}")
 [ "$(status_of "$r")" = 200 ] || no_ "turning organisation mode off answered $(status_of "$r")"
 

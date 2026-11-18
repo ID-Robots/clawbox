@@ -378,3 +378,19 @@ describe("an upload and a move into one home at once", () => {
     expect(temps(IVAN)).toEqual([]);
   });
 });
+
+describe("a quota switched on after uploads made without one", () => {
+  it("counts them: the figure the owner's usage column read is not trusted after a landing", async () => {
+    setLimits({ uploadMaxMb: 0, homeQuotaMb: 0 });
+    // The owner's usage column reads Ivan's empty home.
+    expect((await homeNow()).figure).toBe(0);
+    expect((await putStream("Home", "first.bin", body(Math.round(1.5 * MB)))).status).toBe(200);
+    // The owner sets a 2 MB quota at once: 900 KB more no longer fits.
+    setLimits({ uploadMaxMb: 0, homeQuotaMb: 2 });
+    const res = await putStream("Home", "second.bin", body(900 * KB));
+    expect(res.status).toBe(507);
+    expect(await res.json()).toMatchObject({ code: "quota_exceeded", usedBytes: Math.round(1.5 * MB) });
+    expect(fs.existsSync(path.join(IVAN, "second.bin"))).toBe(false);
+    expect((await homeNow()).onDisk).toBe(Math.round(1.5 * MB));
+  });
+});

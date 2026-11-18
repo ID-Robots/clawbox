@@ -212,6 +212,31 @@ describe("the last check before a write lands (TASK-2663)", () => {
     w.finish(0);
   });
 
+  it("keeps a stale figure, unmarked, when the walk before the check stops short", async () => {
+    expect((await homeUsage(HOME))?.bytes).toBe(6000);
+    const w = (await openQuotaWrite(HOME, 10_000))!;
+    noteHomeChange(HOME);
+    const t0 = Date.now();
+    let calls = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => (calls++ === 0 ? t0 : t0 + 60_000));
+    try {
+      await w.settle();
+    } finally {
+      clock.mockRestore();
+    }
+    // The figure it had stands (it errs high) ...
+    expect(w.usedBytes).toBe(6000);
+    // ... and the next check does not walk the home again.
+    const walks = vi.spyOn(fs.promises, "opendir");
+    try {
+      await w.settle();
+      expect(walks).not.toHaveBeenCalled();
+    } finally {
+      walks.mockRestore();
+    }
+    w.finish(0);
+  });
+
   it("grants nothing in a home that could only be measured as a floor", async () => {
     // The walk's clock runs out before it reaches the first sub-folder.
     const t0 = Date.now();
@@ -228,6 +253,31 @@ describe("the last check before a write lands (TASK-2663)", () => {
     // A landing that adds nothing is no write past the quota.
     expect(w!.admits(0, 5000)).toBe(true);
     w!.finish(0);
+  });
+});
+
+describe("the figure while writes open and land (TASK-2663)", () => {
+  it("keeps what lands while another write is still reading the figure it opens on", async () => {
+    expect((await homeUsage(HOME))?.bytes).toBe(6000);
+    const a = (await openQuotaWrite(HOME, 10_000))!;
+    // A delete elsewhere: the figure is only marked while A is open.
+    noteHomeChange(HOME);
+    // B reads the figure it will open on; before it is registered, A lands 500.
+    const opening = openQuotaWrite(HOME, 10_000);
+    a.finish(500);
+    const b = (await opening)!;
+    expect(b.usedBytes).toBe(6500);
+    b.finish(0);
+  });
+
+  it("does not trust a walk that a delete asked for again while it ran", async () => {
+    // No figure yet: a walk starts, and a delete asks for one while it runs.
+    const walking = homeUsage(HOME);
+    noteHomeChange(HOME);
+    expect((await walking)?.bytes).toBe(6000);
+    // Removed with nothing reported: only a fresh walk sees it.
+    fs.unlinkSync(path.join(HOME, "a.txt"));
+    expect((await homeUsage(HOME))?.bytes).toBe(5000);
   });
 });
 

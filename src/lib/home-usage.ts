@@ -77,18 +77,20 @@ interface UsageState {
   openWrites: Map<string, Set<OpenWrite>>;
   /** Per home, how often it was asked to be walked again (a delete, a move). */
   changes: Map<string, number>;
+  /** Per home, writes reading the figure they open on, not registered yet. */
+  opening: Map<string, number>;
 }
 const STATE_KEY = Symbol.for("clawbox.homeUsage");
 function usageState(): UsageState {
   const g = globalThis as unknown as Record<symbol, UsageState | undefined>;
   let state = g[STATE_KEY];
   if (!state) {
-    state = { cache: new Map(), measuring: new Map(), openWrites: new Map(), changes: new Map() };
+    state = { cache: new Map(), measuring: new Map(), openWrites: new Map(), changes: new Map(), opening: new Map() };
     g[STATE_KEY] = state;
   }
   return state;
 }
-const { cache, measuring, openWrites, changes } = usageState();
+const { cache, measuring, openWrites, changes, opening } = usageState();
 
 /** Test seam: forget every measurement and open write (and any lock a test left held). */
 export function resetHomeUsageForTests(): void {
@@ -96,6 +98,7 @@ export function resetHomeUsageForTests(): void {
   measuring.clear();
   openWrites.clear();
   changes.clear();
+  opening.clear();
   homeLocks().clear();
 }
 
@@ -105,6 +108,15 @@ function key(home: string): string {
 
 function writesOpen(k: string): boolean {
   return (openWrites.get(k)?.size ?? 0) > 0;
+}
+
+/**
+ * Must a figure marked stale be kept rather than dropped? While a write is
+ * open — and while one is reading the figure it will open on: dropped in that
+ * gap, it would open on what it read, without what landed meanwhile.
+ */
+function figureHeld(k: string): boolean {
+  return writesOpen(k) || (opening.get(k) ?? 0) > 0;
 }
 
 /**
@@ -215,13 +227,16 @@ export async function homeUsage(home: string, { maxAgeMs = USAGE_CACHE_MS }: { m
   if (cached && (writesOpen(k) || (!cached.stale && Date.now() - cached.measuredAt < maxAgeMs))) return cached;
   const running = measuring.get(k);
   if (running) return running;
+  const asked = changes.get(k) ?? 0;
   const run = measureHomeUsage(k)
     .then((usage) => {
       // A write that opened on the cached figure while this walk ran may have
       // put bytes on disk the walk counted and its `finish` will add: while
       // any write is open, the figure it opened on stands.
       if (writesOpen(k) && cache.has(k)) return usage;
-      if (usage) cache.set(k, usage);
+      // A delete or a move that asked for a walk while this one ran may or
+      // may not be in it: kept, but marked, so it is walked again.
+      if (usage) cache.set(k, (changes.get(k) ?? 0) !== asked ? { ...usage, stale: true } : usage);
       else cache.delete(k);
       return usage;
     })
@@ -237,11 +252,13 @@ export async function homeUsage(home: string, { maxAgeMs = USAGE_CACHE_MS }: { m
  */
 export function noteHomeChange(home: string, deltaBytes?: number): void {
   const k = key(home);
+  const remeasure = deltaBytes === undefined || !Number.isFinite(deltaBytes);
+  // Counted even with no figure yet: a walk running now must not be trusted.
+  if (remeasure) changes.set(k, (changes.get(k) ?? 0) + 1);
   const cached = cache.get(k);
   if (!cached) return;
-  if (deltaBytes === undefined || !Number.isFinite(deltaBytes)) {
-    changes.set(k, (changes.get(k) ?? 0) + 1);
-    if (writesOpen(k)) cache.set(k, { ...cached, stale: true });
+  if (remeasure) {
+    if (figureHeld(k)) cache.set(k, { ...cached, stale: true });
     else cache.delete(k);
     return;
   }
@@ -347,9 +364,19 @@ export interface QuotaWrite {
  * either).
  */
 export async function openQuotaWrite(home: string, quotaBytes: number, replacingBytes = 0): Promise<QuotaWrite | null> {
-  const usage = await homeUsage(home);
-  if (!usage) return null;
   const k = key(home);
+  opening.set(k, (opening.get(k) ?? 0) + 1);
+  let read: HomeUsage | null;
+  try {
+    read = await homeUsage(home);
+  } finally {
+    const n = (opening.get(k) ?? 1) - 1;
+    if (n > 0) opening.set(k, n);
+    else opening.delete(k);
+  }
+  if (!read) return null;
+  // Registered with nothing awaited since the figure was read.
+  const usage = read;
   const mine: OpenWrite = { passed: 0, temp: null };
   let set = openWrites.get(k);
   if (!set) {
@@ -399,10 +426,17 @@ export async function openQuotaWrite(home: string, quotaBytes: number, replacing
       };
       const fresh = await measureHomeUsage(k, { skip: openTemp });
       const now = cache.get(k);
-      if (!fresh || fresh.truncated || !now) return;
+      if (!now) return;
       // A delete or a move that asked for a walk while this one ran may or
       // may not be in it: the figure stays marked, and the next check walks.
       const askedAgain = (changes.get(k) ?? 0) !== asked;
+      if (!fresh || fresh.truncated) {
+        // Not measurable whole now: the figure stands — it holds every write
+        // this process landed and no delete, so it errs high — and is not
+        // walked again at every check; it is walked once it is old.
+        if (!askedAgain) cache.set(k, { ...now, stale: false });
+        return;
+      }
       cache.set(k, { bytes: fresh.bytes, truncated: false, measuredAt: fresh.measuredAt, ...(askedAgain ? { stale: true } : {}) });
     },
     finish(addedBytes: number) {
@@ -415,7 +449,7 @@ export async function openQuotaWrite(home: string, quotaBytes: number, replacing
       if (cached && addedBytes) cache.set(k, { ...cached, bytes: Math.max(0, cached.bytes + addedBytes) });
       // The last open write is done: a walk asked for meanwhile can run now.
       const now = cache.get(k);
-      if (now?.stale && !writesOpen(k)) cache.delete(k);
+      if (now?.stale && !figureHeld(k)) cache.delete(k);
     },
   };
 }
