@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { getKnown } from "@/lib/config-store";
-import { HAS_CONTROL_CHAR, readHotspotSettings, writeHotspotSettings } from "@/lib/hotspot-env";
+import { HAS_CONTROL_CHAR, readHotspotEnv, readHotspotSettings, writeHotspotSettings } from "@/lib/hotspot-env";
 import { parseNmcliTerseLine, RESTART_AP_TIMEOUT_MS } from "@/lib/network";
 import { startRootStep } from "@/lib/root-step-runner";
 
@@ -34,8 +34,9 @@ export async function GET() {
   }
   const generation = saveGeneration;
   // `enabled` is the switch as the AP scripts read it (src/lib/hotspot-env.ts);
-  // `active` is the radio, whatever the switch says. Settings shows both, so a
-  // switch that reads off over a live AP says so instead of looking fine.
+  // `active` is whether the AP that switch controls is up, whatever the switch
+  // says. Settings shows both, so a switch that reads off over a live AP says
+  // so instead of looking fine.
   const { ssid, hasPassword, enabled } = await readHotspotSettings();
 
   const iface = process.env.NETWORK_INTERFACE || "wlP1p1s0";
@@ -47,13 +48,14 @@ export async function GET() {
       "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active",
     ], { timeout: 3_000 });
     rows = stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine);
-    active = rows.some(r => r[0] === "ClawBox-Setup" && r[2] === iface);
+    // The AP stop-ap.sh owns (wifi_ap_uuid: the ClawBox-Setup profile on this
+    // interface) and nothing else. Settings offers "Stop it now" when this is
+    // true over a switch that is off; an access point some other profile
+    // raised is not one that stop can take down, so it is not this hotspot.
+    active = rows.some(isSetupApRow(iface));
   } catch (err) {
     console.warn("[hotspot] nmcli unavailable:", err);
   }
-  // The kernel's view as well: an interface in AP mode is broadcasting,
-  // whatever NetworkManager calls the profile that put it there.
-  if (!active) active = await radioIsAccessPoint(iface);
   if (enabled && !active) {
     const wifiRow = rows.find(r => r[1] === "802-11-wireless" && r[2] === iface && r[0] !== "ClawBox-Setup");
     if (wifiRow) blockedBy = wifiRow[0];
@@ -128,9 +130,12 @@ export async function POST(request: Request) {
       );
     }
     const storedPassword = stored.value;
+    // Config may never have held the key: a box whose key only data/hotspot.env
+    // carries (what the AP scripts use, and what GET counts in hasPassword).
+    // Keep that one too, or this save would write the env file without it.
     const existingPassword = typeof storedPassword === "string" && storedPassword.length >= 8
       ? storedPassword
-      : undefined;
+      : (await readHotspotEnv())?.password ?? undefined;
     const effectivePassword = password ? password : existingPassword;
 
     // A request without `enabled` (an older client) keeps the switch where the
@@ -158,13 +163,13 @@ export async function POST(request: Request) {
     // is named, and a failure carries its reason.
     let apAction: HotspotApAction = isEnabled ? "deferred" : "stopped";
     let apWarning: string | null = null;
+    const iface = process.env.NETWORK_INTERFACE || "wlP1p1s0";
     try {
       if (isEnabled) {
         // Single-radio guard: if the box is currently a WiFi *client* (it joined
         // a network back at Step 1), starting the AP would tear the radio off
         // that network and sever this very connection. Defer — the saved
         // settings apply on the next AP start (e.g. the end-of-setup reboot).
-        const iface = process.env.NETWORK_INTERFACE || "wlP1p1s0";
         if (await isWifiClient(iface)) {
           console.warn(
             "[hotspot] Box is a WiFi client; deferring AP restart to avoid severing the connection"
@@ -176,6 +181,11 @@ export async function POST(request: Request) {
       } else {
         // Stop the AP — run stop-ap.sh directly since clawbox user can execute it
         await execFileAsync("bash", ["/usr/local/libexec/clawbox/stop-ap.sh"], { timeout: 240_000 });
+        // stop-ap.sh says "Access point stopped." also when it found no AP of
+        // its own to stop. "stopped" is claimed only for what GET reads back.
+        if (await setupApActive(iface)) {
+          throw new Error("the ClawBox-Setup access point is still active after stop-ap.sh");
+        }
       }
     } catch (apErr) {
       console.warn("[hotspot] Failed to toggle AP:", apErr);
@@ -214,11 +224,20 @@ export async function POST(request: Request) {
   }
 }
 
-/** Is the interface in AP mode right now (`iw dev <iface> info` says `type AP`)? */
-async function radioIsAccessPoint(iface: string): Promise<boolean> {
+/** An active-connection row (NAME, TYPE, DEVICE) that is the setup AP on `iface`. */
+function isSetupApRow(iface: string): (row: string[]) => boolean {
+  return (r) => r[0] === "ClawBox-Setup" && r[2] === iface;
+}
+
+/** Is the setup AP up on `iface`, as GET reads it? False when nmcli cannot say. */
+async function setupApActive(iface: string): Promise<boolean> {
   try {
-    const { stdout } = await execFileAsync("iw", ["dev", iface, "info"], { timeout: 3_000 });
-    return /^\s*type AP\s*$/m.test(stdout);
+    const { stdout } = await execFileAsync(
+      "nmcli",
+      ["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"],
+      { timeout: 3_000 }
+    );
+    return stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine).some(isSetupApRow(iface));
   } catch {
     return false;
   }
