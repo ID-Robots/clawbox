@@ -66,7 +66,7 @@ BEFORE=$(chat_selection)
 note "chat model before: ${BEFORE:-none}"
 
 # SC2016: the board script expands on the board; SC2317: run by the EXIT trap.
-# shellcheck disable=SC2016,SC2317
+# shellcheck disable=SC2016,SC2317,SC2329
 cleanup() {
   # The engine goes first, and only once it is confirmed gone does the mock
   # behind it stop: Remove is also what puts the chat back where it was.
