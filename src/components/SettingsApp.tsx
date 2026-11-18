@@ -1299,7 +1299,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // Only the newest read is applied. The switch unlocks before the re-read
   // after a toggle lands, so an owner can switch off and on again while the
   // first read is still probing the radio; answering last, it would set the
-  // switch back to off. Every read and every toggle takes a new generation.
+  // switch back to off. Every read, toggle and save takes a new generation.
   const hotspotStatusGen = useRef(0);
   const loadHotspotStatus = useCallback((withSsidInput: boolean) => {
     const gen = ++hotspotStatusGen.current;
@@ -1457,6 +1457,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       return;
     }
     if (next === hotspotSSID) return;
+    // A read from before this rename would put the old name back.
+    hotspotStatusGen.current++;
     setHotspotSSIDSaving(true);
     setHotspotSSIDStatus(null);
     try {
@@ -1494,6 +1496,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       setHotspotPasswordStatus({ type: "error", message: t("settings.hotspotPasswordTooLong") });
       return;
     }
+    hotspotStatusGen.current++;
     setHotspotPasswordSaving(true);
     setHotspotPasswordStatus(null);
     try {

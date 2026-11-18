@@ -51,22 +51,38 @@ let hotspotGets: number;
 let stopLeavesApUp: boolean;
 /** Set: each GET waits here (its answer fixed when it was asked) until released. */
 let heldGets: Array<() => void> | null;
+/** Set: each POST waits here, before it changes anything, until released. */
+let heldPosts: Array<() => void> | null;
 
 beforeEach(() => {
   hotspotPosts = [];
   hotspotGets = 0;
   stopLeavesApUp = false;
   heldGets = null;
+  heldPosts = null;
   vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     if (url === "/setup-api/system/hotspot") {
       if (init?.method === "POST") {
         const body = JSON.parse(String(init.body)) as Record<string, unknown>;
         hotspotPosts.push(body);
-        // The route stopped the AP: the radio's next answer says so.
-        if (body.enabled === false) hotspot = { enabled: false, active: stopLeavesApUp };
-        else hotspot = { ...hotspot, enabled: true };
-        return json({ success: true, apRestarted: false, apAction: body.enabled === false ? "stopped" : "deferred" });
+        const answer = () => {
+          // The route stopped the AP: the radio's next answer says so. One it
+          // could not take down, the route reads back and answers `failed`.
+          if (body.enabled === false) hotspot = { enabled: false, active: stopLeavesApUp };
+          else hotspot = { ...hotspot, enabled: true };
+          if (body.enabled === false && stopLeavesApUp) {
+            return { success: true, apRestarted: false, apAction: "failed", warning: "could not switch its hotspot off" };
+          }
+          return { success: true, apRestarted: false, apAction: body.enabled === false ? "stopped" : "deferred" };
+        };
+        if (heldPosts) {
+          const held = heldPosts;
+          return new Promise<Response>((resolve) => {
+            held.push(() => resolve({ ok: true, json: () => Promise.resolve(answer()) } as Response));
+          });
+        }
+        return json(answer());
       }
       hotspotGets++;
       const answer = { ssid: "ClawBox-Setup", hasPassword: true, blockedBy: null, ...hotspot };
@@ -194,5 +210,39 @@ describe("Settings → Network: the hotspot card tells the radio's truth", () =>
     held[0]();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(sw).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("a read still in flight when a toggle starts does not answer for it", async () => {
+    // On, and truthfully not broadcasting.
+    hotspot = { enabled: true, active: false };
+    stopLeavesApUp = true;
+    const { container } = render(<SettingsApp ui={ui} />);
+    openNetwork(container);
+
+    const sw = await hotspotSwitch();
+    await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
+    const gets: Array<() => void> = [];
+    heldGets = gets;
+
+    // Off: the read after it ("off, AP still up") is still in flight...
+    fireEvent.click(sw);
+    await waitFor(() => expect(gets).toHaveLength(1));
+    await waitFor(() => expect(sw).not.toBeDisabled());
+    // ...when the owner switches it on again, and that save is still going.
+    const posts: Array<() => void> = [];
+    heldPosts = posts;
+    fireEvent.click(sw);
+    await waitFor(() => expect(posts).toHaveLength(1));
+
+    gets[0]();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The read from before this toggle is not applied: no "off but
+    // broadcasting" over a switch the owner is turning on.
+    expect(screen.queryByTestId("hotspot-off-but-broadcasting")).not.toBeInTheDocument();
+
+    posts[0]();
+    await waitFor(() => expect(gets).toHaveLength(2));
+    gets[1]();
+    await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
   });
 });
