@@ -677,6 +677,25 @@ describe("a running record this process is not supervising", () => {
     expect((await readMemoryRunState()).errorCode).toBe("stalled");
   });
 
+  it("lets only one of two starts asked at the same moment run (TASK-2431: the claim and its record go together)", async () => {
+    // Both see no run going; the first takes the lock and, before it has
+    // written its record, the second judged the lock against the previous
+    // run's settled record and took it for stale.
+    await fsp.writeFile(statePath(), JSON.stringify({
+      status: "succeeded", mode: "full", trigger: "manual", startedAtMs: Date.now() - HOUR, finishedAtMs: Date.now() - MIN,
+      durationMs: HOUR, error: "", errorCode: "", progress: null, childPid: 0,
+    }));
+    pass.impl = (_mode, signal) => untilAborted(signal);
+    const { startMemoryIndex, stopMemoryIndex } = await lib();
+    const [a, b] = await Promise.all([startMemoryIndex("full", "manual"), startMemoryIndex("full", "manual")]);
+    expect([a.accepted, b.accepted].sort()).toEqual([false, true]);
+    expect([a.declined, b.declined]).toContain("running");
+    await until(async () => pass.calls, (n) => n >= 1, "the pass started");
+    expect(pass.calls).toBe(1);
+    expect((await stopMemoryIndex()).stopped).toBe(true);
+    await settled();
+  });
+
   it("still reads a `timed_out` record an older build wrote", async () => {
     await fsp.writeFile(statePath(), JSON.stringify({
       status: "failed", mode: "full", trigger: "manual", startedAtMs: 1, finishedAtMs: 2 * HOUR, durationMs: 2 * HOUR,

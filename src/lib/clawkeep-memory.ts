@@ -60,6 +60,7 @@ import { FALLBACK_AGENT_ID, openclawDefaultAgentId } from "@/lib/openclaw-defaul
 import {
   countIndexChunks,
   indexWriteMark,
+  scratchIndexNames,
   createIndexProgressReader,
   openclawAgentDbPath,
   ptyHostArgs,
@@ -815,7 +816,7 @@ async function markInterrupted(
  * One section, in this process, for judging and settling a run record and for
  * taking the run lock. `markInterrupted` re-reads, checks, writes and frees
  * the lock across awaits: two readers settling the same stale record, or one
- * settling it while `acquireRunLock` judges the lock, could otherwise free
+ * settling it while a start judges the lock (`acquireRunLockInSection`), could otherwise free
  * the lock of a pass that started in between. Process-wide like the pass
  * itself (see process-store.ts).
  */
@@ -2400,10 +2401,7 @@ async function planIndexPass(
   }
 }
 
-async function acquireRunLock(): Promise<boolean> {
-  return runRecordSection(acquireRunLockInSection);
-}
-
+/** Takes the run lock. Called inside `runRecordSection` only (see startMemoryIndex). */
 async function acquireRunLockInSection(): Promise<boolean> {
   await ensureDataDir();
   try {
@@ -2593,7 +2591,7 @@ type PassOutcome =
  */
 interface IndexPass {
   /**
-   * Recorded as `childPid` (with its `childStartKey`), which `acquireRunLock`
+   * Recorded as `childPid` (with its `childStartKey`), which the lock claim
    * checks with `runIsAlive`. The OpenClaw arm records the indexer's own pid —
    * the CURRENT one, after a retry (see startOpenclawPass). The local arm
    * records THIS process, which is the same fact for a pass that runs inside
@@ -2833,18 +2831,25 @@ function startOpenclawAttempt(
   // the one its pinned state directory names.
   const dbPath = openclawAgentDbPath(agentId, openclawEnv());
   const since = Date.now();
+  // The scratch copies already there: the one this attempt makes is the new
+  // name, whatever the wall clock did since (see openclaw-index-progress.ts).
+  const preexisting = scratchIndexNames(dbPath);
+  const readAs = { rebuild: mode === "full", preexisting };
   let chunks = 0;
-  let lastWrite: string | null = null;
+  /** The write mark at the last reading; `undefined` before the first. */
+  let lastWrite: string | null | undefined;
   let poll: NodeJS.Timeout | null = setInterval(() => {
     const counts = host ? reader.latest() : null;
-    const counted = countIndexChunks(dbPath, since, { rebuild: mode === "full" });
+    const counted = countIndexChunks(dbPath, since, readAs);
     if (counted !== null) chunks = counted;
     onProgress({ filesDone: counts?.filesDone ?? 0, filesTotal: counts?.filesTotal ?? 0, chunks }, host !== null);
     // A commit that moved no count — chunks replaced one for one — is
-    // progress all the same; an index nobody writes keeps its mark.
-    const written = indexWriteMark(dbPath, since, { rebuild: mode === "full" });
-    if (written !== null && lastWrite !== null && written !== lastWrite) onActivity();
-    if (written !== null) lastWrite = written;
+    // progress all the same, and so is a scratch index appearing where the
+    // last reading found none; an index nobody writes keeps its mark. The
+    // first reading is only the baseline.
+    const written = indexWriteMark(dbPath, since, readAs);
+    if (written !== null && lastWrite !== undefined && written !== lastWrite) onActivity();
+    lastWrite = written;
     // Off a terminal, inside the stall window however short it is set: a
     // window shorter than the clock would end a pass that is writing chunks
     // before its first reading.
@@ -3037,15 +3042,7 @@ export async function startMemoryIndex(
   if (mode === "incremental" && !openclawIsAbsent() && (trigger === "schedule" || await openclawGatewayRuns())) {
     return { accepted: false, declined: "gateway_indexes", run: await readMemoryRunState() };
   }
-  if (!await acquireRunLock()) {
-    return { accepted: false, declined: "running", run: await readMemoryRunState() };
-  }
   const coreIndexRebuild = options.embedderChanged === true && !openclawIsAbsent();
-  if (!coreIndexRebuild && !(await getMemoryShardEnabled())) {
-    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
-    return { accepted: false, declined: "disabled", run: await readMemoryRunState() };
-  }
-
   let startedAtMs = Date.now();
   let state: PersistedMemoryRunState = {
     status: "running",
@@ -3064,12 +3061,28 @@ export async function startMemoryIndex(
     supervisorPid: process.pid,
     supervisorStartKey: processStartKey(process.pid),
   };
-  try {
-    await writeRunState(state);
-  } catch (err) {
-    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
-    throw err;
-  }
+  // The lock and the record that claims it, in one section (TASK-2431): a
+  // second start that judged the lock between the two would find the previous
+  // run's settled record, take the fresh lock for a stale one, and start a
+  // second pass beside this one.
+  const claim = await runRecordSection(async (): Promise<"claimed" | "running" | "disabled"> => {
+    if (!await acquireRunLockInSection()) return "running";
+    if (!coreIndexRebuild && !(await getMemoryShardEnabled())) {
+      await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
+      return "disabled";
+    }
+    // The record carries the time the claim was really made.
+    startedAtMs = Date.now();
+    state = { ...state, startedAtMs };
+    try {
+      await writeRunState(state);
+    } catch (err) {
+      await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
+      throw err;
+    }
+    return "claimed";
+  });
+  if (claim !== "claimed") return { accepted: false, declined: claim, run: await readMemoryRunState() };
 
   // The one line that differs by edition. Everything above and below it — the
   // decline, the lock, the state file, the reconcile, the watchdog, the cache —
@@ -3319,6 +3332,11 @@ export async function startMemoryIndex(
     // cannot write a final state over this cleanup.
     settled = true;
     pass.abandon();
+    // On the OpenClaw arm the gateway is started again behind the attempt's
+    // end (SIGKILLed TERMINATE_GRACE_MS after the SIGTERM at the latest), and
+    // the lock is held until that start is over: a next pass taking it
+    // earlier would have its offline hold cleared by this start.
+    if (!localArm) await pass.ended.catch(() => undefined);
     for (const pid of passPids) settlingPasses().delete(pid);
     await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
     throw err;

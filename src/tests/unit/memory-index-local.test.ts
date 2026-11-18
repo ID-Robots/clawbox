@@ -1566,6 +1566,41 @@ describe("a pass given up on inside its last file", () => {
   });
 });
 
+describe("a long pass and the searches beside it (TASK-2431)", () => {
+  it("publishes what it has committed at most every minute, not only at its end", async () => {
+    write("first.md", "First note: the deposit is two months' rent.");
+    write("second.md", "Second note: the boiler is serviced in March.");
+    // A minute and more between any two readings of the pass's clock.
+    let clock = 0;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => (clock += 61_000));
+    try {
+      await runLocalIndexPass("full");
+    } finally {
+      now.mockRestore();
+    }
+    // Once after each committed file, and once at the end.
+    expect(storeMeta("generation")).toBe("3");
+  });
+
+  it("publishes nothing early when the pass is quick", async () => {
+    write("first.md", "First note: the deposit is two months' rent.");
+    write("second.md", "Second note: the boiler is serviced in March.");
+    await runLocalIndexPass("full");
+    expect(storeMeta("generation")).toBe("1");
+  });
+
+  it("tells the stall watchdog it is walking a large folder before it has a file count", async () => {
+    for (let i = 0; i < 130; i += 1) write(`walk/note-${i}.md`, `Note ${i}.`);
+    let reported = false;
+    let walkBeats = 0;
+    await runLocalIndexPass("incremental", undefined, () => { reported = true; }, {
+      mayDiscard: true,
+      onHeartbeat: () => { if (!reported) walkBeats += 1; },
+    });
+    expect(walkBeats).toBeGreaterThanOrEqual(2);
+  });
+});
+
 describe("what a pass reports about its own progress", () => {
   function reports() {
     const seen: { filesDone: number; filesTotal: number; chunks: number }[] = [];

@@ -32,7 +32,9 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
 // The gateway a pass runs without (OpenClaw 2026.11.3 indexes offline): no
 // unit is up here, its stop and start are recorded, and a test may make the
 // start after the pass slow.
-const { gateway } = vi.hoisted(() => ({ gateway: { stops: 0, starts: 0, startDelayMs: 0 } }));
+const { gateway } = vi.hoisted(() => ({
+  gateway: { stops: 0, starts: 0, startDelayMs: 0, gate: null as Promise<void> | null },
+}));
 vi.mock("@/lib/openclaw-auth-ops", () => ({
   askOpenclawGateway: async () => ({ answered: false }),
   openclawGatewayRuns: async () => false,
@@ -40,6 +42,7 @@ vi.mock("@/lib/openclaw-auth-ops", () => ({
   startOpenclawGatewayAfterOffline: async () => {
     gateway.starts += 1;
     if (gateway.startDelayMs) await new Promise((resolve) => setTimeout(resolve, gateway.startDelayMs));
+    if (gateway.gate) await gateway.gate;
   },
 }));
 
@@ -60,6 +63,7 @@ beforeEach(async () => {
   gateway.stops = 0;
   gateway.starts = 0;
   gateway.startDelayMs = 0;
+  gateway.gate = null;
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "memory-stall-openclaw-"));
   process.env.CLAWKEEP_DATA_DIR = tmpDir;
   process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
@@ -273,14 +277,24 @@ describe("an OpenClaw pass the owner stops", () => {
   it("is not stopped once its work has ended and the gateway is being started again", async () => {
     // Nothing is left to stop; taking the stop would record a finished pass
     // as a stopped one.
-    gateway.startDelayMs = 3_000;
+    // The start is held open until the stop has been asked, so the stop
+    // certainly lands while the gateway is being started.
+    let release = () => {};
+    gateway.gate = new Promise<void>((resolve) => { release = resolve; });
     noTerminal();
     await fakeIndexer({ steps: 1, stepMs: 100 });
-    const { startMemoryIndex, stopMemoryIndex } = await import("@/lib/clawkeep-memory");
+    const { startMemoryIndex, stopMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
     expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
-    for (let i = 0; i < 500 && gateway.starts === 0; i += 1) await new Promise((r) => setTimeout(r, 20));
-    expect(gateway.starts).toBe(1);
-    expect((await stopMemoryIndex()).stopped).toBe(false);
+    try {
+      for (let i = 0; i < 500 && gateway.starts === 0; i += 1) await new Promise((r) => setTimeout(r, 20));
+      expect(gateway.starts).toBe(1);
+      expect((await readMemoryRunState()).status).toBe("running");
+      expect((await stopMemoryIndex()).stopped).toBe(false);
+      // …and the lock is still the run's while the gateway starts.
+      expect(existsSync(path.join(tmpDir, "memory-index.lock"))).toBe(true);
+    } finally {
+      release();
+    }
     expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
   });
 

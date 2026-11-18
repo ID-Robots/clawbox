@@ -362,7 +362,9 @@ export async function extractDocuments(
     // when a newer pass may have written `out` from a newer revision of the
     // document — and a late write over it, newer than its source, would be
     // taken as current by every scan after.
-    const part = path.join(derived, `.${outName}.${process.pid}-${crypto.randomUUID()}.part`);
+    // A short name of its own: the derived name can already be near the
+    // filesystem's 255-byte limit, and a longer one would fail the copy.
+    const part = path.join(derived, `.${crypto.randomUUID()}.part`);
     let converted = false;
     try {
       converted = await extractOne(file, part);

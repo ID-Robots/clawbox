@@ -1063,11 +1063,22 @@ async function derivedFolderAbsent(dir: string): Promise<boolean> {
  * from a folder the owner emptied. Only the caller knows that difference is the
  * difference between "delete this source's index" and "leave it exactly alone".
  */
-async function indexableFilesUnder(root: string): Promise<{ files: string[]; complete: boolean }> {
+async function indexableFilesUnder(
+  root: string,
+  onEntries?: () => void,
+): Promise<{ files: string[]; complete: boolean }> {
   const files: string[] = [];
   const budget = newWalkBudget();
+  let since = 0;
   for await (const file of walkFiles(path.resolve(root), budget)) {
     if (isIndexable(file)) files.push(file);
+    // A walk of a large tree reads for a while before the pass has a single
+    // file count to report: entries read are progress for the stall watchdog
+    // (TASK-2431). Only entries that arrived, never a read that is blocked.
+    if ((since += 1) >= WALK_HEARTBEAT_EVERY) {
+      since = 0;
+      onEntries?.();
+    }
   }
   return { files, complete: !budget.rootUnreadable && budget.unreadable === 0 && !budget.truncated };
 }
@@ -1103,6 +1114,12 @@ function displayName(source: string, file: string, origins: Record<string, strin
   if (!relative || escapes || path.isAbsolute(relative)) return null;
   return path.join(label, relative);
 }
+
+/** How often a long pass lets searches see the files it has committed so far. */
+const PUBLISH_EVERY_MS = 60_000;
+
+/** How many walked files make one heartbeat for the stall watchdog. */
+const WALK_HEARTBEAT_EVERY = 64;
 
 /** A file this pass will read, held open so nothing can swap it underneath. */
 interface OpenedFile {
@@ -1193,6 +1210,20 @@ export async function runLocalIndexPass(
   const db = await openIndexForWrite();
   /** This pass committed rows: a cached copy of the vectors is out of date. */
   let wrote = false;
+  /**
+   * A pass has no time limit (TASK-2431), so it cannot keep what it commits
+   * from searches until it ends: a search that cached the vectors before a
+   * file was replaced would look its old chunk ids up for hours. What it has
+   * committed is published — `generation` moved, the cache dropped — at most
+   * every PUBLISH_EVERY_MS, and once more at the end (or in the catch below).
+   */
+  let publishedAt = performance.now();
+  const publishCommitted = () => {
+    if (performance.now() - publishedAt < PUBLISH_EVERY_MS) return;
+    metaSet(db, "generation", String(Number(metaGet(db, "generation") ?? 0) + 1));
+    invalidateVectorCache();
+    publishedAt = performance.now();
+  };
   try {
     // THE SCAN COMES FIRST, before anything is emptied. A `full` pass wipes the
     // tables, and reading the owner's folder list can fail — the config store
@@ -1249,10 +1280,19 @@ export async function runLocalIndexPass(
       // parser reads as `healthy` with zero chunks: a green panel and a search
       // that finds nothing. It is stamped at the END, once there is something
       // for it to be true of.
-      db.exec("DELETE FROM chunks; DELETE FROM files;");
-      db.prepare("DELETE FROM meta WHERE key = 'identity'").run();
-      // Emptied is changed: a stop before the first file commits must still
-      // move `generation`, or a cached copy keeps vectors that are gone.
+      // One transaction, so the rows and the identity they had go together or
+      // not at all; and once it has committed, emptied is changed: a stop
+      // before the first file commits must still move `generation`, or a
+      // cached copy keeps vectors that are gone.
+      db.exec("BEGIN");
+      try {
+        db.exec("DELETE FROM chunks; DELETE FROM files;");
+        db.prepare("DELETE FROM meta WHERE key = 'identity'").run();
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
       wrote = true;
     }
     metaSet(db, "schema_version", SCHEMA_VERSION);
@@ -1432,6 +1472,7 @@ export async function runLocalIndexPass(
       }
       chunkCount = chunkCount - replaced + pieces.length;
       wrote = true;
+      publishCommitted();
     }
     // A pass given up on while it was inside its last file stops here, before
     // the bookkeeping below: the run it belonged to may already be settled and
@@ -1649,7 +1690,7 @@ async function scanSources(
     const roots = [source];
     if (derived && !(await derivedFolderAbsent(derived))) roots.push(derived);
     for (const root of roots) {
-      const found = await indexableFilesUnder(root);
+      const found = await indexableFilesUnder(root, onDocument);
       if (!found.complete) unreadableSources.add(source);
       for (const file of found.files) {
         // One file can sit under two overlapping sources; the first to claim
@@ -1687,9 +1728,21 @@ function assertDimension(db: IndexDb, sample: Float32Array | undefined): boolean
   const stored = metaGet(db, "dim");
   let wiped = false;
   if (stored && Number(stored) !== sample.length) {
-    db.exec("DELETE FROM chunks; DELETE FROM files;");
+    // The rows and the width they are stored at change together, or not at
+    // all: a wipe whose width write failed would leave rows gone and a caller
+    // that never heard of it.
+    db.exec("BEGIN");
+    try {
+      db.exec("DELETE FROM chunks; DELETE FROM files;");
+      metaSet(db, "dim", String(sample.length));
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
     wiped = true;
     console.warn(`[memory-index] the embedder changed width (${stored} -> ${sample.length}); the index was rebuilt`);
+    return wiped;
   }
   metaSet(db, "dim", String(sample.length));
   return wiped;
