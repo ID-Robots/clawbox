@@ -98,8 +98,21 @@ nano-lease reserve <serial> "TASK-NNN: stress run"
 nano-board rebuild <serial> <branch> <40-hex sha>
 nano-board sha <serial>
 NANO_CI=nano-board scripts/nano-stress/run.sh --results out/ <serial>
-nano-lease release <serial>        # always, also when the run fails
+nano-ci recycle <serial>           # to the reflash queue; no longer yours
 ```
+
+Recycle the board after every run, whatever its result, as for any board
+handled by hand ([nano-hardware-tests.md](nano-hardware-tests.md#running-it-by-hand)):
+`nano-ci recycle <serial>` gives back the lease taken with `nano-lease reserve`
+and queues the board for a clean reflash. Only when `nano-ci recycle` itself
+fails, release it with `nano-lease release <serial>`.
+
+Each run writes its results into the `--results` folder (without it, a fresh
+`./nano-stress-<stamp>`). A folder that already holds a runtime's files is
+refused for that runtime before anything starts on the board (`run.sh` exits
+2 and names them): an earlier run, the one a new run is compared against, is
+never overwritten. Give each run its own folder, or one folder per pair of
+OpenClaw and Hermes runs.
 
 `run.sh` packs `board-stress.mjs` and every local module it imports, followed
 through their own imports (`scripts/nano-stress/board-modules.mjs`, so a module
@@ -144,8 +157,10 @@ unknown name stops the run before it starts.
 
 `--budget-min N` (default 150) caps the whole run; `--strict` exits 3 when the
 summary lists any finding. `run.sh` exits 0 when the run finished and was
-summarised, and 1 when it did not finish (out of budget, died, never started)
-or its record could not be read; a partial record is still summarised.
+summarised, 1 when it did not finish (out of budget, died, never started)
+or its record could not be read (a partial record is still summarised), and
+2 for a bad option or a results folder that already holds this runtime's
+files.
 
 Never edit `run.sh` while a run of it is going: bash reads a script as it runs
 it.
@@ -165,8 +180,9 @@ In the results folder, per runtime:
 - `stress-<runtime>.md`: the short summary, one table row per step.
 - `board-<runtime>.log`: the board script's own progress lines.
 
-Several raw files can be summarised side by side:
-`node scripts/nano-stress/report.mjs --md both.md raw-openclaw.json raw-hermes.json`.
+Several raw files can be summarised side by side, here the two from the
+`out/` folder above:
+`node scripts/nano-stress/report.mjs --md out/both.md out/raw-openclaw.json out/raw-hermes.json`.
 
 A finding is a failed turn, an OOM kill, a unit restart or new main process, a
 runtime not healthy after a step, MemAvailable under 400 MB, a missed recall,

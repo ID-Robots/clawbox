@@ -591,8 +591,17 @@ async function deleteSessions(busy) {
     }
     for (const s of idle) {
       if (!gw) { result.left.push(s.key); continue; }
-      // A turn still running (a stop mid-turn) ends first, then the session goes.
-      await gw.req("chat.abort", { sessionKey: s.key }, 10_000).catch(() => {});
+      // A turn still running (a stop mid-turn) ends first, then the session
+      // goes. The gateway answers an idle session's abort with ok (aborted:
+      // false); an abort it refused (busy, unauthorized) or never answered may
+      // leave a turn running, whose transcript must not be deleted under it.
+      try {
+        await gw.req("chat.abort", { sessionKey: s.key }, 10_000);
+      } catch (e) {
+        log(`cleanup: chat.abort ${s.key}: ${e.message}: left alone`);
+        result.left.push(s.key);
+        continue;
+      }
       try {
         await gw.req("sessions.delete", { key: s.key, deleteTranscript: true }, 15_000);
         result.deleted++;
@@ -604,7 +613,17 @@ async function deleteSessions(busy) {
     gw?.close();
   } else {
     for (const s of idle) {
-      await hermes.stop(s.key);
+      // The session's last turn must be over before its transcript and Hermes
+      // sessions go: the route can send `done` before it ends a turn. The
+      // owner's Stop, then the route's own word that nothing runs under the
+      // key (hermes-chat.mjs settled(), within its bound). A Stop that failed,
+      // or a turn not confirmed ended, keeps the session.
+      const stopped = await hermes.stop(s.key);
+      if (stopped === null || !(await hermes.settled(s.key))) {
+        log(`cleanup: ${s.key}: ${stopped === null ? "its Stop failed" : "its last turn was not confirmed ended"}: left alone`);
+        result.left.push(s.key);
+        continue;
+      }
       let ok = true;
       // The route's own transcript (data/chat-transcripts/<key>.jsonl) and the
       // Hermes sessions its turns opened.

@@ -57,6 +57,8 @@ class Dashboard {
   attaches = 0;
   // The Stop request itself fails (HTTP 500).
   failStop = false;
+  // How long an answered turn takes (0: at once).
+  answerDelayMs = 0;
   // How many running turns a Stop reports it stopped (0: the POST had not
   // registered its turn yet).
   stoppedCount = 1;
@@ -77,6 +79,7 @@ class Dashboard {
     this.attaches = 0;
     this.attachAuth = [];
     this.failStop = false;
+    this.answerDelayMs = 0;
     this.stoppedCount = 1;
     this.errorStatus = 502;
     for (const res of this.hanging) res.end();
@@ -134,7 +137,9 @@ class Dashboard {
       res.writeHead(200, { "Content-Type": "text/event-stream" });
       res.write(`event: delta\ndata: ${JSON.stringify({ text: "…" })}\n\n`);
       if (this.mode === "answer") {
-        res.end(`event: done\ndata: ${JSON.stringify({ text: tagOf(turn.message), sessionId: HERMES_SESSION, model: "stub-model" })}\n\n`);
+        const done = `event: done\ndata: ${JSON.stringify({ text: tagOf(turn.message), sessionId: HERMES_SESSION, model: "stub-model" })}\n\n`;
+        if (this.answerDelayMs) setTimeout(() => res.end(done), this.answerDelayMs);
+        else res.end(done);
       } else if (this.mode === "error") {
         res.end(`event: error\ndata: ${JSON.stringify({ error: "provider said no" })}\n\n`);
       } else if (this.mode === "eof") {
@@ -207,6 +212,13 @@ class Gateway {
           event({ sessionKey, runId, state: "final", message: { content: [{ type: "text", text: tagOf(f.params.message) }], model: "stub-model" } });
           return;
         }
+        // As the gateway answers an abort it will not carry out (server busy).
+        if (f.method === "chat.abort" && this.refuseAbort) {
+          ws.send(JSON.stringify({ type: "res", id: f.id, ok: false, error: { message: "The server is busy. Check this turn's status before trying Stop again." } }));
+          return;
+        }
+        // An idle session's abort: ok, nothing aborted.
+        if (f.method === "chat.abort") return ok({ ok: true, aborted: false, runIds: [] });
         ok({});
       });
     });
@@ -215,9 +227,11 @@ class Gateway {
     await new Promise<void>((resolve) => this.server.listen(0, "127.0.0.1", resolve));
     this.port = (this.server.address() as AddressInfo).port;
   }
+  refuseAbort = false;
   reset(mode: "answer" | "stale" | "silent" | "drop" = "answer") {
     this.mode = mode;
     this.calls = [];
+    this.refuseAbort = false;
     this.onSend = null;
     this.dropped = false;
     this.held = false;
@@ -247,7 +261,10 @@ describe("the Hermes turn", () => {
   // The box's bearer, as board-stress.mjs hands it over for settle checks.
   const bearer = (extra = {}) => ({ Authorization: "Bearer stub-mcp-token", ...extra });
   const live = () => createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleHeaders: bearer });
-  const sess = () => ({ key: `stress-test-${crypto.randomBytes(3).toString("hex")}`, sessionId: null as string | null, hermesIds: new Set<string>() });
+  // The session object the driver works on; `blocked`, `untracked` and
+  // `turnsSent` appear only once the driver sets them (the tests check that).
+  type Sess = { key: string; sessionId: string | null; hermesIds: Set<string>; blocked?: boolean; untracked?: number; turnsSent?: number };
+  const sess = (): Sess => ({ key: `stress-test-${crypto.randomBytes(3).toString("hex")}`, sessionId: null, hermesIds: new Set<string>() });
   const ask = "Reply with exactly this text and nothing else: STRESS-0A1B2C";
 
   it("is not Stopped when the route ended it", async () => {
@@ -558,8 +575,9 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     expect(raw.steps.map((s: { id: string }) => s.id)).toEqual(["ramp-1"]);
     expect(raw.turns.map((t: { ok: boolean }) => t.ok)).toEqual([true, true]);
     expect(dash.posts).toHaveLength(2);
-    // The second turn waited for the first to end, asked with the box's bearer.
-    expect(dash.attachAuth).toEqual(["Bearer stub-mcp-token"]);
+    // The second turn waited for the first to end, and the cleanup for the
+    // last one, each asked with the box's bearer.
+    expect(dash.attachAuth).toEqual(["Bearer stub-mcp-token", "Bearer stub-mcp-token"]);
     expect(fs.readFileSync(path.join(results, "stress-hermes.md"), "utf8")).toContain("| ramp-1 | 1 | 2/2 |");
     expect(fs.readFileSync(path.join(root, "hermes-calls"), "utf8")).toBe(`sessions delete --yes ${HERMES_SESSION}\n`.repeat(2));
     const log = fs.readFileSync(path.join(results, "board-hermes.log"), "utf8");
@@ -758,5 +776,68 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     expect(fs.readFileSync(path.join(results, "board-hermes.log"), "utf8")).toContain("a Hermes run cannot confirm its turns ended without it");
     expect(readRaw(results, "hermes")).toMatchObject({ final: false, steps: [], turns: [] });
     expect(fs.existsSync(boardDir)).toBe(false);
+  });
+
+  it("refuses a results folder that already holds this runtime's files, before anything starts on the board", async () => {
+    dash.runtime = "hermes";
+    dash.reset("answer");
+    const { results, env } = fixture();
+    fs.mkdirSync(results, { recursive: true });
+    fs.writeFileSync(path.join(results, "raw-hermes.json"), "an earlier run");
+    const { code, out } = await runSh(env, ["--results", results, "stand-in", ...STRESS]);
+    expect(code, out).toBe(2);
+    expect(out).toContain(`${results} already holds raw-hermes.json from an earlier hermes run: not overwriting it`);
+    expect(fs.readFileSync(path.join(results, "raw-hermes.json"), "utf8")).toBe("an earlier run");
+    expect(dash.posts).toHaveLength(0);
+    expect(fs.existsSync(boardDir)).toBe(false);
+  });
+
+  it("reads a budget with a leading zero as decimal", async () => {
+    dash.runtime = "hermes";
+    dash.reset("answer");
+    // Turns slow enough that the run is still going at the first progress
+    // poll, which is where the budget's deadline is first read.
+    dash.answerDelayMs = 1500;
+    const { results, env } = fixture();
+    const { code, out } = await runSh(env, ["--results", results, "--budget-min", "08", "stand-in", ...STRESS]);
+    expect(code, out).toBe(0);
+    expect(out).not.toMatch(/value too great for base|unbound variable/);
+    expect(readRaw(results, "hermes").final).toBe(true);
+  });
+
+  it("keeps an OpenClaw session whose cleanup abort the gateway refused, and deletes nothing under it", async () => {
+    dash.runtime = "openclaw";
+    gateway.reset("answer");
+    gateway.refuseAbort = true;
+    const { results, env } = fixture();
+    const { code, out } = await runSh(env, ["--results", results, "stand-in", ...STRESS]);
+    expect(code, out).toBe(0);
+    const key = gateway.calls.find((c) => c.method === "chat.send")!.params.sessionKey;
+    expect(readRaw(results, "openclaw").cleanup).toEqual({ sessions: 1, deleted: 0, left: [key] });
+    expect(gateway.calls.filter((c) => c.method === "sessions.delete")).toHaveLength(0);
+    expect(fs.readFileSync(path.join(results, "board-openclaw.log"), "utf8")).toContain(`cleanup: chat.abort ${key}:`);
+  });
+
+  it("keeps a Hermes session whose cleanup Stop failed, or whose last turn the route did not confirm ended", async () => {
+    dash.runtime = "hermes";
+    for (const why of ["stop-failed", "not-ended"] as const) {
+      dash.reset("answer");
+      const { results, env } = fixture();
+      // Both turns answer normally; only then does the route turn against the cleanup.
+      dash.onPost = () => {
+        if (dash.posts.length < 2) return;
+        if (why === "stop-failed") dash.failStop = true;
+        else dash.attach = "held";
+      };
+      const { code, out } = await runSh(env, ["--results", results, "stand-in", ...STRESS]);
+      expect(code, out).toBe(0);
+      const raw = readRaw(results, "hermes");
+      expect(raw.turns.map((t: { ok: boolean }) => t.ok)).toEqual([true, true]);
+      expect(raw.cleanup).toEqual({ sessions: 1, deleted: 0, left: [dash.posts[0].sessionKey] });
+      expect(fs.existsSync(path.join(root, "hermes-calls"))).toBe(false);
+      expect(fs.readFileSync(path.join(results, "board-hermes.log"), "utf8")).toContain(why === "stop-failed" ? "its Stop failed: left alone" : "its last turn was not confirmed ended: left alone");
+      fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(boardDir, { recursive: true, force: true });
+    }
   });
 });

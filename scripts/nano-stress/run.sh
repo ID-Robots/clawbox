@@ -16,7 +16,11 @@
 #      hiccup during a 30–60 min run must not end it);
 #   3. polls it, printing its progress lines, until it writes its record;
 #   4. brings the raw record and the board-side log back into DIR and runs
-#      report.mjs: DIR/stress-<runtime>.json and DIR/stress-<runtime>.md;
+#      report.mjs: DIR/raw-<runtime>.json, DIR/board-<runtime>.log,
+#      DIR/stress-<runtime>.json and DIR/stress-<runtime>.md. A DIR that already
+#      holds any of these for the board's runtime is refused before anything
+#      starts on the board (exit 2): an earlier run's results are never
+#      overwritten. Without --results, DIR is a fresh ./nano-stress-<stamp>;
 #   5. removes its folder on the board once the record is safely here.
 #      Interrupted, it stops the board side first (which ends its turns and
 #      deletes its chat sessions before it exits) and brings back the partial
@@ -31,9 +35,10 @@
 #
 # Exit status: 0 when the run finished and its record was summarised; 1 when
 # it did not finish (the budget ran out, it died, it would not start) or its
-# record could not be read — a partial record is still summarised then; 3 with
-# --strict when the summary lists findings (failed turns, OOM kills, restarts,
-# low memory).
+# record could not be read — a partial record is still summarised then; 2 for
+# a bad option or a results folder that already holds this runtime's files; 3
+# with --strict when the summary lists findings (failed turns, OOM kills,
+# restarts, low memory).
 set -uo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -49,7 +54,7 @@ while [ $# -gt 0 ]; do
     --budget-min) BUDGET_MIN=$2; shift 2 ;;
     --strict) STRICT=1; shift ;;
     --) shift; break ;;
-    -h|--help) sed -n '2,35p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) awk 'NR > 1 && /^set -uo pipefail/ { exit } NR > 1' "${BASH_SOURCE[0]}"; exit 0 ;;
     -*) echo "unknown option $1" >&2; exit 2 ;;
     *) SERIAL=$1; shift ;;
   esac
@@ -119,6 +124,8 @@ fi
 # Packed before the board is touched: a module that cannot ship fails here.
 pack_board_side || exit 1
 case "$BUDGET_MIN" in ''|*[!0-9]*) echo "--budget-min wants whole minutes" >&2; exit 2 ;; esac
+# Decimal, whatever its leading zeros: bash reads "08" in $(( )) as a bad octal.
+BUDGET_MIN=$((10#$BUDGET_MIN))
 STRESS_ARGS=("$@")
 NANO_SERIAL=$SERIAL
 # shellcheck source=scripts/nano-tests/lib.sh
@@ -143,6 +150,16 @@ say() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
 
 RUNTIME=$(board_runtime)
 say "board runtime: $RUNTIME"
+# Never over an earlier run's results for this runtime (the ones a new run is
+# compared against): refused here, before anything starts on the board.
+HELD=()
+for f in "raw-$RUNTIME.json" "board-$RUNTIME.log" "stress-$RUNTIME.json" "stress-$RUNTIME.md"; do
+  [ -e "$RESULTS/$f" ] && HELD+=("$f")
+done
+if [ "${#HELD[@]}" -gt 0 ]; then
+  say "$RESULTS already holds ${HELD[*]} from an earlier $RUNTIME run: not overwriting it; give another --results folder"
+  exit 2
+fi
 if wait_runtime_settled 300; then
   say "$RUNTIME settled (${SETTLE_WAITED}s)"
 else
@@ -179,10 +196,18 @@ stop_board_side() {
 # back gzipped and base64-encoded over the same ssh hop. Fails when nothing
 # came back or a stage of the transfer failed.
 fetch() {
+  local raw="$RESULTS/raw-$RUNTIME.json"
+  # Into a file of its own first: a transfer that fails must not empty a
+  # record an earlier try brought back.
   # shellcheck disable=SC2016  # expanded on the board
-  board 'for f in "$1/raw.json" "$1/raw.json.partial"; do [ -s "$f" ] && { gzip -c "$f" | base64 -w0; exit 0; }; done; exit 1' "$BOARD_DIR" \
-    | tail -n 1 | base64 -d 2>/dev/null | gunzip -c > "$RESULTS/raw-$RUNTIME.json" 2>/dev/null \
-    && [ -s "$RESULTS/raw-$RUNTIME.json" ]
+  if board 'for f in "$1/raw.json" "$1/raw.json.partial"; do [ -s "$f" ] && { gzip -c "$f" | base64 -w0; exit 0; }; done; exit 1' "$BOARD_DIR" \
+    | tail -n 1 | base64 -d 2>/dev/null | gunzip -c > "$raw.part" 2>/dev/null \
+    && [ -s "$raw.part" ]; then
+    mv -f -- "$raw.part" "$raw"
+  else
+    rm -f -- "$raw.part"
+    return 1
+  fi
 }
 # collect — the record, checked to parse, and the board-side log, into
 # $RESULTS. Only a collect that succeeded lets the board folder go: until then

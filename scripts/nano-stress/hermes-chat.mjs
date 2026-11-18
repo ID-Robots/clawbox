@@ -43,6 +43,15 @@ export function takeSseFrames(buf) {
  * with the bearer. Without it nothing can confirm a turn ended: every
  * settle check fails, so a session takes no turn after its first and the
  * cleanup leaves it alone (board-stress.mjs refuses a Hermes run without it).
+ *
+ * @typedef {(extra?: Record<string, string>) => Record<string, string>} HeadersFn
+ * @typedef {{ kind: string, message: string }} TurnError
+ * @typedef {{ ackMs: number | null, firstTokenMs: number | null, latencyMs: number | null,
+ *   toolCalls: number, text: string, error: TurnError | null, model: string | null }} TurnResult
+ * @typedef {{ key: string, sessionId: string | null, hermesIds: Set<string>,
+ *   blocked?: boolean, untracked?: number, turnsSent?: number }} HermesSession
+ * @param {{ dash: string, headers: HeadersFn, settleHeaders?: HeadersFn | null,
+ *   log?: (line: string) => void, settleMs?: number, replayCloseMs?: number }} deps
  */
 export function createHermesDriver({ dash, headers, settleHeaders = null, log = () => {}, settleMs = 20_000, replayCloseMs = 2_000 }) {
   let warned = false;
@@ -148,7 +157,15 @@ export function createHermesDriver({ dash, headers, settleHeaders = null, log = 
    * without naming one (the route names it only in its answer): a session
    * such a turn may have opened cannot be deleted by id.
    */
+  /**
+   * @param {HermesSession} sess
+   * @param {string} message
+   * @param {number} timeoutMs
+   * @param {AbortSignal} [signal]
+   * @returns {Promise<TurnResult>}
+   */
   async function turn(sess, message, timeoutMs, signal) {
+    /** @type {TurnResult} */
     const r = { ackMs: null, firstTokenMs: null, latencyMs: null, toolCalls: 0, text: "", error: null, model: null };
     if (signal?.aborted) {
       r.error = { kind: "stopped", message: "the run was stopped" };
