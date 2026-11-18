@@ -543,6 +543,7 @@ describe.skipIf(!hasPython3)("scripts/bench/stt-bench.py", () => {
   it.each([
     ["on a line of its own", `\n${CHECK}`, CHECK],
     ["indented under it", `\n  ${CHECK}`, `  ${CHECK}`],
+    ["indented, and starting the way a frame does", "\n  File not found: /opt/models/small/model.bin", "  File not found: /opt/models/small/model.bin"],
     ["longer than the report keeps", `\n  ${`${CHECK} `.repeat(8)}`, `  ${CHECK}`],
   ])("keeps a cause that runs to several lines whole, and in front (%s)", (_shape, detail, second) => {
     configure({

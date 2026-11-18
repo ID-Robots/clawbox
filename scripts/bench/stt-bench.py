@@ -57,6 +57,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -598,6 +599,20 @@ def is_english_only(model: str) -> bool:
     return model.endswith(".en") or model in ENGLISH_ONLY_EXTRA
 
 
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def is_frame_header(line: str) -> bool:
+    """`  File "<path>", line <n>, in <name>`, as traceback prints a frame.
+
+    The whole shape, not an indented "File": a message can go on with an
+    indented line of its own ("  File not found: …"). 3.13+ may colour the
+    path and the number, so the escapes go before the comparison.
+    """
+    plain = ANSI_ESCAPE.sub("", line)
+    return plain.startswith('  File "') and '", line ' in plain
+
+
 def cause_first(stderr: str, limit: int = 500) -> str:
     """A worker's last words, at most `limit` characters, the cause in front.
 
@@ -610,7 +625,7 @@ def cause_first(stderr: str, limit: int = 500) -> str:
     leads, and the frames follow for whoever needs them.
 
     The cause starts at the first unindented line after the last frame: a
-    frame is an indented `File …` line and the indented source and caret
+    frame is its header (is_frame_header) and the indented source and caret
     lines under it, and the exception that follows begins in column 0. From
     there to the end is all cause, however many lines its message runs to and
     however they are indented (huggingface_hub's run to two). Output with no
@@ -623,7 +638,7 @@ def cause_first(stderr: str, limit: int = 500) -> str:
     """
     lines = stderr.strip().splitlines()
     start = len(lines) - 1
-    frames = [i for i, line in enumerate(lines) if line[:1].isspace() and line.lstrip().startswith("File ")]
+    frames = [i for i, line in enumerate(lines) if is_frame_header(line)]
     if frames:
         i = frames[-1] + 1
         while i < len(lines) and lines[i][:1].isspace():
