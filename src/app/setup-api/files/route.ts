@@ -374,9 +374,19 @@ async function moveAction(fence: FilesFence, destAbs: string | null, body: Recor
   // quota, and is held against it until the move has run.
   const quota = await moveQuotaCheck({ limitedUser, fence, destAbs, sources: sources.map((s) => s.abs) });
   if (quota && "refusal" in quota) return NextResponse.json(quota.refusal.body, { status: quota.refusal.status });
-  // An upload that began writing a source while the check measured it would
-  // keep growing it in the home: asked again with nothing awaited between
-  // this answer and the rename below.
+  // Both asked again with nothing awaited between these answers and the
+  // rename below. An upload may have begun writing into a source while the
+  // quota check was awaited — with no quota (or for the owner) there is no
+  // hold to ask, so every source is asked directly; and one that began
+  // writing a source while the check measured it would keep growing it in
+  // the home. Either way the move is called off and its hold released.
+  if (sources.some((s) => s.abs !== null && uploadWritingUnder(s.abs))) {
+    quota?.hold.done(false);
+    return NextResponse.json(
+      { error: "Something in this selection is still being uploaded. Move it once the upload has finished.", code: "upload_in_progress" },
+      { status: 409 },
+    );
+  }
   if (quota?.hold.writerStarted()) {
     quota.hold.done(false);
     return NextResponse.json(

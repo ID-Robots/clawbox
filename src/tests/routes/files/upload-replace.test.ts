@@ -41,6 +41,21 @@ vi.mock("@/lib/clawbox-users", () => ({
   grantHomeAccess: vi.fn(async () => "ok" as const),
 }));
 
+// A window inside a move's quota check: what runs here runs after the check
+// has answered and before the move handler has read that answer.
+const moveWindow = vi.hoisted(() => ({ during: null as null | (() => Promise<void>) }));
+vi.mock("@/lib/user-upload-guard", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/user-upload-guard")>();
+  return {
+    ...real,
+    moveQuotaCheck: async (opts: Parameters<typeof real.moveQuotaCheck>[0]) => {
+      const answer = await real.moveQuotaCheck(opts);
+      if (moveWindow.during) await moveWindow.during();
+      return answer;
+    },
+  };
+});
+
 type Handler = (req: NextRequest, ctx?: unknown) => Promise<Response>;
 let list: Handler;
 let post: Handler;
@@ -314,5 +329,41 @@ describe("a folder an upload is still writing into", () => {
     }));
     expect(after.status).toBe(200);
     expect(fs.existsSync(path.join(OWNER, "Shared", "archive", "pack", "file.bin"))).toBe(true);
+  });
+
+  it("is not moved when the upload begins while the move's quota check is awaited, with the quota off", async () => {
+    setLimits({ uploadMaxMb: 0, homeQuotaMb: 0 });
+    const pack = path.join(OWNER, "Shared", "pack");
+    for (const [as, to] of [[{ username: "owner", isOwner: true }, "Shared/archive"], [{ username: "ivan", isOwner: false }, "Home"]] as const) {
+      who.current = as;
+      fs.rmSync(pack, { recursive: true, force: true });
+      fs.mkdirSync(pack, { recursive: true });
+      fs.mkdirSync(path.join(OWNER, "Shared", "archive"), { recursive: true });
+      let release: () => void = () => {};
+      const hold = new Promise<void>((r) => { release = r; });
+      const upload: { pending?: Promise<Response> } = {};
+      // The check finds nothing being written; the upload begins right after.
+      moveWindow.during = async () => {
+        moveWindow.during = null;
+        upload.pending = putStream("Shared/pack", "file.bin", body(400 * KB, { hold }));
+        for (let i = 0; i < 200 && temps(pack).length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+      };
+      try {
+        const move = await post(new NextRequest(url(`/setup-api/files?dir=${encodeURIComponent(to)}`), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "move", paths: ["Shared/pack"] }),
+        }));
+        expect(upload.pending, as.username).toBeDefined();
+        expect(move.status, as.username).toBe(409);
+        expect((await move.json()).code, as.username).toBe("upload_in_progress");
+      } finally {
+        moveWindow.during = null;
+        release();
+      }
+      expect((await upload.pending!).status, as.username).toBe(200);
+      expect(fs.statSync(path.join(pack, "file.bin")).size, as.username).toBe(400 * KB);
+      expect(temps(pack), as.username).toEqual([]);
+    }
   });
 });
