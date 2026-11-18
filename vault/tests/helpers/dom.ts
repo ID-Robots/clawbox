@@ -25,6 +25,9 @@ export async function openPage(url: string, routes: Record<string, string>): Pro
     settings: {
       disableJavaScriptEvaluation: true,
       disableCSSFileLoading: true,
+      // happy-dom 21 stopped loading iframe pages unless asked (it was on in
+      // 20); the frame fixtures only exist if the child frames load.
+      enableIframePageLoading: true,
       navigator: { userAgent: "Mozilla/5.0 (test) HappyDOM" },
       fetch: {
         interceptor: {
