@@ -129,7 +129,16 @@ export interface WalkBudget {
    */
   unreadable: number;
   rootUnreadable: boolean;
+  /**
+   * Told every WALK_BEAT_ENTRIES entries the walk has READ — folders, hidden
+   * entries and files it does not yield included — so a caller with a stall
+   * watchdog (TASK-2431) sees a long walk move. Never while a read is blocked.
+   */
+  onEntries?: () => void;
 }
+
+/** How many entries read make one `WalkBudget.onEntries` call. */
+const WALK_BEAT_ENTRIES = 64;
 
 /** A fresh budget for one walk. */
 export function newWalkBudget(): WalkBudget {
@@ -172,6 +181,7 @@ export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0, opt
         return;
       }
       budget.left -= 1;
+      if (budget.onEntries && (MAX_ENTRIES - budget.left) % WALK_BEAT_ENTRIES === 0) budget.onEntries();
       if (entry.name.startsWith(".")) continue;
       const full = path.join(dir, entry.name);
       // isDirectory() is false for a symlink, which is what keeps a link loop out
@@ -278,8 +288,18 @@ export async function extractOne(file: string, out: string): Promise<boolean> {
  * Incremental: a file whose extracted copy is newer than the original is left
  * alone, so re-running after adding one PDF costs one conversion rather than
  * the whole folder.
+ *
+ * `onDocument` is told after each document is done with — converted, refused
+ * or already current. The index pass's stall watchdog (TASK-2431) hears it: a
+ * first pass over a folder of 500 PDFs can convert for longer than the stall
+ * window before it has a single file count to report, and is working all the
+ * while.
  */
-export async function extractDocuments(source: string, signal?: AbortSignal): Promise<ExtractionResult> {
+export async function extractDocuments(
+  source: string,
+  signal?: AbortSignal,
+  onDocument?: () => void,
+): Promise<ExtractionResult> {
   const derived = derivedFolderFor(source);
   let extracted = 0;
   let skipped = 0;
@@ -289,13 +309,15 @@ export async function extractDocuments(source: string, signal?: AbortSignal): Pr
   let sawExtractable = false;
   /** MAX_FILES stopped the extraction short of the folder's documents. */
   let cutShort = false;
-  const budget = newWalkBudget();
+  // The walk's reads are progress too (see `WalkBudget.onEntries`).
+  const budget: WalkBudget = { ...newWalkBudget(), onEntries: onDocument };
 
   for await (const file of walkFiles(path.resolve(source), budget)) {
     // A conversion is a spawned pdftotext or libreoffice with a 60 s budget of
     // its own, and a folder can hold 500 of them — so a caller that has given
-    // up (a stopped index run, a web server going down) must be
-    // able to stop this between files rather than up to 500 timeouts later.
+    // up (the index run's stall watchdog, an owner's stop, a web server going
+    // down) must be able to stop this between files rather than up to 500
+    // timeouts later.
     signal?.throwIfAborted();
     if (seen >= MAX_FILES) {
       notes.push(`Only the first ${MAX_FILES} files in this folder were read.`);
@@ -307,6 +329,9 @@ export async function extractDocuments(source: string, signal?: AbortSignal): Pr
     seen += 1;
     sawExtractable = true;
 
+    // Told once per document however this iteration leaves it: every path
+    // below ends in a `continue` or the bottom of the body.
+    onDocument?.();
     let stat;
     try {
       stat = await fs.stat(file);
@@ -342,7 +367,29 @@ export async function extractDocuments(source: string, signal?: AbortSignal): Pr
     }
 
     await fs.mkdir(derived, { recursive: true });
-    if (await extractOne(file, out)) extracted += 1;
+    // Into a file of this pass's own, published over `out` only if the pass
+    // is still wanted when the conversion is done (TASK-2431). A conversion
+    // takes no signal and can outlast the run that gave up on this pass, by
+    // when a newer pass may have written `out` from a newer revision of the
+    // document — and a late write over it, newer than its source, would be
+    // taken as current by every scan after.
+    // A folder of its own per conversion, short-named: LibreOffice writes its
+    // intermediate `<name>.txt` into the output's folder, so a shared folder
+    // let two passes converting the same document trade intermediates; and
+    // the derived name can already be near the filesystem's 255-byte limit.
+    signal?.throwIfAborted();
+    const work = path.join(derived, `.${crypto.randomUUID()}.work`);
+    await fs.mkdir(work);
+    const part = path.join(work, "text.part");
+    let converted = false;
+    try {
+      converted = await extractOne(file, part);
+      signal?.throwIfAborted();
+      if (converted) await fs.rename(part, out);
+    } finally {
+      await fs.rm(work, { recursive: true, force: true }).catch(() => { /* gone or never written */ });
+    }
+    if (converted) extracted += 1;
     else {
       skipped += 1;
       notes.push(`${path.basename(file)} could not be read.`);
