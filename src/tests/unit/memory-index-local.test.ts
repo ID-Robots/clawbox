@@ -1582,11 +1582,60 @@ describe("a long pass and the searches beside it (TASK-2431)", () => {
     expect(storeMeta("generation")).toBe("3");
   });
 
+  it("publishes a file committed just after a publish while the next one is still embedding", async () => {
+    // The next file's batches are heartbeats, not commits; a commit that
+    // missed the interval must still be published from them.
+    const long = (word: string) => Array.from({ length: 40 }, (_, i) => `Paragraph ${i} about the ${word}: ${"the boiler is serviced in March. ".repeat(30)}`).join("\n\n");
+    write("one.md", long("alpha"));
+    write("two.md", long("bravo"));
+    let clock = 0;
+    const now = vi.spyOn(performance, "now").mockImplementation(() => clock);
+    const embed = globalThis.fetch;
+    let first: string | null = null;
+    let secondBatches = 0;
+    let generationDuringSecond: string | null = "unread";
+    vi.stubGlobal("fetch", vi.fn(async (...args: Parameters<typeof fetch>) => {
+      const body = String((args[1] as { body?: string } | undefined)?.body);
+      const tag = body.includes("alpha") ? "alpha" : body.includes("bravo") ? "bravo" : null;
+      if (tag) {
+        first ??= tag;
+        if (tag !== first) {
+          secondBatches += 1;
+          // The first file is committed by now; a minute passes during the
+          // second file's first batch, and its heartbeat is the first chance
+          // to publish. The second batch looks.
+          if (secondBatches === 1) clock += 61_000;
+          if (secondBatches === 2) generationDuringSecond = storeMeta("generation");
+        }
+      }
+      return embed(...args);
+    }));
+    try {
+      await runLocalIndexPass("incremental");
+    } finally {
+      now.mockRestore();
+    }
+    expect(secondBatches).toBeGreaterThanOrEqual(2);
+    expect(generationDuringSecond).toBe("1");
+  });
+
   it("publishes nothing early when the pass is quick", async () => {
     write("first.md", "First note: the deposit is two months' rent.");
     write("second.md", "Second note: the boiler is serviced in March.");
     await runLocalIndexPass("full");
     expect(storeMeta("generation")).toBe("1");
+  });
+
+  it("counts folders and hidden entries it walks past, not only the files it yields", async () => {
+    for (let i = 0; i < 130; i += 1) fs.mkdirSync(path.join(source, "tree", `empty-${i}`), { recursive: true });
+    write("tree/only.md", "The one note in a tree of folders.");
+    let reported = false;
+    let walkBeats = 0;
+    await runLocalIndexPass("incremental", undefined, () => { reported = true; }, {
+      mayDiscard: true,
+      onHeartbeat: () => { if (!reported) walkBeats += 1; },
+    });
+    expect(walkBeats).toBeGreaterThanOrEqual(2);
   });
 
   it("tells the stall watchdog it is walking a large folder before it has a file count", async () => {

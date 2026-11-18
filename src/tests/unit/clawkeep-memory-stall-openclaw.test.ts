@@ -33,12 +33,15 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
 // unit is up here, its stop and start are recorded, and a test may make the
 // start after the pass slow.
 const { gateway } = vi.hoisted(() => ({
-  gateway: { stops: 0, starts: 0, startDelayMs: 0, gate: null as Promise<void> | null },
+  gateway: { stops: 0, starts: 0, startDelayMs: 0, gate: null as Promise<void> | null, stopGate: null as Promise<void> | null },
 }));
 vi.mock("@/lib/openclaw-auth-ops", () => ({
   askOpenclawGateway: async () => ({ answered: false }),
   openclawGatewayRuns: async () => false,
-  stopOpenclawGatewayForOffline: async () => { gateway.stops += 1; },
+  stopOpenclawGatewayForOffline: async () => {
+    gateway.stops += 1;
+    if (gateway.stopGate) await gateway.stopGate;
+  },
   startOpenclawGatewayAfterOffline: async () => {
     gateway.starts += 1;
     if (gateway.startDelayMs) await new Promise((resolve) => setTimeout(resolve, gateway.startDelayMs));
@@ -64,6 +67,7 @@ beforeEach(async () => {
   gateway.starts = 0;
   gateway.startDelayMs = 0;
   gateway.gate = null;
+  gateway.stopGate = null;
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "memory-stall-openclaw-"));
   process.env.CLAWKEEP_DATA_DIR = tmpDir;
   process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
@@ -228,6 +232,33 @@ describe("the gateway an OpenClaw pass runs without", () => {
     expect(await settledMemoryRun(tmpDir, { tries: 1_500 })).toMatchObject({ status: "succeeded", errorCode: "" });
     expect(existsSync(fake.termed)).toBe(false);
     expect(gateway.starts).toBe(1);
+  });
+});
+
+describe("a claim this process is still starting", () => {
+  it("is not taken for lost while the gateway stops, even when the clock went back", async () => {
+    // The record names this process as supervisor and no pass yet; a clock
+    // that went back makes it look younger than zero, which skipped the
+    // start grace and read the live claim as lost.
+    let release = () => {};
+    gateway.stopGate = new Promise<void>((resolve) => { release = resolve; });
+    noTerminal();
+    await fakeIndexer({ steps: 1, stepMs: 100 });
+    const { startMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
+    const started = startMemoryIndex("full", "manual");
+    for (let i = 0; i < 500 && gateway.stops === 0; i += 1) await new Promise((r) => setTimeout(r, 20));
+    expect(gateway.stops).toBe(1);
+    const realNow = Date.now.bind(Date);
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() - 60 * 60_000);
+    try {
+      expect((await readMemoryRunState()).status).toBe("running");
+      expect(existsSync(path.join(tmpDir, "memory-index.lock"))).toBe(true);
+    } finally {
+      clock.mockRestore();
+      release();
+    }
+    expect((await started).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
   });
 });
 

@@ -129,7 +129,16 @@ export interface WalkBudget {
    */
   unreadable: number;
   rootUnreadable: boolean;
+  /**
+   * Told every WALK_BEAT_ENTRIES entries the walk has READ — folders, hidden
+   * entries and files it does not yield included — so a caller with a stall
+   * watchdog (TASK-2431) sees a long walk move. Never while a read is blocked.
+   */
+  onEntries?: () => void;
 }
+
+/** How many entries read make one `WalkBudget.onEntries` call. */
+const WALK_BEAT_ENTRIES = 64;
 
 /** A fresh budget for one walk. */
 export function newWalkBudget(): WalkBudget {
@@ -172,6 +181,7 @@ export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0, opt
         return;
       }
       budget.left -= 1;
+      if (budget.onEntries && (MAX_ENTRIES - budget.left) % WALK_BEAT_ENTRIES === 0) budget.onEntries();
       if (entry.name.startsWith(".")) continue;
       const full = path.join(dir, entry.name);
       // isDirectory() is false for a symlink, which is what keeps a link loop out
@@ -299,7 +309,8 @@ export async function extractDocuments(
   let sawExtractable = false;
   /** MAX_FILES stopped the extraction short of the folder's documents. */
   let cutShort = false;
-  const budget = newWalkBudget();
+  // The walk's reads are progress too (see `WalkBudget.onEntries`).
+  const budget: WalkBudget = { ...newWalkBudget(), onEntries: onDocument };
 
   for await (const file of walkFiles(path.resolve(source), budget)) {
     // A conversion is a spawned pdftotext or libreoffice with a 60 s budget of

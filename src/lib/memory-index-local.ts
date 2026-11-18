@@ -1068,17 +1068,12 @@ async function indexableFilesUnder(
   onEntries?: () => void,
 ): Promise<{ files: string[]; complete: boolean }> {
   const files: string[] = [];
-  const budget = newWalkBudget();
-  let since = 0;
+  // A walk of a large tree reads for a while before the pass has a single
+  // file count to report: entries read — folders and hidden ones too — are
+  // progress for the stall watchdog (TASK-2431). Never a read that is blocked.
+  const budget = { ...newWalkBudget(), onEntries };
   for await (const file of walkFiles(path.resolve(root), budget)) {
     if (isIndexable(file)) files.push(file);
-    // A walk of a large tree reads for a while before the pass has a single
-    // file count to report: entries read are progress for the stall watchdog
-    // (TASK-2431). Only entries that arrived, never a read that is blocked.
-    if ((since += 1) >= WALK_HEARTBEAT_EVERY) {
-      since = 0;
-      onEntries?.();
-    }
   }
   return { files, complete: !budget.rootUnreadable && budget.unreadable === 0 && !budget.truncated };
 }
@@ -1117,9 +1112,6 @@ function displayName(source: string, file: string, origins: Record<string, strin
 
 /** How often a long pass lets searches see the files it has committed so far. */
 const PUBLISH_EVERY_MS = 60_000;
-
-/** How many walked files make one heartbeat for the stall watchdog. */
-const WALK_HEARTBEAT_EVERY = 64;
 
 /** A file this pass will read, held open so nothing can swap it underneath. */
 interface OpenedFile {
@@ -1218,11 +1210,22 @@ export async function runLocalIndexPass(
    * every PUBLISH_EVERY_MS, and once more at the end (or in the catch below).
    */
   let publishedAt = performance.now();
+  /** A file was committed since the last publish. */
+  let unpublished = false;
+  // Asked after every commit AND every embedded batch: a file committed just
+  // after a publish must not wait for a next file that takes ten minutes.
   const publishCommitted = () => {
-    if (performance.now() - publishedAt < PUBLISH_EVERY_MS) return;
-    metaSet(db, "generation", String(Number(metaGet(db, "generation") ?? 0) + 1));
+    if (!unpublished || performance.now() - publishedAt < PUBLISH_EVERY_MS) return;
+    try {
+      metaSet(db, "generation", String(Number(metaGet(db, "generation") ?? 0) + 1));
+    } catch {
+      // Never a reason to fail a file or the pass: the end of the pass
+      // publishes, and the next commit or batch tries again.
+      return;
+    }
     invalidateVectorCache();
     publishedAt = performance.now();
+    unpublished = false;
   };
   try {
     // THE SCAN COMES FIRST, before anything is emptied. A `full` pass wipes the
@@ -1425,6 +1428,7 @@ export async function runLocalIndexPass(
           vectors.push(...await embedBatch(pieces.slice(at, at + EMBED_BATCH_INPUTS), "document", signal, embedder));
           // Passages embedded: progress, though no count moves until the file commits.
           options.onHeartbeat?.();
+          publishCommitted();
         }
       } catch (err) {
         // The embedder is the shared resource; a failure there is not this
@@ -1472,6 +1476,7 @@ export async function runLocalIndexPass(
       }
       chunkCount = chunkCount - replaced + pieces.length;
       wrote = true;
+      unpublished = true;
       publishCommitted();
     }
     // A pass given up on while it was inside its last file stops here, before

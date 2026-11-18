@@ -711,7 +711,10 @@ function runningRecordVerdict(state: PersistedMemoryRunState): "going" | "lost" 
   // gives up on it after SETTLED_WRITE_ATTEMPTS and frees the lock all the
   // same), or this is a new process that was handed the pid. Either way
   // nothing is running, and no later pass may be refused over it.
-  if (state.supervisorPid === process.pid) return "lost";
+  // A claim this process is still starting (a gateway stop can take minutes,
+  // and a clock that went back can make its record look younger than zero) is
+  // going, whatever its age says.
+  if (state.supervisorPid === process.pid) return startingClaims().has(state.startedAtMs) ? "going" : "lost";
   // A supervisor that is verifiably still the process that started the pass
   // judges it itself: its watchdog ends a pass that stops moving and settles
   // the run within ABANDON_SETTLE_MS of that. A reader elsewhere going by a
@@ -730,6 +733,14 @@ function runningRecordVerdict(state: PersistedMemoryRunState): "going" | "lost" 
     // that lag as a stall.
     indexStallMs() + RECORD_LAG_MS,
   );
+}
+
+/**
+ * The `startedAtMs` stamps of runs this process has claimed and not yet put
+ * under supervision (see startMemoryIndex). Process-wide like the pass.
+ */
+function startingClaims(): Set<number> {
+  return processStore("clawkeep-memory.starting-claims", () => new Set<number>());
 }
 
 /** How far behind the pass a reader of its record may be. */
@@ -2768,6 +2779,13 @@ function startOpenclawAttempt(
   onActivity: () => void,
 ): IndexPass {
   const host = ptyHost();
+  // The environment the pass is spawned with, so the database watched is the
+  // one its pinned state directory names. The scratch copies already there
+  // are listed BEFORE the spawn: the one this attempt makes is the new name,
+  // whatever the wall clock did (see openclaw-index-progress.ts), and a list
+  // taken after the spawn could already hold it.
+  const dbPath = openclawAgentDbPath(agentId, openclawEnv());
+  const preexisting = scratchIndexNames(dbPath);
   // The agent the status reads (`openclawDefaultAgentId`), so the card's
   // counts and the pass that moves them are about the same index.
   const args = ["memory", "index", "--agent", agentId];
@@ -2827,13 +2845,7 @@ function startOpenclawAttempt(
   // `run.progress` stays null — a bar with numbers that never move would be a
   // claim the box cannot back — but the chunks are still counted, slower, for
   // the stall watchdog (TASK-2431).
-  // The environment the pass was spawned with, so the database watched is
-  // the one its pinned state directory names.
-  const dbPath = openclawAgentDbPath(agentId, openclawEnv());
   const since = Date.now();
-  // The scratch copies already there: the one this attempt makes is the new
-  // name, whatever the wall clock did since (see openclaw-index-progress.ts).
-  const preexisting = scratchIndexNames(dbPath);
   const readAs = { rebuild: mode === "full", preexisting };
   let chunks = 0;
   /** The write mark at the last reading; `undefined` before the first. */
@@ -3083,6 +3095,15 @@ export async function startMemoryIndex(
     return "claimed";
   });
   if (claim !== "claimed") return { accepted: false, declined: claim, run: await readMemoryRunState() };
+  // Every stamp this claim's record carries until the pass is supervised: a
+  // reader in this process takes the claim for going by them (see
+  // runningRecordVerdict), never by the record's age.
+  const claimStamps = new Set<number>([startedAtMs]);
+  startingClaims().add(startedAtMs);
+  const endStartClaim = () => {
+    for (const stamp of claimStamps) startingClaims().delete(stamp);
+    claimStamps.clear();
+  };
 
   // The one line that differs by edition. Everything above and below it — the
   // decline, the lock, the state file, the reconcile, the watchdog, the cache —
@@ -3162,6 +3183,9 @@ export async function startMemoryIndex(
     // The record carries the counts and nothing else: the reporter's object
     // is the pass's own and may grow fields no screen should get.
     if (shown) {
+      // The bar's first figures always land, whatever wrote the record just
+      // before (a heartbeat from the walk carries no figures to show).
+      if (!state.progress) reportedAtMs = 0;
       state = {
         ...state,
         progress: { filesDone: progress.filesDone, filesTotal: progress.filesTotal, chunks: progress.chunks },
@@ -3206,6 +3230,8 @@ export async function startMemoryIndex(
     const stamp = () => {
       const at = Math.max(Date.now(), state.startedAtMs + 1);
       ourStamps.add(at);
+      claimStamps.add(at);
+      startingClaims().add(at);
       state = { ...state, startedAtMs: at };
       return state;
     };
@@ -3219,6 +3245,7 @@ export async function startMemoryIndex(
       await stopOpenclawGatewayForOffline();
     } catch (err) {
       await releaseClaim();
+      endStartClaim();
       await startOpenclawGatewayAfterOffline().catch(() => undefined);
       // The record as it stands, so markInterrupted recognises it as this run's.
       const onRecord = await readPersistedRunState();
@@ -3234,6 +3261,7 @@ export async function startMemoryIndex(
     const now = await readPersistedRunState();
     if (now.status !== "running" || !ourStamps.has(now.startedAtMs)) {
       await releaseClaim();
+      endStartClaim();
       await startOpenclawGatewayAfterOffline().catch(() => undefined);
       return { accepted: false, declined: "running", run: await readMemoryRunState() };
     }
@@ -3259,6 +3287,7 @@ export async function startMemoryIndex(
       }, noteMoved);
   } catch (err) {
     await releaseClaim();
+    endStartClaim();
     if (!localArm) await startOpenclawGatewayAfterOffline().catch(() => undefined);
     throw err;
   } finally {
@@ -3337,8 +3366,11 @@ export async function startMemoryIndex(
     // the lock is held until that start is over: a next pass taking it
     // earlier would have its offline hold cleared by this start.
     if (!localArm) await pass.ended.catch(() => undefined);
-    for (const pid of passPids) settlingPasses().delete(pid);
-    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
+    endStartClaim();
+    await runRecordSection(async () => {
+      for (const pid of passPids) settlingPasses().delete(pid);
+      await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
+    });
     throw err;
   }
   // Every way a run is given up on — the owner's stop, the stall watchdog —
@@ -3365,6 +3397,8 @@ export async function startMemoryIndex(
     get workEnded() { return workEnded; },
   };
   supervisedPass().current = supervised;
+  // Supervised from here on: `supervisedHere` answers for the run.
+  endStartClaim();
   // Deliberately no cache invalidation here: nothing the probe reports changes
   // until the pass ends, and dropping the reading at spawn time made the
   // panel's very next read block on the cold probe for the whole run.
@@ -3449,22 +3483,28 @@ export async function startMemoryIndex(
     // refuse every later run until the web server restarted, and the reconcile
     // then says "interrupted", which is at worst the owner being told to run
     // it again.
-    for (let attempt = 1; attempt <= SETTLED_WRITE_ATTEMPTS; attempt += 1) {
-      try {
-        await writeRunState(finalState);
-        break;
-      } catch (err) {
-        if (attempt === SETTLED_WRITE_ATTEMPTS) {
-          console.warn(`[clawkeep-memory] could not record how the ${mode} index run ended:`, err);
-        } else {
-          await new Promise((resolve) => setTimeout(resolve, SETTLED_WRITE_RETRY_MS * attempt));
+    // The settled record and the lock's release in one `runRecordSection`
+    // turn (TASK-2431): a start in between would find the settled record,
+    // take the lock for its own, and have it removed under it by this
+    // release.
+    await runRecordSection(async () => {
+      for (let attempt = 1; attempt <= SETTLED_WRITE_ATTEMPTS; attempt += 1) {
+        try {
+          await writeRunState(finalState);
+          break;
+        } catch (err) {
+          if (attempt === SETTLED_WRITE_ATTEMPTS) {
+            console.warn(`[clawkeep-memory] could not record how the ${mode} index run ended:`, err);
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, SETTLED_WRITE_RETRY_MS * attempt));
+          }
         }
       }
-    }
-    // Only now: until the settled record is on disk, a reader must not take
-    // the reaped pid for a lost run.
-    for (const pid of passPids) settlingPasses().delete(pid);
-    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
+      // Only now: until the settled record is on disk, a reader must not take
+      // the reaped pid for a lost run.
+      for (const pid of passPids) settlingPasses().delete(pid);
+      await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
+    });
     // Whatever the cache holds now — the reading from before the pass, or one
     // a TTL probe took while the pass was writing the index — predates the
     // index the owner will see. The invalidation alone only marked it stale,
