@@ -326,7 +326,15 @@ describe("the home quota", () => {
     expect(uploadWritingUnder(growing)).toBe(false);
     const allowed = await check([growing]);
     expect(allowed && "hold" in allowed).toBe(true);
-    if (allowed && "hold" in allowed) allowed.hold.done();
+    if (!allowed || !("hold" in allowed)) return;
+    expect(allowed.hold.writerStarted()).toBe(false);
+    // An upload begins writing the source after the check: asked again right
+    // before the rename, the move is called off.
+    const late = await userUploadGuard({ limitedUser: null, fence, destPath: growing, disk: () => Infinity });
+    late.destination(growing);
+    expect(allowed.hold.writerStarted()).toBe(true);
+    allowed.hold.done(false);
+    late.finish(null);
   });
 
   it("does not apply to the owner, nor without a quota", async () => {

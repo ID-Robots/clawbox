@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
-import { auditActorOf, clearAuditLogForReset, recordAudit } from "@/lib/audit-log";
+import { auditActorOf, clearAuditLogForReset, recordAudit, unsealAuditLog } from "@/lib/audit-log";
 import { padResponseTime } from "@/lib/login-rate-limit";
 import {
   checkReproveLockout,
@@ -924,6 +924,8 @@ export async function POST(request: Request) {
     // retry. Gate first so an incomplete wipe leaves the box reachable.
     if (allFailures.length > 0) {
       console.warn(`[Reset] Aborting reboot — ${allFailures.length} wipe failure(s)`);
+      // No reboot follows: the box keeps running, and keeps its audit log.
+      unsealAuditLog();
       return NextResponse.json(
         { error: `Factory reset incomplete: ${allFailures.length} file deletion(s) failed`, failures: allFailures },
         { status: 500 },

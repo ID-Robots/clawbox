@@ -154,6 +154,21 @@ describe("reading", () => {
 });
 
 describe("a factory reset", () => {
+  it("seals the log: a sign-in that finishes after the clear writes nothing, the reset's own line does", async () => {
+    await audit.clearAuditLogForReset();
+    try {
+      await audit.recordAudit({ event: "login", actor: "previous-owner" });
+      expect(fs.existsSync(audit.auditLogPath())).toBe(false);
+      await audit.recordAudit({ event: "factory_reset", actor: "owner" });
+      expect(lines().map((l) => l.event)).toEqual(["factory_reset"]);
+    } finally {
+      audit.unsealAuditLog();
+    }
+    // A reset that stopped short unseals: the log records again.
+    await audit.recordAudit({ event: "login", actor: "owner" });
+    expect(lines().map((l) => l.event)).toEqual(["factory_reset", "login"]);
+  });
+
   it("clears the log and its older generation after every line queued before it", async () => {
     fs.mkdirSync(path.join(ROOT, "data"), { recursive: true });
     fs.writeFileSync(`${audit.auditLogPath()}.1`, "old\n");
@@ -165,5 +180,6 @@ describe("a factory reset", () => {
     expect(fs.existsSync(`${audit.auditLogPath()}.1`)).toBe(false);
     await audit.recordAudit({ event: "factory_reset", actor: "owner" });
     expect(lines().map((l) => l.event)).toEqual(["factory_reset"]);
+    audit.unsealAuditLog();
   });
 });

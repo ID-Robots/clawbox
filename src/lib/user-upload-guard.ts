@@ -265,7 +265,14 @@ export function uploadWritingUnder(abs: string): boolean {
 
 /** A move's claim on a home's quota: released once the move has run, whatever it moved. */
 export interface MoveQuotaHold {
-  done(): void;
+  /**
+   * Has an upload begun writing one of the sources since the check? Asked
+   * synchronously right before the (synchronous) rename, so no upload can
+   * begin between this answer and the move.
+   */
+  writerStarted(): boolean;
+  /** The move ran (`moved`, the default) or was called off before it did. */
+  done(moved?: boolean): void;
 }
 
 /**
@@ -326,12 +333,13 @@ export async function moveQuotaCheck(opts: {
   write.reserve(bytes);
   return {
     hold: {
-      done() {
+      writerStarted: () => incoming.some(uploadWritingUnder),
+      done(moved = true) {
         // Counted whole at once — a write that opens before the next walk
         // must not be granted these bytes again — and then measured anew, so
         // a move that ran only in part is not counted whole for long.
-        write.finish(bytes);
-        noteHomeChange(home);
+        write.finish(moved ? bytes : 0);
+        if (moved) noteHomeChange(home);
       },
     },
   };

@@ -344,6 +344,16 @@ async function moveAction(fence: FilesFence, destAbs: string | null, body: Recor
   // quota, and is held against it until the move has run.
   const quota = await moveQuotaCheck({ limitedUser, fence, destAbs, sources: sources.map((s) => s.abs) });
   if (quota && "refusal" in quota) return NextResponse.json(quota.refusal.body, { status: quota.refusal.status });
+  // An upload that began writing a source while the check measured it would
+  // keep growing it in the home: asked again with nothing awaited between
+  // this answer and the rename below.
+  if (quota?.hold.writerStarted()) {
+    quota.hold.done(false);
+    return NextResponse.json(
+      { error: "This file is still being uploaded. Move it into your home folder once the upload has finished.", code: "upload_in_progress" },
+      { status: 409 },
+    );
+  }
   let result: ReturnType<typeof moveEntries>;
   try {
     result = moveEntries({
