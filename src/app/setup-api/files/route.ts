@@ -14,7 +14,7 @@ import { MAX_MOVE_ITEMS, moveEntries, type MoveConflictPolicy } from "@/lib/file
 import { summarizeSelectionForZip, zipSelectionStream } from "@/lib/zip-stream";
 import { issueZipTicket, redeemZipTicket, uniqueArchiveNames } from "@/lib/zip-tickets";
 import { contentDisposition } from "@/lib/content-disposition";
-import { memberHomeChanged, moveQuotaCheck, userUploadGuard, type UploadBound, type UploadGuard } from "@/lib/user-upload-guard";
+import { memberHomeChanged, moveQuotaCheck, uploadWritingUnder, userUploadGuard, type UploadBound, type UploadGuard } from "@/lib/user-upload-guard";
 import { commitUploadTemp, isUploadTempName, uploadTempPath } from "@/lib/upload-temp";
 
 function formatBytes(bytes: number): string {
@@ -360,6 +360,16 @@ async function moveAction(fence: FilesFence, destAbs: string | null, body: Recor
     const abs = fence.resolve(rel);
     return { rel, abs: abs && fence.allows(abs) ? abs : null };
   });
+  // Nothing an upload is still writing into moves, for anyone: the upload
+  // writes a temporary file beside its destination (src/lib/upload-temp.ts)
+  // and renames it into place at the end — a folder moved from under it would
+  // strand that file where neither the rename nor the cleanup can reach it.
+  if (sources.some((s) => s.abs !== null && uploadWritingUnder(s.abs))) {
+    return NextResponse.json(
+      { error: "Something in this selection is still being uploaded. Move it once the upload has finished.", code: "upload_in_progress" },
+      { status: 409 },
+    );
+  }
   // What a move brings into a member's home from Shared counts against their
   // quota, and is held against it until the move has run.
   const quota = await moveQuotaCheck({ limitedUser, fence, destAbs, sources: sources.map((s) => s.abs) });

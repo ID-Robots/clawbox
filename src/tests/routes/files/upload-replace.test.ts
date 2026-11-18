@@ -45,6 +45,7 @@ type Handler = (req: NextRequest, ctx?: unknown) => Promise<Response>;
 let list: Handler;
 let post: Handler;
 let put: Handler;
+let rename: (req: NextRequest, ctx: { params: Promise<{ path: string[] }> }) => Promise<Response>;
 let resetCaches: () => void;
 let resetUsage: () => void;
 
@@ -115,6 +116,7 @@ beforeAll(async () => {
   process.env.CLAWBOX_ROOT = path.join(ROOT, "clawbox-data");
   vi.resetModules();
   ({ GET: list, POST: post, PUT: put } = await import("@/app/setup-api/files/route"));
+  ({ PUT: rename } = await import("@/app/setup-api/files/[...path]/route"));
   ({ resetFilesScopeCachesForTests: resetCaches } = await import("@/lib/files-scope-server"));
   ({ resetHomeUsageForTests: resetUsage } = await import("@/lib/home-usage"));
 });
@@ -246,5 +248,44 @@ describe("a write error", () => {
     expect(res.status).toBe(500);
     expect(fs.readFileSync(path.join(OWNER, "taken", "inside.txt"), "utf-8")).toBe(OLD);
     expect(temps(OWNER)).toEqual([]);
+  });
+});
+
+describe("a folder an upload is still writing into", () => {
+  it("is neither moved nor renamed until the upload has finished, so its temporary file is never stranded", async () => {
+    who.current = { username: "owner", isOwner: true };
+    const pack = path.join(OWNER, "Shared", "pack");
+    fs.mkdirSync(pack, { recursive: true });
+    fs.mkdirSync(path.join(OWNER, "Shared", "archive"), { recursive: true });
+    let release: () => void = () => {};
+    const hold = new Promise<void>((r) => { release = r; });
+    const pending = putStream("Shared/pack", "file.bin", body(400 * KB, { hold }));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(temps(pack)).toHaveLength(1);
+    const move = await post(new NextRequest(url("/setup-api/files?dir=Shared/archive"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "move", paths: ["Shared/pack"] }),
+    }));
+    expect(move.status).toBe(409);
+    expect((await move.json()).code).toBe("upload_in_progress");
+    const renamed = await rename(
+      new NextRequest(url("/setup-api/files/Shared/pack"), { method: "PUT", body: JSON.stringify({ newName: "pack2" }) }),
+      { params: Promise.resolve({ path: ["Shared", "pack"] }) },
+    );
+    expect(renamed.status).toBe(409);
+    expect((await renamed.json()).code).toBe("upload_in_progress");
+    release();
+    expect((await pending).status).toBe(200);
+    expect(fs.statSync(path.join(pack, "file.bin")).size).toBe(400 * KB);
+    expect(temps(pack)).toEqual([]);
+    // Once it has finished, the folder moves as any other.
+    const after = await post(new NextRequest(url("/setup-api/files?dir=Shared/archive"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "move", paths: ["Shared/pack"] }),
+    }));
+    expect(after.status).toBe(200);
+    expect(fs.existsSync(path.join(OWNER, "Shared", "archive", "pack", "file.bin"))).toBe(true);
   });
 });

@@ -7,7 +7,7 @@ import { openInMemberView, type FilesFence } from "@/lib/files-scope";
 import { filesFenceFor } from "@/lib/files-scope-server";
 import { summarizeFolderForZip, zipFolderStream } from "@/lib/zip-stream";
 import { contentDisposition } from "@/lib/content-disposition";
-import { memberHomeChanged } from "@/lib/user-upload-guard";
+import { memberHomeChanged, uploadWritingUnder } from "@/lib/user-upload-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -224,6 +224,16 @@ export async function PUT(req: NextRequest, { params }: Params) {
   // a folder of the owner's choosing where the box keeps its state.
   if (isProtectedContainer(newAbs)) return protectedContainerResponse();
   if (fs.existsSync(newAbs)) return NextResponse.json({ error: "Already exists" }, { status: 409 });
+  // Not while an upload is writing into it: the upload's temporary file sits
+  // beside its destination (src/lib/upload-temp.ts) and is renamed into place
+  // at the end, which a folder renamed from under it would make impossible —
+  // and its cleanup too. Asked right before the (synchronous) rename.
+  if (uploadWritingUnder(abs)) {
+    return NextResponse.json(
+      { error: "This is still being uploaded to. Rename it once the upload has finished.", code: "upload_in_progress" },
+      { status: 409 },
+    );
+  }
 
   try {
     fs.renameSync(abs, newAbs);
