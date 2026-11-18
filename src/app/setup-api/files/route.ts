@@ -15,6 +15,7 @@ import { summarizeSelectionForZip, zipSelectionStream } from "@/lib/zip-stream";
 import { issueZipTicket, redeemZipTicket, uniqueArchiveNames } from "@/lib/zip-tickets";
 import { contentDisposition } from "@/lib/content-disposition";
 import { memberHomeChanged, moveQuotaCheck, userUploadGuard, type UploadBound, type UploadGuard } from "@/lib/user-upload-guard";
+import { commitUploadTemp, isUploadTempName, uploadTempPath } from "@/lib/upload-temp";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -134,6 +135,23 @@ function refusal(err: unknown): { status: number; body: { error: string; code: s
   return { status: 500, body: { error: `Upload failed: ${err instanceof Error ? err.message : String(err)}`, code: "upload_failed" } };
 }
 
+/**
+ * Remove an upload's temporary file after a refusal or a failure: a member's
+ * by the path its descriptor was judged at (judged once more), the owner's
+ * only when the fence still resolves it to itself — the containment the
+ * write was admitted under, re-established for the unlink (CodeQL
+ * js/path-injection asks every unlink to vouch for its own argument).
+ */
+function discardUploadTemp(fence: FilesFence, created: string): void {
+  const target = path.resolve(created);
+  if (fence.scope.kind === "member") {
+    unlinkInMemberView(fence, target);
+    return;
+  }
+  if (fence.resolve(fence.relOf(target)) !== target) return;
+  try { fs.unlinkSync(/* turbopackIgnore: true */ target); } catch { /* best effort */ }
+}
+
 /** The size of the file an upload wrote (0 when there was none, or it is gone). */
 function landedSize(abs: string): number {
   if (!abs) return 0;
@@ -202,6 +220,8 @@ async function searchTree(fence: FilesFence, rootAbs: string | string[], query: 
       scanned++;
       const name = dirent.name;
       if (!includeHidden && name.startsWith(".")) continue;
+      // An upload still being written (src/lib/upload-temp.ts) is nobody's file yet.
+      if (isUploadTempName(name)) continue;
       const isDir = dirent.isDirectory();
       const full = path.join(dir, name);
       // Never surface or descend into secret stores, even with ?hidden=1 —
@@ -445,6 +465,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Failed to read directory" }, { status: 500 });
   }
   const files = entries
+    // An upload still being written (src/lib/upload-temp.ts) is nobody's file yet.
+    .filter((name) => !isUploadTempName(name))
     .map((name) => {
       try {
         const fullPath = path.join(abs, name);
@@ -532,6 +554,10 @@ export async function POST(req: NextRequest) {
     // an unlink that races a write just gets the bytes written back under it.
     const written: string[] = [];
     const pendingWrites: Promise<unknown>[] = [];
+    // The part's temporary file and the destination it is renamed to on success.
+    // (Declared through a cast: it is set inside the parser's callbacks, which
+    // TypeScript's narrowing of the `null` start does not see.)
+    let staged = null as { temp: string; dest: string } | null;
     try {
       const result = await new Promise<{ name: string; path: string }>((resolve, reject) => {
         const busboy = Busboy({
@@ -631,11 +657,16 @@ export async function POST(req: NextRequest) {
           // the limit, the pipeline resolves, and the caller is told the
           // upload worked.
           fileStream.on("limit", () => fail(boundRefusal(guard, guard.initialBound)));
-          // A member's destination is judged again by the descriptor opened.
+          // Written to a temporary file beside the destination, which is
+          // renamed over it only once the whole part has been accepted: a
+          // refusal or a failure part-way leaves the file it would replace
+          // as it was (src/lib/upload-temp.ts). A member's temporary file is
+          // judged by the descriptor opened, as their download is.
+          const temp = uploadTempPath(destPath);
           let member: { fd: number; real: string } | null = null;
           if (fence.scope.kind === "member") {
             try {
-              member = openInMemberView(fence, destPath, "write");
+              member = openInMemberView(fence, temp, "write");
             } catch (err) {
               fileStream.resume();
               fail(err);
@@ -647,10 +678,14 @@ export async function POST(req: NextRequest) {
               return;
             }
           }
-          const ws = member === null ? fs.createWriteStream(destPath) : fs.createWriteStream(destPath, { fd: member.fd });
+          const ws = member === null ? fs.createWriteStream(temp, { flags: "wx" }) : fs.createWriteStream(temp, { fd: member.fd });
           activeWrite = ws;
-          // A member's file is taken back by the path its descriptor was judged at.
-          written.push(member === null ? destPath : member.real);
+          // A member's temporary file is taken back by the path its
+          // descriptor was judged at; the owner's once this open created it
+          // ("wx": never a file that was already there).
+          if (member === null) ws.once("open", () => written.push(temp));
+          else written.push(member.real);
+          staged = { temp: member === null ? temp : member.real, dest: destPath };
           const writePromise = pipeline(fileStream, ws).then(() => {});
           fileWrites.push(writePromise);
           pendingWrites.push(writePromise);
@@ -670,13 +705,19 @@ export async function POST(req: NextRequest) {
         });
         source.pipe(busboy);
       });
-      guard.finish(landedSize(result.path));
+      // The whole part was accepted: only now does it replace the destination.
+      let landed = 0;
+      if (staged) {
+        const committed = commitUploadTemp(staged.temp, staged.dest);
+        written.length = 0;
+        landed = landedSize(committed);
+      }
+      guard.finish(landed);
       return NextResponse.json({ ok: true, name: result.name, path: result.path });
     } catch (err) {
-      guard.finish(null);
       // A refused upload must not leave a partial file behind: the caller is
-      // told nothing landed, and a later upload of the same name would
-      // silently inherit whatever bytes did.
+      // told nothing landed, and the file it would have replaced is as it was
+      // — only the upload's own temporary file goes.
       await Promise.allSettled(pendingWrites);
       // Containment re-established HERE, not trusted from the write: every
       // entry is a fence.resolve() answer, but the check that admitted it governed
@@ -694,6 +735,9 @@ export async function POST(req: NextRequest) {
         if (fence.resolve(fence.relOf(target)) !== target) continue;
         try { await fsp.unlink(target); } catch { /* best effort */ }
       }
+      // Released only once the write has stopped and its file is gone: until
+      // then the upload still counts as writing into that folder.
+      guard.finish(null);
       const { status, body } = refusal(err);
       return NextResponse.json(body, { status });
     }
@@ -780,28 +824,42 @@ export async function PUT(req: NextRequest) {
   }
 
   const bounded = boundedBody(req.body, { limit: (passed: number) => guard.ceiling(passed), message: DISK_FULL });
-  let member: { fd: number; real: string } | null = null;
+  // Written to a temporary file beside the destination and renamed over it
+  // only once the whole body has been accepted: a refusal or a failure
+  // part-way leaves the file it would replace as it was
+  // (src/lib/upload-temp.ts).
+  const temp = uploadTempPath(destPath);
+  // The temporary file this upload created, by the path it is taken back at;
+  // null once it has been renamed into place, or when nothing was created.
+  let created = null as string | null;
   let landed: number | null = null;
   try {
     const nodeReadable = Readable.fromWeb(bounded.stream as unknown as import("stream/web").ReadableStream);
+    let ws: fs.WriteStream;
     if (fence.scope.kind === "member") {
       // Judged again by the descriptor opened, as a member's download is.
-      member = openInMemberView(fence, destPath, "write");
+      const member = openInMemberView(fence, temp, "write");
       if (member === null) return NextResponse.json({ error: "Invalid destination" }, { status: 400 });
-    }
-    await pipeline(nodeReadable, member === null ? fs.createWriteStream(destPath) : fs.createWriteStream(destPath, { fd: member.fd }));
-    landed = bounded.bytes();
-  } catch (err) {
-    // Whatever landed comes off the disk either way; only the STATUS differs,
-    // and it is decided by the meter's flag, never by the error's text — the
-    // pipeline surfaces the cut-off as a plain rejection indistinguishable
-    // from a genuine write error. A member's file goes by the path its
-    // descriptor was judged at — and nothing goes when nothing was opened.
-    if (fence.scope.kind === "member") {
-      if (member) unlinkInMemberView(fence, member.real);
+      created = member.real;
+      ws = fs.createWriteStream(temp, { fd: member.fd });
     } else {
-      try { fs.unlinkSync(destPath); } catch { /* cleanup best-effort */ }
+      // "wx": never a file that was already there.
+      ws = fs.createWriteStream(temp, { flags: "wx" });
+      ws.once("open", () => { created = temp; });
     }
+    await pipeline(nodeReadable, ws);
+    // The whole body was accepted: only now does it replace the destination.
+    const committed = commitUploadTemp(created ?? temp, destPath);
+    created = null;
+    landed = landedSize(committed);
+  } catch (err) {
+    // The temporary file comes off the disk either way and the destination
+    // is untouched; only the STATUS differs, and it is decided by the meter's
+    // flag, never by the error's text — the pipeline surfaces the cut-off as
+    // a plain rejection indistinguishable from a genuine write error. A
+    // member's file goes by the path its descriptor was judged at.
+    if (created) discardUploadTemp(fence, created);
+    created = null;
     const { status, body } = refusal(bounded.overflowed() ? boundRefusal(guard, guard.lastBound()) : err);
     return NextResponse.json(body, { status });
   } finally {

@@ -72,6 +72,16 @@ put_file() {
   printf "%s\n" "${code:-000}"; cat "$out"; rm -f "$out"
 }
 
+# put_chunked COOKIE DIR NAME FILE -> as put_file, but the body is FILE sent
+# chunked: it declares no size, so only the meter can stop it, part-way.
+put_chunked() {
+  local cookie=$1 dir=$2 name=$3 file=$4 out code
+  out=$(mktemp)
+  code=$(printf "header = \"Cookie: clawbox_session=%s\"\nheader = \"Origin: http://127.0.0.1\"\n" "$cookie" \
+    | curl -sS -o "$out" -w "%{http_code}" -X PUT -H "Content-Type: application/octet-stream" -H "Transfer-Encoding: chunked" --data-binary "@$file" --max-time 180 -K - "$DASHBOARD/setup-api/files?dir=$dir&name=$name" 2>/dev/null)
+  printf "%s\n" "${code:-000}"; cat "$out"; rm -f "$out"
+}
+
 # attach COOKIE FILE -> status on the first line, body after (a picture, so either runtime takes it).
 attach() {
   local cookie=$1 file=$2 out code
@@ -148,6 +158,21 @@ else no_ "A 2 MB Files upload by A answered $(status_of "$r") $(body_of "$r")"; 
 printf "NOTE [%s] Files refusal: %s\n" "$RUNTIME" "$(body_of "$r" | field error)"
 r=$(put_file "$A_COOKIE" "$MARK" small.bin 524288)
 [ "$(status_of "$r")" = 200 ] && ok_ "A 512 KB Files upload by A goes through" || no_ "A 512 KB Files upload by A answered $(status_of "$r")"
+# An overwrite refused part-way keeps the old file, byte for byte: A uploads
+# keep.bin (300 KB of random bytes), then sends 2 MB over it chunked, with no
+# size declared, so the 1 MB limit can only stop it part-way.
+head -c 307200 /dev/urandom > "$WORK/keep.bin"
+head -c 2097152 /dev/urandom > "$WORK/over.bin"
+k=$(printf "header = \"Cookie: clawbox_session=%s\"\nheader = \"Origin: http://127.0.0.1\"\n" "$A_COOKIE" | curl -sS -o /dev/null -w "%{http_code}" -X PUT -H "Content-Type: application/octet-stream" --data-binary "@$WORK/keep.bin" --max-time 180 -K - "$DASHBOARD/setup-api/files?dir=$MARK&name=keep.bin" 2>/dev/null)
+before=$(sha256sum "$HOME/$MARK/keep.bin" 2>/dev/null | cut -d" " -f1)
+r=$(put_chunked "$A_COOKIE" "$MARK" keep.bin "$WORK/over.bin")
+sleep 1
+after=$(sha256sum "$HOME/$MARK/keep.bin" 2>/dev/null | cut -d" " -f1)
+expect=$(sha256sum "$WORK/keep.bin" | cut -d" " -f1)
+left=$(find "$HOME/$MARK" -maxdepth 1 -name ".clawbox-upload-*.part" 2>/dev/null | wc -l)
+if [ "$k" = 200 ] && [ "$(status_of "$r")" = 413 ] && [ "$(body_of "$r" | field code)" = upload_too_large ] && [ -n "$before" ] && [ "$before" = "$expect" ] && [ "$after" = "$expect" ] && [ "$left" = 0 ]; then
+  ok_ "A 2 MB chunked overwrite of keep.bin by A is refused part-way (413) and the old file survives byte for byte, with no temporary file left"
+else no_ "the refused overwrite: first upload $k, overwrite $(status_of "$r") $(body_of "$r" | field code), old file kept $([ "$after" = "$expect" ] && echo yes || echo no), temporary files left $left"; fi
 r=$(put_file "$OWNER" "$MARK" owner.bin 2097152)
 [ "$(status_of "$r")" = 200 ] && ok_ "the owner 2 MB Files upload goes through (the owner is never limited)" || no_ "the owner 2 MB upload answered $(status_of "$r")"
 { printf "\x89PNG\r\n\x1a\n"; head -c 1572864 /dev/zero; } > "$WORK/big.png"
