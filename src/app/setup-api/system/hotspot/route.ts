@@ -1,21 +1,14 @@
 import { NextResponse } from "next/server";
-import fs from "fs/promises";
-import path from "@/lib/runtime-path";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { get, setMany, getAll } from "@/lib/config-store";
+import { get } from "@/lib/config-store";
+import { readHotspotSettings, writeHotspotSettings } from "@/lib/hotspot-env";
 import { parseNmcliTerseLine, RESTART_AP_TIMEOUT_MS } from "@/lib/network";
 import { startRootStep } from "@/lib/root-step-runner";
 
 const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
-
-const HOTSPOT_ENV_PATH = path.join(
-  process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
-  "data",
-  "hotspot.env"
-);
 
 let getCache: { body: unknown; at: number } | null = null;
 const GET_TTL_MS = 3_000;
@@ -36,27 +29,30 @@ export async function GET() {
   if (getCache && Date.now() - getCache.at < GET_TTL_MS) {
     return NextResponse.json(getCache.body);
   }
-  const config = await getAll();
-  const ssid = (config.hotspot_ssid as string) || "ClawBox-Setup";
-  const hasPassword = !!config.hotspot_password;
-  const enabled = config.hotspot_enabled !== false;
+  // `enabled` is the switch as the AP scripts read it (src/lib/hotspot-env.ts);
+  // `active` is the radio, whatever the switch says. Settings shows both, so a
+  // switch that reads off over a live AP says so instead of looking fine.
+  const { ssid, hasPassword, enabled } = await readHotspotSettings();
 
   const iface = process.env.NETWORK_INTERFACE || "wlP1p1s0";
   let active = false;
   let blockedBy: string | null = null;
+  let rows: string[][] = [];
   try {
     const { stdout } = await execFileAsync("nmcli", [
       "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active",
     ], { timeout: 3_000 });
-    const rows = stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine);
-    const apRow = rows.find(r => r[0] === "ClawBox-Setup" && r[2] === iface);
-    active = !!apRow;
-    if (enabled && !active) {
-      const wifiRow = rows.find(r => r[1] === "802-11-wireless" && r[2] === iface && r[0] !== "ClawBox-Setup");
-      if (wifiRow) blockedBy = wifiRow[0];
-    }
+    rows = stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine);
+    active = rows.some(r => r[0] === "ClawBox-Setup" && r[2] === iface);
   } catch (err) {
     console.warn("[hotspot] nmcli unavailable:", err);
+  }
+  // The kernel's view as well: an interface in AP mode is broadcasting,
+  // whatever NetworkManager calls the profile that put it there.
+  if (!active) active = await radioIsAccessPoint(iface);
+  if (enabled && !active) {
+    const wifiRow = rows.find(r => r[1] === "802-11-wireless" && r[2] === iface && r[0] !== "ClawBox-Setup");
+    if (wifiRow) blockedBy = wifiRow[0];
   }
 
   const body = { ssid, hasPassword, enabled, active, blockedBy };
@@ -114,28 +110,16 @@ export async function POST(request: Request) {
       : undefined;
     const effectivePassword = password ? password : existingPassword;
 
-    const updates: Record<string, unknown> = {
-      hotspot_ssid: ssid.trim(),
-      hotspot_password: effectivePassword || undefined,
-    };
-    if (typeof enabled === "boolean") {
-      updates.hotspot_enabled = enabled;
-    }
-    await setMany(updates);
+    // A request without `enabled` (an older client) keeps the switch where the
+    // AP scripts have it, not where a stale config flag says it is.
+    const isEnabled = typeof enabled === "boolean" ? enabled : (await readHotspotSettings()).enabled;
 
-    const isEnabled = typeof enabled === "boolean" ? enabled : (await get("hotspot_enabled")) !== false;
-
-    // Write shell-sourceable env file for start-ap.sh
-    const envLines = [`HOTSPOT_SSID=${shellQuote(ssid.trim())}`];
-    if (effectivePassword) {
-      envLines.push(`HOTSPOT_PASSWORD=${shellQuote(effectivePassword)}`);
-    }
-    if (!isEnabled) {
-      envLines.push(`HOTSPOT_DISABLED=1`);
-    }
-    await fs.mkdir(path.dirname(HOTSPOT_ENV_PATH), { recursive: true });
-    await fs.writeFile(HOTSPOT_ENV_PATH, envLines.join("\n") + "\n", {
-      mode: 0o600,
+    // data/hotspot.env (what start-ap.sh, ap-watchdog.sh and wifi-failover.sh
+    // read) and config, in one call, so they cannot disagree.
+    await writeHotspotSettings({
+      ssid: ssid.trim(),
+      password: effectivePassword || undefined,
+      enabled: isEnabled,
     });
 
     // Start or stop the AP service based on enabled state.
@@ -203,9 +187,14 @@ export async function POST(request: Request) {
   }
 }
 
-/** Safely quote a value for shell assignment */
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`;
+/** Is the interface in AP mode right now (`iw dev <iface> info` says `type AP`)? */
+async function radioIsAccessPoint(iface: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync("iw", ["dev", iface, "info"], { timeout: 3_000 });
+    return /^\s*type AP\s*$/m.test(stdout);
+  } catch {
+    return false;
+  }
 }
 
 /** Is the WiFi radio currently a client on a network (i.e. NOT hosting the setup

@@ -66,6 +66,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.sysShowAll": "All ({count})",
     "settings.minEightChars": "At least 8 characters",
     "settings.hotspotNotBroadcasting": "Hotspot is not broadcasting.",
+    "settings.hotspotOffButBroadcasting": "The hotspot is switched off, but this ClawBox is still broadcasting it.",
+    "settings.hotspotStopNow": "Stop it now",
     "settings.hotspotNotBroadcastingWifi": "Hotspot is not broadcasting because this device is connected to “{ssid}” over WiFi.",
     "settings.hotspotSingleRadioNote": "The Jetson has a single WiFi radio, so the hotspot can only run when WiFi is disconnected or the device is on Ethernet. Saved settings will apply automatically the next time the AP starts.",
     "settings.hotspotConfirmTitle": "Enable hotspot?",

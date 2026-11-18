@@ -1,6 +1,8 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
-import fs from "fs/promises";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 vi.mock("@/lib/root-step-runner", () => ({
   ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
@@ -11,28 +13,34 @@ vi.mock("child_process", () => ({
   execFile: vi.fn(),
 }));
 
-vi.mock("fs/promises", () => ({
-  default: {
-    mkdir: vi.fn(),
-    writeFile: vi.fn(),
-  },
-}));
-
+// config.json, in memory. The hotspot's env file is written for real, under a
+// temp CLAWBOX_ROOT: it is the file the AP scripts obey (#1517).
+const { store, applyToStore } = vi.hoisted(() => {
+  const store: Record<string, unknown> = {};
+  const applyToStore = async (entries: Record<string, unknown>) => {
+    for (const [k, v] of Object.entries(entries)) {
+      if (v === undefined) delete store[k];
+      else store[k] = v;
+    }
+  };
+  return { store, applyToStore };
+});
 vi.mock("@/lib/config-store", () => ({
-  get: vi.fn(),
-  setMany: vi.fn(),
-  getAll: vi.fn(),
+  get: vi.fn(async (key: string) => store[key]),
+  setMany: vi.fn(applyToStore),
+  getAll: vi.fn(async () => ({ ...store })),
 }));
 
-import { get, setMany, getAll } from "@/lib/config-store";
+import { setMany } from "@/lib/config-store";
 import { startRootStep } from "@/lib/root-step-runner";
 
-const mockGet = vi.mocked(get);
 const mockSetMany = vi.mocked(setMany);
-const mockGetAll = vi.mocked(getAll);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockStartRootStep = vi.mocked(startRootStep);
-const mockFs = vi.mocked(fs);
+
+let root: string;
+const envFile = () => path.join(root, "data", "hotspot.env");
+const readEnv = () => readFileSync(envFile(), "utf8");
 
 function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
   mockExecFile.mockImplementation(((
@@ -103,11 +111,12 @@ describe("/setup-api/system/hotspot", () => {
     vi.resetModules();
     vi.clearAllMocks();
 
-    mockFs.mkdir.mockResolvedValue(undefined);
-    mockFs.writeFile.mockResolvedValue();
-    mockGet.mockResolvedValue(undefined);
-    mockSetMany.mockResolvedValue();
-    mockGetAll.mockResolvedValue({});
+    for (const k of Object.keys(store)) delete store[k];
+    // A test below makes setMany reject; every test starts on the real store.
+    mockSetMany.mockImplementation(applyToStore);
+    root = mkdtempSync(path.join(tmpdir(), "clawbox-hotspot-route-"));
+    mkdirSync(path.join(root, "data"), { recursive: true });
+    vi.stubEnv("CLAWBOX_ROOT", root);
     setupExecFileMock({
       systemctl: { stdout: "", stderr: "" },
       bash: { stdout: "", stderr: "" },
@@ -120,6 +129,8 @@ describe("/setup-api/system/hotspot", () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
+    rmSync(root, { recursive: true, force: true });
   });
 
   describe("GET /setup-api/system/hotspot", () => {
@@ -134,7 +145,7 @@ describe("/setup-api/system/hotspot", () => {
     });
 
     it("returns configured hotspot settings", async () => {
-      mockGetAll.mockResolvedValue({
+      Object.assign(store, {
         hotspot_ssid: "MyHotspot",
         hotspot_password: "secret123",
         hotspot_enabled: false,
@@ -146,6 +157,58 @@ describe("/setup-api/system/hotspot", () => {
       expect(body.ssid).toBe("MyHotspot");
       expect(body.hasPassword).toBe(true);
       expect(body.enabled).toBe(false);
+    });
+
+    describe("after setup, the switch is the one the AP scripts obey (#1517)", () => {
+      it("says ON for the reported box: config off, env file never told, AP up", async () => {
+        // data/config.json hotspot_enabled=false, data/hotspot.env without
+        // HOTSPOT_DISABLED, and nmcli showing the AP active on the radio.
+        Object.assign(store, { setup_complete: true, hotspot_enabled: false });
+        writeFileSync(envFile(), "HOTSPOT_SSID='ClawBox-Setup'\n");
+        setupExecFileMock({
+          nmcli: { stdout: "ClawBox-Setup:802-11-wireless:wlP1p1s0\nWired connection 1:802-3-ethernet:enP8p1s0\n", stderr: "" },
+        });
+
+        const body = await (await hotspotGet()).json();
+
+        expect(body).toMatchObject({ enabled: true, active: true });
+      });
+
+      it("says OFF when HOTSPOT_DISABLED=1, even over a stale config flag that says on", async () => {
+        Object.assign(store, { setup_complete: true, hotspot_enabled: true });
+        writeFileSync(envFile(), "HOTSPOT_SSID='ClawBox-Setup'\nHOTSPOT_DISABLED=1\n");
+
+        const body = await (await hotspotGet()).json();
+
+        expect(body.enabled).toBe(false);
+      });
+    });
+
+    describe("`active` is the radio, not the profile name", () => {
+      it("reports an interface in AP mode as broadcasting even without a ClawBox-Setup row", async () => {
+        Object.assign(store, { setup_complete: true });
+        writeFileSync(envFile(), "HOTSPOT_DISABLED=1\n");
+        setupExecFileMock({
+          "nmcli": { stdout: "Wired connection 1:802-3-ethernet:enP8p1s0\n", stderr: "" },
+          "iw dev wlP1p1s0 info": { stdout: "Interface wlP1p1s0\n\tifindex 4\n\ttype AP\n", stderr: "" },
+        });
+
+        const body = await (await hotspotGet()).json();
+
+        // Off, and still broadcasting: Settings shows both.
+        expect(body).toMatchObject({ enabled: false, active: true });
+      });
+
+      it("a managed (client) interface is not broadcasting", async () => {
+        setupExecFileMock({
+          "nmcli": { stdout: "HomeWiFi:802-11-wireless:wlP1p1s0\n", stderr: "" },
+          "iw dev wlP1p1s0 info": { stdout: "Interface wlP1p1s0\n\ttype managed\n", stderr: "" },
+        });
+
+        const body = await (await hotspotGet()).json();
+
+        expect(body).toMatchObject({ enabled: true, active: false, blockedBy: "HomeWiFi" });
+      });
     });
   });
 
@@ -159,7 +222,9 @@ describe("/setup-api/system/hotspot", () => {
       expect(mockSetMany).toHaveBeenCalledWith({
         hotspot_ssid: "NewHotspot",
         hotspot_password: "password123",
+        hotspot_enabled: true,
       });
+      expect(readEnv()).toBe("HOTSPOT_SSID='NewHotspot'\nHOTSPOT_PASSWORD='password123'\n");
     });
 
     it("returns 400 for invalid JSON", async () => {
@@ -224,6 +289,7 @@ describe("/setup-api/system/hotspot", () => {
       expect(mockSetMany).toHaveBeenCalledWith({
         hotspot_ssid: "OpenHotspot",
         hotspot_password: undefined,
+        hotspot_enabled: true,
       });
     });
 
@@ -238,11 +304,50 @@ describe("/setup-api/system/hotspot", () => {
         hotspot_password: undefined,
         hotspot_enabled: false,
       });
+      expect(readEnv()).toBe("HOTSPOT_SSID='MyHotspot'\nHOTSPOT_DISABLED=1\n");
+    });
+
+    it("switching off writes the flag the AP scripts read, and runs stop-ap.sh", async () => {
+      Object.assign(store, { setup_complete: true, hotspot_enabled: true, hotspot_password: "keep-me-123" });
+      writeFileSync(envFile(), "HOTSPOT_SSID='ClawBox-Setup'\nHOTSPOT_PASSWORD='keep-me-123'\n");
+
+      const body = await (await hotspotPost(jsonRequest({ ssid: "ClawBox-Setup", enabled: false }))).json();
+
+      expect(body.apAction).toBe("stopped");
+      expect(readEnv()).toContain("HOTSPOT_DISABLED=1");
+      // The key is kept: the toggle does not resend it.
+      expect(readEnv()).toContain("HOTSPOT_PASSWORD='keep-me-123'");
+      expect(mockExecFile).toHaveBeenCalledWith(
+        "bash", ["/usr/local/libexec/clawbox/stop-ap.sh"], expect.anything(), expect.anything(),
+      );
+      expect((await (await hotspotGet()).json()).enabled).toBe(false);
+    });
+
+    it("switching on clears the flag and restarts the AP", async () => {
+      Object.assign(store, { setup_complete: true, hotspot_enabled: false });
+      writeFileSync(envFile(), "HOTSPOT_SSID='ClawBox-Setup'\nHOTSPOT_DISABLED=1\n");
+
+      const body = await (await hotspotPost(jsonRequest({ ssid: "ClawBox-Setup", enabled: true }))).json();
+
+      expect(body.apAction).toBe("restarted");
+      expect(readEnv()).not.toContain("HOTSPOT_DISABLED");
+      expect(store.hotspot_enabled).toBe(true);
+      expect(mockStartRootStep).toHaveBeenCalledWith("restart_ap", expect.anything());
+    });
+
+    it("a save without `enabled` keeps the switch where the AP scripts have it, not where stale config says", async () => {
+      // The drifted box again. Renaming its hotspot must not quietly switch
+      // it off on the strength of a config flag the radio never obeyed.
+      Object.assign(store, { setup_complete: true, hotspot_enabled: false });
+      writeFileSync(envFile(), "HOTSPOT_SSID='ClawBox-Setup'\n");
+
+      await hotspotPost(jsonRequest({ ssid: "Renamed" }));
+
+      expect(readEnv()).toBe("HOTSPOT_SSID='Renamed'\n");
+      expect(store.hotspot_enabled).toBe(true);
     });
 
     it("starts AP when enabled", async () => {
-      mockGet.mockResolvedValue(true);
-
       await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: true }));
 
       expect(mockExecFile).toHaveBeenCalled();
@@ -355,11 +460,10 @@ describe("/setup-api/system/hotspot", () => {
     it("does not answer the next GET out of a cache the save just invalidated", async () => {
       // GET caches for 3s. Without an invalidation the reload that follows a
       // save is answered with the settings it just replaced.
-      mockGetAll.mockResolvedValue({ hotspot_ssid: "OldName", hotspot_enabled: true });
+      Object.assign(store, { hotspot_ssid: "OldName", hotspot_enabled: true });
       expect((await (await hotspotGet()).json()).ssid).toBe("OldName");
 
       await hotspotPost(jsonRequest({ ssid: "NewName" }));
-      mockGetAll.mockResolvedValue({ hotspot_ssid: "NewName", hotspot_enabled: true });
 
       expect((await (await hotspotGet()).json()).ssid).toBe("NewName");
     });
