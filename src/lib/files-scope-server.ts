@@ -21,7 +21,14 @@ import { fenceFor, memberRoots, ownerScope, type FilesFence } from "@/lib/files-
  * answers 503 `home_unavailable` rather than anything of the owner's.
  */
 
-export type FilesFenceAnswer = { ok: true; fence: FilesFence } | { ok: false; response: NextResponse };
+export type FilesFenceAnswer =
+  /**
+   * `limitedUser`: the signed-in ClawBox user other than the owner this
+   * request is served to, whom the per-user upload limit and home quota bind
+   * (src/lib/user-limits.ts); null for the owner and the agent's bearer.
+   */
+  | { ok: true; fence: FilesFence; limitedUser: string | null }
+  | { ok: false; response: NextResponse };
 
 function refuse(status: number, code: string, error: string): FilesFenceAnswer {
   return { ok: false, response: NextResponse.json({ error, code }, { status, headers: { "Cache-Control": "no-store" } }) };
@@ -95,13 +102,13 @@ export async function filesFenceFor(request: Request): Promise<FilesFenceAnswer>
     if (/(?:^|;\s*)clawbox_session=/.test(request.headers.get("cookie") ?? "")) {
       return refuse(503, "session_unknown", "Who is signed in could not be checked just now. Try again in a moment.");
     }
-    return { ok: true, fence: fenceFor(ownerScope()) };
+    return { ok: true, fence: fenceFor(ownerScope()), limitedUser: null };
   }
-  if (who.isOwner) return { ok: true, fence: fenceFor(ownerScope()) };
+  if (who.isOwner) return { ok: true, fence: fenceFor(ownerScope()), limitedUser: null };
   const { readOrgModeStrict } = await import("@/lib/org-mode-server");
   const on = await readOrgModeStrict();
   if (on === null) return refuse(503, "org_mode_unknown", "The box's settings could not be read just now. Try again in a moment.");
-  if (!on) return { ok: true, fence: fenceFor(ownerScope()) };
+  if (!on) return { ok: true, fence: fenceFor(ownerScope()), limitedUser: who.username };
 
   const username = who.username;
   const home = await homeOf(username);
@@ -138,5 +145,5 @@ export async function filesFenceFor(request: Request): Promise<FilesFenceAnswer>
       // a read-only or full home still lists
     }
   }
-  return { ok: true, fence: fenceFor({ kind: "member", username, roots: roots.roots }) };
+  return { ok: true, fence: fenceFor({ kind: "member", username, roots: roots.roots }), limitedUser: username };
 }

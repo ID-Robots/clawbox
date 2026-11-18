@@ -111,6 +111,10 @@ const BOX_WIDE: [string, string][] = [
   ["POST", "/setup-api/update/run"],
   ["GET", "/setup-api/update/versions"],
   ["POST", "/setup-api/system/update-branch"],
+  // The owner's limits for everyone else and the audit log (TASK-2446).
+  ["GET", "/setup-api/settings/user-limits"],
+  ["POST", "/setup-api/settings/user-limits"],
+  ["GET", "/setup-api/settings/audit-log"],
 ];
 
 describe("middleware — organisation mode", () => {

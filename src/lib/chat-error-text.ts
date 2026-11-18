@@ -415,6 +415,26 @@ export function describeFallbackReply(context: ChatRunFailureContext): string | 
 const GENERIC = "That message did not go through. Send it again — the details stayed in this box's log.";
 
 /**
+ * The refusal of a turn past a user's chat limit, as scripts/user-limits.js
+ * `chatLimitSentence` words it on both runtimes (the relay's RATE_LIMITED
+ * frame, the Hermes route's 429). Read back by its numbers and said again in
+ * the same words — never the raw text passed through — or null for any other
+ * failure. A unit test holds the two wordings together.
+ */
+const CHAT_LIMIT_RE = /^You have reached your chat limit on this ClawBox: (\d{1,7}) messages? an? (minute|hour)\. Try again in (\d{1,7}) (seconds?|minutes)\.$/;
+
+export function userChatLimitSentence(raw: unknown): string | null {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  const m = CHAT_LIMIT_RE.exec(text);
+  if (!m) return null;
+  const limit = Number(m[1]);
+  const window = m[2] === "minute" ? "a minute" : "an hour";
+  const n = Number(m[3]);
+  const unit = m[4].startsWith("minute") ? "minutes" : n === 1 ? "second" : "seconds";
+  return `You have reached your chat limit on this ClawBox: ${limit} ${limit === 1 ? "message" : "messages"} ${window}. Try again in ${n} ${unit}.`;
+}
+
+/**
  * A rate limit is transient and external: the box is fine, the provider is just
  * throttling it. So the sentence names the cause, says the box is not broken,
  * and gives the two real remedies — wait, or switch to another provider in
@@ -751,6 +771,10 @@ export function isAccountQuotaFailure(raw: unknown, context?: ChatRunFailureCont
  */
 export function describeChatFailure(raw: unknown, context?: ChatRunFailureContext, words?: ChatFailureWords): string {
   const text = typeof raw === "string" ? raw.trim() : "";
+  // The box's own refusal of a turn past this user's chat limit (TASK-2446):
+  // ahead of everything, because "send it again" is the wrong advice for it.
+  const limit = userChatLimitSentence(text);
+  if (limit) return limit;
   // The predicates read the provider's detail too: a 429 or a 401 lives in
   // the detail line when the gateway's own sentence is the generic one.
   const evidence = [text, context?.detail ?? "", context?.reason ?? ""].join("\n").trim();
