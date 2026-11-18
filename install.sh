@@ -4225,24 +4225,40 @@ ensure_vault_service() {
 # is $SECONDS as a delta, asked first, as in restore_previous_build: a count of
 # sleeps would stretch by however long each systemctl query took. The queries
 # themselves are not cut short (nothing in the installer is, for being slow).
+# Each look is ONE systemctl call (vault_active_pid): a stop that begins between
+# an is-active and a show leaves the unit `deactivating` on the very same
+# MainPID, which two calls would take for a vault that is up.
 vault_came_up() {
   local old=${1:-0} limit=${VAULT_UP_WAIT_S:-30} steady=${VAULT_UP_STEADY_S:-3} pid started=$SECONDS
   while [ $((SECONDS - started)) -lt "$limit" ]; do
-    if systemctl is-active --quiet clawbox-vault.service 2>/dev/null; then
-      pid="$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)"
-      case "$pid" in
-        '' | 0 | *[!0-9]* | "$old") ;;
-        *)
-          sleep "$steady"
-          systemctl is-active --quiet clawbox-vault.service 2>/dev/null \
-            && [ "$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)" = "$pid" ] \
-            && return 0
-          ;;
-      esac
-    fi
+    pid="$(vault_active_pid)"
+    case "$pid" in
+      '' | 0 | *[!0-9]* | "$old") ;;
+      *)
+        sleep "$steady"
+        [ "$(vault_active_pid)" = "$pid" ] && return 0
+        ;;
+    esac
     sleep 1
   done
   return 1
+}
+
+# vault_active_pid — the vault's MainPID when it is `active` right now, else
+# nothing. ActiveState, SubState and MainPID come from ONE `systemctl show`, so
+# the state and the pid are the same observation. show prints the properties in
+# systemd's own order, not the one asked for: each line is matched by name.
+vault_active_pid() {
+  local line state="" pid=""
+  while IFS= read -r line; do
+    case "$line" in
+      ActiveState=*) state="${line#ActiveState=}" ;;
+      MainPID=*) pid="${line#MainPID=}" ;;
+    esac
+  done < <(systemctl show clawbox-vault.service -p ActiveState,SubState,MainPID 2>/dev/null || true)
+  if [ "$state" = active ]; then
+    printf '%s\n' "$pid"
+  fi
 }
 
 # Whether the running vault started before the build on disk: its working

@@ -186,11 +186,19 @@ describe("the service: installed and started on every box, loopback only", () =>
     }
   });
 
-  it("says so when a vault it started or restarted does not stay up, and tries no apt it cannot have", () => {
-    // The real functions and a systemctl stand-in. Before the --no-block call
-    // the unit is FAKE_BEFORE on pid 1111; after it, each is-active probe takes
-    // the next "state:pid" of FAKE_AFTER (the last one repeats) and `show`
-    // answers the pid of the probe last taken.
+  /**
+   * The real ensure_vault_service, vault_came_up and vault_active_pid with a
+   * systemctl stand-in. Before the --no-block call the unit is FAKE_BEFORE on
+   * pid 1111. After it, each look the installer takes is ONE
+   * `show -p ActiveState,SubState,MainPID` and gets the next "state:pid" of
+   * FAKE_AFTER (the last one repeats): `up`, `stopping` (deactivating, on the
+   * pid it had) or `down`. Any other systemctl question after the call (an
+   * is-active, a show of one property) is written to "stray": a look made of
+   * two calls is what lets a stop begin between them. FAKE_SLOW_FIRST makes
+   * the first look take that many seconds; "finished" lists the looks that ran
+   * to their end.
+   */
+  function vaultUpHarness() {
     const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "vault-up-")));
     const bin = path.join(tmp, "bin");
     fs.mkdirSync(bin);
@@ -202,10 +210,17 @@ describe("the service: installed and started on every box, loopback only", () =>
         'case "$1" in',
         "  is-enabled) echo enabled ;;",
         "  is-active)",
-        '    if [ ! -f "$FAKE_DIR/called" ]; then [ "$FAKE_BEFORE" = up ]; exit; fi',
+        '    [ -f "$FAKE_DIR/called" ] && echo "$*" >> "$FAKE_DIR/stray"',
+        '    [ "$FAKE_BEFORE" = up ] ;;',
+        "  show)",
+        '    if [ ! -f "$FAKE_DIR/called" ]; then echo 1111; exit 0; fi',
+        '    case "$*" in *ActiveState*SubState*MainPID*) ;; *) echo "$*" >> "$FAKE_DIR/stray"; exit 0 ;; esac',
         '    n=$(( $(cat "$FAKE_DIR/n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$FAKE_DIR/n"',
-        '    [ "$(tok | cut -d: -f1)" = up ] ;;',
-        '  show) if [ -f "$FAKE_DIR/called" ]; then tok | cut -d: -f2; else echo 1111; fi ;;',
+        '    if [ "$n" = 1 ] && [ -n "$FAKE_SLOW_FIRST" ]; then sleep "$FAKE_SLOW_FIRST"; fi',
+        "    t=$(tok)",
+        '    case "${t%%:*}" in up) st=active; sub=running ;; stopping) st=deactivating; sub=stop-sigterm ;; *) st=inactive; sub=dead ;; esac',
+        '    echo "MainPID=${t#*:}"; echo "ActiveState=$st"; echo "SubState=$sub"',
+        '    echo "$n" >> "$FAKE_DIR/finished" ;;',
         '  start|restart) echo "$1" >> "$FAKE_DIR/called" ;;',
         "esac",
         "",
@@ -213,20 +228,37 @@ describe("the service: installed and started on every box, loopback only", () =>
       { mode: 0o755 },
     );
     fs.writeFileSync(path.join(bin, "apt-get"), '#!/bin/sh\necho "$*" >> "$FAKE_DIR/apt"\n', { mode: 0o755 });
-    const fns = ["ensure_vault_service", "vault_came_up", "ensure_vault_packages"].map((n) => `${shellFunction(INSTALL_SH, n)}\n}\n`).join("");
-    const run = (stubs: string, before: "up" | "down", after: string) => {
+    const fns = ["ensure_vault_service", "vault_came_up", "vault_active_pid", "ensure_vault_packages"].map((n) => `${shellFunction(INSTALL_SH, n)}\n}\n`).join("");
+    const installed = "dpkg_installed() { return 0; }\nvault_runs_previous_build() { return 0; }";
+    const run = (stubs: string, before: "up" | "down", after: string, extra: Record<string, string> = {}) => {
       const dir = fs.mkdtempSync(path.join(tmp, "case-"));
+      const seen = (f: string) => (fs.existsSync(path.join(dir, f)) ? fs.readFileSync(path.join(dir, f), "utf8").trim() : "");
+      const began = Date.now();
       // ensure_vault_service is the script's last command: its status is the exit status.
       const r = spawnSync("bash", ["-c", `${fns}${stubs}\nensure_vault_service`], {
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, FAKE_DIR: dir, FAKE_BEFORE: before, FAKE_AFTER: after, VAULT_UP_WAIT_S: "2", VAULT_UP_STEADY_S: "0" },
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, FAKE_DIR: dir, FAKE_BEFORE: before, FAKE_AFTER: after, VAULT_UP_WAIT_S: "2", VAULT_UP_STEADY_S: "0", ...extra },
         encoding: "utf8",
       });
+      const ms = Date.now() - began;
       expect(r.error).toBeUndefined();
       expect(r.signal).toBeNull();
-      const calls = fs.existsSync(path.join(dir, "called")) ? fs.readFileSync(path.join(dir, "called"), "utf8").trim() : "";
-      return { status: r.status, out: `${r.stdout}${r.stderr}`, calls, apt: fs.existsSync(path.join(dir, "apt")) };
+      // Whatever the run did, every look after the start was the one `show`.
+      expect(seen("stray")).toBe("");
+      return {
+        status: r.status,
+        out: `${r.stdout}${r.stderr}`,
+        calls: seen("called"),
+        apt: fs.existsSync(path.join(dir, "apt")),
+        looks: Number(seen("n") || 0),
+        finished: seen("finished").split("\n").filter(Boolean),
+        ms,
+      };
     };
-    const installed = "dpkg_installed() { return 0; }\nvault_runs_previous_build() { return 0; }";
+    return { tmp, run, installed };
+  }
+
+  it("says so when a vault it started or restarted does not stay up, and tries no apt it cannot have", () => {
+    const { tmp, run, installed } = vaultUpHarness();
     const flapping = Array.from({ length: 12 }, (_, i) => `up:${i % 2 ? 3333 : 2222}`).join(" ");
     try {
       // A start that comes up and stays on its pid: no warning.
@@ -258,6 +290,55 @@ describe("the service: installed and started on every box, loopback only", () =>
       expect(r.apt).toBe(false);
       expect(r.status).toBe(1);
       expect(r.out).toContain("Warning: ClawBox Vault packages not installed: pass gnupg (apt is busy");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("does not take a vault that is stopping for one that is up, though it keeps the pid it had", () => {
+    // `deactivating` still carries the MainPID: an active check and a pid check
+    // made as two calls can land either side of the stop and pass on the pid
+    // alone. The state and the pid are read in one call, and only `active` counts.
+    const { tmp, run, installed } = vaultUpHarness();
+    try {
+      // Never active: a warning, not a start that "came up".
+      let r = run(installed, "down", "stopping:2222");
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("Warning: clawbox-vault.service did not stay up after its start");
+      // Active on its first look, stopping on the same pid at the steady look.
+      r = run(installed, "down", "up:2222 stopping:2222");
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("did not stay up after its start");
+      // The same for a restart onto a new pid.
+      r = run(installed, "up", "up:2222 stopping:2222");
+      expect(r.calls).toBe("restart");
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("did not stay up after its restart");
+      // Stopping at first, then up and staying up within the window: polled on, no warning.
+      r = run(installed, "down", "stopping:2222 up:2222", { VAULT_UP_WAIT_S: "6" });
+      expect(r.status).toBe(0);
+      expect(r.out).not.toContain("Warning");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("gives a vault that is coming up a window of elapsed time, not a number of looks", () => {
+    // The window is 3 s and the first look (a systemctl stuck behind a busy bus)
+    // takes all of it and finds the unit down. Counting looks, a 3 s window is
+    // three looks however long each one took; counting wall clock it is spent.
+    const { tmp, run, installed } = vaultUpHarness();
+    try {
+      const r = run(installed, "down", "down:0", { VAULT_UP_WAIT_S: "3", FAKE_SLOW_FIRST: "3" });
+      expect(r.calls).toBe("start");
+      // The look was let finish, not cut short at the deadline…
+      expect(r.finished).toEqual(["1"]);
+      expect(r.ms).toBeGreaterThanOrEqual(2900);
+      // …and no second one was made after it.
+      expect(r.looks).toBe(1);
+      // The existing warning and failure status, as for any start that never came up.
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("Warning: clawbox-vault.service did not stay up after its start");
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
