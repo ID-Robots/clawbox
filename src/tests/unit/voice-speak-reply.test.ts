@@ -164,6 +164,16 @@ describe("speakReply", () => {
     expect(body.reason).toBe("short of memory");
   });
 
+  it("says Kokoro's memory guard out of Hermes' answer with its numbers, not as a refusal (TASK-2649)", async () => {
+    harnessMock.mockResolvedValue("hermes");
+    hermesSpeakMock.mockResolvedValue({ ok: false, code: "local_memory", status: 502, shortfall: { available: "2.6", needed: "3" } });
+    const res = await speakReply("Hello");
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body).toMatchObject({ code: "local_memory", available: "2.6", needed: "3" });
+    expect(body.error).toBe("The box is short of memory for its voice right now (2.6 GB free, needs 3 GB) — try again when less is running.");
+  });
+
   it("speaks with the box's own voice when the local-only AI lock refuses Hermes' cloud voice (TASK-2501)", async () => {
     harnessMock.mockResolvedValue("hermes");
     storeMock.mockImplementation(async (key: string) => (key === "ai_cloud_lock" ? true : undefined));

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # timeout: 900
-# covers: src/lib/stt-endpoint.ts src/lib/stt-preference.ts src/lib/stt-channel.ts src/app/setup-api/chat/transcribe/route.ts src/app/setup-api/stt/endpoint/route.ts scripts/stt-endpoint-client.py src/lib/hermes-tts.ts src/lib/voice-box.ts scripts/gateway-pre-start.sh
+# covers: src/lib/stt-endpoint.ts src/lib/stt-preference.ts src/lib/stt-channel.ts src/app/setup-api/chat/transcribe/route.ts src/app/setup-api/stt/endpoint/route.ts scripts/stt-endpoint-client.py src/lib/hermes-tts.ts src/lib/voice-box.ts src/lib/voice-speak.ts src/lib/kokoro-memory-guard.ts scripts/gateway-pre-start.sh
 #
 # Speech local-only (TASK-2501 PR-D), on the runtime the board runs.
 #
@@ -17,8 +17,15 @@
 #      the mock;
 #   3. a spoken reply: POST /setup-api/tts/speak answers audio from the box's
 #      own voice (Kokoro); on Hermes the factory `edge` (Microsoft's cloud) is
-#      set first and must have been replaced by `clawbox-local`; on OpenClaw no
-#      ClawBox AI cloud voice entry is left in openclaw.json;
+#      set first and must have been replaced by `clawbox-local` — a box with no
+#      voice installed has nothing to select onto, so that check skips with the
+#      spoken-reply leg rather than asking for a swap that cannot happen; on OpenClaw no
+#      ClawBox AI cloud voice entry is left in openclaw.json. Local engines
+#      earlier tests left loaded are put on standby first when Kokoro's cold
+#      start would not have its 3000 MB; a 502 local_memory that remains is
+#      the product's guard, and the leg is skipped with the numbers. On Hermes
+#      the guard's words come back inside Hermes' answer, and the reply route
+#      must still say local_memory, not cloud_refused (TASK-2649);
 #   4. the server stopped: the recording is refused with `cloud_ai_locked`,
 #      through the running server and in-process with every fetch recorded,
 #      and not one request goes anywhere but the stopped server.
@@ -268,6 +275,37 @@ if [ "$RUNTIME" = openclaw ]; then
 fi
 
 # 3. A spoken reply from the box'"'"'s own voice.
+# Kokoro'"'"'s cold start (no resident kokoro-server) needs CLAWBOX_TTS_MIN_FREE_MB
+# free, 3000 MB unless set (scripts/openclaw/clawbox-tts.sh, TASK-382), and
+# refuses with 502 local_memory below it. The tests before this one leave
+# local models resident (an Ollama model kept alive, the memory embedder):
+# on an 8 GB board that is the difference. When the headroom is not there they
+# are put on standby, the box'"'"'s own idle stop, woken by their next request.
+# llama.cpp'"'"'s chat server is the web server'"'"'s child (it would be started
+# again at once), so it is only reported.
+mem_mb() { awk "/^MemAvailable:/ {print int(\$2/1024)}" /proc/meminfo; }
+TTS_NEED_MB=${CLAWBOX_TTS_MIN_FREE_MB:-3000}
+case $TTS_NEED_MB in "" | *[!0-9]*) TTS_NEED_MB=3000 ;; esac
+MEM_BEFORE=$(mem_mb)
+MEM_BEFORE=${MEM_BEFORE:-0}
+KOKORO_RESIDENT=false
+[ -S "${KOKORO_SOCKET:-/tmp/kokoro-server.sock}" ] && KOKORO_RESIDENT=true
+STOOD_DOWN=""
+if [ "$KOKORO_RESIDENT" = false ] && [ "$MEM_BEFORE" -lt "$TTS_NEED_MB" ]; then
+  OLLAMA_URL=http://127.0.0.1:11434
+  for m in $(curl -sS --max-time 5 "$OLLAMA_URL/api/ps" 2>/dev/null | nj "((v && v.models) || []).map((x) => x.name).join(\" \")" | tr -d "\""); do
+    curl -sS --max-time 60 -o /dev/null -X POST -d "{\"model\":\"$m\",\"keep_alive\":0}" "$OLLAMA_URL/api/generate" 2>/dev/null && STOOD_DOWN="$STOOD_DOWN ollama:$m"
+  done
+  if systemctl is-active --quiet clawbox-embed.service && sudo -n /usr/bin/systemctl stop clawbox-embed.service 2>/dev/null; then
+    STOOD_DOWN="$STOOD_DOWN clawbox-embed"
+  fi
+  [ -n "$STOOD_DOWN" ] && sleep 5
+fi
+LLAMA_PID=$(cat data/llamacpp/server.pid 2>/dev/null)
+LLAMA_RSS=0
+case $LLAMA_PID in "" | *[!0-9]*) ;; *) LLAMA_RSS=$(awk "/^VmRSS:/ {print int(\$2/1024)}" "/proc/$LLAMA_PID/status" 2>/dev/null) ;; esac
+MEM_AFTER=$(mem_mb)
+say "{\"speakMemory\":{\"need\":${TTS_NEED_MB},\"before\":${MEM_BEFORE},\"after\":${MEM_AFTER:-0},\"kokoroResident\":${KOKORO_RESIDENT},\"stoodDown\":$(printf "%s" "${STOOD_DOWN# }" | njs),\"llamaChatRssMb\":${LLAMA_RSS:-0}}}"
 if [ "$RUNTIME" = hermes ]; then
   hermes_set_provider "\"edge\"" >/dev/null
   say "{\"hermesBefore\":$(hermes_provider)}"
@@ -277,7 +315,7 @@ SPK=$(printf "header = \"Cookie: clawbox_session=%s\"\nheader = \"Origin: http:/
   | curl -sS -D "$HDR" -o "$WORK/reply.bin" -w "%{http_code}" -X POST --max-time 200 --data-binary "{\"text\":\"Spoken by this box alone.\"}" -K - "$DASHBOARD/setup-api/tts/speak" 2>/dev/null)
 ENGINE=$(grep -i "^x-clawbox-voice-engine:" "$HDR" | tr -d "\r" | awk "{print \$2}")
 CTYPE=$(grep -i "^content-type:" "$HDR" | tr -d "\r" | awk "{print \$2}")
-say "{\"speak\":{\"status\":\"${SPK:-000}\",\"engine\":$(printf "%s" "$ENGINE" | njs),\"type\":$(printf "%s" "$CTYPE" | njs),\"bytes\":$(stat -c %s "$WORK/reply.bin" 2>/dev/null || echo 0),\"error\":$(head -c 300 "$WORK/reply.bin" | tr -cd "[:print:]" | njs)}}"
+say "{\"speak\":{\"status\":\"${SPK:-000}\",\"engine\":$(printf "%s" "$ENGINE" | njs),\"type\":$(printf "%s" "$CTYPE" | njs),\"bytes\":$(stat -c %s "$WORK/reply.bin" 2>/dev/null || echo 0),\"error\":$(head -c 300 "$WORK/reply.bin" | tr -cd "[:print:]" | njs),\"refusal\":$(head -c 4000 "$WORK/reply.bin" | nj "v && typeof v === \"object\" ? {code: v.code, available: v.available, needed: v.needed} : null")}}"
 rm -f "$HDR"
 # Whether the box has its own voice installed at all: no_voice under the lock means "none",
 # and only then is the spoken-reply leg skipped.
@@ -372,14 +410,26 @@ fi
 # installed, a refusal fails like any other: the wiring is broken.
 SPEAK_CODE=$(printf '%s' "$(r '.speak.error')" | jq -r '.code // empty' 2>/dev/null)
 KOKORO=$(r '.kokoroInstalled')
+# TASK-2608: the engines the earlier legs left loaded are stood down before the
+# voice, so a refusal carries the numbers that say whether the board was short.
+SPEAK_NEED_MB=$(r '.speakMemory.need')
+SPEAK_AFTER_MB=$(r '.speakMemory.after')
+SPEAK_FREED=$(r '.speakMemory.stoodDown')
+SPEAK_LLAMA_MB=$(r '.speakMemory.llamaChatRssMb')
+note "before the voice: MemAvailable $(r '.speakMemory.before') MB, $SPEAK_AFTER_MB MB after standing down [${SPEAK_FREED}], Kokoro cold start needs $SPEAK_NEED_MB MB, kokoro-server resident: $(r '.speakMemory.kokoroResident'), llama.cpp chat server RSS ${SPEAK_LLAMA_MB:-0} MB"
 if [ "$KOKORO" != true ] && [ "$KOKORO" != false ]; then
   not_ok "whether Kokoro is installed on this board could not be read (kokoroInstalled: $KOKORO): the voice reply cannot be judged"
 elif [ "$KOKORO" = false ] && [ "$(r '.speak.status')" != 200 ]; then
-  skip "Kokoro is not installed on this board: the spoken reply leg needs it (the box refused under the lock: HTTP $(r '.speak.status')${SPEAK_CODE:+, $SPEAK_CODE})"
+  skip "Kokoro is not installed on this board: the spoken reply leg needs it (the box refused under the lock: HTTP $(r '.speak.status')${SPEAK_CODE:+, $SPEAK_CODE}${SPEAK_AFTER_MB:+, ${SPEAK_AFTER_MB} MB free after standing down local engines})"
 elif [ "$KOKORO" = false ]; then
   not_ok "a voice reply was spoken under the lock although Kokoro is not installed, so not by the box's own voice: $(r '.speak | tojson')"
 elif [ "$(r '.speak.status')" = 200 ] && [ "$(r '.speak.bytes')" -gt 1024 ] 2>/dev/null && { [ "$RUNTIME" = hermes ] || [ "$(r '.speak.engine')" = local ]; }; then
   ok "a voice reply was spoken by the box's own voice under the lock ($(r '.speak.bytes') bytes of $(r '.speak.type')$([ -n "$(r '.speak.engine')" ] && printf ', engine %s' "$(r '.speak.engine')"))"
+elif [ "$(r '.speak.status')" = 502 ] && [ "$(r '.speak.refusal.code')" = local_memory ]; then
+  # The product's guard, saying with its own numbers that the box was short:
+  # the reason is right, and the leg cannot run on this board right now.
+  ok "the voice refused with the memory guard's reason, not a crash: HTTP 502 local_memory ($(r '.speak.refusal.available') GB free, needs $(r '.speak.refusal.needed') GB)"
+  skip "the spoken reply leg: Kokoro's cold start needs ${SPEAK_NEED_MB:-3000} MB free (clawbox-tts.sh CLAWBOX_TTS_MIN_FREE_MB) and this board had ${SPEAK_AFTER_MB:-?} MB after the test put local engines on standby (${SPEAK_FREED:-nothing to stand down}; llama.cpp chat server ${SPEAK_LLAMA_MB:-0} MB resident)"
 else
   not_ok "the voice reply under the lock: $(r '.speak | tojson')"
 fi

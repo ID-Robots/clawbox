@@ -138,6 +138,15 @@ describe("POST /setup-api/tts/sample on a Hermes box", () => {
     expect(speakMock).not.toHaveBeenCalled();
   });
 
+  it("says Kokoro's memory guard with its numbers when Hermes' answer carries it (TASK-2649)", async () => {
+    speakMock.mockResolvedValue({ ok: false, code: "local_memory", status: 502, shortfall: { available: "2.6", needed: "3" } });
+    const { POST } = await route();
+    const res = await POST(post({ text: "parity check", engine: "local", voice: "af_heart" }));
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ code: "local_memory", available: "2.6", needed: "3" });
+  });
+
   it("says a local failure in local words, not as a cloud refusal", async () => {
     // The transport carries both engines, so its codes are the transport's.
     // Rendered unmapped, a Kokoro failure read as "The ClawBox cloud voice
