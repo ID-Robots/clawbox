@@ -30,7 +30,7 @@ async function req(path: string, init: Parameters<TestVault["request"]>[1] = {},
   const res = await v.request(path, init);
   const text = await res.text();
   if (!opts.secret) plainReplies.push(text);
-  return { status: res.status, body: (text ? JSON.parse(text) : {}) as Record<string, any> };
+  return { status: res.status, body: (text ? JSON.parse(text) : {}) as Record<string, unknown> };
 }
 
 const asUi = (path: string, init: Parameters<TestVault["request"]>[1] = {}, opts: { secret?: boolean } = {}) => req(path, { ...init, token: ui }, opts);
@@ -44,9 +44,9 @@ const mcpCall: VaultCall = async (method, path, body) => {
 };
 
 /** Plays the extension and the human for the next card command. */
-async function humanAnswers(decision: "confirm" | "decline" | "ignore"): Promise<{ command: Record<string, any> | undefined; secretStatusBeforeConfirm?: number }> {
+async function humanAnswers(decision: "confirm" | "decline" | "ignore"): Promise<{ command: Record<string, unknown> | undefined; secretStatusBeforeConfirm?: number }> {
   const polled = await asExt("/api/ext/commands?wait=2000");
-  const command = (polled.body.commands as Array<Record<string, any>>)[0];
+  const command = (polled.body.commands as Array<Record<string, unknown>>)[0];
   if (!command) return { command };
   const early = await asExt("/api/ext/card-secret", { body: { commandId: command.id } }, { secret: true });
   const earlyReport = await asExt("/api/ext/result", { body: { id: command.id, status: "filled" } });
