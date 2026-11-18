@@ -7,6 +7,7 @@ import { screenshotTranslations } from "./screenshot-translations";
 import { primeRadiantTranslations } from "./prime-radiant-translations";
 import { chatStepTranslations } from "./chat-step-translations";
 import { mailDraftTranslations } from "./mail-draft-translations";
+import { linkedBoxesTranslations } from "./linked-boxes-translations";
 
 // Merge setup + desktop + clawkeep + edition translations per locale.
 // Order matters: later sources override earlier ones, so a clawkeep-specific
@@ -23,6 +24,7 @@ function mergeTranslations(
   primeRadiant: Record<Locale, Record<string, string>>,
   chatStep: Record<Locale, Record<string, string>>,
   mailDraft: Record<Locale, Record<string, string>>,
+  linkedBoxes: Record<Locale, Record<string, string>>,
 ): Record<Locale, Record<string, string>> {
   const merged = {} as Record<Locale, Record<string, string>>;
   for (const locale of Object.keys(setup) as Locale[]) {
@@ -41,6 +43,8 @@ function mergeTranslations(
       ...chatStep[locale],
       // An e-mail draft waiting for the person's Send: the chat card and its settings.
       ...mailDraft[locale],
+      // Settings → Linked ClawBoxes and the desktop's box switcher (TASK-2519).
+      ...linkedBoxes[locale],
     };
   }
   return merged;
@@ -596,6 +600,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.effectiveBranchRecovered": "Updates follow {branch}, worked out from this box's own build. No branch is recorded.",
     "update.effectiveBranchUnresolved": "Checking against {branch}, the release channel. This box is not on a branch and records none, so enter a branch here before updating.",
     "update.effectiveBranchDefault": "Updates follow {branch}, the release channel. No branch is recorded on this box.",
+    "update.effectiveBranchWorkstation": "Updates follow {branch}, the ClawBox Workstation channel: a version reaches it only after it was tested on a Workstation. The beta toggle and a branch recorded here do not apply on this computer.",
     "update.save": "Save",
     "update.saving": "Saving…",
     "update.forceFullUpdate": "Force full update",
@@ -1582,6 +1587,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.effectiveBranchRecovered": "Актуализациите следват {branch} — определен от собствената компилация на устройството. Няма записан клон.",
     "update.effectiveBranchUnresolved": "Проверява се спрямо {branch} — каналът за издания. Устройството не е на клон и няма записан, затова въведете клон тук преди актуализация.",
     "update.effectiveBranchDefault": "Актуализациите следват {branch} — каналът за издания. На това устройство няма записан клон.",
+    "update.effectiveBranchWorkstation": "Актуализациите следват {branch} — каналът на ClawBox Workstation: версия стига до него едва след като е тествана на Workstation. Превключвателят за бета и записаният тук клон не важат за този компютър.",
     "update.save": "Запази",
     "update.saving": "Запазване…",
     "update.forceFullUpdate": "Принудителна пълна актуализация",
@@ -2563,6 +2569,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.effectiveBranchRecovered": "Updates folgen {branch}, ermittelt aus dem eigenen Build dieses Geräts. Es ist kein Branch hinterlegt.",
     "update.effectiveBranchUnresolved": "Geprüft wird gegen {branch}, den Release-Kanal. Dieses Gerät steht auf keinem Branch und hat keinen hinterlegt – tragen Sie vor dem Update hier einen Branch ein.",
     "update.effectiveBranchDefault": "Updates folgen {branch}, dem Release-Kanal. Auf diesem Gerät ist kein Branch hinterlegt.",
+    "update.effectiveBranchWorkstation": "Updates folgen {branch}, dem Kanal der ClawBox Workstation: Eine Version kommt erst dorthin, nachdem sie auf einer Workstation getestet wurde. Der Beta-Schalter und ein hier hinterlegter Branch gelten auf diesem Computer nicht.",
     "update.save": "Speichern",
     "update.saving": "Wird gespeichert…",
     "update.forceFullUpdate": "Vollständiges Update erzwingen",
@@ -3547,6 +3554,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.effectiveBranchRecovered": "Las actualizaciones siguen {branch}, deducida de la propia compilación de este equipo. No hay ninguna rama registrada.",
     "update.effectiveBranchUnresolved": "Se comprueba contra {branch}, el canal de versiones. Este equipo no está en ninguna rama ni tiene una registrada: escribe aquí una rama antes de actualizar.",
     "update.effectiveBranchDefault": "Las actualizaciones siguen {branch}, el canal de versiones. Este equipo no tiene ninguna rama registrada.",
+    "update.effectiveBranchWorkstation": "Las actualizaciones siguen {branch}, el canal de ClawBox Workstation: una versión solo llega a él después de probarse en una Workstation. El interruptor de beta y la rama registrada aquí no se aplican en este equipo.",
     "update.save": "Guardar",
     "update.saving": "Guardando…",
     "update.forceFullUpdate": "Forzar actualización completa",
@@ -4528,6 +4536,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.effectiveBranchRecovered": "Les mises à jour suivent {branch}, déduite de la compilation de cet appareil. Aucune branche n'est enregistrée.",
     "update.effectiveBranchUnresolved": "Vérification par rapport à {branch}, le canal des versions. Cet appareil n'est sur aucune branche et n'en enregistre aucune : saisissez une branche ici avant de mettre à jour.",
     "update.effectiveBranchDefault": "Les mises à jour suivent {branch}, le canal des versions. Aucune branche n'est enregistrée sur cet appareil.",
+    "update.effectiveBranchWorkstation": "Les mises à jour suivent {branch}, le canal ClawBox Workstation : une version n'y arrive qu'après avoir été testée sur une Workstation. L'option bêta et la branche enregistrée ici ne s'appliquent pas à cet ordinateur.",
     "update.save": "Enregistrer",
     "update.saving": "Enregistrement…",
     "update.forceFullUpdate": "Forcer une mise à jour complète",
@@ -5509,6 +5518,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.effectiveBranchRecovered": "Gli aggiornamenti seguono {branch}, ricavato dalla build di questo dispositivo. Nessun branch è registrato.",
     "update.effectiveBranchUnresolved": "Il controllo avviene su {branch}, il canale delle release. Questo dispositivo non è su alcun branch e non ne registra uno: inserisci qui un branch prima di aggiornare.",
     "update.effectiveBranchDefault": "Gli aggiornamenti seguono {branch}, il canale delle release. Su questo dispositivo non è registrato alcun branch.",
+    "update.effectiveBranchWorkstation": "Gli aggiornamenti seguono {branch}, il canale di ClawBox Workstation: una versione ci arriva solo dopo essere stata provata su una Workstation. L'interruttore beta e il branch registrato qui non valgono su questo computer.",
     "update.save": "Salva",
     "update.saving": "Salvataggio…",
     "update.forceFullUpdate": "Forza aggiornamento completo",
@@ -6490,6 +6500,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.effectiveBranchRecovered": "更新は {branch}（この端末自身のビルドから判定）に従います。ブランチは記録されていません。",
     "update.effectiveBranchUnresolved": "リリースチャンネルの {branch} と比較しています。この端末はブランチ上になく、記録もないため、更新する前にここでブランチを入力してください。",
     "update.effectiveBranchDefault": "更新はリリースチャンネルの {branch} に従います。この端末にはブランチが記録されていません。",
+    "update.effectiveBranchWorkstation": "更新は {branch}（ClawBox Workstation 用チャンネル）に従います。バージョンは Workstation でテストされた後にのみここに届きます。ベータの切り替えとここに記録されたブランチは、このコンピューターには適用されません。",
     "update.save": "保存",
     "update.saving": "保存中…",
     "update.forceFullUpdate": "完全更新を強制する",
@@ -7471,6 +7482,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.effectiveBranchRecovered": "Updates volgen {branch}, afgeleid uit de eigen build van dit apparaat. Er is geen branch vastgelegd.",
     "update.effectiveBranchUnresolved": "Er wordt vergeleken met {branch}, het releasekanaal. Dit apparaat staat op geen enkele branch en heeft er geen vastgelegd, dus vul hier een branch in voordat je bijwerkt.",
     "update.effectiveBranchDefault": "Updates volgen {branch}, het releasekanaal. Op dit apparaat is geen branch vastgelegd.",
+    "update.effectiveBranchWorkstation": "Updates volgen {branch}, het ClawBox Workstation-kanaal: een versie komt er pas op nadat ze op een Workstation is getest. De bètaschakelaar en een hier vastgelegde branch gelden niet op deze computer.",
     "update.save": "Opslaan",
     "update.saving": "Opslaan…",
     "update.forceFullUpdate": "Volledige update afdwingen",
@@ -8452,6 +8464,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.effectiveBranchRecovered": "Uppdateringar följer {branch}, framtagen ur enhetens eget bygge. Ingen gren är sparad.",
     "update.effectiveBranchUnresolved": "Jämför mot {branch}, releasekanalen. Enheten står inte på någon gren och har ingen sparad, så ange en gren här innan du uppdaterar.",
     "update.effectiveBranchDefault": "Uppdateringar följer {branch}, releasekanalen. Ingen gren är sparad på den här enheten.",
+    "update.effectiveBranchWorkstation": "Uppdateringar följer {branch}, ClawBox Workstation-kanalen: en version hamnar där först när den har testats på en Workstation. Beta-reglaget och en gren som sparas här gäller inte på den här datorn.",
     "update.save": "Spara",
     "update.saving": "Sparar…",
     "update.forceFullUpdate": "Tvinga fullständig uppdatering",
@@ -9433,6 +9446,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "update.effectiveBranchRecovered": "更新跟随 {branch}，由本设备自身的构建推断得出。未记录任何分支。",
     "update.effectiveBranchUnresolved": "正在与发布通道 {branch} 比较。本设备不在任何分支上，也未记录分支，请在更新前于此处填写分支。",
     "update.effectiveBranchDefault": "更新跟随发布通道 {branch}。本设备未记录任何分支。",
+    "update.effectiveBranchWorkstation": "更新跟随 {branch}，即 ClawBox Workstation 通道：某个版本只有在 Workstation 上测试通过后才会进入该通道。测试版开关和此处记录的分支不适用于这台电脑。",
     "update.save": "保存",
     "update.saving": "正在保存…",
     "update.forceFullUpdate": "强制完整更新",
@@ -9886,4 +9900,5 @@ export const translations = mergeTranslations(
   primeRadiantTranslations,
   chatStepTranslations,
   mailDraftTranslations,
+  linkedBoxesTranslations,
 );

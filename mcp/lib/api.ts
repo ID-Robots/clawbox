@@ -3,7 +3,7 @@
 // Three things every call gets that the previous helper did not:
 //   1. A timeout. An unbounded fetch against a stalled Next.js route hung the
 //      whole stdio server, and the agent saw nothing at all.
-//   2. redirect:"manual". /setup-api/* is session-gated by src/middleware.ts;
+//   2. redirect:"manual". /setup-api/* is session-gated by src/proxy.ts;
 //      without a valid bearer every call 307s to /login, and following it
 //      returned the login HTML which JSON.parse then blamed on the tool.
 //   3. Per-route error rules, so a 502 becomes an instruction instead of a

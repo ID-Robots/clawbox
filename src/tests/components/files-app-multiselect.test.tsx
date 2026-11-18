@@ -320,3 +320,35 @@ describe("FilesApp — upload destination", () => {
     expect(writes[0].url).toBe("/setup-api/files?dir=Projects&name=dropped.txt");
   });
 });
+
+// TASK-2446: the owner's limits for other users, as the Files app words them —
+// in the person's own language, with the numbers the route sent.
+describe("FilesApp — the per-user limits", () => {
+  const dropFile = async (name: string) => {
+    render(<FilesApp />);
+    await waitFor(() => expect(screen.getAllByTestId("files-entry").length).toBe(SHOWN.length));
+    const dataTransfer = { types: ["Files"], files: [new File(["x"], name)], getData: () => "", dropEffect: "" };
+    fireEvent.dragEnter(screen.getByTestId("files-grid"), { dataTransfer });
+    fireEvent.dragOver(screen.getByTestId("files-grid"), { dataTransfer });
+    fireEvent.drop(screen.getByTestId("files-grid"), { dataTransfer });
+    await waitFor(() => expect(writes).toHaveLength(1));
+  };
+
+  it("says a file is over the upload limit, naming the file and the limit", async () => {
+    answers = [{ status: 413, body: { error: "server words", code: "upload_too_large", limitBytes: 100 * 1024 * 1024 } }];
+    await dropFile("video.mp4");
+    await waitFor(() => expect(screen.getByTestId("files-status")).toHaveTextContent(t("users.limits.fileTooLarge", { name: "video.mp4", limit: "100 MB" })));
+  });
+
+  it("says the home folder is full, with what it holds and its quota", async () => {
+    answers = [{ status: 507, body: { error: "server words", code: "quota_exceeded", usedBytes: 9.5 * 1024 ** 3, quotaBytes: 10 * 1024 ** 3 } }];
+    await dropFile("big.iso");
+    await waitFor(() => expect(screen.getByTestId("files-status")).toHaveTextContent(t("users.limits.homeFull", { used: "9.5 GB", quota: "10 GB" })));
+  });
+
+  it("still shows the route's own words for any other refusal", async () => {
+    answers = [{ status: 507, body: { error: "Not enough disk space.", code: "disk_full" } }];
+    await dropFile("a.bin");
+    await waitFor(() => expect(screen.getByTestId("files-status")).toHaveTextContent("Not enough disk space."));
+  });
+});

@@ -1,4 +1,4 @@
-import { splitAssistantMedia } from "@/lib/chat-media";
+import { boundedFiles, splitAssistantMedia } from "@/lib/chat-media";
 import { userTabKeyFor } from "@/lib/chat-scope";
 import { uuid, type ChatToolSummary } from "@/lib/chat-history-cache";
 import { isSlashCommand, typedResetCommand, type SlashCommand } from "@/lib/chat-slash-commands";
@@ -662,6 +662,8 @@ export class HermesAdapter implements HarnessAdapter {
       text: reply.text,
       media: reply.images,
       audio: reply.audio,
+      // A document the reply named, as the download card the transcript replays too.
+      ...(reply.files.length ? { files: boundedFiles(reply.files) } : {}),
       ...(thinking ? { reasoning: thinking } : {}),
       ...(toolCalls.length ? { toolCalls } : {}),
       // What answered, as the route recorded it — the dashboard's own

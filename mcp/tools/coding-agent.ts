@@ -63,7 +63,30 @@ const PROVIDER_WORDS: Readonly<Record<string, string>> = {
   "clawbox-ai": "ClawBox AI",
   anthropic: "Anthropic",
   openai: "OpenAI",
+  local: "the box's own engine",
 };
+
+/**
+ * The providers this box's coding tools may name: what the device narrowed
+ * them to (under the local-only AI lock, `local` alone — mcp/lib/context.ts),
+ * else every provider this build knows. Never empty.
+ */
+export function offeredCodingProviders(ctx: Pick<McpContext, "codingProviders">): readonly string[] {
+  const narrowed = (ctx.codingProviders ?? []).filter((p) => (CODING_PROVIDERS as readonly string[]).includes(p));
+  return narrowed.length > 0 ? narrowed : CODING_PROVIDERS;
+}
+
+/**
+ * The `provider` parameter's description, for the providers this box offers.
+ * Both answers stay within MAX_PARAM_DESCRIPTION_CHARS (mcp/lib/register.ts):
+ * mcp/check-tools.ts fails the install on a longer one.
+ */
+export function runProviderDescription(providers: readonly string[]): string {
+  if (providers.length === 1 && providers[0] === "local") {
+    return `"local": the box's own engine — the local-only AI lock is on, so runs use nothing else. Omit: the same.`;
+  }
+  return `"clawbox-ai" (box's plan), "anthropic"/"openai" (owner's, if connected), "local" (the box's own engine). Omit: default.`;
+}
 // Pure too: the store's own bounds, so the output cap below is derived from
 // what the device can actually hold rather than from a round number.
 import { MAX_SECRETS } from "../../src/lib/project-secrets-shape";
@@ -587,7 +610,7 @@ function describeRun(run: RunPayload, tail: number): string {
     // Which account paid is said whenever it is not the box's own plan: the
     // owner asked for that run to go somewhere else and is entitled to see it
     // in the report, and "model claude-opus-5-5" alone does not say whose bill.
-    run.provider && run.provider !== "clawbox-ai" ? `on the owner's ${PROVIDER_WORDS[run.provider] ?? run.provider} account` : null,
+    run.provider === "local" ? `on ${PROVIDER_WORDS.local}` : run.provider && run.provider !== "clawbox-ai" ? `on the owner's ${PROVIDER_WORDS[run.provider] ?? run.provider} account` : null,
     run.model ? `model ${run.model}` : (run.requestedModel ? `model ${run.requestedModel}` : null),
     `${run.numTurns} turns`,
     run.thinkingTokens ? `${run.thinkingTokens} reasoning tokens` : null,
@@ -1068,10 +1091,10 @@ const SETTINGS_RULES: ErrorRule[] = [
 ];
 
 /** The three halves of one role, as `<role>_provider` / `<role>_model` / `<role>_effort`. */
-function roleHalfParams(role: ModelRole, who: string): Shape {
+function roleHalfParams(role: ModelRole, who: string, providers: readonly string[] = CODING_PROVIDERS): Shape {
   const reset = ROLE_RESET_WORDS.join("/");
   return {
-    [`${role}_provider`]: zEnumOf([...ROLE_RESET_WORDS, ...CODING_PROVIDERS], `The account that pays for ${who}; must be connected. ${reset}: the team's own.`).optional(),
+    [`${role}_provider`]: zEnumOf([...ROLE_RESET_WORDS, ...providers], `The account that pays for ${who}; must be connected. ${reset}: the team's own.`).optional(),
     [`${role}_model`]: zOptText(64, `Model for ${who}: ${ROLE_MODEL_TIERS.join("/")}, a model id its provider offers, or ${reset}.`),
     [`${role}_effort`]: zEnumOf([...ROLE_RESET_WORDS, ...ROLE_EFFORT_LEVELS], `Effort for ${who}; ${reset} follows the owner's. A reader never goes above xhigh.`).optional(),
   };
@@ -1157,10 +1180,15 @@ export function describeSettings(s: SettingsPayload): string {
 const RESUME_NEXT =
   "Do not retry. Tell the user what the ClawBox said; the run's page in the Coding Agent app shows the same.";
 
-export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "codingAgent">): void {
+export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "codingAgent" | "codingProviders">): void {
   // The device said no (switch off, harness missing, or an older build without
   // the route). Registering nothing is the safe direction.
   if (!ctx.codingAgent) return;
+  // Under the local-only AI lock the device offers `local` alone (TASK-2501):
+  // the schemas name nothing else, and a run takes no model — the engine
+  // serves one.
+  const providers = offeredCodingProviders(ctx);
+  const namesModels = providers.some((p) => p === "anthropic" || p === "openai");
 
   reg.tool(
     "coding_agent_run",
@@ -1170,14 +1198,15 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
       directory: zOptText(512, "A folder inside the owner's project folder to work in (its name, or its absolute path), when it is not a code project."),
       resume_run_id: zOptText(40, "A finished run's id, e.g. \"run-k3x9q2ab\", to continue that session with this task."),
-      provider: zEnumOf(
-        CODING_PROVIDERS,
-        `Who pays: "clawbox-ai" (the box's plan), "anthropic" or "openai" (the owner's own, once connected). Omit: default.`,
-      ).optional(),
-      model: zEnumOf(
-        RUN_MODELS,
-        `claude-* for "anthropic", gpt-* for "openai"; omit for its default. Naming a model with "clawbox-ai" is refused.`,
-      ).optional(),
+      provider: zEnumOf(providers, runProviderDescription(providers)).optional(),
+      ...(namesModels
+        ? {
+          model: zEnumOf(
+            RUN_MODELS,
+            `claude-* for "anthropic", gpt-* for "openai"; omit for its default. Refused with "clawbox-ai" or "local".`,
+          ).optional(),
+        }
+        : {}),
       effort: zEnumOf(
         OFFERED_EFFORT_LEVELS,
         EFFORT_PARAM_DESCRIPTION,
@@ -1842,9 +1871,9 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
     "Change the owner's coding-team settings: effort, a role's provider/model/effort (planner_*, worker_*, reviewer_*), review pass, auto PR and merge, PR body, dynamic team, runs at once, history, media, commit identity. Only the fields given change. They are the owner's preferences: confirm before changing effort, a model or runs at once unless the user just asked for exactly that.",
     {
       effort: zEnumOf(AGENT_EFFORT_LEVELS, "How hard every run thinks. Costs more at each step up.").optional(),
-      ...roleHalfParams("planner", "the planner (and the team's lead)"),
-      ...roleHalfParams("worker", "the workers, which write the code"),
-      ...roleHalfParams("reviewer", "the reviewer of each task"),
+      ...roleHalfParams("planner", "the planner (and the team's lead)", providers),
+      ...roleHalfParams("worker", "the workers, which write the code", providers),
+      ...roleHalfParams("reviewer", "the reviewer of each task", providers),
       review_pass: z.boolean().optional().describe("One extra review run after every completed run that changed files."),
       auto_pr: z.boolean().optional().describe("Branch, open a pull request and wait for its checks after a run."),
       auto_merge: z.boolean().optional().describe("May the box squash-merge a pull request its own review loop cleared? Never into main."),

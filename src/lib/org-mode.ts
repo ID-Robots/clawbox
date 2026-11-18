@@ -24,7 +24,7 @@
 // box until it is named here — a member of staff is handed the surfaces this
 // file lists and nothing it forgot.
 //
-// Pure (no `fs`, no Next): middleware.ts, production-server.js's mirror
+// Pure (no `fs`, no Next): proxy.ts, production-server.js's mirror
 // (scripts/org-mode.js, pinned by a unit test) and the desktop all judge the
 // same table.
 

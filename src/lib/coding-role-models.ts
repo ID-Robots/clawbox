@@ -31,6 +31,8 @@
 import {
   ANTHROPIC_MODELS,
   CODING_PROVIDERS,
+  LOCAL_ENGINE_MODEL,
+  LOCKED_CODING_PROVIDERS,
   OPENAI_MODELS,
   defaultModelForProvider,
   economyModelForProvider,
@@ -125,6 +127,8 @@ export const ROLE_DEFAULT_MODELS: Readonly<Record<CodingProvider, Readonly<Recor
   anthropic: { planner: "claude-fable-5-2", worker: "claude-sonnet-5-5", reviewer: "claude-opus-5-5" },
   openai: { planner: "gpt-6-astra", worker: "gpt-5.6-sol", reviewer: "gpt-5.6-sol" },
   "clawbox-ai": { planner: "deepseek-v4-flash", worker: "deepseek-v4-flash", reviewer: "deepseek-v4-flash" },
+  // The box's engine serves one model: every role runs on it (TASK-2501 PR-E).
+  local: { planner: LOCAL_ENGINE_MODEL, worker: LOCAL_ENGINE_MODEL, reviewer: LOCAL_ENGINE_MODEL },
 };
 
 /**
@@ -163,6 +167,7 @@ const ROLE_MODEL_OPTIONS: Readonly<Record<CodingProvider, readonly string[]>> = 
   "clawbox-ai": [economyModelForProvider("clawbox-ai")],
   anthropic: ANTHROPIC_MODELS,
   openai: OPENAI_MODELS,
+  local: [LOCAL_ENGINE_MODEL],
 };
 
 /** The models a role may name on this provider. */
@@ -186,6 +191,9 @@ export function isRoleModelId(provider: CodingProvider, value: unknown): value i
  */
 export const RELATIVE_MODEL_COST: Readonly<Record<string, number>> = {
   "deepseek-v4-flash": 1,
+  // The box's own engine bills nobody; 1 is the floor of this scale, and the
+  // one model a locked box has leaves a planner nothing to weigh anyway.
+  [LOCAL_ENGINE_MODEL]: 1,
   // Haiku 5.5 lists at a twentieth of Sonnet; 1 is the floor of this scale.
   "claude-haiku-5-5": 1,
   "claude-sonnet-5": 10,
@@ -417,6 +425,28 @@ export function resolveRoleRun(
   const start = own.effort === undefined ? ROLE_AUTO_EFFORT[provider]?.[role] : undefined;
   if (start) effort = weakerEffort(effort, start);
   return { provider, model, effort, tier, auto };
+}
+
+/**
+ * The stored choices as a box under the local-only AI lock runs them
+ * (TASK-2501): a role pinned to a cloud provider — and a model only that
+ * provider offers — goes back to the team's own, which under the lock is the
+ * box's engine. Its effort and a tier stay. Nothing is written: lift the lock
+ * and the owner's choices are what they were.
+ */
+export function roleModelsUnderLock(stored: RoleModels): RoleModels {
+  const out: RoleModels = {};
+  for (const role of MODEL_ROLES) {
+    const own = stored[role];
+    if (!own) continue;
+    const choice: RoleModelChoice = { ...own };
+    if (choice.provider !== undefined && !LOCKED_CODING_PROVIDERS.includes(choice.provider)) {
+      delete choice.provider;
+      if (choice.model !== undefined && !isTier(choice.model)) delete choice.model;
+    }
+    if (!isEmptyChoice(choice)) out[role] = choice;
+  }
+  return out;
 }
 
 /** One role as the panel draws it: every half, `"auto"` where nothing is stored. */

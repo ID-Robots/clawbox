@@ -8,7 +8,7 @@ export const dynamic = "force-dynamic";
  * from, the commit checked out on disk, the tested branch it is pinned to,
  * and whether those three agree.
  *
- * Auth-gated by src/middleware.ts like every other /setup-api/* route.
+ * Auth-gated by src/proxy.ts like every other /setup-api/* route.
  *
  * Cached briefly because the About screen and the drift banner both poll it
  * and each miss costs a handful of `git` subprocesses; 30s is short enough

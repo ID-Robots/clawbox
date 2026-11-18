@@ -1,6 +1,6 @@
 // "Is the PERSON asking, or the agent?"
 //
-// WHY THIS EXISTS AT ALL. src/middleware.ts admits a caller to /setup-api/* on
+// WHY THIS EXISTS AT ALL. src/proxy.ts admits a caller to /setup-api/* on
 // EITHER a session cookie OR the MCP bearer token (step 3c) — deliberately, so
 // the MCP server, which has no cookie, can reach the device's own API. For
 // almost every route that is exactly right: the agent is allowed to read the
@@ -59,6 +59,15 @@ async function cookieClaims(request: Request): Promise<Record<string, unknown> |
   } catch {
     return null;
   }
+}
+
+/**
+ * When the request's session cookie runs out, in ms since the epoch — read
+ * from the verified cookie, so null for none, a forged or a revoked one.
+ */
+export async function sessionExpiresAt(request: Request): Promise<number | null> {
+  const exp = (await cookieClaims(request))?.exp;
+  return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : null;
 }
 
 /**

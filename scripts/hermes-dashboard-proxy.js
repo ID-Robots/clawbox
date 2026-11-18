@@ -827,7 +827,7 @@ function handleRequest(req, res) {
     // navigations are redirected — and to the ClawBox origin on :80, since a
     // relative /login is served by THIS proxy (redirect loop).
     if (wantsJsonError(req)) {
-      // Marked as the session gate's 401, the way src/middleware.ts marks its
+      // Marked as the session gate's 401, the way src/proxy.ts marks its
       // own (src/lib/session-expiry.ts): the dashboard's own 401s are not.
       res.writeHead(401, { "Content-Type": "application/json", "Cache-Control": "no-store", [SESSION_EXPIRED_HEADER]: "expired" });
       res.end(JSON.stringify({ error: "Authentication required", login: clawboxLoginUrl(req) }));

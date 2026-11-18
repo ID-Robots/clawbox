@@ -1,0 +1,26 @@
+<!doctype html>
+<html><body>
+  <h1>Checkout</h1>
+  <form id="newsletter"><input id="nl-email" type="email" name="email" placeholder="Newsletter email"><button>Subscribe</button></form>
+  <form id="checkout">
+    <fieldset>
+      <legend>Shipping</legend>
+      <label for="ship-name">Full name</label><input id="ship-name" name="name" autocomplete="shipping name">
+      <label for="ship-zip">ZIP</label><input id="ship-zip" name="zip" autocomplete="shipping postal-code">
+      <label for="gift">Gift card number</label><input id="gift" name="giftcard">
+    </fieldset>
+    <fieldset>
+      <legend>Payment</legend>
+      <label for="cc-name">Name on card</label><input id="cc-name" name="ccname" autocomplete="cc-name">
+      <label for="cc-number">Card number</label><input id="cc-number" name="cardnumber" autocomplete="billing cc-number" inputmode="numeric" placeholder="1234 1234 1234 1234" maxlength="19">
+      <label for="cc-exp">Expiry</label><input id="cc-exp" name="exp" autocomplete="cc-exp" placeholder="MM / YY" maxlength="7">
+      <label for="cc-csc">CVC</label><input id="cc-csc" name="cvc" autocomplete="cc-csc" maxlength="4">
+      <label for="cc-type">Card type</label>
+      <select id="cc-type" name="cctype" autocomplete="cc-type">
+        <option value="">Choose…</option><option value="VI">Visa</option><option value="MC">Mastercard</option><option value="AX">American Express</option>
+      </select>
+      <input type="hidden" name="token" value="">
+    </fieldset>
+    <button type="submit" id="pay">Pay now</button>
+  </form>
+</body></html>

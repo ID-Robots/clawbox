@@ -24,7 +24,6 @@ const OPENCLAW_CONFIG_PATH = `${
 }/openclaw.json`;
 
 const ALLOWED_PROTOS = new Set(["http", "https"]);
-const CANONICAL_ORIGIN = process.env.CANONICAL_ORIGIN || "http://clawbox.local";
 const ALLOWED_HOSTS = new Set(
   (process.env.ALLOWED_HOSTS || "clawbox.local,10.42.0.1,10.43.0.1,localhost")
     .split(",")
@@ -67,7 +66,7 @@ function systemHostnames(): string[] {
 
 // Without renamed-host support, ALLOWED_HOSTS was frozen to `clawbox.local`
 // at install time, so any rename bounced the user to a NXDOMAIN page when
-// the gateway was busy and we fell back to CANONICAL_ORIGIN.
+// the gateway was busy and we fell back to a fixed `clawbox.local` origin.
 function isReflectableHost(rawHost: string): boolean {
   if (ALLOWED_HOSTS.has(rawHost)) return true;
   if (net.isIPv4(rawHost)) return true;
@@ -154,7 +153,13 @@ export function redirectToSetup(request: NextRequest): NextResponse {
       // canonical origin instead of throwing a 500.
     }
   }
-  return NextResponse.redirect(new URL(`${CANONICAL_ORIGIN}/setup`), 302);
+  // Not a host we may echo back (a tunnel, a custom domain, a reverse proxy):
+  // answer with a RELATIVE Location, which the browser resolves against the
+  // origin it is already on. The old fallback was an absolute
+  // `http://clawbox.local/setup`, a name that does not resolve for anyone
+  // reaching the box remotely (SUP-1027). Nothing from the request is put into
+  // the header, so there is no Host-header reflection to worry about either.
+  return new NextResponse(null, { status: 302, headers: { Location: "/setup" } });
 }
 
 const CLAWBOX_BAR = `<div id="clawbox-bar" style="position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:99999;display:flex;align-items:center;gap:6px;padding:4px 14px;background:rgba(17,24,39,0.92);border:1px solid rgba(249,115,22,0.3);border-top:none;border-radius:0 0 10px 10px;font-family:system-ui,sans-serif;font-size:12px;color:#d1d5db;backdrop-filter:blur(8px);box-shadow:0 2px 8px rgba(0,0,0,0.3)">

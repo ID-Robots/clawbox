@@ -5,8 +5,9 @@ import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 
 // The scheduled-job alerts' card in Settings → Harness (src/lib/job-alerts.ts,
-// docs/design/scheduled-job-alerts.md): the owner's switch — ON by default —
-// and what the last check found. The desktop notice and the Telegram message
+// docs/design/scheduled-job-alerts.md): the owner's switch — ON by default —,
+// who of the bot's approved users gets the alerts on Telegram (the first five
+// until the owner ticks someone), and what the last check found. The desktop notice and the Telegram message
 // point here, and this is the one place that keeps saying which job is in
 // trouble after the notice has gone.
 //
@@ -36,7 +37,48 @@ interface JobAlertsStatus {
   problems: JobAlertsProblem[];
 }
 
+/** Who is told on Telegram (the route's `recipients`): the bot's approved users and the owner's pick. */
+interface RecipientUser {
+  id: string;
+  name?: string;
+}
+
+interface JobAlertRecipients {
+  picked: string[] | null;
+  known: boolean;
+  approved: RecipientUser[];
+  effective: string[];
+  defaultCount: number;
+  maxPicked: number;
+}
+
 const PROBLEMS: ReadonlySet<string> = new Set(["stopped", "failing", "skipping", "overdue"]);
+
+const isStringArray = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((v) => typeof v === "string");
+
+// Checked on its own: a `recipients` this card cannot draw (an older server
+// has none at all) leaves that part out and keeps the rest of the card.
+function isRecipients(value: unknown): value is JobAlertRecipients {
+  if (!value || typeof value !== "object") return false;
+  const r = value as Record<string, unknown>;
+  return (r.picked === null || isStringArray(r.picked))
+    && typeof r.known === "boolean"
+    && Array.isArray(r.approved)
+    && r.approved.every((u) => {
+      if (!u || typeof u !== "object") return false;
+      const user = u as Record<string, unknown>;
+      return typeof user.id === "string" && (user.name === undefined || typeof user.name === "string");
+    })
+    && isStringArray(r.effective)
+    && typeof r.defaultCount === "number"
+    && typeof r.maxPicked === "number";
+}
+
+function recipientsOf(body: unknown): JobAlertRecipients | null {
+  const value = body && typeof body === "object" ? (body as { recipients?: unknown }).recipients : undefined;
+  return isRecipients(value) ? value : null;
+}
 
 // Shape-checked down to the element: a body this card cannot draw (an older
 // server, a proxy's error page, a mock answering `{}`) hides the card instead
@@ -96,6 +138,7 @@ interface JobAlertsPanelProps {
 export default function JobAlertsPanel({ show = false, onShown }: JobAlertsPanelProps = {}) {
   const { t, locale } = useT();
   const [status, setStatus] = useState<JobAlertsStatus | null>(null);
+  const [recipients, setRecipients] = useState<JobAlertRecipients | null>(null);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const cardRef = useRef<HTMLDivElement | null>(null);
@@ -127,7 +170,10 @@ export default function JobAlertsPanel({ show = false, onShown }: JobAlertsPanel
         const r = await fetch("/setup-api/job-alerts", { cache: "no-store" });
         if (!r.ok || !alive) return;
         const body: unknown = await r.json();
-        if (alive && isStatus(body)) setStatus(body);
+        if (alive && isStatus(body)) {
+          setStatus(body);
+          setRecipients(recipientsOf(body));
+        }
       } catch {
         // Nothing to draw: the card stays hidden.
       }
@@ -135,23 +181,40 @@ export default function JobAlertsPanel({ show = false, onShown }: JobAlertsPanel
     return () => { alive = false; };
   }, []);
 
-  async function toggle(enabled: boolean) {
+  /** The switch and the pick save the same way: the route answers the whole card. */
+  async function save(change: { enabled: boolean } | { recipients: string[] | null }) {
     setBusy(true);
     setFailed(false);
     try {
       const r = await fetch("/setup-api/job-alerts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled }),
+        body: JSON.stringify(change),
       });
       const body: unknown = await r.json().catch(() => null);
-      if (r.ok && (body as { ok?: unknown } | null)?.ok === true && isStatus(body)) setStatus(body);
-      else setFailed(true);
+      if (r.ok && (body as { ok?: unknown } | null)?.ok === true && isStatus(body)) {
+        setStatus(body);
+        setRecipients(recipientsOf(body));
+      } else {
+        setFailed(true);
+      }
     } catch {
       setFailed(true);
     } finally {
       setBusy(false);
     }
+  }
+
+  // Ticked = who the next alert goes to on Telegram, so a box that never chose
+  // shows the default's people ticked. A tick or an untick saves the ticked
+  // approved users as the pick; a picked id that is no longer approved is not
+  // drawn, and leaves the pick with the next save.
+  function pick(id: string, on: boolean) {
+    if (!recipients) return;
+    const ticked = new Set(recipients.known ? recipients.effective : []);
+    if (on) ticked.add(id);
+    else ticked.delete(id);
+    void save({ recipients: recipients.approved.map((u) => u.id).filter((x) => ticked.has(x)) });
   }
 
   if (!status) return null;
@@ -160,6 +223,16 @@ export default function JobAlertsPanel({ show = false, onShown }: JobAlertsPanel
   // The environment's off is the operator's: the switch is drawn off and inert,
   // because flipping a preference it overrides would change nothing.
   const lockedOff = status.off === "env";
+
+  // The Telegram part is drawn while the alerts are on and there is anyone to
+  // pick — or a pick to undo: a saved one whose people are all gone, or one
+  // that cannot be read.
+  const approvedIds = new Set(recipients?.approved.map((u) => u.id) ?? []);
+  const ticked = new Set(recipients?.known ? recipients.effective : []);
+  const stale = recipients?.picked?.filter((id) => !approvedIds.has(id)).length ?? 0;
+  const atLimit = recipients !== null && ticked.size >= recipients.maxPicked;
+  const showRecipients = status.enabled && recipients !== null
+    && (recipients.approved.length > 0 || !recipients.known || (recipients.picked?.length ?? 0) > 0);
 
   return (
     <div ref={cardRef} className="max-w-xl scroll-mt-4" data-testid="settings-job-alerts">
@@ -191,7 +264,7 @@ export default function JobAlertsPanel({ show = false, onShown }: JobAlertsPanel
             aria-busy={busy}
             disabled={busy || lockedOff}
             data-testid="job-alerts-switch"
-            onClick={() => void toggle(!status.enabled)}
+            onClick={() => void save({ enabled: !status.enabled })}
             className={`relative shrink-0 w-11 h-6 rounded-full transition-colors disabled:opacity-50 ${status.enabled ? "bg-[var(--coral-bright)]" : "bg-white/15"}`}
           >
             <span
@@ -200,6 +273,66 @@ export default function JobAlertsPanel({ show = false, onShown }: JobAlertsPanel
             />
           </button>
         </div>
+
+        {showRecipients && recipients && (
+          <div className="px-3 py-3" data-testid="job-alerts-recipients">
+            <span className="block text-sm text-[var(--text-primary)] font-medium">{t("jobAlerts.recipients.title")}</span>
+            <span className="block text-[11px] text-[var(--text-secondary)] leading-relaxed">{t("jobAlerts.recipients.helper")}</span>
+            {recipients.approved.length > 0 && (
+              <ul className="mt-2 space-y-0.5">
+                {recipients.approved.map((u) => {
+                  const on = ticked.has(u.id);
+                  return (
+                    <li key={u.id}>
+                      <label className="flex items-center gap-2.5 rounded-lg px-1.5 py-1 cursor-pointer hover:bg-white/[0.04]">
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          disabled={busy || (!on && atLimit)}
+                          onChange={(e) => pick(u.id, e.target.checked)}
+                          data-testid={`job-alerts-recipient-${u.id}`}
+                          className="shrink-0 w-4 h-4 accent-[var(--coral-bright)] disabled:opacity-50"
+                        />
+                        <span className="flex-1 min-w-0 truncate text-sm text-[var(--text-primary)]">{u.name ?? u.id}</span>
+                        {u.name && (
+                          <span className="shrink-0 font-mono text-[10px] text-[var(--text-muted)]">{u.id}</span>
+                        )}
+                      </label>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            {(!recipients.known || recipients.picked === null || recipients.effective.length === 0 || stale > 0 || atLimit) && (
+            <span className="block text-[11px] text-[var(--text-secondary)] leading-relaxed mt-1.5" data-testid="job-alerts-recipients-note">
+              {!recipients.known ? (
+                <span className="block text-[var(--amber-ink)]">{t("jobAlerts.recipients.unreadable")}</span>
+              ) : recipients.picked === null ? (
+                <span className="block">{t("jobAlerts.recipients.default", { count: recipients.defaultCount })}</span>
+              ) : recipients.effective.length === 0 ? (
+                <span className="block text-[var(--amber-ink)]">{t("jobAlerts.recipients.none")}</span>
+              ) : null}
+              {recipients.known && stale > 0 && (
+                <span className="block">{t("jobAlerts.recipients.stale", { count: stale })}</span>
+              )}
+              {recipients.known && atLimit && (
+                <span className="block">{t("jobAlerts.recipients.limit", { count: recipients.maxPicked })}</span>
+              )}
+            </span>
+            )}
+            {(recipients.picked !== null || !recipients.known) && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void save({ recipients: null })}
+                data-testid="job-alerts-recipients-reset"
+                className="mt-1.5 text-[11px] font-medium text-[var(--coral-bright)] hover:underline disabled:opacity-50"
+              >
+                {t("jobAlerts.recipients.reset")}
+              </button>
+            )}
+          </div>
+        )}
 
         <div className="px-3 py-2.5 text-[11px] text-[var(--text-secondary)] leading-relaxed" data-testid="job-alerts-status">
           {!status.enabled ? (

@@ -79,6 +79,8 @@ git_retryable_failure() {
     *"Authentication failed"*|*"terminal prompts disabled"*) return 0 ;;
     *"Could not resolve host"*|*"Connection timed out"*|*"Connection reset"*) return 0 ;;
     *"early EOF"*|*"RPC failed"*|*"unable to access"*) return 0 ;;
+    # git_with_retry's low-speed abort on a stalled transfer.
+    *"Operation too slow"*) return 0 ;;
   esac
   return 1
 }
@@ -164,6 +166,19 @@ git_with_retry() {
   case "$delay" in
     ''|*[!0-9]*) echo "  CLAWBOX_GIT_RETRY_DELAY is not a number, using 3" >&2; delay=3 ;;
   esac
+  # A transfer that STALLS is a failure to retry, not a wait (TASK-2517). Git
+  # has no overall timeout, and a fetch whose connection went quiet — a WiFi
+  # roam, a captive network, a NAT that dropped the flow — sat there until the
+  # updater's step budget ran out, with every retry below unused. git's own
+  # low-speed abort ends an HTTP transfer that moves under `lowSpeedLimit`
+  # bytes/s for `lowSpeedTime` seconds ("Operation too slow"), which arrives
+  # as "RPC failed" or "unable to access" and is retried like any other
+  # network failure. A slow link that still moves is never cut: the bound is on
+  # silence, not on length. As -c options on THIS call, so they reach git
+  # through the owner's runner (which does not pass a VAR=… prefix on) and
+  # override nothing in the checkout's own config beyond this command.
+  local low_time="${CLAWBOX_GIT_LOW_SPEED_TIME:-60}"
+  case "$low_time" in ''|*[!0-9]*) low_time=60 ;; esac
   # The subcommand, not "$1": every caller here leads with -c/-C, so naming the
   # first argument produced "git -C attempt 1/3 failed" in the journal.
   verb="$(printf '%s\n' "$@" | grep -m1 -E '^(fetch|clone|pull|push|ls-remote)$' || true)"
@@ -171,7 +186,7 @@ git_with_retry() {
     # Output is CAPTURED so the classification below has the text to read, then
     # re-emitted on stderr — where git puts it — so a caller that captures this
     # function's stdout cannot mistake git's progress for a result.
-    if out="$(GIT_TERMINAL_PROMPT=0 ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git "$@" 2>&1)"; then
+    if out="$(GIT_TERMINAL_PROMPT=0 ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime="$low_time" "$@" 2>&1)"; then
       [ -z "$out" ] || printf '%s\n' "$out" >&2
       return 0
     else
@@ -1330,7 +1345,7 @@ OPENCLAW_RETRY=/usr/bin/env
 if [ -n "${SRC_DIR:-}" ] && [ -x "$SRC_DIR/scripts/openclaw-maintenance-retry.sh" ]; then
   OPENCLAW_RETRY="$SRC_DIR/scripts/openclaw-maintenance-retry.sh"
 fi
-OPENCLAW_VERSION="2026.11.3"
+OPENCLAW_VERSION="2026.11.5"
 
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
@@ -1464,6 +1479,9 @@ EXPECTED_ACTIVE_SERVICES=(
   clawbox-heartbeat.timer
   clawbox-ap-watchdog.timer
   clawbox-codex-auth-sync.timer
+  # ClawBox Vault, the built-in password manager (vault/). Every edition: it is
+  # ClawBox's own service, the same under OpenClaw and Hermes. Loopback only.
+  clawbox-vault.service
 )
 EXPECTED_INSTALLED_SERVICES=(
   clawbox-wifi-failover.service
@@ -3070,6 +3088,11 @@ case "$BUILD_GATEWAY_ROOM_MB" in ''|*[!0-9]*) BUILD_GATEWAY_ROOM_MB=6144 ;; esac
 # When pause_gateway_if_build_needs_room stopped the gateway, in epoch seconds;
 # empty otherwise. Only ever read by report_gateway_build_pause.
 GATEWAY_PAUSED_FOR_BUILD_AT=""
+# The systemd stamp of that same stop (InactiveEnterTimestampMonotonic), read
+# right after it; empty otherwise. Only ever read by hand_paused_gateway_to_update:
+# after the build the live stamp may be that of a start and stop someone else
+# made meanwhile, which the fallback must never take for the pause's.
+GATEWAY_PAUSED_STAMP=""
 
 # On a rebuild nothing reboots after, stop the assistant for `next build` only
 # if the build will not fit beside it (TASK-1197).
@@ -3116,6 +3139,7 @@ pause_gateway_if_build_needs_room() {
   # that never happened.
   if ! systemctl is-active --quiet clawbox-gateway.service 2>/dev/null; then
     GATEWAY_PAUSED_FOR_BUILD_AT=$(date +%s 2>/dev/null || echo "")
+    GATEWAY_PAUSED_STAMP=$(systemctl show clawbox-gateway.service -p InactiveEnterTimestampMonotonic --value 2>/dev/null || true)
   fi
   return 0
 }
@@ -3125,10 +3149,122 @@ pause_gateway_if_build_needs_room() {
 report_gateway_build_pause() {
   local at="$GATEWAY_PAUSED_FOR_BUILD_AT" now
   GATEWAY_PAUSED_FOR_BUILD_AT=""
+  GATEWAY_PAUSED_STAMP=""
   case "$at" in ''|*[!0-9]*) return 0 ;; esac
   now=$(date +%s 2>/dev/null || echo "")
   case "$now" in ''|*[!0-9]*) return 0 ;; esac
   echo "  clawbox-gateway.service was paused for $((now - at)) s for the build"
+  return 0
+}
+
+# The in-app update's restart arm hands a gateway it paused for `next build` to
+# the update's second half instead of starting it here (TASK-2517).
+#
+# WHY. That second half stops the gateway before its fixups (post_update runs
+# quiesced) and gateway_verify is what starts it on the updated pre-start, so a
+# start here was a start the update undid a minute later — and it was not free.
+# Measured on an 8 GB OpenClaw board (beta, an update with nothing new): the
+# resume held the stopped dashboard 20 s for the gateway's pre-start, then
+# post_update waited 42 s for that same start to finish only to stop it, and
+# gateway_verify started it a third time. The assistant is down for that whole
+# stretch either way: the start in the middle served nothing.
+#
+# The other engines paused for the build are still started by
+# resume_paused_engines; only the gateway, and only on this arm. The failure arm
+# resumes everything as before (nothing follows it), and so do the reboot arm's
+# boot and every other caller of do_rebuild.
+#
+# THE ONE NEW RISK, AND ITS NET. Before this, a gateway paused for the build ran
+# again whatever happened to the rest of the update. Now it waits for a second
+# half that, in one failure — a verified build whose web server never comes up,
+# so no continuation runs — would never come. So a transient timer
+# (GATEWAY_HANDBACK_UNIT) starts it GATEWAY_HANDBACK_S seconds later unless
+# something else has touched it since the pause: it acts only while the
+# gateway is still inactive (or failed) with the very InactiveEnterTimestamp the
+# pause left, and while no root update step, no gateway quiesce and no OpenClaw
+# process runs. Every START moves that stamp (gateway_verify's, an operator's),
+# a quiesce holds the unit's start condition off, and the waits below cover the
+# work that runs beside a gateway already stopped, so the net can only ever
+# start a gateway nobody has started or worked on since the build stopped it. Anything this cannot arm is the old
+# behaviour: the gateway is started here.
+GATEWAY_HANDBACK_UNIT="clawbox-gateway-handback"
+GATEWAY_HANDBACK_S="${CLAWBOX_GATEWAY_HANDBACK_S:-900}"
+case "$GATEWAY_HANDBACK_S" in ''|*[!0-9]*) GATEWAY_HANDBACK_S=900 ;; esac
+# How often the net looks again while a root update step runs: it never starts
+# the gateway under one, and it does not give up because of one either.
+GATEWAY_HANDBACK_RECHECK_S="${CLAWBOX_GATEWAY_HANDBACK_RECHECK_S:-60}"
+case "$GATEWAY_HANDBACK_RECHECK_S" in ''|*[!0-9]*) GATEWAY_HANDBACK_RECHECK_S=60 ;; esac
+# config/clawbox-gateway-maintenance.sh's guard: present while the updater holds
+# the gateway quiesced.
+GATEWAY_MAINTENANCE_GUARD="${CLAWBOX_GATEWAY_MAINTENANCE_GUARD:-/run/clawbox-gateway-maintenance}"
+# What the timer runs, as root, with the stamp the pause left as $1 and the
+# recheck interval as $2: while a root update step runs it waits and looks
+# again rather than ending, so a deadline that falls inside a long step (a
+# continuation whose process died in post_update) still starts the gateway
+# once the step is over. It waits the same way while the updater's maintenance
+# guard ($3, /run/clawbox-gateway-maintenance: a quiesce in progress) is up, and
+# while any OpenClaw process runs: a `systemctl stop` of a gateway that is
+# already stopped moves no stamp, so a doctor --fix or an offline auth edit the
+# web server runs beside the stopped gateway would otherwise not be seen — and
+# with the gateway down, a process naming openclaw is someone working on it.
+# (`[o]penclaw`, so the pattern never matches this script's own command line.)
+# Inline in
+# this root-owned file (the mirror's copy), never a script of the tree's. ONE
+# line: systemd writes a transient unit's command into a unit file under
+# /run/systemd/transient, and a newline in it splits the ExecStart= there
+# ("Missing '=', ignoring line"), as the first board run of this showed. No
+# `${` and no `%` either: systemd expands both in a command line.
+# shellcheck disable=SC2016  # expanded by the timer's own shell
+GATEWAY_HANDBACK_SCRIPT='while :; do state=$(systemctl show clawbox-gateway.service -p ActiveState --value 2>/dev/null); case "$state" in inactive|failed) ;; *) exit 0 ;; esac; [ -n "$1" ] && [ "$(systemctl show clawbox-gateway.service -p InactiveEnterTimestampMonotonic --value 2>/dev/null)" = "$1" ] || exit 0; if systemctl list-units --no-legend --plain --state=active,activating,deactivating "clawbox-root-update@*" 2>/dev/null | grep -q . || [ -e "$3" ] || pgrep -f "[o]penclaw" >/dev/null 2>&1; then sleep "$2" || sleep 60; continue; fi; echo "clawbox-gateway.service was paused for an update build and nothing has started it since: starting it"; exec systemctl start --no-block clawbox-gateway.service; done'
+
+disarm_gateway_handback() {
+  # The service too: it may be inside its recheck loop.
+  systemctl stop "$GATEWAY_HANDBACK_UNIT.timer" "$GATEWAY_HANDBACK_UNIT.service" 2>/dev/null || true
+  systemctl reset-failed "$GATEWAY_HANDBACK_UNIT.timer" "$GATEWAY_HANDBACK_UNIT.service" 2>/dev/null || true
+  return 0
+}
+
+# Returns non-zero when the net could not be armed, so the caller starts the
+# gateway itself.
+#
+# The deadline is ON THE BOOT's clock (`--on-boot`, now + GATEWAY_HANDBACK_S),
+# never `--on-active`: systemd re-reads a transient timer at every
+# daemon-reload and counts an OnActiveSec= again from the reload, so on a board
+# each update step's daemon-reload pushed the deadline another 15 min out and
+# the timer never fired; an OnBootSec= deadline is the same after a reload, and
+# needs no wall clock. RemainAfterElapse=no unloads it once it has fired.
+#
+# $1 is the stamp the pause left (GATEWAY_PAUSED_STAMP), never one read now: a
+# gateway started and stopped again during the build carries a newer stamp,
+# and the timer then leaves it alone.
+arm_gateway_handback() {
+  local stamp="${1:-}" up
+  case "$stamp" in ''|0|*[!0-9]*) return 1 ;; esac
+  up="$(awk '{print int($1)}' /proc/uptime 2>/dev/null)" || up=""
+  case "$up" in ''|*[!0-9]*) return 1 ;; esac
+  disarm_gateway_handback
+  systemd-run --quiet --collect --unit="$GATEWAY_HANDBACK_UNIT" \
+    --on-boot="$((up + GATEWAY_HANDBACK_S))s" --timer-property=AccuracySec=10s \
+    --timer-property=RemainAfterElapse=no \
+    /bin/sh -c "$GATEWAY_HANDBACK_SCRIPT" sh "$stamp" "$GATEWAY_HANDBACK_RECHECK_S" "$GATEWAY_MAINTENANCE_GUARD" >/dev/null 2>&1
+}
+
+hand_paused_gateway_to_update() {
+  local unit found=0
+  local -a kept=()
+  [ "${#PAUSED_ENGINE_UNITS[@]}" -gt 0 ] || return 0
+  for unit in "${PAUSED_ENGINE_UNITS[@]}"; do
+    if [ "$unit" = clawbox-gateway.service ]; then found=1; else kept+=("$unit"); fi
+  done
+  [ "$found" = 1 ] || return 0
+  if ! arm_gateway_handback "${GATEWAY_PAUSED_STAMP:-}"; then
+    echo "  Could not arm the gateway's fallback start; starting clawbox-gateway.service again here as before"
+    return 0
+  fi
+  PAUSED_ENGINE_UNITS=(${kept[@]+"${kept[@]}"})
+  GATEWAY_PAUSED_FOR_BUILD_AT=""
+  GATEWAY_PAUSED_STAMP=""
+  echo "  Leaving clawbox-gateway.service stopped for the update's second half: post_update stops it before its fixups and gateway_verify starts it on the updated pre-start, so a start here would only be stopped again (if nothing has started it $((GATEWAY_HANDBACK_S / 60)) min from now, $GATEWAY_HANDBACK_UNIT.timer does)"
   return 0
 }
 
@@ -3414,6 +3550,16 @@ set_previous_build_aside() {
   # to compensate for it.
   case "$need"  in ''|*[!0-9]*) need="" ;; esac
   case "$avail" in ''|*[!0-9]*) avail="" ;; esac
+  # The framework cache is not a second copy: carry_build_cache MOVES it into the
+  # new build. Counted twice, its few hundred MB (the Turbopack cache on a board,
+  # TASK-2517) could tip a box with room for two builds into the arm below that
+  # deletes the only one it has. An unreadable size subtracts nothing.
+  local cache_kb=""
+  if [ -n "$need" ] && [ -d "$build_dir/cache" ] && [ ! -L "$build_dir/cache" ]; then
+    cache_kb="$(du -sk "$build_dir/cache" 2>/dev/null | awk '{print $1}')"
+    case "$cache_kb" in ''|*[!0-9]*) cache_kb="" ;; esac
+    if [ -n "$cache_kb" ] && [ "$cache_kb" -lt "$need" ]; then need=$((need - cache_kb)); fi
+  fi
   if [ -n "$need" ] && [ -n "$avail" ] && [ "$avail" -lt "$((need * 2))" ]; then
     echo "  Only ${avail}K free for a ${need}K build — clearing the old one instead of keeping it" >&2
     rm -rf "$build_dir"
@@ -3757,6 +3903,210 @@ build_type_check_proven_by_ci() {
   printf '%s\n' "${head:0:12} is origin/$branch's tip on branch $branch; CI type-checks every pull request before it lands on $branch"
 }
 
+# Why one build stamp could not stand for a rebuild of this checkout, or
+# nothing when it can. `build_stamp_refusal <build-info.json> <node version>
+# <env files there now, comma-separated> <HEAD, 40 hex>`;
+# non-zero only when node itself could not run. Read with node as the tree's
+# owner, as scripts/verify-build-identity.sh reads the same file: a Jetson has
+# node, not necessarily jq, and the file is the tree's.
+build_stamp_refusal() {
+  as_clawbox node -e '
+    const fs = require("fs");
+    let s;
+    try { s = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.stdout.write("cannot be read"); process.exit(0); }
+    const why = [];
+    // contentDirty (write-build-info.mjs) leaves out the executable bits the
+    // rebuild step itself sets; a stamp from before it has only `dirty`.
+    if (typeof s.contentDirty === "boolean") {
+      if (s.contentDirty) why.push("was built from a tree with changed files (contentDirty=true)");
+    } else if (s.dirty !== false) {
+      why.push(`was built from a tree with changes (dirty=${s.dirty})`);
+    }
+    if (s.untracked !== 0) why.push(`was built with ${s.untracked} untracked file(s) in the tree`);
+    // The env files Next loaded for the build (write-build-info.mjs): one
+    // deleted since is invisible to the mtime check in the caller. A stamp from
+    // before the list cannot say, so it is not kept.
+    // The identity of the stamp itself, beside the build it sits with: commit
+    // and build id. verify-build-identity.sh checks the flat paths only, and
+    // the served stamp of the nested postbuild layout is under the resolved entry.
+    const head = process.argv[4] || "";
+    if (!head || s.commit !== head) why.push(`names commit ${String(s.commit || "(none)").slice(0, 12)}, and HEAD is ${head.slice(0, 12) || "(unread)"}`);
+    let besideId = "";
+    try { besideId = fs.readFileSync(require("path").join(require("path").dirname(process.argv[1]), "BUILD_ID"), "utf8").trim(); } catch {}
+    if (!besideId || s.buildId !== besideId) why.push(`describes build ${s.buildId || "(none)"}, and ${besideId ? `${besideId} is` : "no BUILD_ID is"} beside it`);
+    const envNow = (process.argv[3] || "").split(",").filter(Boolean).sort().join(",");
+    if (!Array.isArray(s.envFiles)) why.push("records no env-file list (a build from before it)");
+    else if ([...s.envFiles].sort().join(",") !== envNow) why.push(`was built with env files [${s.envFiles.join(", ")}], and [${envNow.split(",").filter(Boolean).join(", ")}] are there now`);
+    const want = process.argv[2] || "";
+    if (!want || s.node !== want) why.push(`was built on Node ${s.node || "(unrecorded)"}, and this build would run on ${want || "(no answer)"}`);
+    process.stdout.write(why.join("; "));
+  ' "$1" "${2:-}" "${3:-}" "${4:-}" 2>/dev/null
+}
+
+# The note that tells the update's second half the rebuild step KEPT the build
+# it found (TASK-2517). The web server that resumes the update after the
+# restart demands a changed BUILD_ID as its evidence that the rebuild happened
+# (src/lib/updater.ts) — a power cycle can erase a unit's failure, never the
+# build on disk — and a build kept on purpose does not change it. So the step
+# says so: "<BUILD_ID of the serving build> <boot id> <seconds since boot>",
+# which the updater accepts only for the build that is serving and only when it
+# was written in the boot, and after the moment, at which it dispatched this run
+# (rebuildKeptBuild) — so no older run's note can stand for this one, and a run
+# whose step never reached this point has none.
+#
+# ON DISK, in root's /var/lib/clawbox, never /run: the reboot arm ends this step
+# with a reboot, and the second half then resumes in the NEXT boot — a note on
+# tmpfs would be gone and the kept build read as a rebuild that never happened.
+# The boot id it carries is the dispatching boot's, not the reading one's, so
+# the note still binds to this run across that reboot. A plain data file root
+# writes and runs nothing from, through a fresh mktemp file renamed over the
+# place, readable by all; cleared at the top of every rebuild step. Non-zero,
+# leaving no note, when it cannot be written: the caller then rebuilds as it
+# always did.
+REBUILD_KEPT_NOTE="${CLAWBOX_REBUILD_KEPT_BUILD:-/var/lib/clawbox/rebuild-kept-build}"
+forget_rebuild_kept_build() {
+  rm -f "$REBUILD_KEPT_NOTE" 2>/dev/null || true
+  return 0
+}
+record_rebuild_kept_build() {
+  local entry id boot up tmp=""
+  forget_rebuild_kept_build
+  # The BUILD_ID of the tree the server runs from, read as the updater reads it
+  # (readBuildId): beside the real standalone entry, through its link if any.
+  entry="$(readlink -f "$PROJECT_DIR/.next/standalone/server.js" 2>/dev/null)" || entry=""
+  [ -n "$entry" ] || return 1
+  # Read as the tree's owner: the entry is a link the tree may point anywhere,
+  # and root reads nothing through it that the account could not read itself.
+  id="$(as_clawbox head -n 1 -- "$(dirname "$entry")/.next/BUILD_ID" 2>/dev/null | tr -d '[:space:]')" || id=""
+  case "$id" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  boot="$(tr -d '[:space:]' < "${CLAWBOX_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}" 2>/dev/null)" || boot=""
+  case "$boot" in ''|*[!0-9a-f-]*) return 1 ;; esac
+  up="$(awk '{print $1}' /proc/uptime 2>/dev/null)" || up=""
+  case "$up" in ''|*[!0-9.]*) return 1 ;; esac
+  if mkdir -p "$(dirname "$REBUILD_KEPT_NOTE")" 2>/dev/null \
+    && tmp="$(mktemp "$(dirname "$REBUILD_KEPT_NOTE")/.rebuild-kept-build.XXXXXX" 2>/dev/null)" \
+    && printf '%s %s %s\n' "$id" "$boot" "$up" > "$tmp" && chmod 0644 "$tmp" && mv -fT "$tmp" "$REBUILD_KEPT_NOTE" 2>/dev/null; then
+    return 0
+  fi
+  [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
+# Is the build on disk already the build of this checkout? Prints why or why
+# not; 0 only when every condition below holds (TASK-2517).
+#
+# WHY. An update whose target is the commit the box already serves — "Update
+# now" with nothing new, the setup wizard's update step on a box flashed at the
+# target, an update started again after one of its late steps failed — stopped
+# the dashboard, ran bun install and the whole `next build`, and restarted it
+# onto an equivalent build. step_rebuild_reboot asks this first and leaves out
+# the rebuild when the answer is yes (bun install, the engine pause, next build,
+# postbuild); everything else the step does — the redeploy before it, the
+# polkit refresh and the service restart that resumes the update after it —
+# runs as before.
+#
+# WHAT IS COMPARED. The update's sync has just put the tree on origin/<branch>
+# (reset --hard + clean -fd), so the question is whether the build on disk was
+# made from exactly this tree, with the inputs a build reads besides the tree
+# unchanged:
+#   - the served build is whole (its standalone entry and BUILD_ID) and BOTH its
+#     stamps name HEAD with the build id beside them — the check
+#     verify_build_present runs after every build (scripts/verify-build-identity.sh,
+#     as the tree's owner, because it is a file of the tree);
+#   - neither stamp says the tree it was built from had changes or new files;
+#   - nothing is parked (.next-old, .next-claim.*, .next-discard.*): that is a
+#     rebuild that did not finish, and do_rebuild is what settles it;
+#   - the tree is clean now (the status probe build_type_check_proven_by_ci
+#     runs, with the same executable-bit rule);
+#   - the build would run on the Node.js that built it (the stamp's `node`
+#     against `node --version` in the build's own login environment);
+#   - node-pty loads, the probe ensure_node_pty starts with: do_rebuild is also
+#     what repairs it;
+#   - no env file Next loads at build time is newer than the build: next.config.ts
+#     bakes GATEWAY_URL and PORTAL_EMBED_ORIGINS into the rewrites and headers
+#     it compiles.
+# A condition that cannot be answered is a no, and every failed one is named, so
+# the log says why a box rebuilt. CLAWBOX_FORCE_REBUILD=1 always rebuilds.
+build_is_current_for_checkout() {
+  local build_dir="$PROJECT_DIR/.next"
+  local -a tree_git=(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
+  local -a failed=()
+  local changes="" node_now="" refusal="" stamp served_entry="" served_stamp="" env_now="" head_full="" parked env_file line reason="" head="" whole=1
+  if [ "${CLAWBOX_FORCE_REBUILD:-0}" = "1" ]; then failed+=("CLAWBOX_FORCE_REBUILD=1"); fi
+  # `-f`, not build_entry_present: that one also accepts a dangling link, for
+  # a parked build whose nested entry is elsewhere. A build kept as the one to
+  # serve needs an entry that resolves to a file (verify_build_present's test).
+  if [ ! -f "$build_dir/standalone/server.js" ] || [ ! -f "$build_dir/BUILD_ID" ]; then
+    failed+=("there is no complete build in .next")
+    whole=0
+  fi
+  for parked in "$PROJECT_DIR"/.next-old "$PROJECT_DIR"/.next-claim.* "$PROJECT_DIR"/.next-discard.*; do
+    if [ -e "$parked" ] || [ -L "$parked" ]; then
+      failed+=("a rebuild did not finish (${parked##*/} is there)")
+      whole=0
+      break
+    fi
+  done
+  # The identity first and on its own: the stamps below are only worth reading
+  # for a whole build that names this commit at all.
+  if [ "$whole" = 1 ]; then
+    if [ ! -f "$PROJECT_DIR/scripts/verify-build-identity.sh" ]; then
+      failed+=("scripts/verify-build-identity.sh is missing, so the build's commit cannot be checked")
+    elif ! runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+        bash "$PROJECT_DIR/scripts/verify-build-identity.sh" --project-dir "$PROJECT_DIR" --quiet >/dev/null 2>&1; then
+      if head="$("${tree_git[@]}" rev-parse --short=12 HEAD 2>/dev/null)" && [ -n "$head" ]; then
+        failed+=("the build on disk is not a build of $head")
+      else
+        failed+=("the build on disk is not a build of the checked-out commit")
+      fi
+    else
+      node_now="$(as_clawbox_login "node --version" 2>/dev/null | tail -n 1)" || node_now=""
+      node_now="${node_now//[[:space:]]/}"
+      # The one thing do_rebuild repairs besides the build: a node-pty that no
+      # longer loads (ensure_node_pty). A box whose terminal module is broken
+      # takes the full rebuild, which repairs it as every update always did.
+      if ! as_clawbox_login "cd $PROJECT_DIR && node -e \"require('node-pty')\"" >/dev/null 2>&1; then
+        failed+=("node-pty does not load (the rebuild repairs it)")
+      fi
+      # The served stamp is beside the entry production-server.js loads, which
+      # for postbuild's nested layout is a link (as record_rebuild_kept_build
+      # resolves it); an entry that does not resolve keeps the flat path.
+      served_entry="$(readlink -f "$build_dir/standalone/server.js" 2>/dev/null)" || served_entry=""
+      served_stamp="$build_dir/standalone/.next/build-info.json"
+      [ -n "$served_entry" ] && served_stamp="$(dirname "$served_entry")/.next/build-info.json"
+      head_full="$("${tree_git[@]}" rev-parse HEAD 2>/dev/null)" || head_full=""
+      env_now=""
+      for env_file in .env .env.local .env.production .env.production.local; do
+        [ -e "$PROJECT_DIR/$env_file" ] && env_now="${env_now:+$env_now,}$env_file"
+      done
+      for stamp in "$build_dir/build-info.json" "$served_stamp"; do
+        if ! refusal="$(build_stamp_refusal "$stamp" "$node_now" "$env_now" "$head_full")"; then
+          failed+=("${stamp#"$PROJECT_DIR"/} could not be read (node did not run)")
+        elif [ -n "$refusal" ]; then
+          failed+=("${stamp#"$PROJECT_DIR"/} $refusal")
+        fi
+      done
+    fi
+  fi
+  if ! changes="$("${tree_git[@]}" -c core.excludesFile=/dev/null -c core.fileMode=false --no-optional-locks status --porcelain --untracked-files=normal 2>/dev/null)"; then
+    failed+=("git status could not answer")
+  elif [ -n "$changes" ]; then
+    failed+=("the tree has changes: $(first_paths 3 "$changes")")
+  fi
+  for env_file in .env .env.local .env.production .env.production.local; do
+    if [ -f "$build_dir/BUILD_ID" ] && [ -e "$PROJECT_DIR/$env_file" ] && [ "$PROJECT_DIR/$env_file" -nt "$build_dir/BUILD_ID" ]; then
+      failed+=("$env_file changed after the build")
+    fi
+  done
+  if [ "${#failed[@]}" -gt 0 ]; then
+    for line in "${failed[@]}"; do reason="${reason:+$reason; }$line"; done
+    printf '%s\n' "$reason"
+    return 1
+  fi
+  head="$("${tree_git[@]}" rev-parse --short=12 HEAD 2>/dev/null)" || head=""
+  printf '%s\n' "the build on disk is ${head:-this commit}'s, from a clean tree on Node $node_now, and no env file changed since"
+}
+
 # `bun run build`, with ONE retry and only for the mid-build file-trace race.
 #
 # WHAT RACES. Next writes a `.nft.json` beside every server entry and then
@@ -3916,8 +4266,15 @@ oom_killer_in_kernel_log() {
 do_rebuild() {
   local build_dir="$PROJECT_DIR/.next"
   local kept_dir="$PROJECT_DIR/.next-old"
-  local rc=0 built=0 reboot_follows=0 failed_at="the rebuild" failed_why="" pty_failed=0
-  if [ "${1:-}" = "--reboot-follows" ]; then reboot_follows=1; fi
+  local rc=0 built=0 reboot_follows=0 gateway_to_update=0 failed_at="the rebuild" failed_why="" pty_failed=0
+  # `--gateway-to-update` is step_rebuild_reboot's restart arm: a gateway paused
+  # for the build is the update's second half's to start (hand_paused_gateway_to_update).
+  case "${1:-}" in
+    --reboot-follows) reboot_follows=1 ;;
+    --gateway-to-update) gateway_to_update=1 ;;
+  esac
+  # A fallback start an earlier update armed must not fire into this build.
+  disarm_gateway_handback
 
   # Check before stopping the dashboard: zram alone did not prevent TASK-789.
   ensure_build_swap || return $?
@@ -4054,6 +4411,9 @@ do_rebuild() {
     echo "  Leaving the paused engines to the reboot that follows this step"
     forget_paused_engines
   else
+    if [ "$gateway_to_update" = "1" ]; then
+      hand_paused_gateway_to_update
+    fi
     resume_paused_engines
     report_gateway_build_pause
   fi
@@ -4145,6 +4505,137 @@ ensure_pipx() {
 
 # dpkg_installed PACKAGE — true when dpkg has PACKAGE installed, whatever apt was
 # asked to want (install, hold or deinstall); never an apt-get exit code.
+# ClawBox Vault's storage (vault/src/server/pass.ts): `pass` keeps each login as
+# a GnuPG-encrypted file in a git-tracked folder, so the vault needs pass and
+# gnupg (and git, which the base package line carries). Asked by step_apt_update,
+# which every full install and every in-app update runs, and again by
+# ensure_vault_service for a box that reached post_update by another road.
+#
+# Never fatal to its caller: without them the vault still runs and says what is
+# missing in its own window. Which ones are missing is read back from dpkg,
+# never from apt-get's exit code. Returns 1 when one is still missing.
+ensure_vault_packages() {
+  local pkg="" missing=""
+  for pkg in pass gnupg; do
+    dpkg_installed "$pkg" || missing="$missing $pkg"
+  done
+  [ -n "$missing" ] || return 0
+  if ! wait_for_apt; then
+    echo "  Warning: ClawBox Vault packages not installed:$missing (apt is busy or dpkg could not be recovered)" >&2
+    return 1
+  fi
+  # shellcheck disable=SC2086  # a list of package names, split on purpose
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $missing || true
+  missing=""
+  for pkg in pass gnupg; do
+    dpkg_installed "$pkg" || missing="$missing $pkg"
+  done
+  [ -z "$missing" ] && return 0
+  echo "  Warning: ClawBox Vault packages not installed:$missing" >&2
+  return 1
+}
+
+# ClawBox Vault after an update. The in-app updater needs nothing from here:
+# its apt_update step installs the packages and its rebuild step starts every
+# enabled clawbox-* unit (restart_services_after_update). This is for the box
+# that reaches post_update by another road — a hand-run force-update.sh, a
+# heal, an update that stopped after the rebuild — where neither of those ran:
+# the unit step_systemd_services has just installed and enabled would otherwise
+# stay down until the next boot. On that road nothing restarts a vault that IS
+# running either, so it would keep serving the previous build (from a vault/
+# folder the checkout may have replaced under it) until the next boot: such a
+# vault is restarted. One the updater has already restarted onto this build is
+# left alone. Idempotent; a failure is a warning.
+ensure_vault_service() {
+  local rc=0 old_pid
+  ensure_vault_packages || rc=1
+  [ "$(systemctl is-enabled clawbox-vault.service 2>/dev/null || true)" = enabled ] || return "$rc"
+  if ! systemctl is-active --quiet clawbox-vault.service 2>/dev/null; then
+    echo "  Starting clawbox-vault.service: enabled and not running"
+    if ! systemctl start --no-block clawbox-vault.service; then
+      echo "  Warning: could not start clawbox-vault.service" >&2
+      rc=1
+    elif ! vault_came_up 0; then
+      echo "  Warning: clawbox-vault.service did not stay up after its start (journalctl -u clawbox-vault.service)" >&2
+      rc=1
+    fi
+  elif vault_runs_previous_build; then
+    echo "  Restarting clawbox-vault.service: it is still running the previous build"
+    old_pid="$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)"
+    if ! systemctl restart --no-block clawbox-vault.service; then
+      echo "  Warning: could not restart clawbox-vault.service" >&2
+      rc=1
+    elif ! vault_came_up "${old_pid:-0}"; then
+      echo "  Warning: clawbox-vault.service did not stay up after its restart (journalctl -u clawbox-vault.service)" >&2
+      rc=1
+    fi
+  fi
+  return "$rc"
+}
+
+# vault_came_up OLD_PID — after a --no-block start or restart: within
+# VAULT_UP_WAIT_S (30) seconds of wall clock the unit is active on a MainPID
+# other than OLD_PID (0 for a start), and is still active on that same pid
+# VAULT_UP_STEADY_S (3) seconds later, so a launcher that exits at once is
+# reported here instead of only in the journal. It only watches: the unit's
+# own Restart=on-failure retries are left to systemd either way. The deadline
+# is $SECONDS as a delta, asked first, as in restore_previous_build: a count of
+# sleeps would stretch by however long each systemctl query took. The queries
+# themselves are not cut short (nothing in the installer is, for being slow).
+# Each look is ONE systemctl call (vault_active_pid): a stop that begins between
+# an is-active and a show leaves the unit `deactivating` on the very same
+# MainPID, which two calls would take for a vault that is up.
+vault_came_up() {
+  local old=${1:-0} limit=${VAULT_UP_WAIT_S:-30} steady=${VAULT_UP_STEADY_S:-3} pid started=$SECONDS
+  while [ $((SECONDS - started)) -lt "$limit" ]; do
+    pid="$(vault_active_pid)"
+    case "$pid" in
+      '' | 0 | *[!0-9]* | "$old") ;;
+      *)
+        sleep "$steady"
+        [ "$(vault_active_pid)" = "$pid" ] && return 0
+        ;;
+    esac
+    sleep 1
+  done
+  return 1
+}
+
+# vault_active_pid — the vault's MainPID when it is `active` right now, else
+# nothing. ActiveState, SubState and MainPID come from ONE `systemctl show`, so
+# the state and the pid are the same observation. show prints the properties in
+# systemd's own order, not the one asked for: each line is matched by name.
+vault_active_pid() {
+  local line state="" pid=""
+  while IFS= read -r line; do
+    case "$line" in
+      ActiveState=*) state="${line#ActiveState=}" ;;
+      MainPID=*) pid="${line#MainPID=}" ;;
+    esac
+  done < <(systemctl show clawbox-vault.service -p ActiveState,SubState,MainPID 2>/dev/null || true)
+  if [ "$state" = active ]; then
+    printf '%s\n' "$pid"
+  fi
+}
+
+# Whether the running vault started before the build on disk: its working
+# directory is no longer the checkout's vault/ (replaced, so "(deleted)"), or a
+# file it runs from changed after it started. Unknown (no pid, no start time)
+# is "no": a restart nobody can justify is not made.
+vault_runs_previous_build() {
+  local pid cwd started dir="$PROJECT_DIR/vault"
+  pid="$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)"
+  case "$pid" in '' | 0 | *[!0-9]*) return 1 ;; esac
+  cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+  [ -n "$cwd" ] || return 1
+  [ "$cwd" = "$(readlink -f "$dir" 2>/dev/null || echo "$dir")" ] || return 0
+  started="$(date -d "$(ps -o lstart= -p "$pid" 2>/dev/null)" +%s 2>/dev/null || true)"
+  case "$started" in '' | *[!0-9]*) return 1 ;; esac
+  # ps has whole seconds: a file of the vault's own start second is not "newer".
+  [ -n "$(find "$dir/src" "$dir/extension" "$dir/package.json" "$PROJECT_DIR/scripts/start-vault.sh" \
+    -type f -newermt "@$((started + 1))" -print -quit 2>/dev/null)" ]
+}
+
 dpkg_installed() {
   case "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null || true)" in
     *' ok installed') return 0 ;;
@@ -4275,6 +4766,10 @@ step_apt_update() {
     dpkg_installed "$doc_lib" || doc_missing="$doc_missing $doc_lib"
   done
   [ -z "$doc_missing" ] || echo "  Warning: document libraries not installed:$doc_missing" >&2
+  # ClawBox Vault's storage, pass and gnupg (git is in the base line above).
+  # Separate and non-fatal, like the document libraries: a mirror without one
+  # of them must not fail the base install. See ensure_vault_packages.
+  ensure_vault_packages || true
   # Node.js for production server and OpenClaw. The floor is the pinned core's
   # `engines.node` ($OPENCLAW_NODE_ENGINE): 2026.9.3 refuses Node 22 outright,
   # so an older ClawBox image — every one of which shipped Node 22 — takes the
@@ -11413,6 +11908,9 @@ step_post_update() {
   # sudoers change the same way. The step is idempotent — cp, daemon-reload,
   # enable — and is exactly what fresh installs already run.
   optional_step systemd_services step_systemd_services
+  # After the units are in place: ClawBox Vault's packages and its unit, for a
+  # box that got here without the updater's apt and rebuild steps.
+  optional_step vault_service ensure_vault_service
   optional_step hermes_dashboard_proxy_refresh step_hermes_dashboard_proxy_refresh
   optional_step nm_dispatcher step_nm_dispatcher
   # The polkit narrowing, again. step_rebuild_reboot removes the old grant right
@@ -12091,7 +12589,11 @@ step_polkit_rules() {
 
 step_start_services() {
   local svc
-  local -a svcs=(clawbox-ap clawbox-setup clawbox-performance)
+  # clawbox-vault: the built-in password manager, on every edition. An in-app
+  # update needs no line of its own for it: step_rebuild_reboot installs and
+  # enables the unit, and restart_services_after_update then starts or restarts
+  # every enabled clawbox-* unit on the new build.
+  local -a svcs=(clawbox-ap clawbox-setup clawbox-performance clawbox-vault)
   # The OpenClaw gateway only exists on editions that run it. On the Hermes SKU
   # it is never installed (and is masked by step_edition_gateway_state), and
   # `systemctl restart` on a missing unit exits 5 — which, under the
@@ -15565,15 +16067,50 @@ step_rebuild_reboot() {
   # shell; the EXIT guard then puts the checkout back on that build's commit
   # (TASK-1427). A trap, not `do_rebuild || …`: errexit must stay live inside
   # do_rebuild (see its comments).
-  arm_rebuild_checkout_guard
-  if [ -n "$reboot_reasons" ]; then
-    do_rebuild --reboot-follows
-  else
-    do_rebuild
+  #
+  # No rebuild at all when the build on disk is already this checkout's
+  # (build_is_current_for_checkout, TASK-2517): the dashboard keeps serving it
+  # until the restart or reboot below, which this update still owes — that
+  # restart is what resumes the update's second half.
+  #
+  # On the restart arm outside test mode a gateway paused for the build is left
+  # to that second half (`--gateway-to-update`), which stops it again first
+  # thing and then starts it; test mode keeps the plain rebuild.
+  #
+  # The note that tells the second half so (record_rebuild_kept_build) is
+  # cleared first, whatever this run decides: it may only ever describe this
+  # run. A build that is current but cannot be noted is rebuilt as before —
+  # without the note the second half would read the unchanged build as a
+  # rebuild that never happened.
+  local current_why="" build_kept=0
+  forget_rebuild_kept_build
+  # And a gateway fallback an earlier update armed: do_rebuild cancels it too,
+  # but a kept build never reaches do_rebuild.
+  disarm_gateway_handback
+  if current_why="$(build_is_current_for_checkout)"; then
+    if record_rebuild_kept_build; then
+      build_kept=1
+    else
+      current_why="the build on disk is this checkout's, but the note that tells the update's second half so could not be written"
+    fi
   fi
-  disarm_rebuild_checkout_guard
-  # Reached only with a new build verified on disk: do_rebuild returns non-zero
-  # on every other outcome and errexit ends this step there. The server that
+  if [ "$build_kept" = 1 ]; then
+    echo "No rebuild needed: $current_why"
+  else
+    echo "Rebuilding: $current_why"
+    arm_rebuild_checkout_guard
+    if [ -n "$reboot_reasons" ]; then
+      do_rebuild --reboot-follows
+    elif ! is_test_mode; then
+      do_rebuild --gateway-to-update
+    else
+      do_rebuild
+    fi
+    disarm_rebuild_checkout_guard
+  fi
+  # Reached only with a build of this checkout verified on disk — a new one, or
+  # the one build_is_current_for_checkout just proved current: do_rebuild
+  # returns non-zero on every other outcome and errexit ends this step there. The server that
   # comes up next — the restart below, or the boot after the reboot — is that
   # build, so the old build's polkit grant can go now (step_polkit_rules asks
   # the build itself before it removes anything). Never fatal HERE: the

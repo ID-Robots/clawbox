@@ -48,6 +48,21 @@ Two properties of the Hermes entry are load-bearing:
 To check a device: `hermes mcp list` (or `openclaw mcp status`) should name
 `clawbox`; `hermes mcp test clawbox` connects and lists its tools.
 
+### Every package it imports is declared
+
+The server runs from the checkout (`bun run mcp/clawbox-mcp.ts`), so its
+packages are whatever `bun install` put in the checkout's `node_modules`. A
+package the server imports must be named in the root `package.json`
+`dependencies`. Being there because another package depends on it is not
+enough. Up to 4.3.0, `zod` was imported by six of these files but never declared. It
+resolved only because the MCP SDK's copy happened to be hoisted to the top. On
+an install that leaves it out (bun's isolated linker, for example), the server
+dies on its first import with `Cannot find package 'zod'`. The gateway then logs
+`bundle-mcp: failed to start server "clawbox"` and retries after its 60 s
+cooldown. `src/tests/unit/mcp-server-declared-deps.test.ts` checks both halves:
+the import graph loads only declared packages, and the server starts and answers
+`tools/list` from a layout that holds only those.
+
 ### The server hangs up when it is idle
 
 OpenClaw's gateway spawns one of these processes per **session key** and holds
@@ -137,6 +152,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`, `coding_project_import`) | when the owner switched the coding agent on | same |
 | The coding team's settings (`coding_settings_get`, `coding_settings_set`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
+| ClawBox Vault (`vault_list`, `vault_match`, `vault_fill`, `vault_save`, `vault_generate`, `vault_delete`, `vault_audit`) | yes, full profile | yes, full profile |
 | Prime Radiant (`prime_radiant_*`, 37 tools) | yes | yes |
 | Memory Shard management (`memory_shard_reindex`, `_reindex_stop`, `_sources_*`, `_schedule_*`, `_provider_*`, `_enable`, `_reset`) | yes | yes |
 | Memory Shard search (`memory_shard_search`) | **no** — the index is OpenClaw's, searched in its own turn | yes |
@@ -1281,7 +1297,9 @@ while the total is not known yet — never a made-up 0%. Both editions have an
 index now (OpenClaw's own, or the one ClawBox keeps where there is no OpenClaw),
 so the tool is registered on both, with one description per edition: only the
 Hermes one points at `memory_shard_search`, which is Hermes-only because on
-OpenClaw the index is OpenClaw's and it searches it as part of a turn.
+OpenClaw the index is OpenClaw's and it searches it as part of a turn. On a
+`dual` install neither points at it: the index there is OpenClaw's too, and the
+search route answers 409 `edition`.
 `memory_shard_search` also answers from the Prime Radiant wiki, a built-in
 source once the vault exists: those passages carry `source: "prime-radiant"`,
 the vault-relative page `path`, the page or claim `id`, `kind`, the page `type`
@@ -1433,7 +1451,9 @@ draws (installed, running / idle / on-demand / not-installed /
 not-on-this-edition, disk and memory, the device's own one-line detail, which is
 never a path or a command). Alongside it, which voice and which transcription
 engine the box uses now (`GET /setup-api/tts` `choice`/`activeEngine`, `GET
-/setup-api/stt` `primary`/`chain`). `engine: "whisper"` adds the downloaded
+/setup-api/stt` `primary`/`chain`; `primary: "endpoint"` is the owner's own
+OpenAI-compatible speech server on the box or the LAN, and `localOnly` says the
+local-only AI lock keeps every recording off the cloud, TASK-2501). `engine: "whisper"` adds the downloaded
 sizes and free disk (`GET /setup-api/whisper`), `engine: "embeddings"` the
 embedding service's unit state (`GET /setup-api/embed/status`). Each leg past
 the inventory is independent, so one that does not answer costs only its line.
@@ -1490,6 +1510,31 @@ account detail first, never the advice (TASK-2141). Never a credential and
 never an email. Read-only: accounts are added, ordered and re-authenticated by
 the owner in Settings, and the route's writes refuse this bearer 403
 `owner_only`.
+
+### ClawBox Vault (both editions, full profile)
+
+The box's password manager (`vault/`, `mcp/tools/vault.ts`; the rules are in
+`docs/agents/vault.md`). **No tool returns a password.** The tools talk to the
+vault service on `127.0.0.1:4796` with the token in `~/.clawbox-vault/agent-token`.
+
+| Tool | What the agent gets |
+|---|---|
+| `vault_list(query?)` | entry names, usernames, sites, last change |
+| `vault_match(url)` | the entries that belong to a page, exact site first |
+| `vault_fill(url, name?, submit?)` | a status: `filled`, `no_form`, `no_tab`, `origin_mismatch`, `no_entry`, `locked`, `extension_offline`, `timeout` |
+| `vault_save(name, login, url, password?, note?, regenerate?, length?, symbols?)` | the entry name; without `password` the vault generates and stores one |
+| `vault_generate(name?, login?, url?, length?, symbols?, overwrite?)` | "generated and stored as …", or what would be generated |
+| `vault_delete(name, confirm)` | "deleted …"; `confirm` must be `true` |
+| `vault_audit(limit?)` | recent actions: who, what, which entry, which site, result |
+
+- The password of a fill goes from the vault to the extension in the box's
+  browser, which types it into the page. Open the login page first.
+- Until the owner has chosen a vault PIN in the ClawBox Vault app, every tool
+  answers `CONFLICT` ("not set up"): tell the user, do not retry.
+- None declares `readOnly`, so none is in a delegated run's `run-read` server,
+  and none is on the `core` surface.
+- The two card tools (`vault_cards_list`, `vault_card_fill`) are registered only
+  with `CLAWBOX_VAULT_CARDS=1`, which no install sets.
 
 ### What the agent deliberately cannot do
 

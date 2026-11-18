@@ -27,9 +27,12 @@ const {
   recheckMsFromEnv,
 } = require("./scripts/upgrade-session-watch.js");
 const { loadOrCreateRelayIdentity, readGatewayToken, relayUserChat, staffReadyReader } = require("./scripts/gateway-user-relay.js");
+const { claimReplyMedia } = require("./scripts/chat-reply-media.js");
+const { createMediaOwners } = require("./scripts/chat-media-owners.js");
 const { staffAgentId } = require("./scripts/org-staff-policy.js");
 const { OPENCLAW_SHARED_KEY, USER_CHAT_WS_PATH, openclawSharedFrom } = require("./scripts/openclaw-sharing.js");
 const { ORG_MODE_KEY, orgModeFrom, orgModeRefusesUpgrade } = require("./scripts/org-mode.js");
+const { USER_LIMITS_KEY, admitChatRequest, userLimitsFrom } = require("./scripts/user-limits.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // entry point is standalone CommonJS and cannot import the TypeScript helper:
@@ -143,7 +146,7 @@ function resolveUpgradeTarget(reqUrl) {
 // Current session generation and ClawBox users, read from data/config.json
 // (mtime-cached), so WS upgrades honor the same password-change revocation —
 // and, since TASK-1256, the same removed-user revocation — the Next.js
-// middleware enforces (src/middleware.ts). Without this, a revoked cookie would
+// middleware enforces (src/proxy.ts). Without this, a revoked cookie would
 // still be accepted at the /terminal-ws (root shell) and /novnc-ws gates until
 // natural expiry. Defaults to generation 0 and no users on any read error.
 const CONFIG_JSON_PATH = path.join(process.env.CLAWBOX_ROOT || __dirname, "data", "config.json");
@@ -171,18 +174,21 @@ function readSessionConfig() {
       users: parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername()),
       openclawShared: openclawSharedFrom(parsed[OPENCLAW_SHARED_KEY]),
       orgMode: orgModeFrom(parsed[ORG_MODE_KEY]),
+      // The owner's limits for every other user (TASK-2446): the relay counts
+      // each user's chat turns against them.
+      userLimits: userLimitsFrom(parsed[USER_LIMITS_KEY]),
     };
     sessionConfigCache = { mtimeMs: stat.mtimeMs, value };
     return value;
   } catch {
-    const value = { gen: 0, users: new Map(), openclawShared: false, orgMode: false };
+    const value = { gen: 0, users: new Map(), openclawShared: false, orgMode: false, userLimits: userLimitsFrom(undefined) };
     sessionConfigCache = { mtimeMs: -1, value };
     return value;
   }
 }
 
 // Verify the HMAC-SHA256 `clawbox_session` cookie — the same scheme
-// src/middleware.ts uses (payload.sig; sig = HMAC-SHA256(payload, SESSION_SECRET);
+// src/proxy.ts uses (payload.sig; sig = HMAC-SHA256(payload, SESSION_SECRET);
 // base64url payload carries { exp, gen, u?, sv? }) — and say WHO it speaks for
 // (scripts/session-cookie.js, TASK-1256), and when it runs out. Mirrored in CJS
 // because upgrades bypass Next.js. Fails closed when the secret is absent.
@@ -304,6 +310,32 @@ const OPENCLAW_CONFIG_PATH = `${
   || `${process.env.HOME || "/home/clawbox"}/.openclaw`
 }/openclaw.json`;
 const RELAY_IDENTITY_PATH = path.join(process.env.CLAWBOX_ROOT || __dirname, "data", ".gateway-user-relay-device.json");
+// Whose chat a media file is (src/lib/chat-media-owners.ts): the relay records
+// the files a member of staff's reply names as theirs (TASK-2516), so the
+// download card in their chat opens for them and for nobody else.
+const chatMediaOwners = createMediaOwners(path.join(process.env.CLAWBOX_ROOT || __dirname, "data", "chat-media-owners.json"));
+const OPENCLAW_STATE_DIR = path.dirname(OPENCLAW_CONFIG_PATH);
+
+/** A member of staff's reply named files: record the ones that may be theirs (scripts/chat-reply-media.js). */
+function recordStaffReplyMedia(username, claim) {
+  const { recorded, refused } = claimReplyMedia({
+    username,
+    paths: claim.paths,
+    since: claim.since,
+    until: claim.until,
+    // Their own folder only — the staff agent's workspace
+    // (src/lib/org-staff-agents.ts staffWorkspaceDir), which nobody else's
+    // assistant writes into. A file in the shared media tree is made theirs
+    // by the staff MCP relay that ran their tool call (provenance), never by
+    // a reply naming it.
+    roots: [{ dir: path.join(OPENCLAW_STATE_DIR, "staff", username) }],
+    record: chatMediaOwners.recordMediaOwner,
+  });
+  if (recorded.length > 0 || refused.length > 0) {
+    // Counts and reasons only: a path can name a person's document.
+    console.log(`[user-chat-relay] a reply's files: ${recorded.length} recorded as the member's, ${refused.length} not (${[...new Set(refused.map((r) => r.reason))].join(", ") || "-"})`);
+  }
+}
 let relayIdentity = null;
 const userChatWss = new WebSocket.Server({ noServer: true });
 
@@ -349,6 +381,10 @@ function relayUserChatUpgrade(req, socket, head, url, identity) {
       staffAgent,
       staffReady: staffAgent ? staffReadyReader(OPENCLAW_CONFIG_PATH, staffAgent) : undefined,
       stillCurrent: () => readSessionConfig().orgMode === orgMode,
+      // Each turn the user starts is counted against the owner's chat limits
+      // for them, read fresh per turn (scripts/user-limits.js).
+      admitChat: () => admitChatRequest(identity.username, readSessionConfig().userLimits),
+      onReplyMedia: staffAgent ? (claim) => recordStaffReplyMedia(identity.username, claim) : null,
       connectUpstream: () => new WebSocket(`ws://127.0.0.1:${GATEWAY_PORT}${url}`, {
         // Port-less to satisfy the gateway's strict origin allowlist, as the
         // owner's pipe and the WSS proxy below send it.
@@ -421,7 +457,7 @@ if (!process.env.CLAWBOX_TERMINAL_TOKEN) {
 // runs as a stdio subprocess of openclaw and has no session cookie, so
 // without this every tool call from a Codex / Claude agent gets 307'd
 // to /login (POSTs surface as 405, GETs receive the login HTML page).
-// Seeded here so middleware.ts can resolve the same value via env on
+// Seeded here so proxy.ts can resolve the same value via env on
 // the very first request, before src/lib/mcp-token.ts would lazily mint
 // one. gateway-pre-start.sh reads the same file to inject the value
 // into the MCP server's env when registering it with openclaw.
@@ -440,7 +476,7 @@ try {
   // can fail on its own (a root-owned token, a read-only data/); with it inside
   // this try and above this line, an EPERM threw past the assignment and
   // CLAWBOX_MCP_TOKEN was never set — so a permissions hiccup discarded a token
-  // that had just been read successfully, and middleware.ts lost the very
+  // that had just been read successfully, and proxy.ts lost the very
   // first-request resolution this block exists to provide. On the Hermes SKU
   // clawbox-gateway.service is masked, so gateway-pre-start.sh's replacement
   // never runs and nothing else repairs it. TASK-657.

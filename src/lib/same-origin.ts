@@ -1,7 +1,7 @@
 /**
  * Is this state-changing request coming from OUR page?
  *
- * WHY. src/middleware.ts authenticates a request; it does not ask where the
+ * WHY. src/proxy.ts authenticates a request; it does not ask where the
  * request was made FROM. A browser that holds the owner's session cookie will
  * attach it to a POST any other site's page fires at the box, and a route that
  * only checks "is the owner signed in" then does that site's bidding. The

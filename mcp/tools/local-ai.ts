@@ -63,6 +63,8 @@ interface VoiceBody {
 interface TranscriptionBody {
   primary?: string;
   chain?: string[];
+  /** The local-only AI lock (TASK-2501): no cloud leg, no fallback. */
+  localOnly?: boolean;
 }
 
 /** GET /setup-api/whisper. */
@@ -173,8 +175,15 @@ export function registerLocalAiTools(reg: Registrar): void {
         ...(transcription
           ? {
             transcription: {
-              first_choice: transcription.primary === "local" ? "on the box (Whisper)" : transcription.primary === "cloud" ? "the ClawBox cloud" : "unknown",
+              first_choice: transcription.primary === "local"
+                ? "on the box (Whisper)"
+                : transcription.primary === "endpoint"
+                  ? "the owner's own speech server on the local network"
+                  : transcription.primary === "cloud" ? "the ClawBox cloud" : "unknown",
               tried_in_order: Array.isArray(transcription.chain) ? transcription.chain : [],
+              ...(transcription.localOnly
+                ? { local_only: "local-only AI is on: recordings never go to the cloud, and a failure of the chosen engine is an error" }
+                : {}),
             },
           }
           : {}),

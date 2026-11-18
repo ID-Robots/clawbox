@@ -237,6 +237,53 @@ d("gateway-pre-start.sh — a fresh box", () => {
   });
 });
 
+/** The shipped derivation of the heartbeat-retired flag, out of the real script. */
+function retiredFlagDerivation(): string {
+  const src = readFileSync(SCRIPT, "utf-8");
+  const from = "if [ -z \"${CLAWBOX_OPENCLAW_2026_11_5:-}\" ]; then";
+  const to = "export CLAWBOX_OPENCLAW_2026_11_5\n";
+  const start = src.indexOf(from);
+  const end = src.indexOf(to, start);
+  if (start < 0 || end < 0) throw new Error("the 2026.11.5 flag derivation is not in gateway-pre-start.sh");
+  return src.slice(start, end + to.length);
+}
+
+d("gateway-pre-start.sh — which cores have retired the heartbeat key", () => {
+  // The flag is DERIVED from the installed core's version with `sort -V`, and
+  // the cases below run that derivation itself: a broken comparison would make
+  // a 2026.11.3 box skip a row it needs, or a 2026.11.5 box try the refused write.
+  function flagFor(effective: string, explicit?: string): string {
+    const r = spawnSync("bash", ["-c", `${retiredFlagDerivation()}\nprintf %s "$CLAWBOX_OPENCLAW_2026_11_5"`], {
+      encoding: "utf-8",
+      env: testEnv({ PATH: "/usr/bin:/bin", CLAWBOX_OPENCLAW_EFFECTIVE: effective, ...(explicit === undefined ? {} : { CLAWBOX_OPENCLAW_2026_11_5: explicit }) }),
+      timeout: 30_000,
+    });
+    expect(r.status).toBe(0);
+    return r.stdout;
+  }
+
+  it.each([
+    ["2026.11.5", "1"],
+    ["2026.11.6", "1"],
+    ["2026.11.10", "1"],
+    ["2026.12.0", "1"],
+    ["2027.1.0", "1"],
+    ["2026.11.5-beta.1", "1"],
+    ["2026.11.4", "0"],
+    ["2026.11.3", "0"],
+    ["2026.10.9", "0"],
+    ["2026.9.30", "0"],
+    ["", "0"],
+  ])("takes the core %s as %s", (effective, expected) => {
+    expect(flagFor(effective)).toBe(expected);
+  });
+
+  it("lets an explicit value win, as the other core flags do", () => {
+    expect(flagFor("2026.11.3", "1")).toBe("1");
+    expect(flagFor("2026.11.5", "0")).toBe("0");
+  });
+});
+
 d("gateway-pre-start.sh — a box the previous build seeded off", () => {
   it("flips every key still at its opt-out, and writes generation 2", () => {
     writeGen1();
@@ -256,6 +303,32 @@ d("gateway-pre-start.sh — a box the previous build seeded off", () => {
     expect(calls()[0]).toContain("config set --batch-json");
     expect(calls()[1]).toBe(`config unset ${HEARTBEAT}`);
     expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+
+  it("never asks a core that retired the heartbeat key to unset it, and still flips the other two", () => {
+    // OpenClaw 2026.11.5 turned the heartbeat monitor into an automation job and
+    // took `agents.defaults.heartbeat` out of its schema: `config unset` of it is
+    // refused there. The boot flag says which core this is; the cadence row is
+    // skipped, the other two rows are flipped as before, and the record is
+    // written all the same so the box is not judged again every boot.
+    writeGen1();
+    writeConfig(OPTED_OUT);
+    const r = run({ CLAWBOX_OPENCLAW_2026_11_5: "1" });
+    expect(r.status).toBe(0);
+    expect(at(DREAMING)).toBe(true);
+    expect(at(MODE)).toBe("auto");
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0]).toContain("config set --batch-json");
+    expect(calls().join("\n")).not.toContain("heartbeat");
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+
+  it("still unsets the heartbeat key on a core that has it (the flag absent or 0)", () => {
+    writeGen1();
+    writeConfig(OPTED_OUT);
+    const r = run({ CLAWBOX_OPENCLAW_2026_11_5: "0" });
+    expect(r.status).toBe(0);
+    expect(calls()).toContain(`config unset ${HEARTBEAT}`);
   });
 
   it("leaves the one key the owner changed afterwards, and flips the rest", () => {

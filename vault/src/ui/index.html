@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>ClawBox Vault</title>
+    <link rel="icon" href="favicon.png" />
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <!-- Lock screen: first run sets the vault PIN, later runs unlock with it. -->
+    <section id="gate" class="gate" hidden>
+      <div class="gate-card">
+        <img src="favicon.png" alt="" class="gate-logo" width="64" height="64" />
+        <h1>ClawBox Vault</h1>
+        <p class="muted" id="gate-text">Unlock with your vault PIN.</p>
+        <form id="gate-form" class="stack" autocomplete="off" data-clawbox-vault-ignore>
+          <input id="gate-pin" type="password" placeholder="Vault PIN" aria-label="Vault PIN" autocomplete="off" minlength="6" required />
+          <input id="gate-pin2" type="password" placeholder="Repeat the PIN" aria-label="Repeat the PIN" autocomplete="off" hidden />
+          <button class="btn primary wide" type="submit" id="gate-submit">Unlock</button>
+        </form>
+        <p class="error" id="gate-error" role="alert"></p>
+        <p class="muted small" id="gate-hint"></p>
+      </div>
+    </section>
+
+    <div id="shell" class="shell" hidden>
+      <aside class="nav">
+        <div class="brand">
+          <img src="favicon.png" alt="" width="34" height="34" />
+          <div>
+            <div class="brand-name">ClawBox Vault</div>
+            <div class="brand-sub" id="brand-sub">Passwords on this ClawBox</div>
+          </div>
+        </div>
+        <nav>
+          <button class="nav-item active" data-view="entries">Entries</button>
+          <button class="nav-item" data-view="cards" id="nav-cards" hidden>Cards</button>
+          <button class="nav-item" data-view="generator">Generator</button>
+          <button class="nav-item" data-view="extension">Browser</button>
+          <button class="nav-item" data-view="agent">Assistant</button>
+          <button class="nav-item" data-view="activity">Activity</button>
+        </nav>
+        <div class="nav-foot">
+          <button class="btn ghost wide" id="btn-change-pin">Change PIN</button>
+          <button class="btn wide" id="btn-lock">Lock vault</button>
+          <div class="muted small" id="version"></div>
+        </div>
+      </aside>
+
+      <main class="content">
+        <!-- Entries -->
+        <section class="view" id="view-entries">
+          <header class="view-head">
+            <div>
+              <h2>Entries</h2>
+              <p class="muted" id="entries-count">Logins stored on this ClawBox.</p>
+            </div>
+            <div class="toolbar">
+              <input id="search" type="search" placeholder="Search name, login or URL" aria-label="Search entries" autocomplete="off" data-clawbox-vault-ignore />
+              <button class="btn primary" id="btn-new">New entry</button>
+            </div>
+          </header>
+          <div class="split">
+            <div class="list-pane">
+              <ul id="entry-list" class="entry-list" aria-label="Entries"></ul>
+            </div>
+            <div class="detail-pane" id="detail">
+              <div class="placeholder">
+                <p class="muted">Select an entry to see its details.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Cards -->
+        <section class="view" id="view-cards" hidden>
+          <header class="view-head">
+            <div>
+              <h2>Payment cards</h2>
+              <p class="muted" id="cards-count">Cards stored in the pass store under cards/.</p>
+            </div>
+            <div class="toolbar">
+              <input id="card-search" type="search" placeholder="Search label, brand or last 4" aria-label="Search cards" autocomplete="off" data-clawbox-vault-ignore />
+              <button class="btn primary" id="btn-new-card">New card</button>
+            </div>
+          </header>
+          <div class="split">
+            <div class="list-pane">
+              <ul id="card-list" class="entry-list" aria-label="Cards"></ul>
+            </div>
+            <div class="detail-pane" id="card-detail">
+              <div class="placeholder">
+                <p class="muted">Select a card to see its details.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Generator -->
+        <section class="view" id="view-generator" hidden>
+          <header class="view-head">
+            <div>
+              <h2>Password generator</h2>
+              <p class="muted">Generated in this page with the browser's cryptographic random source. Nothing is saved until you save an entry.</p>
+            </div>
+          </header>
+          <div class="card gen-card">
+            <output id="gen-output" class="gen-output" aria-live="polite"></output>
+            <div class="gen-meter"><span id="gen-bar"></span></div>
+            <p class="muted small" id="gen-entropy"></p>
+            <div class="gen-controls">
+              <label class="field">Length <span id="gen-length-value" class="pill">24</span>
+                <input id="gen-length" type="range" min="8" max="128" value="24" />
+              </label>
+              <label class="check"><input type="checkbox" id="gen-symbols" checked /> Symbols</label>
+              <label class="check"><input type="checkbox" id="gen-digits" checked /> Digits</label>
+              <label class="check"><input type="checkbox" id="gen-upper" checked /> Uppercase</label>
+            </div>
+            <div class="row end">
+              <button class="btn" id="gen-again">Regenerate</button>
+              <button class="btn" id="gen-copy">Copy</button>
+              <button class="btn primary" id="gen-use">Use in new entry</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Extension -->
+        <section class="view" id="view-extension" hidden>
+          <header class="view-head">
+            <div>
+              <h2>Browser</h2>
+              <p class="muted">The ClawBox Vault extension fills and saves logins in the browser on this ClawBox, the one the assistant uses.</p>
+            </div>
+          </header>
+          <div class="grid2">
+            <div class="card">
+              <h3>This box's browser</h3>
+              <div id="pair-status" class="pair-status"></div>
+              <div id="pair-code-box" class="pair-code-box" hidden>
+                <div class="pair-code" id="pair-code"></div>
+                <p class="muted small" id="pair-countdown"></p>
+              </div>
+              <div class="row">
+                <button class="btn primary" id="btn-auto-pair" hidden>Pair this box's browser</button>
+                <button class="btn" id="btn-ext-lock" hidden>Lock extension</button>
+                <button class="btn danger" id="btn-unpair" hidden>Unpair</button>
+              </div>
+            </div>
+            <div class="card">
+              <h3>How it gets there</h3>
+              <ol class="steps">
+                <li>The extension is already installed in this ClawBox's browser. There is nothing to download.</li>
+                <li>It pairs by itself, within a minute of the browser starting, once the vault has a PIN.</li>
+                <li>Open the browser from the desktop if it shows as not connected.</li>
+              </ol>
+              <p class="muted small">Unpair stops fills and saves until you pair the browser again here.</p>
+              <details>
+                <summary class="muted small">Pair with a code instead</summary>
+                <p class="muted small">For a browser on this ClawBox that did not pair by itself: click the ClawBox Vault icon in its toolbar and type the code. A code works once, for 5 minutes, and replaces the browser paired before.</p>
+                <div class="row"><button class="btn small" id="btn-pair">Show pairing code</button></div>
+              </details>
+            </div>
+          </div>
+        </section>
+
+        <!-- Assistant -->
+        <section class="view" id="view-agent" hidden>
+          <header class="view-head">
+            <div>
+              <h2>Assistant</h2>
+              <p class="muted">The assistant on this ClawBox can list, match, save and fill logins. No tool ever gives it a password.</p>
+            </div>
+          </header>
+          <div class="grid2">
+            <div class="card">
+              <h3>Built in</h3>
+              <p class="muted">The vault tools are part of the assistant. There is nothing to configure: they work once the vault has a PIN and the browser is paired.</p>
+              <p class="muted small">Tools: vault_list, vault_match, vault_fill, vault_save, vault_generate, vault_delete, vault_audit<span id="agent-card-tools" hidden>, vault_cards_list, vault_card_fill</span>.</p>
+              <p class="muted small">Every call is written to Activity with the entry and the site, never with a secret.</p>
+            </div>
+            <div class="card">
+              <h3>How a fill works</h3>
+              <ol class="steps">
+                <li>The assistant opens the login page in the browser and calls <code>vault_fill(url)</code>.</li>
+                <li>The vault queues a fill for the paired extension.</li>
+                <li>The extension finds the matching tab, fetches the login for that one fill and types it into the real inputs.</li>
+                <li>The assistant gets back only a status: <code>filled</code>, <code>no_form</code>, <code>no_tab</code> or <code>origin_mismatch</code>.</li>
+              </ol>
+              <p class="muted small" id="agent-card-note" hidden>Cards: <code>vault_card_fill</code> opens a confirmation window in the browser (site, card label, last 4). It fills only after you click Confirm; the assistant gets <code>declined</code> or <code>timeout</code> otherwise, and never the number.</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Activity -->
+        <section class="view" id="view-activity" hidden>
+          <header class="view-head">
+            <div>
+              <h2>Activity</h2>
+              <p class="muted">Every save, delete, reveal, fill and pairing. No secrets are written here.</p>
+            </div>
+            <div class="toolbar"><button class="btn" id="btn-audit-refresh">Refresh</button></div>
+          </header>
+          <div class="card flush">
+            <table class="audit">
+              <thead><tr><th>Time</th><th>Who</th><th>Action</th><th>Entry</th><th>Site</th><th>Result</th></tr></thead>
+              <tbody id="audit-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="dlg-edit" class="dialog">
+      <form id="edit-form" class="stack" autocomplete="off" data-clawbox-vault-ignore>
+        <h2 id="edit-title">New entry</h2>
+        <label class="field">Name <input id="edit-name" placeholder="example.com/alice" required /></label>
+        <div class="grid2 tight">
+          <label class="field">Login <input id="edit-login" placeholder="alice@example.com" /></label>
+          <label class="field">URL <input id="edit-url" placeholder="https://example.com/login" /></label>
+        </div>
+        <label class="field">Password
+          <div class="pw-row">
+            <input id="edit-password" type="password" autocomplete="new-password" />
+            <button class="btn" type="button" id="edit-show">Show</button>
+            <button class="btn" type="button" id="edit-generate">Generate</button>
+          </div>
+          <span class="muted small" id="edit-pw-hint"></span>
+        </label>
+        <label class="field">2FA secret <input id="edit-2fa" placeholder="otpauth://… (optional)" /></label>
+        <label class="check" id="edit-clear2fa-row" hidden><input type="checkbox" id="edit-clear2fa" /> Remove the stored 2FA secret</label>
+        <label class="field">Note <input id="edit-note" /></label>
+        <p class="error" id="edit-error" role="alert"></p>
+        <div class="row end">
+          <button class="btn ghost" type="button" id="edit-cancel">Cancel</button>
+          <button class="btn primary" type="submit">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-card" class="dialog">
+      <form id="card-form" class="stack" autocomplete="off" data-clawbox-vault-ignore>
+        <h2 id="card-title">New card</h2>
+        <label class="field">Label <input id="card-label" placeholder="e.g. Company Visa (default: brand and last 4)" maxlength="60" /></label>
+        <label class="field">Card number
+          <div class="pw-row">
+            <input id="card-number" class="masked digits" inputmode="numeric" autocomplete="off" spellcheck="false" maxlength="23" />
+            <button class="btn" type="button" id="card-number-show">Show</button>
+          </div>
+          <span class="muted small" id="card-number-hint"></span>
+        </label>
+        <div class="grid2 tight">
+          <label class="field">Cardholder <input id="card-holder" placeholder="Name on the card" autocomplete="off" maxlength="100" /></label>
+          <label class="field">Expiry <input id="card-exp" class="digits" placeholder="MM/YY" inputmode="numeric" autocomplete="off" maxlength="7" required /></label>
+        </div>
+        <label class="field">Security code (CVV)
+          <div class="pw-row">
+            <input id="card-cvv" class="masked digits" inputmode="numeric" autocomplete="off" maxlength="4" />
+            <button class="btn" type="button" id="card-cvv-show">Show</button>
+          </div>
+          <span class="muted small" id="card-cvv-hint">Optional. Without it, type the code yourself at checkout.</span>
+        </label>
+        <label class="check" id="card-clearcvv-row" hidden><input type="checkbox" id="card-clearcvv" /> Remove the stored security code</label>
+        <label class="field">Note <input id="card-note" autocomplete="off" maxlength="1000" /></label>
+        <p class="error" id="card-error" role="alert"></p>
+        <div class="row end">
+          <button class="btn ghost" type="button" id="card-cancel">Cancel</button>
+          <button class="btn primary" type="submit">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="dlg-confirm" class="dialog small-dialog">
+      <h2 id="confirm-title">Delete entry?</h2>
+      <p class="muted" id="confirm-text"></p>
+      <div class="row end">
+        <button class="btn ghost" id="confirm-no">Cancel</button>
+        <button class="btn danger" id="confirm-yes">Delete</button>
+      </div>
+    </dialog>
+
+    <dialog id="dlg-pin" class="dialog small-dialog">
+      <form id="pin-form" class="stack" autocomplete="off" data-clawbox-vault-ignore>
+        <h2>Change vault PIN</h2>
+        <input id="pin-current" type="password" placeholder="Current PIN" autocomplete="off" required />
+        <input id="pin-next" type="password" placeholder="New PIN (6+ characters)" autocomplete="off" minlength="6" required />
+        <input id="pin-next2" type="password" placeholder="Repeat the new PIN" autocomplete="off" minlength="6" required />
+        <p class="error" id="pin-error" role="alert"></p>
+        <div class="row end">
+          <button class="btn ghost" type="button" id="pin-cancel">Cancel</button>
+          <button class="btn primary" type="submit">Change PIN</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

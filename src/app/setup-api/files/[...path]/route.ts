@@ -7,6 +7,7 @@ import { openInMemberView, type FilesFence } from "@/lib/files-scope";
 import { filesFenceFor } from "@/lib/files-scope-server";
 import { summarizeFolderForZip, zipFolderStream } from "@/lib/zip-stream";
 import { contentDisposition } from "@/lib/content-disposition";
+import { memberHomeChanged, noteLanded, uploadWritingUnder } from "@/lib/user-upload-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -223,12 +224,25 @@ export async function PUT(req: NextRequest, { params }: Params) {
   // a folder of the owner's choosing where the box keeps its state.
   if (isProtectedContainer(newAbs)) return protectedContainerResponse();
   if (fs.existsSync(newAbs)) return NextResponse.json({ error: "Already exists" }, { status: 409 });
+  // Not while an upload is writing into it: the upload's temporary file sits
+  // beside its destination (src/lib/upload-temp.ts) and is renamed into place
+  // at the end, which a folder renamed from under it would make impossible —
+  // and its cleanup too. Asked right before the (synchronous) rename.
+  if (uploadWritingUnder(abs)) {
+    return NextResponse.json(
+      { error: "This is still being uploaded to. Rename it once the upload has finished.", code: "upload_in_progress" },
+      { status: 409 },
+    );
+  }
 
   try {
     fs.renameSync(abs, newAbs);
   } catch (err) {
     return mutationErrorResponse(err, "Failed to rename");
   }
+  // Something now answers to the new name: a move into a member's home that
+  // measured a folder of that name (or around it) measures again (TASK-2663).
+  noteLanded(newAbs);
   return NextResponse.json({ ok: true });
 }
 
@@ -255,7 +269,10 @@ export async function DELETE(req: NextRequest, { params }: Params) {
       fs.unlinkSync(abs);
     }
   } catch (err) {
+    memberHomeChanged(fence);
     return mutationErrorResponse(err, "Failed to delete");
   }
+  // A member's home just got smaller: their quota is measured again.
+  memberHomeChanged(fence);
   return NextResponse.json({ ok: true });
 }

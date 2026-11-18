@@ -136,7 +136,7 @@ describe("the wizard's own session carries it into provider sign-in (TASK-527)",
     // this is the state every request after CredentialsStep sees.
     writeConfig({ setup_complete: false, password_configured: true });
     vi.resetModules();
-    const { middleware } = await import("@/middleware");
+    const { proxy } = await import("@/proxy");
 
     for (const p of [
       "/setup-api/hermes/oauth/start",
@@ -144,10 +144,10 @@ describe("the wizard's own session carries it into provider sign-in (TASK-527)",
       "/setup-api/hermes/oauth/poll",
       "/setup-api/hermes/oauth/cancel",
     ]) {
-      const anonymous = await middleware(new NextRequest(new URL(`http://localhost${p}`)));
+      const anonymous = await proxy(new NextRequest(new URL(`http://localhost${p}`)));
       expect(anonymous.status, `${p} must refuse an anonymous caller`).toBe(401);
 
-      const asWizard = await middleware(new NextRequest(new URL(`http://localhost${p}`), {
+      const asWizard = await proxy(new NextRequest(new URL(`http://localhost${p}`), {
         headers: { cookie },
       }));
       expect(asWizard.status, `${p} must accept the wizard's own session`).toBe(200);
@@ -184,7 +184,7 @@ describe("the wizard's own session carries it into provider sign-in (TASK-527)",
     // broadcasting `ClawBox-Setup` with no key. Nobody in radio range gets to
     // open a provider sign-in session against the box's dashboard, and the
     // allow-list not naming these paths is what guarantees it.
-    const { middleware } = await import("@/middleware");
+    const { proxy } = await import("@/proxy");
 
     for (const p of [
       "/setup-api/hermes/oauth",
@@ -195,7 +195,7 @@ describe("the wizard's own session carries it into provider sign-in (TASK-527)",
       // A trailing slash is not a way around the allow-list either.
       "/setup-api/hermes/oauth/start/",
     ]) {
-      const res = await middleware(new NextRequest(new URL(`http://localhost${p}`)));
+      const res = await proxy(new NextRequest(new URL(`http://localhost${p}`)));
       expect(res.status, `${p} must be refused during the open-AP window`).toBe(401);
     }
   });
@@ -203,10 +203,10 @@ describe("the wizard's own session carries it into provider sign-in (TASK-527)",
   it("still lets the wizard reach the steps that genuinely predate a password", async () => {
     // The counterweight: gating the OAuth flow must not have cost the wizard the
     // routes it really does need before it can have a credential.
-    const { middleware } = await import("@/middleware");
+    const { proxy } = await import("@/proxy");
 
     for (const p of ["/setup-api/setup/status", "/setup-api/wifi/scan", "/setup-api/system/credentials"]) {
-      const res = await middleware(new NextRequest(new URL(`http://localhost${p}`)));
+      const res = await proxy(new NextRequest(new URL(`http://localhost${p}`)));
       expect(res.status, `${p} must stay reachable on first boot`).toBe(200);
     }
   });

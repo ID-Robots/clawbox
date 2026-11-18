@@ -5,7 +5,7 @@ import path from "@/lib/runtime-path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import Busboy from "busboy";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { chatAttachmentDir, pruneMediaDir, type MediaRetention } from "@/lib/harness/media-root";
 import { isMediaOwnedBy, recordMediaOwner } from "@/lib/chat-media-owners";
 import { personSession } from "@/lib/owner-session";
@@ -15,6 +15,8 @@ import { isImageMedia } from "@/lib/chat-media";
 import { CHAT_ATTACHMENT_MAX_BYTES, CHAT_DROP_BATCH_RE, CHAT_DROP_MAX_DEPTH } from "@/lib/chat-attachments";
 import { isOfficeDocumentName, officeTextPath } from "@/lib/office-documents";
 import { extractOfficeText, type OfficeTextResult } from "@/lib/office-text";
+import { uploadTooLargeMessage } from "@/lib/user-limits";
+import { readUserLimits, uploadLimitBytes } from "@/lib/user-limits-server";
 
 export const dynamic = "force-dynamic";
 
@@ -250,6 +252,44 @@ async function readHead(file: string): Promise<Buffer> {
 /** One message for both halves of the gate: the customer's fix is the same. */
 const IMAGE_ONLY_MESSAGE = "This device can only attach images";
 
+// A file name is capped at 255 BYTES on the common filesystems, not characters.
+// The staged name is `<uuid>-<leaf>` (37 bytes of prefix), and a Cyrillic letter
+// is two bytes, so 120 Cyrillic characters would not fit.
+const MAX_LEAF_BYTES = 200;
+
+const MAX_LEAF_CHARS = 120;
+const HASH_CHARS = 8;
+
+/**
+ * `name` as-is when it fits the character and byte caps; otherwise a prefix
+ * within the caps, a short hash of the FULL original, and the extension.
+ *
+ * A plain cut makes two long names that differ only past the cut collide, and
+ * in a folder drop (where segments are not uuid-prefixed) the second upload
+ * then meets the "wx" refusal and answers 409. The hash keeps them distinct.
+ * The cut is on a character boundary, never inside a UTF-8 sequence.
+ */
+function shortenName(name: string): string {
+  if ([...name].length <= MAX_LEAF_CHARS && Buffer.byteLength(name) <= MAX_LEAF_BYTES) return name;
+  const dot = name.lastIndexOf(".");
+  const ext = dot > 0 && Buffer.byteLength(name.slice(dot)) <= 12 ? name.slice(dot) : "";
+  const hash = createHash("sha256").update(name).digest("hex").slice(0, HASH_CHARS);
+  const tail = `-${hash}${ext}`;
+  const maxBytes = MAX_LEAF_BYTES - Buffer.byteLength(tail);
+  const maxChars = MAX_LEAF_CHARS - [...tail].length;
+  let out = "";
+  let bytes = 0;
+  let chars = 0;
+  for (const ch of name.slice(0, dot > 0 && ext ? dot : name.length)) {
+    const size = Buffer.byteLength(ch);
+    if (bytes + size > maxBytes || chars + 1 > maxChars) break;
+    out += ch;
+    bytes += size;
+    chars += 1;
+  }
+  return `${out}${tail}`;
+}
+
 /**
  * A filesystem-safe leaf name for an uploaded file.
  *
@@ -266,11 +306,11 @@ const IMAGE_ONLY_MESSAGE = "This device can only attach images";
  */
 function safeLeafName(raw: string): string | null {
   const base = path.basename(String(raw ?? "").trim());
-  const cleaned = base
+  const full = base
     .replace(/[\u0000-\u001f\u007f/\\]/g, "")
     .replace(/^\.+/, "")
-    .slice(0, 120)
     .trim();
+  const cleaned = full ? shortenName(full).trim() : "";
   if (!cleaned || cleaned === "." || cleaned === "..") return null;
   return cleaned;
 }
@@ -366,8 +406,31 @@ export async function POST(req: NextRequest) {
   // recorded as theirs (src/lib/chat-media-owners.ts), and may add to a
   // dropped folder's batch only when that batch is new or already theirs.
   const person = await personSession(req);
+  // A session cookie whose person could not be resolved just now (the user
+  // registry unreadable for a moment) is not the owner's: refused, never
+  // staged as the owner's upload past that user's limits.
+  if (!person && /(?:^|;\s*)clawbox_session=/.test(req.headers.get("cookie") ?? "")) {
+    return NextResponse.json(
+      { error: "Who is signed in could not be checked just now. Try again in a moment.", code: "session_unknown" },
+      { status: 503 },
+    );
+  }
   const user = person && !person.isOwner ? person.username : null;
   let batchDirUsed: string | null = null;
+
+  // A user other than the owner is held to the owner's upload limit for them
+  // as well (src/lib/user-limits.ts), when it is below this route's own
+  // ceiling; the refusal then names THEIR limit, not the route's.
+  const userLimit = user ? uploadLimitBytes(await readUserLimits()) : null;
+  const byUserLimit = userLimit !== null && userLimit < MAX_BYTES;
+  const maxBytes = byUserLimit ? userLimit : MAX_BYTES;
+  const maxRequestBytes = byUserLimit ? userLimit + (MAX_REQUEST_BYTES - MAX_BYTES) : MAX_REQUEST_BYTES;
+  const tooLarge = (fallback: string) =>
+    byUserLimit ? new BadUpload(uploadTooLargeMessage(userLimit), 413, "upload_too_large") : new BadUpload(fallback, 413);
+  const declared = parseInt(req.headers.get("content-length") ?? "0", 10);
+  if (byUserLimit && Number.isFinite(declared) && declared > maxRequestBytes) {
+    return NextResponse.json({ error: uploadTooLargeMessage(userLimit), code: "upload_too_large", limitBytes: userLimit }, { status: 413 });
+  }
 
   let written: string | null = null;
   // Hoisted so the cleanup below can wait for the write to stop before
@@ -378,9 +441,16 @@ export async function POST(req: NextRequest) {
     const result = await new Promise<{ name: string; path: string; root: string | null }>((resolve, reject) => {
       const busboy = Busboy({
         headers: { "content-type": contentType },
+        // Browsers send a multipart `filename` as raw UTF-8; busboy's default
+        // `defParamCharset` is latin1, which turns a Cyrillic name into mojibake
+        // (SUP-1026). RFC 5987 `filename*` values still carry their own charset.
+        defParamCharset: "utf8",
         limits: {
           files: 1,
-          fileSize: MAX_BYTES,
+          // One sentinel byte over, as the Files route does: busboy raises
+          // `limit` when a part REACHES its fileSize, so a file of exactly the
+          // limit would otherwise be refused.
+          fileSize: maxBytes + 1,
           fields: MAX_FIELDS,
           fieldSize: MAX_FIELD_BYTES,
           parts: MAX_PARTS,
@@ -563,7 +633,7 @@ export async function POST(req: NextRequest) {
         written = dest;
         // busboy raises `limit` and then ends the stream, so the pipeline would
         // otherwise resolve on a truncated file and hand back a path to it.
-        fileStream.on("limit", () => fail(new BadUpload("File exceeds the size limit", 413)));
+        fileStream.on("limit", () => fail(tooLarge("File exceeds the size limit")));
         // "wx": never clobber. A path we just generated should not exist, and
         // if it does, something is wrong enough that overwriting is the worst
         // available answer.
@@ -598,8 +668,8 @@ export async function POST(req: NextRequest) {
       let receivedBytes = 0;
       source.on("data", (chunk: Buffer) => {
         receivedBytes += chunk.length;
-        if (receivedBytes > MAX_REQUEST_BYTES) {
-          fail(new BadUpload("Request exceeds the size limit", 413));
+        if (receivedBytes > maxRequestBytes) {
+          fail(tooLarge("Request exceeds the size limit"));
         }
       });
       source.on("error", fail);
@@ -644,7 +714,8 @@ export async function POST(req: NextRequest) {
     const status = err instanceof BadUpload ? err.status : (err as NodeJS.ErrnoException)?.code === "EEXIST" ? 409 : 500;
     // A refusal with a code is a sentence written for the customer: shown as is.
     if (err instanceof BadUpload && err.code) {
-      return NextResponse.json({ error: err.message, code: err.code }, { status });
+      const limit = err.code === "upload_too_large" && userLimit !== null ? { limitBytes: userLimit } : {};
+      return NextResponse.json({ error: err.message, code: err.code, ...limit }, { status });
     }
     return NextResponse.json(
       { error: `Upload failed: ${err instanceof Error ? err.message : String(err)}` },

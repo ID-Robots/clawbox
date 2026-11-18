@@ -148,8 +148,11 @@ API_STATUS=000
 API_BODY=
 board_api() {
   local out
+  # API_MAX_TIME set on the runner (`API_MAX_TIME=20 board_api …`) is handed
+  # over as an argument: `api` reads it on the board, where the runner's
+  # environment never goes (the prefix alone left every poll at 150 s).
   # shellcheck disable=SC2016  # $@ is the board's positional list
-  out=$(board 'api "$@"' "$@")
+  out=$(board 'API_MAX_TIME=$1; shift; api "$@"' "${API_MAX_TIME:-150}" "$@")
   API_STATUS=$(printf '%s\n' "$out" | head -n1)
   API_BODY=$(printf '%s\n' "$out" | tail -n +2)
   case "$API_STATUS" in [0-9][0-9][0-9]) ;; *) API_STATUS=000 ;; esac
@@ -160,7 +163,7 @@ board_api() {
 board_owner_api() {
   local out
   # shellcheck disable=SC2016  # $@ is the board's positional list
-  out=$(board 'owner_api "$@"' "$@")
+  out=$(board 'API_MAX_TIME=$1; shift; owner_api "$@"' "${API_MAX_TIME:-150}" "$@")
   API_STATUS=$(printf '%s\n' "$out" | head -n1)
   API_BODY=$(printf '%s\n' "$out" | tail -n +2)
   case "$API_STATUS" in [0-9][0-9][0-9]) ;; *) API_STATUS=000 ;; esac

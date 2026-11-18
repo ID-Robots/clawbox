@@ -1,4 +1,8 @@
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mediaUrl } from "@/lib/chat-media";
 
 /**
  * A member of staff's Hermes turn on an organisation box (TASK-2444,
@@ -18,6 +22,11 @@ const memberMock = vi.hoisted(() => vi.fn());
 const profileMock = vi.hoisted(() => vi.fn());
 /** Whose state.db each turn's reads were scoped to (undefined: the box's own). */
 const stateHomes = vi.hoisted(() => [] as Array<string | null | undefined>);
+/** The organisation switch as `readOrgMode` reads it, and the member's own profile folder. */
+const org = vi.hoisted(() => ({ on: false, folder: "/h/.hermes/profiles/clawbox-staff-maria/workspace" }));
+const recordReplyMock = vi.hoisted(() => vi.fn());
+/** Real paths recorded as the member's (src/lib/chat-media-owners.ts). */
+const owned = vi.hoisted(() => new Set<string>());
 
 vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-dashboard-turn")>()),
@@ -53,9 +62,23 @@ vi.mock("@/lib/hermes-model-options", () => ({
 vi.mock("@/lib/org-mode-server", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/org-mode-server")>()),
   orgMemberStrictOf: memberMock,
+  readOrgMode: vi.fn(async () => org.on),
+}));
+vi.mock("@/lib/chat-media-owners", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/chat-media-owners")>()),
+  recordMediaOwner: vi.fn(),
+  isMediaOwnedBy: vi.fn((username: string, real: string) => username === "maria" && owned.has(real)),
+}));
+vi.mock("@/lib/chat-reply-media", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/chat-reply-media")>()),
+  recordMemberReplyMedia: recordReplyMock,
 }));
 const guardLoadedMock = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/hermes-staff-profile", () => ({ ensureStaffHermesProfile: profileMock, staffGuardLoaded: guardLoadedMock }));
+vi.mock("@/lib/hermes-staff-profile", () => ({
+  ensureStaffHermesProfile: profileMock,
+  staffGuardLoaded: guardLoadedMock,
+  staffHermesProfilePaths: vi.fn(() => ({ folder: org.folder })),
+}));
 vi.mock("@/lib/chat-scope-server", () => ({
   transcriptKeyFor: vi.fn(async () => ({ ok: true, key: "desktop-user-maria", principal: { username: "maria", isOwner: false } })),
   hermesSessionFor: vi.fn((_who: unknown, id: string) => id),
@@ -98,6 +121,10 @@ beforeEach(() => {
   memberMock.mockResolvedValue({ username: "maria" });
   profileMock.mockResolvedValue(STAFF);
   stateHomes.length = 0;
+  org.on = false;
+  recordReplyMock.mockReset();
+  owned.clear();
+  recordReplyMock.mockReturnValue({ recorded: [], refused: [] });
   guardLoadedMock.mockReset();
   guardLoadedMock.mockResolvedValue(true);
   openTurnMock.mockResolvedValue(fakeTurn());
@@ -189,6 +216,64 @@ describe("a member of staff's turn", () => {
     expect((await res.json()).code).toBe("staff_profile_unavailable");
     expect(openTurnMock).not.toHaveBeenCalled();
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("a member of staff's reply naming files of their own (TASK-2516)", () => {
+  it("is recorded as written; a picture keeps its card only when it is theirs, and a document's card is in the transcript too", async () => {
+    const own = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "staff-own-"));
+    try {
+      const chart = path.join(own, "chart.png");
+      const stale = path.join(own, "old.png");
+      const doc = path.join(own, "report.docx");
+      const oldDoc = path.join(own, "old.docx");
+      const oldChart = path.join(own, "last-week.png");
+      const elsewhere = path.join(own, "..", `${path.basename(own)}-elsewhere.docx`);
+      for (const file of [chart, stale, doc, oldDoc, oldChart, elsewhere]) fs.writeFileSync(file, "x");
+      org.on = true;
+      org.folder = own;
+      // The recorder's verdict: the chart and the document are this turn's, the old picture is not.
+      // An earlier turn's document is theirs already; a file outside their folders never is.
+      recordReplyMock.mockImplementation(() => {
+        owned.add(chart);
+        owned.add(doc);
+        return { recorded: [chart, doc], refused: [{ path: stale, reason: "not_this_turn" }, { path: oldDoc, reason: "not_this_turn" }, { path: oldChart, reason: "not_this_turn" }] };
+      });
+      owned.add(oldDoc);
+      owned.add(oldChart); // a picture of theirs from an earlier turn
+      owned.add(path.resolve(elsewhere));
+      openTurnMock.mockResolvedValue({
+        ...fakeTurn(),
+        async run() {
+          return {
+            text: `Here they are.\nMEDIA:${chart}\nMEDIA:${stale}\nMEDIA:${doc}\nMEDIA:${oldDoc}\nMEDIA:${oldChart}\nMEDIA:${elsewhere}\nMEDIA:notes/plan.docx\nMEDIA:https://example.com/brief.pdf\n\`\`\`\nMEDIA:${elsewhere}\n\`\`\``,
+            reasoning: "",
+            status: "complete",
+          };
+        },
+      });
+      const res = await POST(post({ message: "Draw the chart and write the report." }));
+      expect(res.status).toBe(200);
+      // Judged on the reply AS WRITTEN — its picture lines too, which the caption loses.
+      expect(recordReplyMock).toHaveBeenCalledWith(expect.objectContaining({ username: "maria", ownFolder: own, text: expect.stringContaining(`MEDIA:${chart}`) }));
+      const { text } = await res.json();
+      expect(text).toContain(`MEDIA:${chart}`);
+      expect(text).toContain(`MEDIA:${doc}`);
+      expect(text).toContain(`MEDIA:${oldDoc}`); // theirs from before: still served
+      expect(text).toContain(`MEDIA:${oldChart}`); // …a picture too, though reclaiming took its line
+      expect(text).toContain("MEDIA:https://example.com/brief.pdf"); // not a file of this box
+      // No card that would be a 404: a picture not recorded, a file outside
+      // their folders (named in fenced code it stays text), a relative path.
+      expect(text).not.toContain(stale);
+      expect(text).not.toContain("MEDIA:notes/plan.docx");
+      expect(text.split(`MEDIA:${elsewhere}`)).toHaveLength(2);
+      expect(text).toContain(`\`\`\`\nMEDIA:${elsewhere}\n\`\`\``);
+      const stored = appendMock.mock.calls.map((call) => call[0]).find((r) => r.role === "assistant");
+      expect(stored.media).toEqual([mediaUrl(chart), mediaUrl(oldChart)]);
+      expect(stored.files).toEqual([mediaUrl(doc), mediaUrl(oldDoc), mediaUrl("https://example.com/brief.pdf")]);
+    } finally {
+      fs.rmSync(own, { recursive: true, force: true });
+    }
   });
 });
 

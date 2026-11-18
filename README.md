@@ -458,7 +458,7 @@ Full runtime topology in the [Architecture reference](https://docs.clawbox.com/t
 │   ├── lib/                Config, network, auth, OAuth, i18n, updater, chat, harness,
 │   │                       coding agent, named tunnel, memory shard, code-projects
 │   ├── tests/              Unit, component and API route tests
-│   └── middleware.ts       Captive portal detection + session auth
+│   └── proxy.ts            Captive portal detection + session auth (Next 16 proxy, formerly middleware.ts)
 ├── production-server.js    Node.js HTTP + WebSocket proxy wrapper
 ├── install-x64.sh          PC installer: x86_64 and arm64 workstations (host preflight, configurable ports)
 └── install.sh              Full system installer (idempotent)
@@ -500,7 +500,6 @@ it checks, how cleanup works and how to add a test:
 | `TERMINAL_WS_PORT` | `3006` | Terminal WebSocket PTY port |
 | `NOVNC_WS_PORT` | `6080` | noVNC WebSocket port (remote desktop) |
 | `NETWORK_INTERFACE` | `wlP1p1s0` | WiFi interface for AP |
-| `CANONICAL_ORIGIN` | `http://clawbox.local` | Default redirect origin |
 | `ALLOWED_HOSTS` | `clawbox.local,10.42.0.1,10.43.0.1,localhost` | Trusted hostnames |
 | `SESSION_SECRET` | Auto-generated | Session cookie signing key, persisted in `data/.session-secret` |
 | `CLAWBOX_MCP_TOKEN` | Auto-generated | Bearer token the MCP server uses on `/setup-api`, persisted in `data/.mcp-token` |

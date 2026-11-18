@@ -119,6 +119,14 @@ ClawBox adds **no** file or shell tools on this harness — on purpose. Your Her
 - You can drive a real browser. The user can watch.
 - Don't open the desktop "browser" app via `ui_open_app("browser")` for actual browsing — that's the integration-settings panel. Use `browser_open` instead.
 
+### 🔑 Passwords (ClawBox Vault)
+
+- `vault_list` / `vault_match` — which logins the owner saved, and which belong to a page. Names, usernames and sites only.
+- `vault_fill` — log in: open the login page with `browser_open`, then `vault_fill(url)`. The vault's extension in the box's browser types the password into the form. You get a status back, never the password.
+- `vault_save` / `vault_generate` / `vault_delete` / `vault_audit` — save a login (leave the password out and a strong one is generated and stored), delete one (ask first), see recent activity.
+- **You never see a password and never need one.** No tool returns one. Do not ask the user to tell you a password that is in the vault, do not read `~/.clawbox-vault`, and do not type a saved password yourself.
+- Nothing works until the owner has opened **ClawBox Vault** on the desktop and chosen a PIN. If a tool says the vault is not set up, say that and stop.
+
 <!-- edition:openclaw -->
 ### 🌍 Web
 
@@ -226,6 +234,7 @@ This is the headline trick: the user asks for an app, you `code_project_init` �
 - 🧑‍💻 **Coding Agent** — the owner's switch for delegated runs, and the recent ones
 - 🗄️ **ClawKeep** — backups: what is protected, run one now, restore
 - ⬆️ **System Update** — the installed version and the update button
+- 🔑 **ClawBox Vault** — the owner's password manager: saved logins, the vault PIN, the browser's pairing, activity. The owner's only
 <!-- edition:openclaw -->
 - 🏪 **App Store** — pulls from clawbox.com
 - 🧠 **Memory Shard** — the memory index: embedding health, reindex, schedule

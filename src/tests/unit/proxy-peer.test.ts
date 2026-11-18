@@ -164,6 +164,39 @@ describe("proxy-peer — attached to the server", () => {
   });
 });
 
+// TASK-2446: the audit log records where a sign-in came from. Only this
+// guard sees the socket, so it writes the peer into its own header on every
+// request, over whatever a client sent under that name.
+describe("proxy-peer — the socket's peer, for the audit log", () => {
+  const { PEER_HEADER, recordPeer } = proxyPeer as unknown as { PEER_HEADER: string; recordPeer: (req: unknown) => void };
+
+  it("writes the socket's peer over a value the client sent", () => {
+    const req = fakeReq("::ffff:192.0.2.9", { [PEER_HEADER]: "198.51.100.1", "x-forwarded-for": "198.51.100.2" });
+    recordPeer(req);
+    expect(req.headers[PEER_HEADER]).toBe("192.0.2.9");
+    // X-Forwarded-For is left as it was: nothing reads it for the address.
+    expect(req.headers["x-forwarded-for"]).toBe("198.51.100.2");
+  });
+
+  it("removes a client's value when the peer cannot be read, and never throws", () => {
+    const req = fakeReq(undefined, { [PEER_HEADER]: "198.51.100.1" });
+    recordPeer(req);
+    expect(req.headers).not.toHaveProperty(PEER_HEADER);
+    expect(() => recordPeer({ headers: null })).not.toThrow();
+  });
+
+  it("is written for every request once the guard is attached, the tunnel's too", () => {
+    const server = new EventEmitter();
+    const seen: Array<Record<string, string>> = [];
+    server.on("request", (req: { headers: Record<string, string> }) => seen.push({ ...req.headers }));
+    attachProxyPeerGuard(server);
+    server.emit("request", fakeReq("192.0.2.20", { [PEER_HEADER]: "198.51.100.1" }), {});
+    server.emit("request", fakeReq("127.0.0.1"), {});
+    expect(seen[0][PEER_HEADER]).toBe("192.0.2.20");
+    expect(seen[1][PEER_HEADER]).toBe("127.0.0.1");
+  });
+});
+
 describe("proxy-peer — the wiring in production-server.js", () => {
   const SRC = readFileSync(path.join(process.cwd(), "production-server.js"), "utf-8");
 

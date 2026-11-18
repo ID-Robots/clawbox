@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { auditActorOf, recordAudit } from "@/lib/audit-log";
 import { POST as configureAiModel } from "@/app/setup-api/ai-models/configure/route";
 import { get } from "@/lib/config-store";
 import {
@@ -198,6 +199,7 @@ export async function POST(req: Request) {
   }
 
   const name = HARNESSES[target].label;
+  await recordAudit({ event: "harness_swap", actor: await auditActorOf(req), detail: { from: source.edition, to: target } }, req);
 
   // The follow gave up, or threw, on a unit that is still going — or on one
 

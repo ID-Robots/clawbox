@@ -2,6 +2,7 @@ import { hermesConfigGet, hermesConfigGetMany, hermesConfigReadPending } from "@
 import { runHermesCli } from "@/lib/hermes-cli";
 import { LOCAL_TTS_PROVIDER_ID, type VoiceConfigView } from "@/lib/voice-output";
 import { isClawboxAiToken } from "@/lib/clawai-token";
+import { kokoroMemoryShortfall, type KokoroMemoryShortfall } from "@/lib/kokoro-memory-guard";
 
 /**
  * Speech on the Hermes edition, driven through Hermes' OWN TTS pipeline.
@@ -336,6 +337,19 @@ export function hermesTtsProviderIsFactory(provider: string | null): boolean {
 
 export class HermesTtsWriteError extends Error {}
 
+/** What the local-only AI lock answers a cloud voice with (TASK-2501). */
+export const HERMES_VOICE_LOCKED = "Local-only AI is on: replies are spoken by this box's own voice only.";
+
+/**
+ * Is the local-only AI lock on? Read lazily, failing closed (`cloudAiLockOn`):
+ * the voice routes import this module and should not pull the store reader
+ * into a chat turn that never speaks.
+ */
+async function voiceLocked(): Promise<boolean> {
+  const { cloudAiLockOn } = await import("@/lib/feature-engine");
+  return await cloudAiLockOn();
+}
+
 async function set(key: string, value: string): Promise<void> {
   const r = await runHermesCli(["config", "set", key, value], { timeoutMs: 15_000 });
   if (r.code !== 0) {
@@ -358,6 +372,11 @@ async function set(key: string, value: string): Promise<void> {
  * can never be left pointing at a provider that has nowhere to send a request.
  */
 export async function writeHermesCloudTarget(token: string): Promise<void> {
+  // THE ONE WRITER of the cloud voice on this edition — the Voice tab, every
+  // ClawBox AI link and the restore after a renewed plan all come through
+  // here — so the local-only AI lock (TASK-2501) refuses it here, before the
+  // proxy or the token reach Hermes' config. Callers already handle a refusal.
+  if (await voiceLocked()) throw new HermesTtsWriteError(HERMES_VOICE_LOCKED);
   // IMPORTED HERE, not at the top of the file, for the reason hermes-clawai.ts
   // gives for the same move: `harness/credentials` reaches `openclaw-config`,
   // which spawns the openclaw CLI, and a static import would put that whole
@@ -405,6 +424,7 @@ export async function selectHermesEngine(engine: "local" | "cloud", token: strin
  * caller's to keep — this writes nothing else, and never a credential.
  */
 export async function selectHermesProvider(engine: "local" | "cloud"): Promise<void> {
+  if (engine === "cloud" && (await voiceLocked())) throw new HermesTtsWriteError(HERMES_VOICE_LOCKED);
   await set(KEYS.provider, hermesProviderFor(engine));
 }
 
@@ -475,7 +495,40 @@ async function readBounded(res: Response, limit: number): Promise<string | null>
 
 export type HermesSpeech =
   | { ok: true; audio: Uint8Array<ArrayBuffer>; mime: string }
-  | { ok: false; code: string; status: number; reason?: string };
+  | { ok: false; code: string; status: number; reason?: string; shortfall?: KokoroMemoryShortfall };
+
+/** The most of a refusal's body worth reading for the reason in it. */
+const MAX_REFUSAL_BYTES = 64 * 1024;
+
+/**
+ * Kokoro's memory guard in a refusal from Hermes' speech route, or null.
+ *
+ * Hermes runs the box's own voice as its `clawbox-local` command and answers
+ * that command's failure with 400 and `{"detail": "… exited with code 1:
+ * stderr: …"}`, the script's stderr inside (measured on a lab board,
+ * 2026-11-17). Its memory guard is the one reason the owner can act on — the
+ * box was short of memory, not the voice refusing — so it is read out of the
+ * detail rather than reported as the transport's failure.
+ */
+async function memoryShortfallIn(res: Response): Promise<KokoroMemoryShortfall | null> {
+  let raw: string | null;
+  try {
+    raw = await readBounded(res, MAX_REFUSAL_BYTES);
+  } catch {
+    // A body that cannot be read (already read, or locked) says nothing, and
+    // the refusal stays the transport's.
+    return null;
+  }
+  if (raw === null) return null;
+  let detail: unknown = raw;
+  try {
+    const body = JSON.parse(raw) as { detail?: unknown; error?: unknown } | null;
+    detail = body?.detail ?? body?.error ?? raw;
+  } catch {
+    // Not JSON: the text itself.
+  }
+  return typeof detail === "string" ? kokoroMemoryShortfall(detail) : null;
+}
 
 /**
  * Speak `text` with whatever Hermes is configured to speak with.
@@ -496,20 +549,42 @@ export async function speakWithHermes(
   text: string,
   opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<HermesSpeech> {
-  // The local-only AI lock (TASK-2501): Hermes speaks with whatever
-  // `tts.provider` names, so anything but the box's own voice is refused here,
-  // before the text leaves for it. Only `clawbox-local` with its command
-  // registered (its type AND its command) counts: a name that merely looks
-  // local, or one with nothing behind it, lets Hermes fall back to a provider of its own (Edge, in the
-  // cloud). The reply is then spoken by the box's script instead (voice-speak).
-  const { isCloudAiLocked, CLOUD_AI_LOCKED_CODE } = await import("@/lib/ai-cloud-lock");
-  if (await isCloudAiLocked()) {
-    const { provider, localRegistered, localCommand } = await readHermesVoice();
-    // Both halves of the definition, read: Hermes refuses a `command` provider
-    // with no command and falls back to a provider of its own.
-    const local = (provider ?? "").trim().toLowerCase() === HERMES_LOCAL_TTS_PROVIDER && localRegistered && Boolean(localCommand);
-    if (!local) {
-      return { ok: false, code: CLOUD_AI_LOCKED_CODE, status: 409, reason: "Local-only AI is on: replies are spoken by this box's own voice only." };
+  // THE LOCAL-ONLY AI LOCK (TASK-2501): Hermes speaks with whatever
+  // `tts.provider` names, and the factory `edge` is Microsoft's cloud. So under
+  // the lock anything but the box's own voice is REPLACED by it first — the
+  // Kokoro definition install.sh registers — and only then is Hermes asked.
+  // The boot pass (register-mcp.sh) makes the same move for Hermes' own
+  // channel replies. With no on-box voice registered nothing is spoken: the
+  // text never leaves for a cloud voice.
+  if (await voiceLocked()) {
+    const voice = await readHermesVoice();
+    if (voice.unread.provider || voice.unread.localProvider) {
+      return { ok: false, code: "cloud_ai_locked", status: 503, reason: "Could not read which voice this box speaks with." };
+    }
+    if (!voice.localRegistered || !voice.localCommand) {
+      return { ok: false, code: "cloud_ai_locked", status: 409, reason: `${HERMES_VOICE_LOCKED} No on-box voice is installed.` };
+    }
+    const current = (voice.provider ?? "").trim().toLowerCase();
+    if (current !== HERMES_LOCAL_TTS_PROVIDER) {
+      try {
+        // Remembered FIRST, the way the boot plan does it, so lifting the lock
+        // gives the box back what it had: ClawBox AI's own cloud voice through
+        // the plan's stand-down (restored on an entitled box), an owner's own
+        // pick through the lock marker. Hermes' factory `edge` and an unset
+        // selection are nobody's choice and are not remembered.
+        const markers = await import("@/lib/hermes-voice-standdown");
+        if (current === HERMES_CLOUD_TTS_PROVIDER && !voice.unread.cloudRoute && !voice.unread.cloudKey) {
+          const { CLAWBOX_AI_PROXY_URL } = await import("@/lib/harness/credentials");
+          if (hermesCloudRouteIsOurs(voice, CLAWBOX_AI_PROXY_URL)) await markers.rememberHermesVoiceStanddown(voice.cloudVoice);
+          else await markers.rememberHermesVoiceLock(voice.provider ?? "");
+        } else if (current && current !== HERMES_FACTORY_TTS_PROVIDER) {
+          await markers.rememberHermesVoiceLock(voice.provider ?? "");
+        }
+        await set(KEYS.provider, HERMES_LOCAL_TTS_PROVIDER);
+      } catch {
+        return { ok: false, code: "cloud_ai_locked", status: 503, reason: "Could not move this box onto its own voice." };
+      }
+      console.warn("[hermes/tts] local-only AI is on: moved Hermes' voice onto the box's own (Kokoro)");
     }
   }
   const { dashboardFetch } = await import("@/lib/hermes-dashboard-auth");
@@ -526,7 +601,13 @@ export async function speakWithHermes(
     return { ok: false, code: "cloud_no_answer", status: 502 };
   }
   if (!res.ok) {
-    return { ok: false, code: res.status === 401 ? "cannot_change" : "cloud_refused", status: 502 };
+    if (res.status === 401) return { ok: false, code: "cannot_change", status: 502 };
+    // The box's own voice short of memory (TASK-2649): `local_memory` with the
+    // guard's numbers, not the transport's `cloud_refused`, which the Voice
+    // panel and the chat read as "the cloud voice refused".
+    const shortfall = await memoryShortfallIn(res);
+    if (shortfall) return { ok: false, code: "local_memory", status: 502, shortfall };
+    return { ok: false, code: "cloud_refused", status: 502 };
   }
   // BOUNDED BEFORE IT IS BUFFERED. This runs on every reply on the chat path,
   // and neither the character cap on the text nor the abort deadline limits a

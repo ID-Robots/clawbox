@@ -279,3 +279,43 @@ describe("serialized unvalidated primary-model fallback", () => {
     }
   });
 });
+
+describe("openclaw.json's auth order written with the gateway stopped (CodeRabbit on #1526)", () => {
+  it("reads, changes and writes auth.order under OpenClaw's sidecar lock: an edit that lands while it waits is kept", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawbox-auth-order-lock-"));
+    roots.push(root);
+    process.env.CLAWBOX_OPENCLAW_HOME = root;
+    delete process.env.OPENCLAW_HOME;
+    vi.resetModules();
+
+    const configPath = path.join(root, "openclaw.json");
+    const lockPath = `${configPath}.lock`;
+    await fs.writeFile(configPath, JSON.stringify({ auth: { order: { openai: ["openai:default"] } }, gateway: { port: 18789 } }));
+    // Another writer (the CLI, a staged write being flushed) holds the lock.
+    await fs.writeFile(lockPath, JSON.stringify({ pid: process.pid, createdAt: "2000-01-01T00:00:00.000Z" }));
+
+    const { setConfigAuthOrderOffline } = await import("@/lib/openclaw-config");
+    const pending = setConfigAuthOrderOffline("anthropic", ["anthropic:clawbox-aaaa", "anthropic:default"]);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      // Nothing read and written over while the lock is held.
+      expect(JSON.parse(await fs.readFile(configPath, "utf8")).auth.order.anthropic).toBeUndefined();
+      // The owner's edit lands meanwhile.
+      await fs.writeFile(configPath, JSON.stringify({
+        auth: { order: { openai: ["openai:default"] } },
+        gateway: { port: 18789 },
+        agents: { defaults: { model: { primary: "anthropic/claude-opus-5-5" } } },
+      }));
+      await fs.unlink(lockPath);
+      await pending;
+    } finally {
+      await fs.unlink(lockPath).catch(() => {});
+    }
+
+    const written = JSON.parse(await fs.readFile(configPath, "utf8"));
+    expect(written.agents.defaults.model.primary).toBe("anthropic/claude-opus-5-5");
+    expect(written.auth.order).toEqual({ openai: ["openai:default"], anthropic: ["anthropic:clawbox-aaaa", "anthropic:default"] });
+    expect(written.gateway).toEqual({ port: 18789 });
+    expect(existsSync(lockPath)).toBe(false);
+  });
+});

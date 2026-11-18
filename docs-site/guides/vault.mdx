@@ -1,0 +1,73 @@
+---
+title: "ClawBox Vault"
+icon: "key"
+summary: "A password manager on your box: it saves your website logins, fills them in the box's browser, and lets the assistant log in for you without ever seeing a password."
+---
+
+**ClawBox Vault** keeps your website logins on the box itself, encrypted. The box's
+browser fills them into login pages and offers to save new ones, and the assistant can
+log in to a site for you. The assistant never sees a password: it asks the vault to
+fill, and gets back only whether it worked.
+
+Open it from the **ClawBox Vault** icon on the desktop. It is the same on OpenClaw and
+on Hermes.
+
+<Note>
+ClawBox Vault is the owner's. Other users of the box do not see the app and cannot open it.
+</Note>
+
+## Set it up
+
+1. Open **ClawBox Vault** and choose a **vault PIN** (at least 6 characters). You need
+   it each time you open the app. Until you choose one, the vault saves and fills nothing.
+2. That is all. The extension is already in the box's browser, and it connects by
+   itself within a minute. The **Browser** page in the app shows when it is connected.
+
+## Save a login
+
+- **In the browser:** log in to a site in the box's browser as usual. A bar appears at
+  the top of the page: **Save to ClawBox Vault?** Click **Save**.
+- **In the app:** click **New entry** and type the site, your username and the password,
+  or let the **Generator** make a strong one.
+
+## Let the assistant log in
+
+Ask in the chat, for example: *"Log in to billing.example.com."* The assistant opens the
+page in the box's browser and asks the vault to fill your login. The vault's extension
+types the password into the page. The assistant is told `filled`, or why it did not work
+(no login saved for that site, the page has no login form, the vault is locked).
+
+The assistant can also save a login for a new account: it asks the vault to make a
+strong password, the vault stores it, and the extension types it into the sign-up form.
+You read the password in the app whenever you need it; the assistant never does.
+
+## What the assistant can and cannot see
+
+| It can | It cannot |
+|---|---|
+| See which sites and usernames you saved | See, read or copy any password |
+| Ask the vault to fill a login into the page that belongs to it | Fill a login into a different site's page |
+| Save a new login, or delete one after asking you | Open the vault app or learn your PIN |
+
+Every fill, save and delete is listed under **Activity** in the app, with the site and
+the entry. Passwords are never written there.
+
+## Lock, unpair, change the PIN
+
+- **Lock vault** closes the app until you type the PIN again. It also locks itself after
+  15 minutes without use.
+- **Browser → Lock extension** stops fills and saves until you unlock it with the PIN.
+- **Browser → Unpair** disconnects the box's browser from the vault. It stays
+  disconnected until you click **Pair this box's browser** there.
+- **Change PIN** is at the bottom left of the app.
+
+## Good to know
+
+- **Payment cards are not part of the vault.** It keeps website logins only.
+- **Backups:** ClawKeep does not back up the vault. Your passwords stay on this box and
+  nowhere else. If you want a copy, copy the folders `~/.clawbox-vault/store` and
+  `~/.clawbox-vault/gnupg` to a safe place yourself: together they are your passwords,
+  so treat that copy like the passwords themselves. A factory reset removes the vault.
+- **Forgot the PIN?** Your entries are not lost. See the troubleshooting steps in the
+  vault's technical notes, or contact support.
+- The vault only fills pages served over `https://`, and only the site a login belongs to.

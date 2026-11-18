@@ -95,6 +95,7 @@ import {
   type EmailReadabilityWatchOptions,
 } from "./tools/email";
 import { registerLocalAiTools } from "./tools/local-ai";
+import { registerVaultTools } from "./tools/vault";
 import { registerMediaTools } from "./tools/media";
 import { registerOrientationTools } from "./tools/orientation";
 import { registerHermesPluginTools } from "./tools/hermes-plugins";
@@ -295,6 +296,9 @@ export async function buildServer(
   registerSystemTools(reg, ctx);
   registerDesktopTools(reg, ctx);
   registerBrowserTools(reg);
+  // The password manager, beside the browser it types into. No tool in it
+  // returns a password (mcp/tools/vault.ts).
+  registerVaultTools(reg);
   registerMediaTools(reg);
   registerEmailTools(reg, ctx);
   registerCodingTools(reg);
@@ -324,7 +328,7 @@ export async function buildServer(
  * the box answering "send only" seven minutes after Settings said "Read on
  * demand". `hasMailboxSurface` is asked of the registrar rather than of
  * `profile`/`edition` again — it owns both reasons, including the SDK one.
- * `buildServer` deliberately does not do this: mcp/check-tools.ts builds twelve
+ * `buildServer` deliberately does not do this: mcp/check-tools.ts builds fourteen
  * servers and connects none of them.
  *
  * STOPPED WITH THE TRANSPORT. `unref` is what stops the poll holding an
@@ -687,7 +691,7 @@ async function main(): Promise<void> {
   );
 }
 
-// mcp/check-tools.ts imports buildServer to build six postures per edition and diff the tool lists;
+// mcp/check-tools.ts imports buildServer to build seven postures per edition and diff the tool lists;
 // it sets this first so importing this module does not claim stdio.
 if (process.env.CLAWBOX_MCP_NO_AUTOSTART !== "1") {
   main().catch((err) => {

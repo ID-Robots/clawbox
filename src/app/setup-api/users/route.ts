@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { recordAudit } from "@/lib/audit-log";
 import { getSystemUsername } from "@/lib/auth";
 import { UserAdminError, createUser, listUsers, removeUser, userHelperAvailable } from "@/lib/clawbox-users";
 import { rootStepRepairCommand } from "@/lib/root-step-runner";
@@ -7,6 +8,7 @@ import { syncStaffAgents } from "@/lib/org-staff-agents";
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { sessionIdentity } from "@/lib/route-auth";
+import { forgetChatRequests } from "@/lib/user-limits";
 
 export const dynamic = "force-dynamic";
 
@@ -83,6 +85,7 @@ export async function POST(request: Request) {
   }
   try {
     const created = await createUser(body?.username, body?.password);
+    await recordAudit({ event: "user_create", actor: (await sessionIdentity(request))?.username ?? null, target: created.username }, request);
     // The box now has more than one person: keep the assistant's own session
     // tools to each person's conversations (src/lib/user-chats.ts). Awaited
     // (it never throws): the config write makes OpenClaw 2026.11.3 reload, and
@@ -117,6 +120,9 @@ export async function DELETE(request: Request) {
   try {
     const me = await sessionIdentity(request);
     await removeUser(body.username, { currentUser: me?.username ?? getSystemUsername() });
+    await recordAudit({ event: "user_remove", actor: me?.username ?? null, target: body.username }, request);
+    // A name created again later starts with no chat turns counted against it.
+    forgetChatRequests(body.username);
     return NextResponse.json({ removed: body.username, ...(await listing(request)) });
   } catch (err) {
     return refusal(err);

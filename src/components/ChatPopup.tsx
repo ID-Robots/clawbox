@@ -6541,7 +6541,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
     // before answering, so that tab replays it on return; here it only went
     // from busy to unread (settleRun).
     if (sessionKeyRef.current !== keyAtSend) return
-    const hasMedia = (result.media?.length ?? 0) > 0 || (result.audio?.length ?? 0) > 0
+    const hasMedia = (result.media?.length ?? 0) > 0 || (result.audio?.length ?? 0) > 0 || (result.files?.length ?? 0) > 0
     // The answer can already be on screen from the transcript: the route writes
     // it down and only then answers, so a followed turn that ended between the
     // read and the attach, and a tab the owner left and came back to inside
@@ -6557,6 +6557,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
       timestamp: Date.now(),
       images: [...(result.media ?? [])],
       audio: boundedAudio([...(result.audio ?? [])]),
+      // A document the reply named: its download card, the same one the transcript replays.
+      ...(result.files?.length ? { files: [...result.files] } : {}),
       // Beside the answer, never folded into it — the live bubble and the one
       // replayed from the transcript have to be the same bubble.
       ...(result.reasoning ? { reasoning: result.reasoning } : {}),

@@ -30,6 +30,14 @@ import { monotonicNow } from "./monotonic-clock";
 import { waitForGatewayStartBeforeStop } from "./gateway-start-guard";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
+import {
+  probeUpdateHost,
+  resolveUpdateChannel,
+  UpdateChannelError,
+  workstationRefMissingReason,
+  workstationRefMissingUpdateError,
+  type UpdateChannel,
+} from "./update-channel";
 import { classifyUpdaterHandover } from "./updater-handover";
 import { startRootStep } from "./root-step-runner";
 import { preserveLocalEdits } from "./local-edits";
@@ -90,6 +98,12 @@ import {
  * cleared when a new run starts and when the owner dismisses the result.
  */
 const UPDATE_INTERRUPTED_KEY = "update_interrupted_at";
+/**
+ * When this run dispatched its rebuild step — `{ boot, uptime }`: the boot's id
+ * and the seconds since that boot — beside `update_needs_continuation`: what a
+ * note from that step must match to count (rebuildKeptBuild, TASK-2517).
+ */
+const UPDATE_REBUILD_DISPATCHED_KEY = "update_rebuild_dispatched";
 /**
  * Beside the stamp: how the run was cut short and which step it was on, from
  * the lock holder's record (`{ cause, step? }`). Written before the stamp and
@@ -206,7 +220,7 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // `{target: null, updateAvailable: false}` — "no OpenClaw update available" over a
 // box that has one, the false-success shape — and `reinstallManagedPluginPayload`
 // pinned the channel plugins to `@2026.8.1` on a 2026.9.3 core.
-const OPENCLAW_VERSION_FALLBACK = "2026.11.3";
+const OPENCLAW_VERSION_FALLBACK = "2026.11.5";
 
 /**
  * The state-DB schema each pinned core supports, read from the published
@@ -239,6 +253,7 @@ const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
   "2026.10.7": 20,
   "2026.10.9": 20,
   "2026.11.3": 22,
+  "2026.11.5": 36,
 };
 
 /**
@@ -262,6 +277,7 @@ const OPENCLAW_AGENT_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
   "2026.10.7": 25,
   "2026.10.9": 25,
   "2026.11.3": 27,
+  "2026.11.5": 38,
 };
 
 /** The state schema `version` supports, or null when this pin is not in the table. */
@@ -660,7 +676,12 @@ async function readFromOrigin(
   args: string[],
   /** `log`: each attempt, its output and its exit into the update's raw log. */
   options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number; log?: boolean },
-): Promise<{ remote: RemoteReachability; stdout: string }> {
+): Promise<{
+  remote: RemoteReachability;
+  stdout: string;
+  /** origin answered that the ref asked for does not exist (isMissingRef). */
+  missingRef: boolean;
+}> {
   const attempts = options.attempts ?? REMOTE_FETCH_ATTEMPTS;
   const retryDelayMs = options.retryDelayMs ?? REMOTE_RETRY_DELAY_MS;
   let lastText = "";
@@ -673,7 +694,7 @@ async function readFromOrigin(
         env: { ...process.env, ...GIT_NO_PROMPT_ENV },
       });
       const { stdout } = options.log ? await logUpdateCommand(["git", ...args], attemptGit) : await attemptGit();
-      return { remote: REMOTE_REACHABLE, stdout: String(stdout ?? "") };
+      return { remote: REMOTE_REACHABLE, stdout: String(stdout ?? ""), missingRef: false };
     } catch (err) {
       lastErr = err;
       lastText = errorText(err);
@@ -692,6 +713,7 @@ async function readFromOrigin(
       reason: refusalReason(lastErr, lastText),
     },
     stdout: "",
+    missingRef: isMissingRef(lastText),
   };
 }
 
@@ -938,6 +960,66 @@ async function readBuildId(): Promise<string> {
 }
 
 /**
+ * Where install.sh's rebuild step notes that it KEPT the build it found,
+ * because that build already was this checkout's (`record_rebuild_kept_build`,
+ * TASK-2517): "<BUILD_ID> <boot id> <seconds since boot>", root's, on disk —
+ * the reboot arm ends that step with a reboot, and this half then resumes in
+ * the next boot.
+ */
+function rebuildKeptNote(): string {
+  return process.env.CLAWBOX_REBUILD_KEPT_BUILD || "/var/lib/clawbox/rebuild-kept-build";
+}
+
+/** Where this boot's id is read. */
+function bootIdFile(): string {
+  return process.env.CLAWBOX_BOOT_ID_FILE || "/proc/sys/kernel/random/boot_id";
+}
+
+/**
+ * This boot and the seconds since it began, or null where either cannot be
+ * read: the clock the rebuild step's note is written on. Monotonic within the
+ * boot, so a clock step during an update can neither fake nor hide an order.
+ */
+async function bootMoment(): Promise<{ boot: string; uptime: number } | null> {
+  try {
+    const boot = (await readFile(/* turbopackIgnore: true */ bootIdFile(), "utf-8")).trim();
+    const uptime = Number((await readFile("/proc/uptime", "utf-8")).trim().split(/\s+/)[0]);
+    if (!/^[0-9a-f-]{8,64}$/.test(boot) || !Number.isFinite(uptime) || uptime <= 0) return null;
+    return { boot, uptime };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Did THIS run's rebuild step keep the build that is serving, rather than fail
+ * to produce one? The continuation demands a changed BUILD_ID as evidence of a
+ * rebuild; a step that found the build already current (an update with nothing
+ * new) leaves the same one, and says so in its note instead. Only positive
+ * evidence counts: the note names exactly the serving build, and was written in
+ * the boot this run dispatched the step in and after that moment. The note's
+ * boot is compared with the DISPATCH's, never with the boot reading it, so a
+ * kept build that ended in the reboot arm's reboot still counts, while a note an
+ * older run left can never stand for this one (install.sh also clears it at the
+ * top of every rebuild step). Anything unreadable is a no.
+ */
+async function rebuildKeptBuild(buildId: string, dispatched: unknown): Promise<boolean> {
+  if (!buildId || !dispatched || typeof dispatched !== "object") return false;
+  const { boot, uptime } = dispatched as { boot?: unknown; uptime?: unknown };
+  if (typeof boot !== "string" || !boot || typeof uptime !== "number" || !Number.isFinite(uptime) || uptime <= 0) {
+    return false;
+  }
+  let note: string;
+  try {
+    note = (await readFile(/* turbopackIgnore: true */ rebuildKeptNote(), "utf-8")).trim();
+  } catch {
+    return false;
+  }
+  const match = /^([A-Za-z0-9_-]+) ([0-9a-f-]+) ([0-9]+(?:\.[0-9]+)?)$/.exec(note);
+  return !!match && match[1] === buildId && match[2] === boot && Number(match[3]) >= uptime;
+}
+
+/**
  * Wait for the rebuild_reboot root unit to take this process down (it
  * restarts clawbox-setup / reboots the box on success). The old
  * implementation was a blind 30s sleep that resolved SUCCESS — so a rebuild
@@ -962,7 +1044,7 @@ async function waitForRebuildToTakeOver(dispatchedAt: number): Promise<never> {
   }
   // Either way the restart isn't coming — clear the flag so the next server
   // start doesn't "continue" a rebuild that never happened.
-  await set("update_needs_continuation", undefined);
+  await setMany({ update_needs_continuation: undefined, [UPDATE_REBUILD_DISPATCHED_KEY]: undefined });
   throw new Error(message);
 }
 
@@ -1230,7 +1312,13 @@ export type BranchSource =
   /** Detached HEAD, resolved from the build stamp / refs that contain HEAD. */
   | "detached-recovered"
   /** Nothing said otherwise: `main`. Never auto-pinned. */
-  | "default";
+  | "default"
+  /**
+   * A ClawBox Workstation's own channel (src/lib/update-channel.ts): the
+   * `workstation` branch, ahead of every rule above. Never pinned — it follows
+   * from the hardware (or CLAWBOX_UPDATE_CHANNEL), not from a record.
+   */
+  | "workstation-channel";
 
 export interface ResolvedBranch {
   /** Local branch to checkout */
@@ -1338,8 +1426,27 @@ async function recoverDetachedBranch(projectDir: string): Promise<string | null>
   return null;
 }
 
+/**
+ * The update channel this checkout follows (src/lib/update-channel.ts).
+ * Throws UpdateChannelError when it cannot be decided without guessing.
+ */
+function currentUpdateChannel(projectDir: string): UpdateChannel {
+  return resolveUpdateChannel(probeUpdateHost(projectDir));
+}
+
 export async function resolveUpdateBranch(projectDir: string = PROJECT_DIR): Promise<ResolvedBranch> {
   const main: ResolvedBranch = { local: "main", upstream: "origin/main", source: "default" };
+
+  // 0. A ClawBox Workstation follows its own channel, ahead of the pin: the
+  // pin on a Workstation is the branch install-x64.sh installed from, and
+  // following it is exactly the "Workstation on beta" this channel replaces.
+  // Every other box answers `branch` and goes on below, unchanged. A channel
+  // that cannot be decided throws (UpdateChannelError), like rule 3 refuses a
+  // guess: the update fails with the reason instead of moving the box.
+  const channel = currentUpdateChannel(projectDir);
+  if (channel.kind === "workstation") {
+    return { local: channel.ref, upstream: `origin/${channel.ref}`, source: "workstation-channel" };
+  }
 
   // 1. Check .update-branch file
   try {
@@ -1600,6 +1707,10 @@ export async function repinUpdateBranch(
   projectDir: string = PROJECT_DIR,
   source: BranchSource = "checkout-branch",
 ): Promise<UpdateWarning[]> {
+  // The Workstation channel is not a record either: it follows from the
+  // hardware, and a pin written from it would outlive an override back to the
+  // branch rules (CLAWBOX_UPDATE_CHANNEL=branch). The pin is left as it is.
+  if (source === "workstation-channel") return [];
   if (source === "default") {
     return [{
       code: "repin-skipped",
@@ -1903,7 +2014,12 @@ async function updateClawBoxAndReboot(): Promise<void> {
   // evidence the rebuild actually happened. Without it, a power cycle in the
   // few seconds between unit failure and our watcher noticing would reset the
   // unit's systemd state and let the continuation fake a completed update.
-  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
+  // …and when it dispatched the step, on the boot's own count, so the
+  // continuation can tell this run's "kept the build" note from an older one.
+  await setMany({
+    update_needs_continuation: (await readBuildId()) || "no-previous-build",
+    [UPDATE_REBUILD_DISPATCHED_KEY]: (await bootMoment()) ?? undefined,
+  });
   // Captured before the dispatch, so the failure read below cannot miss a line
   // the unit wrote in its first moments — nor pick up the previous attempt's.
   // Wall clock on purpose, like every journal `--since` here: the journal
@@ -1930,7 +2046,12 @@ async function updateClawBoxAndReboot(): Promise<void> {
  */
 async function updateClawBoxAsOwner(): Promise<void> {
   await syncCheckoutForRebuild();
-  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
+  // No rebuild step runs on this path, so no dispatch moment: cleared, so a
+  // record an appliance run left can never travel with this flag.
+  await setMany({
+    update_needs_continuation: (await readBuildId()) || "no-previous-build",
+    [UPDATE_REBUILD_DISPATCHED_KEY]: undefined,
+  });
   try {
     await rebuildAsOwner(PROJECT_DIR, {
       onCommand: logUpdateCommand,
@@ -1943,7 +2064,7 @@ async function updateClawBoxAsOwner(): Promise<void> {
     // The previous build is back in place (or reclaimed on the next start), so
     // there is no restart to continue from — the same rule as
     // waitForRebuildToTakeOver.
-    await set("update_needs_continuation", undefined);
+    await setMany({ update_needs_continuation: undefined, [UPDATE_REBUILD_DISPATCHED_KEY]: undefined });
     throw new Error(`Rebuild failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   await restartUiProcess();
@@ -1962,7 +2083,25 @@ async function updateClawBoxAsOwner(): Promise<void> {
  * order: `openclaw_install` reads the NEW release's pin.
  */
 async function syncCheckoutAsOwner(): Promise<void> {
-  const { local, upstream, source } = await resolveUpdateBranch(PROJECT_DIR);
+  const { local, upstream } = await fetchUpdateBranchAsOwner(PROJECT_DIR);
+  // The code install.sh's step 1 raises for the same save, so the restart
+  // step's own save recognises it the way it does on the appliance.
+  await syncCheckoutToUpstream(local, upstream, "local-edits-saved");
+}
+
+/**
+ * The first half of `syncCheckoutAsOwner`: resolve the update branch and fetch
+ * it, touching nothing else. Throws with the owner's sentence when it cannot.
+ *
+ * On the Workstation channel a branch origin does not carry is not "the pin
+ * no longer exists, choose another one" (refusalReason's sentence for a
+ * deleted QA branch): nothing has been released to Workstations yet, and the
+ * box stays on what it has — it is never moved to the pin or to main instead.
+ * Thrown before the tree is touched, so step 1 fails with the checkout as it was.
+ */
+export async function fetchUpdateBranchAsOwner(projectDir: string = PROJECT_DIR): Promise<ResolvedBranch> {
+  const resolved = await resolveUpdateBranch(projectDir);
+  const { upstream, source } = resolved;
   const slash = upstream.indexOf("/");
   const remote = slash > 0 ? upstream.slice(0, slash) : "";
   const branch = slash > 0 ? upstream.slice(slash + 1) : "";
@@ -1970,18 +2109,20 @@ async function syncCheckoutAsOwner(): Promise<void> {
     throw new Error(`This ClawBox cannot fetch its update branch: ${upstream} is not a remote branch the updater can name.`);
   }
   console.log(`[Updater] Fetching ${upstream} as the desktop owner (resolved from: ${source})`);
-  const fetched = await reachOrigin(
-    PROJECT_DIR,
+  const fetched = await readFromOrigin(
+    projectDir,
     ["fetch", "--quiet", remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`],
     // Every attempt, with git's own output, into the update's raw log.
     { timeout: 120_000, log: true },
   );
-  if (!fetched.reachable) {
-    throw new Error(fetched.reason ?? `Could not fetch ${upstream}. Check the internet connection and try again.`);
+  if (!fetched.remote.reachable) {
+    if (source === "workstation-channel" && fetched.missingRef) {
+      await dropStaleChannelRef(projectDir, branch);
+      throw new Error(workstationRefMissingUpdateError(branch));
+    }
+    throw new Error(fetched.remote.reason ?? `Could not fetch ${upstream}. Check the internet connection and try again.`);
   }
-  // The code install.sh's step 1 raises for the same save, so the restart
-  // step's own save recognises it the way it does on the appliance.
-  await syncCheckoutToUpstream(local, upstream, "local-edits-saved");
+  return resolved;
 }
 
 /**
@@ -5402,13 +5543,21 @@ async function readHermesVersion(): Promise<string | null> {
   }
 }
 
-interface PinnedBranchCheck {
+export interface PinnedBranchCheck {
   target: { branch: string; currentSha: string; targetSha: string } | null;
   remote: RemoteReachability;
+  /**
+   * The channel the comparison was made on (src/lib/update-channel.ts):
+   * `branch` — the branch rules every Jetson follows — or `workstation`; null
+   * when the channel itself could not be decided, which `remote` says.
+   */
+  channel: UpdateChannel["kind"] | null;
 }
 
 /**
- * Compare the device against its pinned branch on origin.
+ * Compare the device against the branch it follows on origin: the
+ * Workstation channel's branch on a ClawBox Workstation, else its pinned
+ * branch.
  *
  * The fetch outcome is RETURNED, not swallowed. It used to be
  * `.catch(() => {})`, after which HEAD was compared against whatever
@@ -5417,7 +5566,18 @@ interface PinnedBranchCheck {
  * screen said "You're up to date" about a check that never happened
  * (TASK-655).
  */
-async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCheck> {
+export async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCheck> {
+  let channel: UpdateChannel;
+  try {
+    channel = currentUpdateChannel(projectDir);
+  } catch (err) {
+    if (!(err instanceof UpdateChannelError)) throw err;
+    // No channel, no comparison — and never the pin's branch in its place.
+    return { target: null, remote: { reachable: false, cause: "device", reason: err.message }, channel: null };
+  }
+  // The Workstation channel's branch, whatever the pin says (resolveUpdateBranch's rule 0).
+  if (channel.kind === "workstation") return compareWithOrigin(projectDir, channel.ref, "workstation");
+
   let branch: string;
   try {
     branch = (await readFile(path.join(projectDir, ".update-branch"), "utf-8")).trim();
@@ -5425,7 +5585,7 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
     // Only "there is no file" means "no branch is recorded". Any other read
     // error is a pin that IS there and could not be read.
     if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-      return { target: null, remote: noUpdateBranchReason() };
+      return { target: null, remote: noUpdateBranchReason(), channel: "branch" };
     }
     branch = "";
   }
@@ -5433,19 +5593,65 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
   // updater would resolve, `main` by default, instead of declining to look:
   // a box in that state could not see a release waiting for it (TASK-1213).
   if (!branch) branch = (await resolveEffectiveUpdateBranch(projectDir)).branch;
-  else if (!isSafeBranch(branch)) return { target: null, remote: noUpdateBranchReason() };
+  else if (!isSafeBranch(branch)) return { target: null, remote: noUpdateBranchReason(), channel: "branch" };
 
-  const remote = await reachOrigin(projectDir, ["fetch", "--quiet", "origin", branch], {
+  return compareWithOrigin(projectDir, branch, "branch");
+}
+
+/**
+ * origin answered that the channel's branch does not exist: forget the local
+ * copy of it, as `git fetch --prune` would. A copy left from before the branch
+ * was deleted is otherwise a version every local reader still sees — the
+ * What's new panel reads its package.json, the drift report its tip — while
+ * the check says nothing has been released. Best effort: a ref that cannot be
+ * removed changes no verdict here.
+ */
+async function dropStaleChannelRef(projectDir: string, branch: string): Promise<void> {
+  try {
+    await execGit(projectDir, ["update-ref", "-d", `refs/remotes/origin/${branch}`], { timeout: 10_000 });
+  } catch {
+    // No such ref, or a locked one: nothing to do.
+  }
+}
+
+/** Fetch `origin <branch>` and compare HEAD with it. */
+async function compareWithOrigin(
+  projectDir: string,
+  branch: string,
+  channel: UpdateChannel["kind"],
+): Promise<PinnedBranchCheck> {
+  // The Workstation channel names the ref it compares against, as step 1's
+  // fetch does: a checkout whose `remote.origin.fetch` was narrowed (say, to
+  // beta) would otherwise never write `origin/workstation`, and the comparison
+  // below would read a missing or stale ref. The branch rules keep the fetch
+  // they always made.
+  const fetchArgs = channel === "workstation"
+    ? ["fetch", "--quiet", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]
+    : ["fetch", "--quiet", "origin", branch];
+  const fetched = await readFromOrigin(projectDir, fetchArgs, {
     timeout: 20_000,
     attempts: REMOTE_CHECK_ATTEMPTS,
     retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS,
   });
+  const remote = fetched.remote;
+  // origin has no workstation branch: nothing has been released to
+  // Workstations. Said as such, and decided here — a stale local
+  // `origin/workstation` left by a deleted branch is no target either.
+  if (channel === "workstation" && fetched.missingRef) {
+    await dropStaleChannelRef(projectDir, branch);
+    return {
+      target: null,
+      remote: { reachable: false, cause: "device", reason: workstationRefMissingReason(branch) },
+      channel,
+    };
+  }
   // The fetch landed but the comparison did not, so this check has NO verdict —
   // a different answer from "no update", and the only one the device is
   // entitled to give. A fetch that failed already carries the better reason.
   const unresolved = (): PinnedBranchCheck => ({
     target: null,
     remote: remote.reachable ? unresolvedTargetReason(branch) : remote,
+    channel,
   });
   try {
     const [{ stdout: currentOut }, { stdout: targetOut }] = await Promise.all([
@@ -5458,8 +5664,8 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
     // compared empty against empty and read as "equal", so a box with no refs
     // reported itself converged.
     if (!currentSha || !targetSha) return unresolved();
-    if (currentSha === targetSha) return { target: null, remote };
-    return { target: { branch, currentSha, targetSha }, remote };
+    if (currentSha === targetSha) return { target: null, remote, channel };
+    return { target: { branch, currentSha, targetSha }, remote, channel };
   } catch {
     return unresolved();
   }
@@ -5500,7 +5706,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   // ls-remote: they are this check's two anonymous requests to GitHub, and the
   // refusal both are retried for is caused by an address sending too many, so
   // they go one after the other rather than as a burst.
-  const [[targetVersion, { target: pinnedBranchTarget, remote: pinnedRemote }], openclawCurrent, openclawTarget, rawVersion, hermesCurrent, releaseRemote] = await Promise.all([
+  const [[targetVersion, { target: pinnedBranchTarget, remote: pinnedRemote, channel: updateChannel }], openclawCurrent, openclawTarget, rawVersion, hermesCurrent, releaseRemote] = await Promise.all([
     getTargetVersion().then(async (targetVersion) => [targetVersion, await getPinnedBranchTarget(PROJECT_DIR)] as const),
     // Nothing to read on the Hermes edition: there is no OpenClaw to report
     // there (see `openclawAbsent` above).
@@ -5529,7 +5735,13 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   // this device, which is why the address is checked too. Any one of them
   // failing means this check did not see the releases, so the worst answer is
   // what the device reports.
-  const remote = [releaseRemote, pinnedRemote, lastTagRemote].find((r) => !r.reachable) ?? REMOTE_REACHABLE;
+  //
+  // The tag list is one of them only on the branch rules, the one channel that
+  // offers a tag (see taggedClawboxTarget below): a Workstation whose own
+  // branch was fetched and compared has its verdict, whatever the tag lookup
+  // met. A channel that could not be decided already says so in pinnedRemote.
+  const tagRemote = updateChannel === "branch" ? lastTagRemote : REMOTE_REACHABLE;
+  const remote = [releaseRemote, pinnedRemote, tagRemote].find((r) => !r.reachable) ?? REMOTE_REACHABLE;
 
   // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
   // so it compares cleanly against the target tag.
@@ -5537,7 +5749,11 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 
   // Only report a target if it's strictly newer than the device's base tag.
   // (A dev box can sit on a local tag ahead of origin's latest release.)
-  const taggedClawboxTarget = targetVersion && compareSemverTags(targetVersion, baseTag) > 0
+  // Only on the branch rules: a release tag is cut on main, and a Workstation
+  // (or a box whose channel could not be decided) installs the workstation
+  // branch or nothing — never the tag. Offering it would name a version the
+  // update does not install.
+  const taggedClawboxTarget = updateChannel === "branch" && targetVersion && compareSemverTags(targetVersion, baseTag) > 0
     ? targetVersion
     : null;
   // `main` is the release channel and its releases are tagged, so a box behind
@@ -6102,6 +6318,7 @@ async function resumeContinuation(): Promise<boolean> {
     await rm(handoverFile, { force: true });
     await setMany({
       update_needs_continuation: undefined,
+      [UPDATE_REBUILD_DISPATCHED_KEY]: undefined,
       [UPDATE_INTERRUPTED_KEY]: undefined,
       [UPDATE_INTERRUPTED_DETAIL_KEY]: undefined,
     });
@@ -6228,12 +6445,16 @@ async function resumeContinuation(): Promise<boolean> {
     return false;
   }
 
+  // Read before the flags go: when this run dispatched its rebuild step.
+  const rebuildDispatchedAt = await get(UPDATE_REBUILD_DISPATCHED_KEY);
+
   // The restart this is resuming is the one the update ASKED FOR: the flag is
   // written by the rebuild step itself. So anything a reader stamped while that
   // replacement was under way describes the update's own normal path, and goes
   // with the flag rather than outliving it.
   await setMany({
     update_needs_continuation: undefined,
+    [UPDATE_REBUILD_DISPATCHED_KEY]: undefined,
     [UPDATE_INTERRUPTED_KEY]: undefined,
     [UPDATE_INTERRUPTED_DETAIL_KEY]: undefined,
   });
@@ -6263,7 +6484,15 @@ async function resumeContinuation(): Promise<boolean> {
   const unitFailed = !ownerRebuilt && rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP));
   const recordedBuildId = typeof needsContinuation === "string" ? needsContinuation : null;
   const currentBuildId = await readBuildId();
-  const buildUnchanged = recordedBuildId !== null && recordedBuildId === currentBuildId;
+  // The same build is evidence of a rebuild that did not happen — unless the
+  // rebuild step kept it on purpose, because it already was this checkout's
+  // (TASK-2517): then its note, written after this run dispatched it, names it.
+  const keptOnPurpose = recordedBuildId !== null && recordedBuildId === currentBuildId && !unitFailed && !ownerRebuilt
+    && (await rebuildKeptBuild(currentBuildId, rebuildDispatchedAt));
+  if (keptOnPurpose) {
+    console.log(`[Updater] The rebuild step kept build ${currentBuildId}: it already was this checkout's build`);
+  }
+  const buildUnchanged = recordedBuildId !== null && recordedBuildId === currentBuildId && !keptOnPurpose;
   // ...and NO build id is never evidence of a build. `do_rebuild` used to
   // delete `.next` before building, so an OOM-killed build left the box with
   // nothing — and an absent id compares UNEQUAL to the recorded one, which the
@@ -6953,6 +7182,28 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // run writes its own after its backup — so no run can ever set data aside
   // on an override it was not given.
   const remainingSteps = steps.slice(startFrom);
+
+  // THE UPDATE CHANNEL (src/lib/update-channel.ts), asked before anything that
+  // moves the checkout. Step 0 on an appliance is install.sh, which reads the
+  // pin and never this channel: a CLAWBOX_UPDATE_CHANNEL it cannot honour
+  // would otherwise move the tree first and be refused only at the restart
+  // step's resolveUpdateBranch, over a box already half-moved. Refused here
+  // the way the internet check below refuses: the box is as it was. Every box
+  // whose channel is decided — every Jetson with no override — passes.
+  if (remainingSteps.some((s) => s.id === "bootstrap_updater" || s.id === RESTART_STEP_ID)) {
+    try {
+      currentUpdateChannel(PROJECT_DIR);
+    } catch (err) {
+      if (!(err instanceof UpdateChannelError)) throw err;
+      console.error(`[Updater] refusing the update before step 1: ${err.message}`);
+      runtime.state.phase = "failed";
+      runtime.state.error = err.message;
+      runtime.state.currentStepIndex = -1;
+      await clearUpdateLock();
+      return;
+    }
+  }
+
   let schemaCheckedPin: string | null = null;
   const syncAhead = remainingSteps.some((s) => s.id === "bootstrap_updater");
   const downgradeScope = {
