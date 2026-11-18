@@ -39,9 +39,20 @@ export function uploadTempPath(destPath: string): string {
  * link of that name is replaced, never written through. Throws what the
  * filesystem throws (EISDIR for a folder of that name …) — the caller then
  * removes the temporary file and the destination is untouched. Answers
- * where it landed and the size of the regular file it replaced (0 for none).
+ * where it landed, the size of the regular file it replaced (0 for none) and
+ * the size it landed.
+ *
+ * `admit`, when given, is asked first — synchronously, with the sizes of the
+ * file to land and of the file the rename would replace, read right before
+ * it with nothing awaited in between — and a `false` from it calls the
+ * rename off: null, the destination untouched and the temporary file left
+ * for the caller to remove (TASK-2663, a home's quota checked at the commit).
  */
-export function commitUploadTemp(tempReal: string, destPath: string): { target: string; replacedBytes: number } {
+export function commitUploadTemp(
+  tempReal: string,
+  destPath: string,
+  admit?: (sizes: { landedBytes: number; replacedBytes: number }) => boolean,
+): { target: string; replacedBytes: number; landedBytes: number } | null {
   const target = path.join(path.dirname(tempReal), path.basename(destPath));
   let replaced: fs.Stats | null = null;
   try {
@@ -49,10 +60,14 @@ export function commitUploadTemp(tempReal: string, destPath: string): { target: 
   } catch {
     replaced = null;
   }
-  if (replaced?.isFile()) fs.chmodSync(/* turbopackIgnore: true */ tempReal, replaced.mode & 0o7777);
-  fs.renameSync(/* turbopackIgnore: true */ tempReal, target);
-  // What the rename actually replaced, read right before it with nothing
+  // What the rename actually replaces, read right before it with nothing
   // awaited in between: another upload of the same name may have landed
   // since this one began, so the size seen at its start can be stale.
-  return { target, replacedBytes: replaced?.isFile() ? replaced.size : 0 };
+  const replacedBytes = replaced?.isFile() ? replaced.size : 0;
+  const landed = fs.lstatSync(/* turbopackIgnore: true */ tempReal);
+  const landedBytes = landed.isFile() ? landed.size : 0;
+  if (admit && !admit({ landedBytes, replacedBytes })) return null;
+  if (replaced?.isFile()) fs.chmodSync(/* turbopackIgnore: true */ tempReal, replaced.mode & 0o7777);
+  fs.renameSync(/* turbopackIgnore: true */ tempReal, target);
+  return { target, replacedBytes, landedBytes };
 }

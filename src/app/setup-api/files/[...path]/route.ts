@@ -7,7 +7,7 @@ import { openInMemberView, type FilesFence } from "@/lib/files-scope";
 import { filesFenceFor } from "@/lib/files-scope-server";
 import { summarizeFolderForZip, zipFolderStream } from "@/lib/zip-stream";
 import { contentDisposition } from "@/lib/content-disposition";
-import { memberHomeChanged, uploadWritingUnder } from "@/lib/user-upload-guard";
+import { memberHomeChanged, noteLanded, uploadWritingUnder } from "@/lib/user-upload-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -240,6 +240,9 @@ export async function PUT(req: NextRequest, { params }: Params) {
   } catch (err) {
     return mutationErrorResponse(err, "Failed to rename");
   }
+  // Something now answers to the new name: a move into a member's home that
+  // measured a folder of that name (or around it) measures again (TASK-2663).
+  noteLanded(newAbs);
   return NextResponse.json({ ok: true });
 }
 
