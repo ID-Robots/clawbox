@@ -98,16 +98,8 @@ jobs:
       # PR: shellcheck over every script under it, then its self-test against
       # fixture tests and a stub nano-ci (no board). Needs no toolchain —
       # shellcheck and jq are on the runner image — and takes seconds.
-      #
-      # SC2329 ("function is never invoked") is excluded, and only it
-      # (TASK-2687). The runner image's shellcheck moved to 0.11, which added
-      # that check, and it flags every function the suite invokes by NAME
-      # rather than by a call: the `trap cleanup EXIT` handlers and the
-      # callbacks handed to wait_app_update. Seven of those, all false
-      # positives, failed `checks` on every PR in the repository at once.
-      # Every other finding, info level included, still fails the step.
       - name: Nano hardware tests — shellcheck
-        run: shellcheck -x -e SC2329 scripts/nano-tests/*.sh scripts/nano-tests/tests/*.sh
+        run: shellcheck -x scripts/nano-tests/*.sh scripts/nano-tests/tests/*.sh
 
       - name: Nano hardware tests — runner self-test
         run: bash scripts/nano-tests/selftest.sh

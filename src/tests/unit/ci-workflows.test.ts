@@ -215,12 +215,7 @@ describe("the checks CI runs, and their blocking status", () => {
     // The suite itself needs a lab board (nano-hardware-tests.yml, opt-in by
     // label); the runner that turns its output into a verdict does not, and a
     // runner that could not fail would report every board green.
-    //
-    // SC2329 is the one check excluded (TASK-2687): shellcheck 0.11 on the
-    // runner image reads every trap handler and wait_app_update callback as a
-    // function nobody calls. Exactly that code — not a severity floor, which
-    // would drop every info finding with it.
-    runsBlocking("shellcheck -x -e SC2329 scripts/nano-tests/*.sh scripts/nano-tests/tests/*.sh");
+    runsBlocking("shellcheck -x scripts/nano-tests/*.sh scripts/nano-tests/tests/*.sh");
     runsBlocking("bash scripts/nano-tests/selftest.sh");
   });
 
@@ -314,7 +309,7 @@ describe("the checks CI runs, and their blocking status", () => {
       "./scripts/check-doc-images.sh", "bun run check:sudoers", "python3 -m unittest discover -s scripts/x64-migration",
       "bun run scripts/i18n-scan.ts", "bun run typecheck:mcp", "bun run check:mcp-tools", "bun run lint",
       "bash scripts/vitest-shard.sh", "node scripts/check-lockfiles.mjs", "bash scripts/check-vitest-shards.sh", "bun run test:coverage:merge",
-      "shellcheck -x -e SC2329 scripts/nano-tests/", "bash scripts/nano-tests/selftest.sh",
+      "shellcheck -x scripts/nano-tests/", "bash scripts/nano-tests/selftest.sh",
       "node scripts/check-claude-md-no-loss.mjs",
     ]) {
       const runners = [...jobs].filter(([, text]) => runsOfEachStep(text).some((body) => body.includes(command))).map(([key]) => key);
