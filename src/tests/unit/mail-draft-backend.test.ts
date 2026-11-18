@@ -3,6 +3,8 @@
 // backend can give is read — including the ones that must never be reported as
 // "not sent".
 
+import fs from "fs";
+import path from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   canonicalJson,
@@ -182,6 +184,20 @@ describe("draftContentHash", () => {
       '{"attachments":[],"bcc":[],"body":"Body","bodyType":"text","cc":[],"id":"d1","subject":"Hello","to":["ivan@example.com"]}',
     );
     expect(draftContentHash(BASE)).toBe("486400710f35e162a632768352574713f1ddde9f9872280dc83c946b76c8d7d5");
+  });
+
+  it("agrees with every test vector the backend contract publishes", () => {
+    // Read from the doc itself, so the published vectors and the code cannot
+    // drift apart: escapes, UTF-16 key order and number formatting included.
+    const doc = fs.readFileSync(path.join(process.cwd(), "docs", "email-draft-approval.md"), "utf8");
+    const section = doc.slice(doc.indexOf("### Canonical JSON"));
+    const rows = [...section.matchAll(/^\| `(.+?)` \| `(.+?)` \| `([0-9a-f]{64})` \|$/gm)];
+    expect(rows.length).toBeGreaterThanOrEqual(3);
+    for (const [, input, canonical, hash] of rows) {
+      const answer = JSON.parse(input) as unknown;
+      expect(canonicalJson(answer), input).toBe(canonical);
+      expect(draftContentHash(answer), input).toBe(hash);
+    }
   });
 });
 

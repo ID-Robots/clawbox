@@ -41,7 +41,8 @@ cannot see gets a card saying the draft is not in their mailbox.
 - the draft id;
 - a SHA-256 hash of the backend's **whole answer** for the draft:
   `sha256("clawbox-mail-draft/v2\n" + canonical JSON)`, where canonical JSON
-  is the answer re-serialised with every object's keys sorted. The hash is not
+  is the answer re-serialised byte for byte as set out in
+  [Canonical JSON](#canonical-json) below. The hash is not
   limited to the fields the card shows. A Reply-To, a From, a header or an
   attachment's bytes or digest, when the backend includes them, are bound as
   firmly as the recipients and the body. An answer nested more than 64 levels
@@ -308,14 +309,89 @@ Sends that draft.
 
 Between ClawBox's re-read and the backend's send there is a short window in
 which the draft can still be edited, and only the backend can close it. **A
-conforming backend must refuse to send a draft that no longer matches the
-`contentHash` it was given, and answer 409 (or 412).** It does that by
-recomputing `contentHash` over its own current answer, as described above, or
-by sending with the mail provider's own concurrency check (for Graph, the
-message's `changeKey`). A backend that does neither does not meet this
-contract: the approval then covers the draft only up to ClawBox's re-read.
+conforming backend must never send anything other than the content whose hash
+is `contentHash`. If the draft no longer matches, it sends nothing and answers
+409 (or 412).** Comparing the hash and then asking the provider to send the
+draft by its id is NOT enough. The draft can be edited between that check and
+the provider's send, and the provider then sends the edited mail. The check and
+the send must be one step. A backend can do that in either of two ways:
+
+- **Send the content it checked.** Read the draft once, recompute
+  `contentHash` over that read (see [Canonical JSON](#canonical-json)), refuse
+  on a mismatch, and send a message built from that same read: recipients,
+  subject, body and attachments. Then delete the draft. An edit after the read
+  reaches only the draft, never the mail that leaves. Do not use an operation
+  that sends a stored draft by its id: it sends whatever the draft holds at
+  that moment.
+- **Hold the draft still.** If every change to the draft goes through the
+  backend, take a lock per draft that edits also take. Hold it from the read
+  through the provider's answer to the send.
+
+Neither way relies on the provider refusing a changed draft. Use a provider's
+conditional send only where the provider documents one for that exact send
+operation. Microsoft Graph's `message: send` documents none: it takes no
+request body and no precondition header. A backend that does neither of the
+above does not meet this contract: the approval then covers the draft only up
+to ClawBox's re-read.
+
 Include attachment contents or a digest in the draft JSON if attachment swaps
 should be caught. A Graph backend can use `$expand=attachments`.
+
+### Canonical JSON
+
+A backend that recomputes `contentHash` must produce the same bytes as
+ClawBox, or a valid Send is refused as changed. ClawBox computes:
+
+```
+contentHash = lowercase hex of SHA-256( UTF-8 bytes of
+                "clawbox-mail-draft/v2" + "\n" + canonical(answer) )
+```
+
+`answer` is the JSON value parsed from the body of the backend's `200` answer
+to `GET {endpoint}/drafts/{id}`, decoded as UTF-8. It is the whole answer, not
+the fields ClawBox shows. `canonical` writes it as follows:
+
+- **No whitespace** anywhere outside strings.
+- **Objects**: `{`, the members joined by `,`, then `}`. Each member is the key
+  written as a string, then `:`, then the value. Members are ordered by key,
+  comparing the keys as sequences of **UTF-16 code units**, not code points or
+  UTF-8 bytes. So `"😀"` (U+D83D U+DE00) sorts before `"ｚ"` (U+FF5A). A key that
+  appears twice in the answer keeps its last value.
+- **Arrays**: `[`, the elements in their original order joined by `,`, then `]`.
+- **`true`, `false`, `null`** as those literals.
+- **Strings**: in double quotes. `"` is written `\"` and `\` is written `\\`.
+  Backspace, form feed, newline, carriage return and tab are written `\b`, `\f`,
+  `\n`, `\r`, `\t`. Any other character below U+0020, and a lone surrogate
+  (U+D800–U+DFFF not part of a pair), is written `\u` plus four **lowercase**
+  hex digits. Every other character is written as itself, in UTF-8. That
+  includes `/`, U+007F, U+2028, U+2029 and everything beyond ASCII. No other
+  escapes are used.
+- **Numbers**: parsed as IEEE 754 doubles, then written the way ECMAScript's
+  `Number.prototype.toString()` writes them. That means the shortest digits
+  that read back as the same double, `-0` written `0`, and an exponent
+  (`1e+21`, `5e-7`) only below 1e-6 or from 1e21. So `1.0` → `1`,
+  `1E2` → `100`, and `123456789012345678901` → `123456789012345680000`: the
+  shortest digits padded with zeros, not the double's exact integer value.
+- Nesting deeper than 64 levels is refused, never hashed.
+
+For an answer with no duplicate keys and no lone surrogates, this is the JSON
+Canonicalization Scheme of [RFC 8785](https://www.rfc-editor.org/rfc/rfc8785),
+so a JCS library gives the same text. ClawBox's own code is `canonicalJson` and
+`draftContentHash` in `src/lib/mail-draft-backend.ts`.
+
+Test vectors. The input is the answer's body as sent. The canonical text and
+the hash must match exactly:
+
+| Input | Canonical text | `contentHash` |
+|---|---|---|
+| `{"to":["ivan@example.com"],"subject":"Hello","id":"d1","cc":[],"bcc":[],"body":"Body","bodyType":"text","attachments":[]}` | `{"attachments":[],"bcc":[],"body":"Body","bodyType":"text","cc":[],"id":"d1","subject":"Hello","to":["ivan@example.com"]}` | `486400710f35e162a632768352574713f1ddde9f9872280dc83c946b76c8d7d5` |
+| `{"subject":"Re: \"Q3\" \\ plan / café 😀","body":"line 1\nline 2\ttab\u0001","to":["ivan@example.com"]}` | `{"body":"line 1\nline 2\ttab\u0001","subject":"Re: \"Q3\" \\ plan / café 😀","to":["ivan@example.com"]}` | `61f59bb40ebbfbf4f9d5f61f7c130e92a6534f027db18e8bf33076e9ea335d57` |
+| `{"z":1.0,"size":1E2,"n":-0,"big":1e21,"small":5e-7,"f":0.1,"long":123456789012345678901,"ｚ":true,"😀":null,"a":[],"o":{}}` | `{"a":[],"big":1e+21,"f":0.1,"long":123456789012345680000,"n":0,"o":{},"size":100,"small":5e-7,"z":1,"😀":null,"ｚ":true}` | `c219ce8bf52c06209d18b41d139ef8ae426dc0f2b19bd42c0727ad0d192f813c` |
+
+In the table, `\"`, `\\`, `\n`, `\t` and `\u0001` are the JSON escapes
+themselves, exactly as they appear in the bytes. They do not stand for the
+characters. `src/tests/unit/mail-draft-backend.test.ts` checks these vectors
+against ClawBox's code.
 
 ## Who can do what
 
