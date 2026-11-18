@@ -16,7 +16,9 @@
 #      down 30 s later, after the AP watchdog's 20 s timer has had its look.
 #   2. Reboot (`sudo -n systemctl reboot`, as 75-full-reboot): back with a new
 #      boot id, and once clawbox-ap.service has run, still no AP and GET still
-#      says off.
+#      says off. Then the boot-time decision is asked again as root (the
+#      restart_ap root step restarts clawbox-ap.service, so start-ap.sh reads
+#      the switch exactly as at boot): it skips, and still no AP.
 #   3. On: the route answers `restarted`, the AP comes back (nmcli and iw),
 #      GET says enabled:true active:true, and the flag is gone.
 #
@@ -326,6 +328,21 @@ done
 # shellcheck disable=SC2016  # expanded on the board
 SAID=$(board 'journalctl -b -u clawbox-ap.service -o cat --no-pager 2>/dev/null | grep -c "Hotspot disabled in settings"' | tail -n 1)
 note "clawbox-ap.service after boot: ${AP_UNIT:-?}; 'Hotspot disabled in settings' lines this boot: ${SAID:-unreadable}"
+# The boot-time decision itself, asked again now: the AP unit restarted as root
+# through the restart_ap root step (the launcher Settings uses), so
+# start-ap.sh reads the switch exactly as at boot. A board whose
+# clawbox-ap.service is not enabled at boot (some lab boards) would otherwise
+# never have asked it.
+# shellcheck disable=SC2016  # expanded on the board
+GATE=$(board '
+  since=$(date +%s)
+  timeout 300 sudo -n /usr/local/libexec/clawbox/clawbox-run-root-step.sh restart_ap >/dev/null 2>&1
+  rc=$?
+  n=$(journalctl -u clawbox-ap.service --since "@$since" -o cat --no-pager 2>/dev/null | grep -c "Hotspot disabled in settings")
+  echo "$rc ${n:-0}"
+' | tail -n 1)
+if [ "${GATE%% *}" = 0 ]; then ok "boot decision: clawbox-ap.service restarted as root (restart_ap root step)"; else not_ok "boot decision: the restart_ap root step failed (exit ${GATE%% *})"; fi
+if [ "${GATE#* }" -ge 1 ] 2>/dev/null; then ok "boot decision: start-ap.sh said 'Hotspot disabled in settings'"; else note "start-ap.sh's 'Hotspot disabled in settings' line not seen in the journal (${GATE#* }); the radio below decides"; fi
 sleep 30
 P2=$(probe)
 note "after reboot: $P2"
