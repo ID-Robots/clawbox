@@ -101,13 +101,14 @@ wired_same() {
 
 # ---- preconditions --------------------------------------------------------------
 # shellcheck disable=SC2016  # expanded on the board
-SETUP=$(board 'python3 -I -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"setup_complete\") is True)" "$REPO/data/config.json" 2>/dev/null' | tail -n 1)
-if [ "$SETUP" != True ]; then
+SETUP=$(board 'python3 -I -c "import json,sys; c=json.load(open(sys.argv[1])); print(c.get(\"setup_complete\"), c.get(\"password_configured\"))" "$REPO/data/config.json" 2>&1' | tail -n 1)
+note "config.json setup_complete, password_configured: ${SETUP:-unreadable}"
+P0=$(probe)
+note "before: $P0"
+if [ "${SETUP%% *}" != True ]; then
   skip "setup is not complete on this board: the hotspot switch is the wizard's until then"
   finish
 fi
-P0=$(probe)
-note "before: $P0"
 IFACE=$(field "$P0" iface)
 WIRED0=$(field "$P0" wired)
 if [ "$(field "$P0" iw)" = none ]; then
