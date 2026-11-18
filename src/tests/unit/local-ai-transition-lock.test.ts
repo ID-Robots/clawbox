@@ -87,4 +87,24 @@ describe("onLocalAiTransitionStart", () => {
     await expect(withLocalAiTransitionLock(async () => "ran")).resolves.toBe("ran");
     stop();
   });
+
+  it("a listener whose promise rejects or never settles neither holds the queue nor goes unhandled", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    const stopA = onLocalAiTransitionStart((async () => {
+      throw new Error("async listener broke");
+    }) as unknown as () => void);
+    const stopB = onLocalAiTransitionStart((() => new Promise(() => {})) as unknown as () => void);
+    try {
+      await expect(withLocalAiTransitionLock(async () => "first")).resolves.toBe("first");
+      await expect(withLocalAiTransitionLock(async () => "second")).resolves.toBe("second");
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      stopA();
+      stopB();
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
 });

@@ -37,17 +37,33 @@ function parse(data: unknown): SessionUser | null {
   };
 }
 
+/** The lookup, headers and body together, has this long: one that stalls counts as failed, and the next ask tries again. */
+export const SESSION_USER_TIMEOUT_MS = 15_000;
+
+/** /users/me under one deadline over the request and its body; null for any failure, a stall included. */
+function lookUpSessionUser(): Promise<SessionUser | null> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(null);
+    }, SESSION_USER_TIMEOUT_MS);
+  });
+  const asked = fetch("/setup-api/users/me", { cache: "no-store", signal: controller.signal })
+    .then((r) => (r.ok ? r.json() : null))
+    .then(parse)
+    .catch(() => null);
+  return Promise.race([asked, expired]).finally(() => clearTimeout(timer));
+}
+
 /** One request per page load, shared by every component that asks. A failure is retried on the next ask. */
 export function fetchSessionUser(): Promise<SessionUser | null> {
   if (!pending) {
-    pending = fetch("/setup-api/users/me", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then(parse)
-      .catch(() => null)
-      .then((user) => {
-        if (!user) pending = null;
-        return user;
-      });
+    pending = lookUpSessionUser().then((user) => {
+      if (!user) pending = null;
+      return user;
+    });
   }
   return pending;
 }

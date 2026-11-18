@@ -29,10 +29,16 @@ export function withLocalAiTransitionLock<T>(fn: () => Promise<T>): Promise<T> {
     state.running = (state.running ?? 0) + 1;
     state.generation = (state.generation ?? 0) + 1;
     for (const listener of [...(state.listeners ?? [])]) {
+      // A reader's problem is not the transition's: a listener that throws, or
+      // one that returns a promise that rejects, is let go — never awaited, so
+      // nothing it does can hold the queue.
       try {
-        listener();
+        const returned: unknown = listener();
+        if (returned && typeof (returned as PromiseLike<unknown>).then === "function") {
+          Promise.resolve(returned).catch(() => {});
+        }
       } catch {
-        // A reader's problem is not the transition's.
+        // see above
       }
     }
     try {

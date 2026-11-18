@@ -910,6 +910,11 @@ describe("clusterAnswer: the engine", () => {
     it("stops a read when a change of the AI settings starts under it: nothing more is asked", async () => {
       let answerLookup: () => void = () => {};
       let finishSave: () => void = () => {};
+      // Explicit signals, not delays: the lookup has begun, and the save has begun.
+      let lookupEntered: () => void = () => {};
+      const lookupStarted = new Promise<void>((resolve) => { lookupEntered = resolve; });
+      let saveEntered: () => void = () => {};
+      const saveStarted = new Promise<void>((resolve) => { saveEntered = resolve; });
       const { impl } = engineFetch({ models: modelsOk(), metrics: new Response(metricsText(1), { status: 200 }) });
       _setClusterDepsForTest({
         env: { CLAWBOX_CLUSTER_PEERS: PEERS } as unknown as NodeJS.ProcessEnv,
@@ -917,34 +922,56 @@ describe("clusterAnswer: the engine", () => {
         isWorkstation: () => true,
         fetchImpl: impl,
         // The address check is still waiting when the save starts.
-        lookup: () => new Promise((resolve) => { answerLookup = () => resolve([]); }),
+        lookup: () => new Promise((resolve) => {
+          answerLookup = () => resolve([]);
+          lookupEntered();
+        }),
         run: runnerBy({ local: ok(GOOD("spark-a")) }),
         readEngine: async () => ({ ...TARGET, baseUrl: "http://engine.lan:8000/v1" }),
       });
-      const pending = clusterAnswer();
-      await new Promise((r) => setTimeout(r, 10));
-      const saving = withLocalAiTransitionLock(() => new Promise<void>((resolve) => { finishSave = resolve; }));
-      await new Promise((r) => setTimeout(r, 10));
-      answerLookup();
-      const answer = (await pending) as ClusterSnapshot;
-      expect(answer.engine).toMatchObject({ configured: true, unread: "changing" });
-      expect(impl).not.toHaveBeenCalled();
-      finishSave();
-      await saving;
+      let saving: Promise<void> | null = null;
+      try {
+        const pending = clusterAnswer();
+        await lookupStarted;
+        saving = withLocalAiTransitionLock(() => new Promise<void>((resolve) => {
+          finishSave = resolve;
+          saveEntered();
+        }));
+        await saveStarted;
+        answerLookup();
+        const answer = (await pending) as ClusterSnapshot;
+        expect(answer.engine).toMatchObject({ configured: true, unread: "changing" });
+        expect(impl).not.toHaveBeenCalled();
+      } finally {
+        finishSave();
+        await saving;
+      }
     });
 
     it("keeps no token baseline across a change of the AI settings: the same page may be another engine now", async () => {
       let tokens = 1_000;
-      const { impl } = engineFetch({ models: modelsOk(), metrics: () => new Response(metricsText(tokens), { status: 200 }) });
+      let running = 3;
+      const page = () => [
+        `vllm:num_requests_running{model_name="deepseek-test"} ${running}`,
+        `vllm:generation_tokens_total{model_name="deepseek-test"} ${tokens}`,
+        "",
+      ].join("\n");
+      const { impl } = engineFetch({ models: modelsOk(), metrics: () => new Response(page(), { status: 200 }) });
       setup({ fetchImpl: impl, readEngine: async () => TARGET, lookup: async () => [], run: runnerBy({ local: ok(GOOD("spark-a")) }) });
-      await engineOf();
+      expect((await engineOf()).metrics?.active).toBe(3);
       await withLocalAiTransitionLock(async () => {});
       clock += 10_000;
       tokens = 9_000;
-      await engineOf();
-      await new Promise((r) => setTimeout(r, 20));
+      // The new sample is told apart by its gauge: wait until it is the one answered.
+      running = 7;
+      let metrics = (await engineOf()).metrics;
+      for (let i = 0; i < 50 && metrics?.active !== 7; i++) {
+        await new Promise((r) => setTimeout(r, 10));
+        metrics = (await engineOf()).metrics;
+      }
+      expect(metrics?.active).toBe(7);
       // 1,000 → 9,000 in ten seconds would read 800 tok/s; across the change it is no rate.
-      expect((await engineOf()).metrics).toMatchObject({ available: true, tokensPerSecond: null });
+      expect(metrics).toMatchObject({ available: true, tokensPerSecond: null });
     });
   });
 

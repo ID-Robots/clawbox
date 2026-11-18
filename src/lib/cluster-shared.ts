@@ -285,20 +285,82 @@ const SAMPLE_RE = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{(?:[^}"]|"(?:[^"\\]|\\.)*")*\})
 export type PrometheusSeries = Map<string, Map<string, number>>;
 
 // name="value" inside a label set; the value may hold escaped quotes.
-const LABEL_RE = /([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"/g;
+// A label name as written bare: letters, digits and underscores.
+const LABEL_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+function isNameChar(code: number): boolean {
+  return (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122) || code === 95;
+}
+
+/** A quoted string starting at `i` (which is `"`): its content (escapes kept) and the index after it, or null when it never closes. */
+function readQuoted(text: string, i: number): [string, number] | null {
+  for (let j = i + 1; j < text.length; j++) {
+    const c = text.charCodeAt(j);
+    if (c === 92) j++; // a backslash: the next character is the escaped one
+    else if (c === 34) return [text.slice(i + 1, j), j + 1];
+  }
+  return null;
+}
+
+/**
+ * The label pairs of a `{…}` block, in ONE pass over it (no backtracking: a
+ * crafted megabyte-long line costs a megabyte of steps). A name may be bare or
+ * quoted (`"engine"="0"`, as newer engines may print it). Null when the block
+ * is not a label set.
+ */
+function parseLabelPairs(raw: string): [string, string][] | null {
+  const n = raw.length;
+  let i = raw.charCodeAt(0) === 123 ? 1 : 0; // after `{`
+  const pairs: [string, string][] = [];
+  const skip = (alsoComma: boolean) => {
+    while (i < n) {
+      const c = raw.charCodeAt(i);
+      if (c === 32 || c === 9 || (alsoComma && c === 44)) i++;
+      else break;
+    }
+  };
+  for (;;) {
+    skip(true);
+    if (i >= n || raw.charCodeAt(i) === 125) return pairs; // `}` or the end
+    let name: string;
+    if (raw.charCodeAt(i) === 34) {
+      const quoted = readQuoted(raw, i);
+      if (!quoted) return null;
+      [name, i] = quoted;
+    } else {
+      const start = i;
+      while (i < n && isNameChar(raw.charCodeAt(i))) i++;
+      if (i === start) return null;
+      name = raw.slice(start, i);
+    }
+    skip(false);
+    if (raw.charCodeAt(i) !== 61) return null; // `=`
+    i++;
+    skip(false);
+    if (raw.charCodeAt(i) !== 34) return null;
+    const value = readQuoted(raw, i);
+    if (!value) return null;
+    i = value[1];
+    pairs.push([name, value[0]]);
+  }
+}
 
 /**
  * A label set as ONE spelling, whatever order the engine printed it in:
  * `{model_name="m",engine="0"}` and `{engine="0",model_name="m"}` are the same
- * series. Pairs sorted by name; no labels is `""`.
+ * series, so is `{"engine"="0"}` and `{engine="0"}`, and a label with an empty
+ * value is the label absent (as Prometheus has it). Pairs sorted by name; no
+ * labels is `""`. A block that is not a label set keeps its own text, so it is
+ * still a series of its own.
  */
 export function canonicalLabels(raw: string): string {
   if (!raw) return "";
-  const pairs: [string, string][] = [];
-  for (const m of raw.matchAll(LABEL_RE)) pairs.push([m[1], m[2]]);
+  const parsed = parseLabelPairs(raw);
+  if (parsed === null) return raw;
+  const pairs = parsed.filter(([, value]) => value !== "");
   if (pairs.length === 0) return "";
   pairs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  return `{${pairs.map(([name, value]) => `${name}="${value}"`).join(",")}}`;
+  return `{${pairs.map(([name, value]) => `${LABEL_NAME_RE.test(name) ? name : `"${name}"`}="${value}"`).join(",")}}`;
 }
 
 /**

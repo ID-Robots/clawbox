@@ -96,13 +96,28 @@ export function writeExternalEngineKey(key: string, writtenAt?: number | null): 
   fs.mkdirSync(path.dirname(target), { recursive: true });
   // Unique per write, so two writers never share a temp file.
   const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  fs.writeFileSync(tmp, key, { mode: 0o600 });
-  fs.chmodSync(tmp, 0o600);
-  if (typeof writtenAt === "number" && Number.isFinite(writtenAt)) {
-    const at = new Date(writtenAt);
-    fs.utimesSync(tmp, at, at);
+  try {
+    fs.writeFileSync(tmp, key, { mode: 0o600 });
+    fs.chmodSync(tmp, 0o600);
+    if (typeof writtenAt === "number" && Number.isFinite(writtenAt)) {
+      const at = new Date(writtenAt);
+      try {
+        fs.utimesSync(tmp, at, at);
+      } catch {
+        // The key still goes back: a key whose old time could not be restored
+        // is newer than its record, which the Cluster view withholds (fails closed).
+      }
+    }
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    // No temp file left behind holding a key.
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // never written, or already renamed
+    }
+    throw err;
   }
-  fs.renameSync(tmp, target);
 }
 
 export function deleteExternalEngineKey(): void {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, statSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -221,13 +221,40 @@ describe("the key file's write time (TASK-2670)", () => {
     expect(readExternalEngineKeyWrittenAt()).toBeNull();
     const before = Date.now();
     writeExternalEngineKey(KEY);
+    const after = Date.now();
     const written = readExternalEngineKeyWrittenAt()!;
+    // Now, within the filesystem's coarse clock — never a time ahead of the write.
     expect(written).toBeGreaterThanOrEqual(before - 2_000);
+    expect(written).toBeLessThanOrEqual(after + 2_000);
     const earlier = Date.parse("2026-11-01T08:00:00.000Z");
     writeExternalEngineKey("sk-previous-key-placeholder-0123456789", earlier);
     expect(Math.abs(readExternalEngineKeyWrittenAt()! - earlier)).toBeLessThan(1_000);
     expect(readExternalEngineKey()).toBe("sk-previous-key-placeholder-0123456789");
     expect(statSync(path.join(root, "data", ".external-engine-key")).mode & 0o777).toBe(0o600);
+  });
+
+  it("still puts the key back when its old time cannot be set, and leaves no temp file when the write fails", async () => {
+    const fsModule = await import("node:fs");
+    const utimes = vi.spyOn(fsModule.default, "utimesSync").mockImplementation(() => {
+      throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+    });
+    try {
+      writeExternalEngineKey("sk-previous-key-placeholder-0123456789", Date.parse("2026-11-01T08:00:00.000Z"));
+      expect(readExternalEngineKey()).toBe("sk-previous-key-placeholder-0123456789");
+      // Not the old time: newer than its record, which the Cluster view withholds.
+      expect(readExternalEngineKeyWrittenAt()!).toBeGreaterThan(Date.parse("2026-11-02T00:00:00.000Z"));
+    } finally {
+      utimes.mockRestore();
+    }
+    const rename = vi.spyOn(fsModule.default, "renameSync").mockImplementation(() => {
+      throw Object.assign(new Error("gone"), { code: "ENOENT" });
+    });
+    try {
+      expect(() => writeExternalEngineKey(KEY)).toThrow("gone");
+    } finally {
+      rename.mockRestore();
+    }
+    expect(readdirSync(path.join(root, "data")).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   });
 });
 

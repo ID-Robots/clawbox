@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useId, useRef, useCallback } from "react";
+import { useState, useEffect, useId, useLayoutEffect, useRef, useCallback } from "react";
 import { useMobileBack } from "@/lib/mobile-back";
 import SystemUpdateApp, { componentNeedsUpdate, shipsOpenclaw, type VersionInfo } from "@/components/SystemUpdateApp";
 import Image from "next/image";
@@ -3659,6 +3659,30 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const systemPanelProps = (view: SystemView) => usersAllowed === true
     ? { role: "tabpanel", id: systemPanelId(view), "aria-labelledby": systemTabId(view) }
     : {};
+  // When the Cluster tab goes — the panel's own read said there is no cluster,
+  // or the availability check did — focus on that tab or inside its panel would
+  // be left on nothing: it moves to Device. Focus anywhere else stays put. One
+  // rule for both ways the tab can go, so it lives on `clusterAvailable`.
+  const clusterHadFocus = useRef(false);
+  useEffect(() => {
+    const onFocusIn = (e: FocusEvent) => {
+      const target = e.target instanceof Element ? e.target : null;
+      clusterHadFocus.current = target !== null && (
+        target.id === `${systemTabsId}-tab-cluster`
+        || !!document.getElementById(`${systemTabsId}-panel-cluster`)?.contains(target)
+      );
+    };
+    document.addEventListener("focusin", onFocusIn);
+    return () => document.removeEventListener("focusin", onFocusIn);
+  }, [systemTabsId]);
+  const clusterShownBefore = useRef(clusterAvailable);
+  useLayoutEffect(() => {
+    if (clusterShownBefore.current && !clusterAvailable && clusterHadFocus.current) {
+      clusterHadFocus.current = false;
+      document.getElementById(`${systemTabsId}-tab-device`)?.focus();
+    }
+    clusterShownBefore.current = clusterAvailable;
+  }, [clusterAvailable, systemTabsId]);
   // The tabs pattern's keys: the arrows move between the two (and open the
   // one they land on), Home and End go to the first and the last.
   const onSystemTabKey = (e: React.KeyboardEvent) => {
@@ -6449,16 +6473,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
             <ClusterPanel
               onUnavailable={() => {
                 // The box says it has no cluster after all: the tab goes, and
-                // Device opens. Focus on the Cluster tab or in its panel would be
-                // left on nothing, so it moves to Device; focus elsewhere stays.
-                const focused = document.activeElement;
-                const clusterFocused = focused !== null && (
-                  focused.id === systemTabId("cluster")
-                  || !!document.getElementById(systemPanelId("cluster"))?.contains(focused)
-                );
+                // Device opens (focus follows, with the rule on `clusterAvailable`).
                 clusterGone();
                 setSystemView("device");
-                if (clusterFocused) document.getElementById(systemTabId("device"))?.focus();
               }}
             />
           </div>

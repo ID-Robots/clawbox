@@ -243,6 +243,31 @@ describe("canonicalLabels", () => {
     expect(canonicalLabels("{}")).toBe("");
   });
 
+  it("reads a quoted label name as the same name, and an empty value as the label absent", () => {
+    expect(canonicalLabels('{"engine"="0",model_name="m"}')).toBe('{engine="0",model_name="m"}');
+    expect(canonicalLabels('{"engine"="0"}')).not.toBe(canonicalLabels('{"engine"="1"}'));
+    expect(canonicalLabels('{"gpu.rank"="0"}')).toBe('{"gpu.rank"="0"}');
+    expect(canonicalLabels('{engine="0",model_name=""}')).toBe(canonicalLabels('{engine="0"}'));
+    expect(canonicalLabels('{model_name=""}')).toBe("");
+  });
+
+  it("keeps a block that is not a label set as its own series", () => {
+    expect(canonicalLabels("{not a label set}")).toBe("{not a label set}");
+    expect(canonicalLabels('{engine="0}')).toBe('{engine="0}');
+  });
+
+  it("reads a crafted megabyte-long label block in one pass, without stalling", () => {
+    const long = `vllm:generation_tokens_total{${"a".repeat(1024 * 1024)}} 5\n`;
+    const started = Date.now();
+    const series = parsePrometheusSeries(long);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(series.get("vllm:generation_tokens_total")?.size).toBe(1);
+    const quoted = `vllm:generation_tokens_total{${'"x'.repeat(200_000)}} 5\n`;
+    const begun = Date.now();
+    parsePrometheusSeries(quoted);
+    expect(Date.now() - begun).toBeLessThan(2_000);
+  });
+
   it("keeps a counter one series when the engine reorders its labels between reads", () => {
     const first = engineSampleFrom(parsePrometheusSeries('vllm:generation_tokens_total{engine="0",model_name="m"} 100\n'));
     const second = engineSampleFrom(parsePrometheusSeries('vllm:generation_tokens_total{model_name="m",engine="0"} 200\n'));
