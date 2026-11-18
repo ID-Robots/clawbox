@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 
+import { recordAudit } from "@/lib/audit-log";
 import { readFailureKind } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { readOpenclawShared, writeOpenclawShared } from "@/lib/openclaw-sharing";
@@ -68,5 +69,6 @@ export async function POST(req: Request) {
     return refuse(500, "store_write_failed", "The switch could not be saved — the ClawBox settings file could not be written. Nothing was changed.");
   }
   console.log(`[openclaw-sharing] the owner ${shared ? "shared OpenClaw with" : "took OpenClaw back from"} every user`);
+  await recordAudit({ event: "openclaw_sharing", actor: who.username, detail: { on: shared } }, req);
   return NextResponse.json(await state(true), { headers: NO_STORE });
 }

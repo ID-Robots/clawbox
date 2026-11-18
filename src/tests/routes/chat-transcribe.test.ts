@@ -941,4 +941,58 @@ describe("/setup-api/chat/transcribe", () => {
       expect(remux.audioForCloud).not.toHaveBeenCalled();
     });
   });
+
+  describe("the local-only AI lock (TASK-2501)", () => {
+    /** The owner put the cloud first; the lock overrules the order, not the preference. */
+    function lockWithCloudFirst(): void {
+      const dataDir = path.join(tmpHome, "data");
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(path.join(dataDir, "config.json"), JSON.stringify({ ai_cloud_lock: true, stt_primary: "cloud" }, null, 2));
+    }
+
+    it("transcribes on the box and never sends the recording to the cloud", async () => {
+      lockWithCloudFirst();
+      boxHasWhisper();
+      localStt.transcribe.mockResolvedValue({ ok: true, text: "heard on the box" });
+
+      const res = await POST(audioRequest());
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, text: "heard on the box", engine: "local" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("fails on the box's own failure rather than falling back to the cloud", async () => {
+      lockWithCloudFirst();
+      boxHasWhisper();
+      localStt.transcribe.mockResolvedValue({ ok: false, error: "whisper crashed" });
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const res = await POST(audioRequest());
+
+      expect(res.status).toBe(500);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("refuses with the lock's code when the box has no engine of its own", async () => {
+      lockWithCloudFirst();
+
+      const res = await POST(audioRequest());
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(localStt.transcribe).not.toHaveBeenCalled();
+    });
+
+    it("uses the cloud as before once the lock is off", async () => {
+      writePrimary("cloud");
+      boxHasWhisper();
+      fetchMock.mockResolvedValue(jsonResponse({ text: "from the cloud" }));
+
+      const res = await POST(audioRequest());
+
+      expect(await res.json()).toMatchObject({ ok: true, text: "from the cloud", engine: "cloud" });
+    });
+  });
 });

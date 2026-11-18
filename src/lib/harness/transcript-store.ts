@@ -127,6 +127,8 @@ export interface TranscriptRecord {
   media?: string[];
   /** Same, for spoken replies. Kept apart for the same reason `ChatMessage` does. */
   audio?: string[];
+  /** Same, for every other file the reply named (a document, a zip): the download cards. */
+  files?: string[];
   /**
    * The model's internal monologue for this turn, kept OUT of `text`.
    *
@@ -217,6 +219,7 @@ function boundRecord(record: TranscriptRecord): TranscriptRecord {
     timestamp: Number.isFinite(record.timestamp) ? record.timestamp : Date.now(),
     ...(record.media?.length ? { media: record.media.slice(0, MAX_MEDIA_REFS) } : {}),
     ...(record.audio?.length ? { audio: record.audio.slice(0, MAX_MEDIA_REFS) } : {}),
+    ...(record.files?.length ? { files: record.files.slice(0, MAX_MEDIA_REFS) } : {}),
     ...(reasoning
       ? {
         reasoning: reasoning.length > MAX_TEXT_BYTES
@@ -456,6 +459,7 @@ function parseRecord(line: string): TranscriptRecord | null {
   };
   const media = strings(row.media);
   const audio = strings(row.audio);
+  const files = strings(row.files);
   // Both are OPTIONAL on the way in, which is what makes this backward
   // compatible: every line written before these fields existed parses exactly
   // as it did, and simply replays without a disclosure or chips.
@@ -482,6 +486,7 @@ function parseRecord(line: string): TranscriptRecord | null {
     timestamp,
     ...(media ? { media } : {}),
     ...(audio ? { audio } : {}),
+    ...(files ? { files } : {}),
     ...(reasoning ? { reasoning } : {}),
     ...(toolCalls.length ? { toolCalls } : {}),
     ...(typeof row.model === "string" && row.model ? { model: row.model } : {}),

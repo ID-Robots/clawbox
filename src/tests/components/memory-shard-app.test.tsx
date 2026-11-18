@@ -61,6 +61,12 @@ let enableCalls: unknown[] = [];
 let resetCalls = 0;
 let indexStatus = 200;
 let indexRefusalKind: string | null = null;
+/** The index request never gets an answer: a tunnel dropped it while the box was still working on it. */
+let indexDrops = false;
+/** ...and by then the box has the pass on record as going. */
+let indexDropsWithRunOnRecord = false;
+/** ...or as already finished. */
+let indexDropsWithRunFinished = false;
 // A promise a POST/PUT waits on before answering — never resolved when a test
 // needs the request to stay in flight.
 let indexGate: Promise<void> | null = null;
@@ -77,6 +83,16 @@ function installFetch() {
     if (url.includes("/setup-api/clawkeep/memory/index")) {
       indexCalls.push(JSON.parse(String(init?.body ?? "{}")));
       if (indexGate) await indexGate;
+      if (indexDrops) {
+        if (indexDropsWithRunOnRecord) {
+          memory = { ...memory, run: { status: "running", mode: "full", trigger: "manual", startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "" } };
+        }
+        if (indexDropsWithRunFinished) {
+          const at = Date.now();
+          memory = { ...memory, run: { status: "succeeded", mode: "full", trigger: "manual", startedAtMs: at - 2_000, finishedAtMs: at, durationMs: 2_000, error: "" } };
+        }
+        throw new TypeError("Failed to fetch");
+      }
       if (indexStatus === 409 && indexRefusalKind) return ok({ error: "no", kind: indexRefusalKind }, 409);
       return ok({ accepted: indexStatus === 200, run: memory.run, status: memory }, indexStatus);
     }
@@ -123,6 +139,9 @@ describe("the Memory Shard app", () => {
     resetCalls = 0;
     indexStatus = 200;
     indexRefusalKind = null;
+    indexDrops = false;
+    indexDropsWithRunOnRecord = false;
+    indexDropsWithRunFinished = false;
     indexGate = null;
     scheduleGate = null;
     statusGate = null;
@@ -464,6 +483,64 @@ describe("the Memory Shard app", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Index now" }));
     expect(await screen.findByText(/switched off/)).toBeTruthy();
     expect(screen.queryByText(/Indexing is already running/)).toBeNull();
+  });
+
+  it("says the assistant keeps the index current when that is why an Index now was declined", async () => {
+    // The third 409. On OpenClaw the running assistant does an incremental
+    // pass by itself; the box no longer stops it for one, and "already
+    // running" would send the owner looking for a run nobody started.
+    indexStatus = 409;
+    indexRefusalKind = "gateway_indexes";
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Index now" }));
+    expect(await screen.findByText(/keeps this index up to date by itself/)).toBeTruthy();
+    expect(screen.queryByText(/Indexing is already running/)).toBeNull();
+  });
+
+  it("does not say a pass could not be started when the request was dropped while the pass is on record as going", async () => {
+    // A full pass on OpenClaw waits for the assistant to stop, which takes
+    // minutes on one in use; a tunnel drops the request near 100 s and the box
+    // starts the pass anyway. "Try again" over that is a second press into a
+    // 409.
+    indexDrops = true;
+    indexDropsWithRunOnRecord = true;
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Full reindex" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Full reindex" }).at(-1)!);
+    await waitFor(() => expect(indexCalls).toEqual([{ mode: "full" }]));
+    // The card has adopted the run the box has on record: it says so...
+    expect(await screen.findByText(/running now/)).toBeTruthy();
+    // ...and says nothing about a pass that could not be started.
+    expect(screen.queryByText(/could not be started/)).toBeNull();
+  });
+
+  it("does not say so either when the dropped request's pass has already finished", async () => {
+    // A short pass can be over before the box is asked: the run on record is
+    // then a success that STARTED after the one that was there before the press.
+    indexDrops = true;
+    indexDropsWithRunFinished = true;
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Full reindex" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Full reindex" }).at(-1)!);
+    await waitFor(() => expect(indexCalls).toEqual([{ mode: "full" }]));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Index now" })).toBeTruthy());
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).endsWith("/setup-api/clawkeep/memory")).length).toBeGreaterThan(1));
+    expect(screen.queryByText(/could not be started/)).toBeNull();
+  });
+
+  it("is not reassured by an older success that was already on record before the press", async () => {
+    indexDrops = true;
+    memory = { ...LOCAL_MEMORY, run: { status: "succeeded", mode: "full", trigger: "manual", startedAtMs: 1_700_000_000_000, finishedAtMs: 1_700_000_060_000, durationMs: 60_000, error: "" } };
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Index now" }));
+    expect(await screen.findByText(/could not be started/)).toBeTruthy();
+  });
+
+  it("still says a pass could not be started when the request failed and nothing is going", async () => {
+    indexDrops = true;
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Index now" }));
+    expect(await screen.findByText(/could not be started/)).toBeTruthy();
   });
 
   it("asks twice before a reset, and then puts the setup wizard back in front of the owner", async () => {

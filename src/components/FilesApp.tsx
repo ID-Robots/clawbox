@@ -5,6 +5,7 @@ import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { fileExtension, fileIcon, formatSize, Icon } from "./file-icons";
+import { formatLimitBytes } from "@/lib/limit-bytes";
 import CodeEditor from "./CodeEditor";
 import { languageForFile } from "@/lib/code-language";
 import { openInScreenshot, overlayMounted, subscribeOverlays } from "@/lib/screenshot/session";
@@ -711,8 +712,9 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
           ok++;
         } else {
           const data = await res.json().catch(() => ({}));
-          if (data.error) {
-            showStatus(data.error);
+          const refused = limitRefusal(data, file.name) ?? (typeof data.error === "string" && data.error ? data.error : null);
+          if (refused) {
+            showStatus(refused);
             refreshLatest();
             return;
           }
@@ -727,6 +729,21 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
   };
 
   // ─── Move ──────────────────────────────────────────────────────────────────
+
+  /**
+   * A refusal by the per-user limits the box's owner set (TASK-2446): a file
+   * over the upload limit, or a home folder at its quota — in the person's
+   * own language, with the numbers the route sent. Null for any other answer.
+   */
+  const limitRefusal = (data: { code?: unknown; limitBytes?: unknown; usedBytes?: unknown; quotaBytes?: unknown }, name?: string): string | null => {
+    if (data.code === "upload_too_large" && typeof data.limitBytes === "number") {
+      return t("users.limits.fileTooLarge", { name: name ?? "", limit: formatLimitBytes(data.limitBytes) });
+    }
+    if (data.code === "quota_exceeded" && typeof data.usedBytes === "number" && typeof data.quotaBytes === "number") {
+      return t("users.limits.homeFull", { used: formatLimitBytes(data.usedBytes), quota: formatLimitBytes(data.quotaBytes) });
+    }
+    return null;
+  };
 
   /** Why a move was refused, in the owner's words; the route's own text is the last resort. */
   const moveRefusal = (code: unknown, message: unknown): string => {
@@ -762,7 +779,7 @@ export default function FilesApp({ initialPath = "" }: { initialPath?: string } 
         setMoveConflict({ paths: movable, dest, conflicts: data.conflicts.filter(isMoveConflictItem) });
         return;
       }
-      if (!res.ok) { showStatus(moveRefusal(data.code, data.error)); return; }
+      if (!res.ok) { showStatus(limitRefusal(data as Record<string, unknown>) ?? moveRefusal(data.code, data.error)); return; }
       const moved = Array.isArray(data.moved) ? data.moved.length : 0;
       const failed = Array.isArray(data.failed) ? data.failed as { code?: unknown; error?: unknown }[] : [];
       clearSelection();

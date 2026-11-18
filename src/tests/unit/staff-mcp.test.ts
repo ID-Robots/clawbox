@@ -52,7 +52,7 @@ describe("the store", () => {
       credentials: { ivan: { docs: "line\nbreak", ok: "fine-token" }, "Bad User": { docs: "x" } },
       relayTokens: { ivan: "short", maria: "b".repeat(64) },
     });
-    expect(parsed.servers).toEqual({ docs: { header: "X-Api-Key" } });
+    expect(parsed.servers).toEqual({ docs: { header: "X-Api-Key", needsCredential: true, writeTools: false, members: null, harness: "openclaw" } });
     expect(parsed.credentials).toEqual({ ivan: { ok: "fine-token" } });
     expect(parsed.relayTokens).toEqual({ maria: "b".repeat(64) });
   });
@@ -247,5 +247,93 @@ describe("which tools a member's call may reach", () => {
     expect(mcp.staffToolAllowed("search", open, { readOnlyHint: true })).toBe(true);
     expect(mcp.staffToolAllowed("", open)).toBe(false);
     expect(mcp.staffToolAllowed(undefined, open)).toBe(false);
+  });
+});
+
+describe("a tool on the box that takes no credential, granted to all staff or by name (TASK-2516)", () => {
+  const servers = [httpServer("worddoc", "http://127.0.0.1:8765/mcp"), httpServer("docs"), httpServer("ungranted", "http://127.0.0.1:9000/mcp")];
+  const tokens = { ivan: "a".repeat(64), maria: "b".repeat(64), olga: "c".repeat(64) };
+  const plan = (worddoc: Record<string, unknown>) => mcp.planStaffMcpEntries({
+    staff: ["ivan", "maria", "olga"],
+    store: mcp.parseStore({ servers: { worddoc, docs: {} }, credentials: { ivan: { docs: "ivan-docs" } }, relayTokens: tokens }),
+    servers,
+    relayBase: "http://127.0.0.1",
+  });
+
+  it("gives every member of staff the server, each through their own relay token, with no credential needed", () => {
+    const entries = plan({ needsCredential: false });
+    expect(entries.get("ivan")?.map((e) => e.server)).toEqual(["docs", "worddoc"]);
+    expect(entries.get("maria")?.map((e) => e.server)).toEqual(["worddoc"]);
+    expect(entries.get("olga")?.[0].config.headers).toEqual({ Authorization: `Bearer ${"c".repeat(64)}` });
+  });
+
+  it("gives a server granted by name to those members only", () => {
+    const entries = plan({ needsCredential: false, members: ["maria"] });
+    expect(entries.get("maria")?.map((e) => e.server)).toEqual(["worddoc"]);
+    expect(entries.get("olga")).toBeUndefined();
+    expect(entries.get("ivan")?.map((e) => e.server)).toEqual(["docs"]);
+  });
+
+  it("never hands staff a server the owner did not grant", () => {
+    const all = [...plan({ needsCredential: false }).values()].flat().map((e) => e.server);
+    expect(all).not.toContain("ungranted");
+    expect(mcp.grantsDocument(plan({ needsCredential: false })).agents["clawbox-staff-olga"]).toEqual([mcp.staffEntryName("olga", "worddoc")]);
+  });
+
+  it("mints a relay token for every member reached by a server that takes no credential", async () => {
+    const file = path.join(ROOT, "store-open.json");
+    await mcp.updateStaffMcpStore(() => mcp.parseStore({ servers: { worddoc: { needsCredential: false, members: ["olga"] } } }), file);
+    const store = await mcp.ensureRelayTokens(["ivan", "olga"], file);
+    expect(Object.keys(store.relayTokens)).toEqual(["olga"]);
+  });
+
+  it("takes a removed user's name out of every grant's member list", async () => {
+    const file = path.join(ROOT, "store-members.json");
+    await mcp.updateStaffMcpStore(() => mcp.parseStore({ servers: { worddoc: { members: ["ivan", "maria"] }, docs: {} } }), file);
+    await mcp.forgetStaffMcpUser("ivan", file);
+    const after = await mcp.readStaffMcpStore(file);
+    expect(after.servers.worddoc.members).toEqual(["maria"]);
+    expect(after.servers.docs.members).toBeNull();
+  });
+
+  it("lets create/edit tools through only where the owner ticked them — never a sender, a deleter or a destructive tool", () => {
+    const strict = { include: null, exclude: [] };
+    const writes = { include: null, exclude: [], writeTools: true };
+    for (const name of ["create_word_document", "createDocument", "write_file", "append_rows", "save_docx", "update_document"]) {
+      expect(mcp.staffToolAllowed(name, strict), name).toBe(false);
+      expect(mcp.staffToolAllowed(name, writes), name).toBe(true);
+    }
+    for (const name of ["send_email", "create_and_send", "delete_document", "share_file", "publish_post", "run_macro", "move_file", "sendmail", "upload_file"]) {
+      expect(mcp.staffToolAllowed(name, writes), name).toBe(false);
+    }
+    expect(mcp.staffToolAllowed("create_document", writes, { readOnlyHint: false })).toBe(true);
+    expect(mcp.staffToolAllowed("create_document", strict, { readOnlyHint: false })).toBe(false);
+    expect(mcp.staffToolAllowed("create_document", writes, { destructiveHint: true })).toBe(false);
+    // The owner's own filter still narrows.
+    expect(mcp.staffToolAllowed("create_document", { include: ["search"], exclude: [], writeTools: true })).toBe(false);
+  });
+});
+
+describe("tool names the review found (TASK-2516)", () => {
+  const strict = { include: null, exclude: [] };
+  const writes = { include: null, exclude: [], writeTools: true };
+  it("refuses who-may-do-what tools even with create/edit ticked", () => {
+    for (const name of ["set_permissions", "add_member", "update_acl", "updateRole", "add_user"]) expect(mcp.staffToolAllowed(name, writes), name).toBe(false);
+  });
+  it("reads a verb at the end of a run-together word too", () => {
+    for (const name of ["mailsend", "filedelete", "docpublish"]) {
+      expect(mcp.staffToolAllowed(name, strict), name).toBe(false);
+      expect(mcp.staffToolAllowed(name, writes), name).toBe(false);
+    }
+    for (const name of ["search", "get_settings", "lookup_address", "list_running_jobs"]) expect(mcp.staffToolAllowed(name, strict), name).toBe(true);
+  });
+  it("plans no entry from a credential named like an object property", () => {
+    const entries = mcp.planStaffMcpEntries({
+      staff: ["olga"],
+      store: mcp.parseStore({ servers: { constructor: {} }, relayTokens: { olga: "c".repeat(64) } }),
+      servers: [httpServer("constructor")],
+      relayBase: "http://127.0.0.1",
+    });
+    expect(entries.size).toBe(0);
   });
 });

@@ -79,7 +79,7 @@ function glyphFor({ state, percent }: Reading): string {
   return `battery_${Math.min(6, Math.floor((percent * 7) / 100))}_bar`;
 }
 
-const BatteryIndicator = memo(function BatteryIndicator() {
+const BatteryIndicator = memo(function BatteryIndicator({ className = "" }: { className?: string }) {
   const { t } = useT();
   // `null` until /users/me has answered; the poll starts only on `true`.
   const ownerApis = useMayUseOwnerApis() === true;
@@ -155,7 +155,7 @@ const BatteryIndicator = memo(function BatteryIndicator() {
       aria-label={label}
       data-testid="shelf-battery"
       data-low={low ? (critical ? "critical" : "low") : undefined}
-      className={`flex items-center gap-0.5 h-10 px-1.5 select-none ${tone}`}
+      className={`flex items-center gap-0.5 h-10 px-1.5 select-none ${tone} ${className}`}
     >
       <span
         aria-hidden="true"

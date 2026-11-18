@@ -20,7 +20,11 @@ export const LOCAL_PROVIDER = "llamacpp";
  * catalog, which OpenClaw turns on for every model when `tools.toolSearch` is
  * unset, and are reached through one `dispatch_action` (`tool_call` before
  * OpenClaw 2026.11.3). MCP tools carry their
- * server's prefix (`clawbox__`).
+ * server's prefix (`clawbox__`). On OpenClaw 2026.11.5+ the hook's `toolsAllow`
+ * only narrows which tools may be called, so scripts/gateway-pre-start.sh also
+ * writes this list as `tools.byProvider.llamacpp.allow` (_LOCAL_LEAN_TOOLS
+ * there; src/tests/unit/gateway-pre-start-local-lean-tools.test.ts holds the two
+ * together).
  */
 export const LEAN_TOOLS = Object.freeze([
   "read",

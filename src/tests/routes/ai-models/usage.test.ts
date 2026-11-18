@@ -5,12 +5,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/harness/credentials", () => ({
-  resolveClawaiToken: vi.fn(),
+  resolveClawaiEntitlementToken: vi.fn(),
 }));
 
-import { resolveClawaiToken } from "@/lib/harness/credentials";
+import { resolveClawaiEntitlementToken } from "@/lib/harness/credentials";
 
-const mockToken = vi.mocked(resolveClawaiToken);
+const mockToken = vi.mocked(resolveClawaiEntitlementToken);
 
 const WEEKLY_BODY = {
   percentUsed: 24,

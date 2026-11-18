@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { cloudAiLockedResponse, isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { get as readPreference } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import {
@@ -618,6 +619,11 @@ export async function POST(req: Request) {
   }
   if (action === "select" && !isVoiceChoice(choice)) {
     return refuse("Pick Auto, this box, or ClawBox cloud.", "bad_request", 400);
+  }
+  // The local-only AI lock (TASK-2501): the cloud voice is not a choice, and
+  // neither is its voice list. "Auto" and "this box" still are.
+  if (((action === "select" && choice === "cloud") || (action === "voice" && engine === "cloud")) && (await isCloudAiLocked())) {
+    return cloudAiLockedResponse("Local-only AI is on: replies are spoken by this box's own voice only.");
   }
 
   // One boundary for every branch. Every step here is filesystem work or a

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withProviderChangeLock } from "@/lib/provider-change-lock";
+import { cloudAiLockedResponse, isCloudAiLocked, isLocalAiModelRef } from "@/lib/ai-cloud-lock";
 import { getActiveHarness } from "@/lib/harness";
 import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { getAll } from "@/lib/config-store";
@@ -50,6 +51,7 @@ import {
 } from "@/lib/provider-models";
 import {
   DISABLED_PROVIDERS_KEY,
+  chatgptSignInFenced,
   claudeSignInFenced,
   credentialedProviders,
   normalizeProviderId,
@@ -99,6 +101,9 @@ import {
 export const dynamic = "force-dynamic";
 
 const PRIMARY_MODEL_KEY = "chat:primary-provider-model";
+
+/** Why a cloud chat model is refused under the local-only AI lock (TASK-2501). */
+const CHAT_MODEL_LOCKED_MESSAGE = "Local-only AI is on: the chat can only use a model on this box or your External engine.";
 
 type ChatModelSource = "primary" | "local";
 
@@ -970,6 +975,12 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
   if (claudeOption && claudeSignInFenced(openclawConfig)) {
     configuredPrimaryOptions.set("anthropic", { ...claudeOption, available: false, reauthRequired: true });
   }
+  // The ChatGPT sign-in, by the same rule and the same function the strip asks
+  // (SUP-1023): a dead refresh marker where the credential was.
+  const chatgptOption = configuredPrimaryOptions.get(CHATGPT_UI_PROVIDER);
+  if (chatgptOption && chatgptSignInFenced(openclawConfig)) {
+    configuredPrimaryOptions.set(CHATGPT_UI_PROVIDER, { ...chatgptOption, available: false, reauthRequired: true });
+  }
 
   // When Local-only mode is on, the cloud providers are intentionally
   // disabled — dropping them from the dropdown is the UX that matches
@@ -1315,6 +1326,16 @@ async function postChatModel(request: Request) {
           : null;
     const disabledRefusal = refuseDisabledProvider(state, requestedModel);
     if (disabledRefusal) return disabledRefusal;
+    // The local-only AI lock (TASK-2501): only a model on the box or the
+    // owner's External engine may become the chat model. Before any write —
+    // the compat branch below registers a model on its way to an answer. An
+    // explicit `model` wins over `source` there, so it is the model that is
+    // judged; only `{"source":"local"}` with no Local AI configured passes
+    // here, and is refused below as "Local AI is not configured".
+    const cloudLocked = await isCloudAiLocked();
+    if (cloudLocked && !isLocalAiModelRef(requestedModel) && !(requestedModel === null && body.source === "local")) {
+      return cloudAiLockedResponse(CHAT_MODEL_LOCKED_MESSAGE);
+    }
 
     // Which ROW the pick was made on, as the picker's own id. The ChatGPT
     // subscription and the OpenAI API key are both `openai/<id>` on OpenClaw
@@ -1572,6 +1593,11 @@ async function postChatModel(request: Request) {
         { error: body.source === "primary" ? "AI provider is not configured" : "Local AI is not configured" },
         { status: 400 },
       );
+    }
+    // And the model the pick resolved to, before the primary is written: the
+    // check above judged what was asked, this judges what would be written.
+    if (cloudLocked && !isLocalAiModelRef(targetModel)) {
+      return cloudAiLockedResponse(CHAT_MODEL_LOCKED_MESSAGE);
     }
 
     // The other two doors — an id already in `state.options`, and a pick

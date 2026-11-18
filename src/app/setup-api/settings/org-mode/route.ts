@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 
+import { recordAudit } from "@/lib/audit-log";
 import { readFailureKind } from "@/lib/config-store";
 import { readOrgMode, writeOrgMode } from "@/lib/org-mode-server";
 import { syncStaffAgents } from "@/lib/org-staff-agents";
@@ -63,6 +64,7 @@ export async function POST(req: Request) {
     return refuse(500, "store_write_failed", "The switch could not be saved — the ClawBox settings file could not be written. Nothing was changed.");
   }
   console.log(`[org-mode] the owner turned organisation mode ${orgMode ? "on" : "off"}`);
+  await recordAudit({ event: "org_mode", actor: who.username, detail: { on: orgMode } }, req);
   // Each member of staff's own OpenClaw agent — their limited tools and their
   // own memory — arrives with the switch and goes with it
   // (src/lib/org-staff-agents.ts). Awaited, so a member's next turn finds it;

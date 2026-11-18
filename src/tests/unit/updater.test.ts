@@ -620,6 +620,34 @@ describe("updater", () => {
       expect(state.phase).toBe("running");
     });
 
+    it("refuses before step 1 when CLAWBOX_UPDATE_CHANNEL cannot be honoured (TASK-2602)", async () => {
+      // On an appliance step 0 is install.sh, which never reads the channel: a
+      // value the updater refuses must stop the run BEFORE that step moves the
+      // tree, not at the restart step's resolveUpdateBranch.
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", "workstaton");
+      updater.resetUpdateState();
+      expect(updater.startUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const state = updater.getUpdateState();
+      expect(state.error).toMatch(/"workstaton", which is not an update channel/);
+      expect(state.currentStepIndex).toBe(-1);
+      expect(state.steps.every((step) => step.status === "pending")).toBe(true);
+      const dispatched = mockExecFile.mock.calls
+        .map(([cmd, args]) => [cmd, ...((args as string[] | undefined) ?? [])].join(" "))
+        .filter((line) => line.includes("root-step") || line.includes("clawbox-root-update@"));
+      expect(dispatched).toEqual([]);
+    });
+
+    it("a box with no channel override runs step 1 as before (TASK-2602)", async () => {
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().steps[0].status).not.toBe("pending");
+      });
+      expect(updater.getUpdateState().error ?? "").not.toMatch(/update channel/);
+    });
+
     it("uses the root step journal output when a root update step fails", async () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),

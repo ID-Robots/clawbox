@@ -32,10 +32,16 @@ import {
   runOpenclawConfigUnset,
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
+import { promises as fsp } from "fs";
+import path from "@/lib/runtime-path";
+import { resolveConfigRoot } from "@/lib/config-store";
+import { cloudAiLockOn } from "@/lib/feature-engine";
 import { createSerialLock } from "@/lib/serial-lock";
+import { readSttEndpoint, STT_ENDPOINT_CLIENT_SCRIPT } from "@/lib/stt-endpoint";
 import { forgetLocalSttProbe, localSttInstalled } from "@/lib/stt-local";
 import {
   buildAudioModels,
+  lockedSttOrder,
   readStoredSttPrimary,
   resolveSttPrimary,
   sttEngineOrder,
@@ -57,7 +63,9 @@ export type CloudSttUnavailable =
   /** It holds a key that is not this box's ClawBox AI token. */
   | "profile_stale"
   /** The `openai` credential is a ChatGPT sign-in, which the core will not send to the proxy. */
-  | "openai_oauth";
+  | "openai_oauth"
+  /** The local-only AI lock is on: no recording is sent to a cloud engine (TASK-2501). */
+  | "cloud_ai_locked";
 
 export interface CloudSttBacking {
   usable: boolean;
@@ -85,6 +93,7 @@ const UNAVAILABLE_SENTENCE: Record<CloudSttUnavailable, string> = {
   profile_not_api_key: `the ${TRANSCRIBE_AUTH_PROFILE} auth profile is not an API key the gateway can send to the ClawBox AI endpoint`,
   profile_stale: `the ${TRANSCRIBE_AUTH_PROFILE} auth profile holds a different key from this box's ClawBox AI credential`,
   openai_oauth: "the openai credential is a ChatGPT sign-in, and OpenClaw refuses a custom endpoint for an OAuth credential",
+  cloud_ai_locked: "local-only AI is on, so no recording is sent to a cloud transcription engine",
 };
 
 /**
@@ -162,8 +171,14 @@ async function clawaiTokenFrom(config: OpenClawConfig): Promise<string | null> {
   return await resolveClawaiToken();
 }
 
-/** {@link decideCloudSttBacking} over what this box holds now. */
+/**
+ * {@link decideCloudSttBacking} over what this box holds now. The local-only
+ * AI lock answers first (TASK-2501): under it no credential backs a cloud row,
+ * so none is written and a written one is withdrawn with our endpoint. An
+ * unreadable lock reads as on (`cloudAiLockOn` fails closed).
+ */
 export async function readCloudSttBacking(config?: OpenClawConfig): Promise<CloudSttBacking> {
+  if (await cloudAiLockOn()) return unusable("cloud_ai_locked");
   const cfg = config ?? (await readConfig());
   const token = await clawaiTokenFrom(cfg);
   // No token, no question for the store: both readers below open sqlite.
@@ -185,6 +200,8 @@ function isOurAudioEndpoint(url: unknown): boolean {
 
 /** The on-box client, matched by name as gateway-pre-start.sh matches it: HOME is the script's to resolve. */
 const STT_CLIENT_SCRIPT = "stt-client.py";
+/** The scripts a ClawBox CLI row may run: the box's engine and the owner's own server (TASK-2501). */
+const CLAWBOX_STT_SCRIPTS = [STT_CLIENT_SCRIPT, STT_ENDPOINT_CLIENT_SCRIPT] as const;
 
 /**
  * Could ClawBox have written this audio row? The cloud row in either shape a
@@ -200,10 +217,62 @@ function isClawboxAudioRow(row: unknown): boolean {
   }
   if (rest.type === "cli") {
     const named = [rest.command, ...(Array.isArray(rest.args) ? rest.args : [])];
-    return named.some((value) => typeof value === "string" && value.endsWith(STT_CLIENT_SCRIPT));
+    return named.some((value) => typeof value === "string" && CLAWBOX_STT_SCRIPTS.some((script) => value.endsWith(script)));
   }
   return isDeepStrictEqual(rest, { provider: "openai", model: TRANSCRIBE_MODEL, profile: TRANSCRIBE_AUTH_PROFILE })
     || isDeepStrictEqual(rest, { provider: "openai", model: TRANSCRIBE_MODEL });
+}
+
+/**
+ * The mark that ClawBox itself switched channel transcription off for the
+ * local-only AI lock, so only ClawBox's own switch is ever turned back on
+ * (TASK-2501). A file beside the device store rather than a store key, because
+ * gateway-pre-start.sh sets and clears the same switch at every gateway start
+ * and must not write the Next app's store: `data/.channel-audio-lock-off`.
+ */
+export function channelAudioLockOffPath(): string {
+  return path.join(resolveConfigRoot(), "data", ".channel-audio-lock-off");
+}
+
+async function lockOffMarked(): Promise<boolean> {
+  try {
+    await fsp.access(channelAudioLockOffPath());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type AudioSwitch = "off" | "restore" | null;
+
+/**
+ * `tools.media.audio.enabled` under the lock. With no audio row at all the
+ * core AUTO-DETECTS an engine — the reply model, then any provider holding a
+ * key for a transcription API (OpenAI, Groq, Deepgram …), then local CLIs
+ * (OpenClaw docs/nodes/audio.md) — and a locked box with no engine of its own
+ * must not have a voice note sent to whichever cloud that finds. So a locked
+ * empty list switches transcription off (`off`), and once there is a row again,
+ * or the lock is lifted, the switch ClawBox turned off is turned back on
+ * (`restore`). An `enabled: false` the owner set is theirs and never touched.
+ */
+async function audioSwitchFor(off: boolean, current: unknown): Promise<AudioSwitch> {
+  const ours = await lockOffMarked();
+  if (off) return current === false ? null : "off";
+  return ours ? "restore" : null;
+}
+
+async function applyAudioSwitch(change: AudioSwitch, current: unknown): Promise<void> {
+  if (change === "off") {
+    // The mark first: a switch ClawBox turned off without one would never be
+    // turned back on.
+    await fsp.mkdir(path.dirname(channelAudioLockOffPath()), { recursive: true });
+    await fsp.writeFile(channelAudioLockOffPath(), "", { mode: 0o600 });
+    await runOpenclawConfigSetBatch([["tools.media.audio.enabled", "false", "--json"]]);
+    console.warn("[stt-channel] channel voice notes are not transcribed: local-only AI is on and this box has no engine of its own");
+  } else if (change === "restore") {
+    if (current === false) await runOpenclawConfigUnset("tools.media.audio.enabled");
+    await fsp.rm(channelAudioLockOffPath(), { force: true });
+  }
 }
 
 export interface SyncChannelAudioOptions {
@@ -273,21 +342,36 @@ export async function syncChannelAudio(
         return false;
       }
     }
+    // The lock (TASK-2501) takes the first engine alone, never the cloud: see
+    // `lockedSttOrder`. Asked here, under the writer's lock, so every caller —
+    // the Settings route, a Whisper install or removal, the cloud defaults,
+    // the boot pass — writes the same list for the same box.
+    const [locked, endpoint] = await Promise.all([cloudAiLockOn(), readSttEndpoint()]);
+    const effective = locked ? lockedSttOrder(order, endpoint !== null) : order;
     const cloud = await readCloudSttBacking(config);
-    const models = buildAudioModels(order, localInstalled, cloud.usable);
+    const models = buildAudioModels(effective, localInstalled, cloud.usable, endpoint !== null);
     const foreign = existing.filter((row) => !isAudioRow(row));
     const merged = [...foreign, ...models];
     const listInForce = isDeepStrictEqual(existing.filter(isAudioRow), models);
+    const enabled = media?.audio?.enabled;
+    const audioSwitch = await audioSwitchFor(locked && models.length === 0, enabled);
     if (cloud.usable) {
-      if (baseUrl === CLAWBOX_AI_PROXY_URL && listInForce) return false;
-      await runOpenclawConfigSetBatch([
-        ["tools.media.audio.baseUrl", JSON.stringify(CLAWBOX_AI_PROXY_URL), "--json"],
-        ["tools.media.models", JSON.stringify(merged), "--json"],
-      ]);
+      if (baseUrl === CLAWBOX_AI_PROXY_URL && listInForce && !audioSwitch) return false;
+      if (!(baseUrl === CLAWBOX_AI_PROXY_URL && listInForce)) {
+        await runOpenclawConfigSetBatch([
+          ["tools.media.audio.baseUrl", JSON.stringify(CLAWBOX_AI_PROXY_URL), "--json"],
+          ["tools.media.models", JSON.stringify(merged), "--json"],
+        ]);
+      }
+      await applyAudioSwitch(audioSwitch, enabled);
       return true;
     }
     const endpointIsOurs = isOurAudioEndpoint(baseUrl);
-    if (listInForce && !endpointIsOurs) return false;
+    if (listInForce && !endpointIsOurs) {
+      if (!audioSwitch) return false;
+      await applyAudioSwitch(audioSwitch, enabled);
+      return true;
+    }
     console.warn(
       `[stt-channel] channel voice notes go without the ClawBox AI transcription row: ${UNAVAILABLE_SENTENCE[cloud.reason ?? "not_linked"]}`,
     );
@@ -298,6 +382,7 @@ export async function syncChannelAudio(
     }
     // Present by the check above, which `config unset` requires.
     if (endpointIsOurs) await runOpenclawConfigUnset("tools.media.audio.baseUrl");
+    await applyAudioSwitch(audioSwitch, enabled);
     return true;
   });
 }
@@ -342,8 +427,10 @@ export async function reconcileChannelAudio(options: ReconcileChannelAudioOption
     readConfigStrict(),
     localSttInstalled(),
   ]);
-  const token = await clawaiTokenFrom(config);
-  const order = sttEngineOrder(resolveSttPrimary(stored, token !== null, local.installed));
+  const [locked, endpoint] = await Promise.all([cloudAiLockOn(), readSttEndpoint()]);
+  // Under the lock the credential is not asked for: no order it could change.
+  const token = locked ? null : await clawaiTokenFrom(config);
+  const order = sttEngineOrder(resolveSttPrimary(stored, token !== null, local.installed, endpoint !== null, locked), locked);
   const wrote = await syncChannelAudio(order, local.installed, { onlyOurRoute: true });
   if (wrote) {
     console.warn(

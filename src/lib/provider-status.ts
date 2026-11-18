@@ -511,15 +511,51 @@ const ORPHANED_REFRESH_MS = 150_000;
  * header ask ONE function and cannot disagree.
  */
 export function claudeSignInFenced(config: OpenClawConfig): boolean {
+  return oauthSignInFenced(config, ANTHROPIC_PROVIDER);
+}
+
+/**
+ * Is this box's ChatGPT SIGN-IN one the gateway will never use? The same
+ * question as {@link claudeSignInFenced}, for the same reason, asked of the
+ * `openai` row's OAuth profile (`openai:chatgpt`): the mechanism is core's, not
+ * Claude's — it fences ANY OAuth credential before a refresh and makes the
+ * fence terminal on any refresh error — and it was met on a ChatGPT profile
+ * (SUP-1023, 2026.11.3: an `expires: 1` row whose access and refresh were
+ * markers, left by a refresh that could not reach the token endpoint).
+ *
+ * Without it a re-sign-in that was rolled back, or an expired renewal, left the
+ * OpenAI card reading "Connected" over a credential every turn died on. A key
+ * of the owner's own beside it (an OpenAI API key profile or provider key) means
+ * the gateway can still run, so this answers false; ClawBox AI's `claw_` token,
+ * which rides in the `openai` provider slot for images and voice, is not one.
+ */
+export function chatgptSignInFenced(config: OpenClawConfig): boolean {
+  return oauthSignInFenced(config, CHATGPT_ROW_PROVIDER, (key) => typeof key !== "string" || !isClawboxAiToken(key));
+}
+
+/** The row `normalizeProviderId` files every OpenAI credential under. */
+const CHATGPT_ROW_PROVIDER = "openai";
+
+/**
+ * The shared body: every OAuth profile filed under `provider` is a dead marker
+ * in the gateway's store, and nothing else of the owner's could answer.
+ * `countsAsKey` says which provider-definition keys are credentials of that
+ * provider's own (all of them, unless the caller knows better).
+ */
+function oauthSignInFenced(
+  config: OpenClawConfig,
+  provider: string,
+  countsAsKey: (key: unknown) => boolean = () => true,
+): boolean {
   for (const [wireId, definition] of Object.entries(config.models?.providers ?? {})) {
     const key = (definition as { apiKey?: unknown } | undefined)?.apiKey;
     // A string, or the SecretRef object core resolves (`{source, provider, id}`): either is a key of its own.
     const keyed = typeof key === "string" ? key.trim() !== "" : !!key && typeof key === "object" && Object.keys(key).length > 0;
-    if (keyed && normalizeProviderId(wireId) === ANTHROPIC_PROVIDER) return false;
+    if (keyed && countsAsKey(key) && normalizeProviderId(wireId) === provider) return false;
   }
   const signIns: string[] = [];
   for (const [profileKey, entry] of Object.entries(config.auth?.profiles ?? {})) {
-    if (normalizeProviderId(profileProviderId(profileKey, entry)) !== ANTHROPIC_PROVIDER) continue;
+    if (normalizeProviderId(profileProviderId(profileKey, entry)) !== provider) continue;
     // An API key or a setup token beside the sign-in is a credential of its
     // own, and the gateway can run on it whatever the sign-in's state.
     if (!isOauthProfile(entry)) return false;
@@ -598,6 +634,8 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
   if (await hasClawaiToken()) credentialed.add(CLAWAI_PROVIDER);
   // Asked once, and only of a row that would otherwise read Connected.
   const claudeFenced = credentialed.has(ANTHROPIC_PROVIDER) && claudeSignInFenced(config);
+  // And the ChatGPT sign-in, by the same rule (SUP-1023).
+  const chatgptFenced = credentialed.has(CHATGPT_ROW_PROVIDER) && chatgptSignInFenced(config);
 
   const primary = config.agents?.defaults?.model?.primary ?? null;
   const defaultProvider = normalizeProviderId(primary ? primary.split("/")[0] : null);
@@ -649,6 +687,7 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
       // rather than a probe state.
       state: (id === CLAWAI_PROVIDER && clawaiRefused && credentialed.has(id))
         || (id === ANTHROPIC_PROVIDER && claudeFenced)
+        || (id === CHATGPT_ROW_PROVIDER && chatgptFenced)
         ? "needs-reauth"
         : stateFor(credentialed.has(id), isDefault),
       isDefault,

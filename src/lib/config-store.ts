@@ -230,6 +230,19 @@ export async function getKnown(key: string): Promise<{ value: unknown; known: bo
 }
 
 /**
+ * `getKnown`, synchronously: for a decision made inside a synchronous step
+ * (a coding run's exit handler deciding whether to start a second process).
+ */
+export function getKnownSync(key: string): { value: unknown; known: boolean } {
+  try {
+    return { value: held(readConfigStrict(), key), known: true };
+  } catch (err) {
+    console.error("[config-store] data/config.json could not be read:", readFailureKind(err));
+    return { value: undefined, known: false };
+  }
+}
+
+/**
  * The same tri-state, for several keys, from ONE read.
  *
  * Asking `getKnown` three times reads the file three times, and three reads of

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { resolveClawaiToken } from "@/lib/harness/credentials";
+import { resolveClawaiEntitlementToken } from "@/lib/harness/credentials";
 import { isClawboxAiToken } from "@/lib/clawai-token";
 import { fetchClawaiUsage } from "@/lib/clawai-usage-portal";
 
@@ -34,7 +34,9 @@ function boxTimeZone(): string | null {
  * that may still read them.
  */
 export async function GET(): Promise<NextResponse> {
-  const token = await resolveClawaiToken();
+  // The plan's meter is about the account, not AI content: it keeps reading
+  // under the local-only AI lock (src/lib/ai-cloud-lock.ts).
+  const token = await resolveClawaiEntitlementToken();
   if (!token || !isClawboxAiToken(token)) {
     return NextResponse.json({ available: false, reason: "not_connected" }, { headers: NO_STORE });
   }

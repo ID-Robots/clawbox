@@ -368,6 +368,16 @@ export function gatewayAuthStoreHoldsApiKey(
 /** One stored profile of a provider, as much of it as may leave this module. */
 export interface ProviderAuthProfile extends GatewayAuthProfileCopy {
   profileId: string;
+  /**
+   * The profile's authorization lifetime, as core keeps it beside the
+   * credential (`authorizationLifetimes[<id>]` in the store row, OpenClaw
+   * 2026.11.3): a new value each time core treats the credential as REPLACED —
+   * any write from outside its own refresh, `paste-token` included — and the
+   * same value across core's own refresh of a sign-in. An automation's recorded
+   * inference account holds it, so a new one is what ends that binding. Null
+   * when core has not enrolled the profile yet (or an older core keeps none).
+   */
+  authorization?: string | null;
 }
 
 /**
@@ -442,11 +452,11 @@ export function readGatewayProviderAuth(provider: string, paths?: GatewayAuthPat
     const read = readMergedStore(paths ?? gatewayAuthPaths());
     if (read === "no-store") return { kind: "no-store" };
     if (read === "unreadable") return { kind: "unreadable" };
-    const { merged, localState, baseState } = read;
+    const { merged, localState, baseState, lifetimes } = read;
     const profiles: ProviderAuthProfile[] = [];
     for (const profileId of Object.keys(merged)) {
       const entry = profileAt(merged, profileId);
-      if (entry && providerOf(profileId, entry) === wanted) profiles.push({ profileId, ...describeCopy(entry) });
+      if (entry && providerOf(profileId, entry) === wanted) profiles.push({ profileId, ...describeCopy(entry), authorization: stringOr(lifetimes[profileId]) });
     }
     const orderOf = (state: Json | null) => storedOrderOf(state, wanted);
     const stats = { ...mapOf(baseState, "usageStats"), ...mapOf(localState, "usageStats") };
@@ -482,13 +492,15 @@ function storedOrderOf(state: Json | null, provider: string): string[] | null {
  * the header) — and the two state rows beside it. Throws when a database that
  * is there cannot be asked.
  */
-function readMergedStore(where: GatewayAuthPaths): { merged: Json; localState: Json | null; baseState: Json | null } | "no-store" | "unreadable" {
+function readMergedStore(where: GatewayAuthPaths): { merged: Json; localState: Json | null; baseState: Json | null; lifetimes: Json } | "no-store" | "unreadable" {
   const found = findStore(where);
   if (!found) return "no-store";
   const blob = parseBlob(found.json) as Json | null;
   const stored = blob && profilesOf(blob);
   if (!stored) return "unreadable";
   const merged: Json = { ...stored };
+  // Each profile's authorization lifetime comes from the row that holds it.
+  const lifetimes: Json = { ...mapOf(blob, "authorizationLifetimes") };
   let localState: Json | null = null;
   let baseState: Json | null;
   if (found.store === "shared") {
@@ -496,8 +508,13 @@ function readMergedStore(where: GatewayAuthPaths): { merged: Json; localState: J
     if (isFile(mainDb)) {
       const db = openSqlite(mainDb, true);
       try {
-        const local = profilesOf((parseBlob(readRow(db, STORE_CELLS.agent)?.json) as Json | null) ?? {});
-        if (local) Object.assign(merged, local);
+        const localBlob = (parseBlob(readRow(db, STORE_CELLS.agent)?.json) as Json | null) ?? {};
+        const local = profilesOf(localBlob);
+        if (local) {
+          Object.assign(merged, local);
+          const localLifetimes = mapOf(localBlob, "authorizationLifetimes");
+          for (const id of Object.keys(local)) lifetimes[id] = localLifetimes[id];
+        }
       } finally {
         db.close();
       }
@@ -507,7 +524,7 @@ function readMergedStore(where: GatewayAuthPaths): { merged: Json; localState: J
   } else {
     baseState = readStateBlob(found.dbPath, "agent");
   }
-  return { merged, localState, baseState };
+  return { merged, localState, baseState, lifetimes };
 }
 
 /**

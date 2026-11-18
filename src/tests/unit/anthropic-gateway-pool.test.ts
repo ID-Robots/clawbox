@@ -32,6 +32,8 @@ const h = vi.hoisted(() => ({
   storeFile: "",
   /** What each offline window (the gateway stopped around the token pastes) was asked for. */
   windows: [] as unknown[],
+  /** A memory index pass holds the gateway stopped. */
+  held: false,
 }));
 
 vi.mock("@/lib/coding-agent-notify", () => ({ announceAnthropicLimit: vi.fn(async () => undefined) }));
@@ -60,6 +62,7 @@ vi.mock("@/lib/openclaw-auth-ops", async () => {
       h.windows.push(options);
       return work();
     },
+    openclawGatewayHeldOffline: async () => h.held,
     logoutOpenclawAuthProfiles: async (_provider: string, ids: string[], agentId?: string) => {
       for (const id of ids) await spawnOpenclawCli(["models", "auth", "logout", id, "--yes", ...agent(agentId)], { timeoutMs: 60_000 });
       return ids;
@@ -76,6 +79,20 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   readConfig: vi.fn(async () => h.config),
   readConfigStrict: vi.fn(async () => h.config),
   restartGateway: vi.fn(async () => { h.restarts += 1; }),
+  // openclaw.json's `auth.order.<provider>` (TASK-2533: kept equal to the stored order).
+  runOpenclawConfigSet: vi.fn(async (args: string[]) => {
+    const [key, value] = args;
+    const m = /^auth\.order\.(.+)$/.exec(key);
+    if (!m) throw new Error(`unexpected config set: ${key}`);
+    const auth = h.config.auth as { order?: Record<string, unknown> };
+    auth.order = { ...(auth.order ?? {}), [m[1]]: JSON.parse(value) };
+  }),
+  runOpenclawConfigUnset: vi.fn(async (key: string) => {
+    const m = /^auth\.order\.(.+)$/.exec(key);
+    if (!m) throw new Error(`unexpected config unset: ${key}`);
+    const auth = h.config.auth as { order?: Record<string, unknown> };
+    if (auth.order) delete auth.order[m[1]];
+  }),
   spawnOpenclawCli: vi.fn(async (args: string[], options: { stdinData?: string } = {}) => fakeCli(args, options.stdinData)),
 }));
 
@@ -226,6 +243,7 @@ beforeEach(async () => {
   h.cli = [];
   h.restarts = 0;
   h.windows = [];
+  h.held = false;
   usage = () => ({ five_hour: { utilization: 12, resets_at: null }, seven_day: { utilization: 20, resets_at: null } });
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
     if (String(url).endsWith("/api/oauth/usage")) {
@@ -290,6 +308,50 @@ describe("the chat on the box's Claude accounts (TASK-1260, 2026-10-14)", () => 
     // The token travelled on stdin, never on a command line.
     expect(h.cli.flat().join(" ")).not.toContain("sk-ant-oat01");
     expect((await pool.describePool()).gateway).toMatchObject({ following: true, accountId: work.id, label: "Work Max" });
+    // openclaw.json's order says the same as the stored one (TASK-2533).
+    expect((h.config.auth as { order?: Record<string, unknown> }).order?.anthropic).toEqual(storedOrder());
+  });
+
+  it("opens no window and renews nothing while a memory index pass holds the gateway stopped", async () => {
+    // The window's pastes would be refused the state the pass owns, and its
+    // own start would bring the gateway up under the pass. The keeper's next
+    // pass, with the gateway back, does the work.
+    h.held = true;
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await swap.whenSwapsSettled();
+
+    await gw.keepGatewayMirror();
+
+    expect(h.windows).toEqual([]);
+    expect(h.cli).toEqual([]);
+    expect(anthropicProfiles()).toEqual(["anthropic:default"]);
+
+    h.held = false;
+    await gw.keepGatewayMirror();
+    expect(anthropicProfiles()).toEqual(["anthropic:clawbox-" + personal.id, "anthropic:clawbox-" + work.id, "anthropic:default"].sort());
+    expect(h.windows).toEqual([{ waitOutStop: true }]);
+  });
+
+  it("opens no window and renews nothing while a memory index pass holds the gateway stopped", async () => {
+    // The window's pastes would be refused the state the pass owns, and its
+    // own start would bring the gateway up under the pass. The keeper's next
+    // pass, with the gateway back, does the work.
+    h.held = true;
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await swap.whenSwapsSettled();
+
+    await gw.keepGatewayMirror();
+
+    expect(h.windows).toEqual([]);
+    expect(h.cli).toEqual([]);
+    expect(anthropicProfiles()).toEqual(["anthropic:default"]);
+
+    h.held = false;
+    await gw.keepGatewayMirror();
+    expect(anthropicProfiles()).toEqual(["anthropic:clawbox-" + personal.id, "anthropic:clawbox-" + work.id, "anthropic:default"].sort());
+    expect(h.windows).toEqual([{ waitOutStop: true }]);
   });
 
   it("records a limit core rotated off as the pool's own, until Anthropic's reset, and moves the order — no restart", async () => {

@@ -30,6 +30,14 @@ import { monotonicNow } from "./monotonic-clock";
 import { waitForGatewayStartBeforeStop } from "./gateway-start-guard";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
+import {
+  probeUpdateHost,
+  resolveUpdateChannel,
+  UpdateChannelError,
+  workstationRefMissingReason,
+  workstationRefMissingUpdateError,
+  type UpdateChannel,
+} from "./update-channel";
 import { classifyUpdaterHandover } from "./updater-handover";
 import { startRootStep } from "./root-step-runner";
 import { preserveLocalEdits } from "./local-edits";
@@ -206,7 +214,7 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // `{target: null, updateAvailable: false}` — "no OpenClaw update available" over a
 // box that has one, the false-success shape — and `reinstallManagedPluginPayload`
 // pinned the channel plugins to `@2026.8.1` on a 2026.9.3 core.
-const OPENCLAW_VERSION_FALLBACK = "2026.11.3";
+const OPENCLAW_VERSION_FALLBACK = "2026.11.5";
 
 /**
  * The state-DB schema each pinned core supports, read from the published
@@ -239,6 +247,7 @@ const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
   "2026.10.7": 20,
   "2026.10.9": 20,
   "2026.11.3": 22,
+  "2026.11.5": 36,
 };
 
 /**
@@ -262,6 +271,7 @@ const OPENCLAW_AGENT_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
   "2026.10.7": 25,
   "2026.10.9": 25,
   "2026.11.3": 27,
+  "2026.11.5": 38,
 };
 
 /** The state schema `version` supports, or null when this pin is not in the table. */
@@ -660,7 +670,12 @@ async function readFromOrigin(
   args: string[],
   /** `log`: each attempt, its output and its exit into the update's raw log. */
   options: { timeout: number; maxBuffer?: number; attempts?: number; retryDelayMs?: number; log?: boolean },
-): Promise<{ remote: RemoteReachability; stdout: string }> {
+): Promise<{
+  remote: RemoteReachability;
+  stdout: string;
+  /** origin answered that the ref asked for does not exist (isMissingRef). */
+  missingRef: boolean;
+}> {
   const attempts = options.attempts ?? REMOTE_FETCH_ATTEMPTS;
   const retryDelayMs = options.retryDelayMs ?? REMOTE_RETRY_DELAY_MS;
   let lastText = "";
@@ -673,7 +688,7 @@ async function readFromOrigin(
         env: { ...process.env, ...GIT_NO_PROMPT_ENV },
       });
       const { stdout } = options.log ? await logUpdateCommand(["git", ...args], attemptGit) : await attemptGit();
-      return { remote: REMOTE_REACHABLE, stdout: String(stdout ?? "") };
+      return { remote: REMOTE_REACHABLE, stdout: String(stdout ?? ""), missingRef: false };
     } catch (err) {
       lastErr = err;
       lastText = errorText(err);
@@ -692,6 +707,7 @@ async function readFromOrigin(
       reason: refusalReason(lastErr, lastText),
     },
     stdout: "",
+    missingRef: isMissingRef(lastText),
   };
 }
 
@@ -1230,7 +1246,13 @@ export type BranchSource =
   /** Detached HEAD, resolved from the build stamp / refs that contain HEAD. */
   | "detached-recovered"
   /** Nothing said otherwise: `main`. Never auto-pinned. */
-  | "default";
+  | "default"
+  /**
+   * A ClawBox Workstation's own channel (src/lib/update-channel.ts): the
+   * `workstation` branch, ahead of every rule above. Never pinned — it follows
+   * from the hardware (or CLAWBOX_UPDATE_CHANNEL), not from a record.
+   */
+  | "workstation-channel";
 
 export interface ResolvedBranch {
   /** Local branch to checkout */
@@ -1338,8 +1360,27 @@ async function recoverDetachedBranch(projectDir: string): Promise<string | null>
   return null;
 }
 
+/**
+ * The update channel this checkout follows (src/lib/update-channel.ts).
+ * Throws UpdateChannelError when it cannot be decided without guessing.
+ */
+function currentUpdateChannel(projectDir: string): UpdateChannel {
+  return resolveUpdateChannel(probeUpdateHost(projectDir));
+}
+
 export async function resolveUpdateBranch(projectDir: string = PROJECT_DIR): Promise<ResolvedBranch> {
   const main: ResolvedBranch = { local: "main", upstream: "origin/main", source: "default" };
+
+  // 0. A ClawBox Workstation follows its own channel, ahead of the pin: the
+  // pin on a Workstation is the branch install-x64.sh installed from, and
+  // following it is exactly the "Workstation on beta" this channel replaces.
+  // Every other box answers `branch` and goes on below, unchanged. A channel
+  // that cannot be decided throws (UpdateChannelError), like rule 3 refuses a
+  // guess: the update fails with the reason instead of moving the box.
+  const channel = currentUpdateChannel(projectDir);
+  if (channel.kind === "workstation") {
+    return { local: channel.ref, upstream: `origin/${channel.ref}`, source: "workstation-channel" };
+  }
 
   // 1. Check .update-branch file
   try {
@@ -1600,6 +1641,10 @@ export async function repinUpdateBranch(
   projectDir: string = PROJECT_DIR,
   source: BranchSource = "checkout-branch",
 ): Promise<UpdateWarning[]> {
+  // The Workstation channel is not a record either: it follows from the
+  // hardware, and a pin written from it would outlive an override back to the
+  // branch rules (CLAWBOX_UPDATE_CHANNEL=branch). The pin is left as it is.
+  if (source === "workstation-channel") return [];
   if (source === "default") {
     return [{
       code: "repin-skipped",
@@ -1962,7 +2007,25 @@ async function updateClawBoxAsOwner(): Promise<void> {
  * order: `openclaw_install` reads the NEW release's pin.
  */
 async function syncCheckoutAsOwner(): Promise<void> {
-  const { local, upstream, source } = await resolveUpdateBranch(PROJECT_DIR);
+  const { local, upstream } = await fetchUpdateBranchAsOwner(PROJECT_DIR);
+  // The code install.sh's step 1 raises for the same save, so the restart
+  // step's own save recognises it the way it does on the appliance.
+  await syncCheckoutToUpstream(local, upstream, "local-edits-saved");
+}
+
+/**
+ * The first half of `syncCheckoutAsOwner`: resolve the update branch and fetch
+ * it, touching nothing else. Throws with the owner's sentence when it cannot.
+ *
+ * On the Workstation channel a branch origin does not carry is not "the pin
+ * no longer exists, choose another one" (refusalReason's sentence for a
+ * deleted QA branch): nothing has been released to Workstations yet, and the
+ * box stays on what it has — it is never moved to the pin or to main instead.
+ * Thrown before the tree is touched, so step 1 fails with the checkout as it was.
+ */
+export async function fetchUpdateBranchAsOwner(projectDir: string = PROJECT_DIR): Promise<ResolvedBranch> {
+  const resolved = await resolveUpdateBranch(projectDir);
+  const { upstream, source } = resolved;
   const slash = upstream.indexOf("/");
   const remote = slash > 0 ? upstream.slice(0, slash) : "";
   const branch = slash > 0 ? upstream.slice(slash + 1) : "";
@@ -1970,18 +2033,20 @@ async function syncCheckoutAsOwner(): Promise<void> {
     throw new Error(`This ClawBox cannot fetch its update branch: ${upstream} is not a remote branch the updater can name.`);
   }
   console.log(`[Updater] Fetching ${upstream} as the desktop owner (resolved from: ${source})`);
-  const fetched = await reachOrigin(
-    PROJECT_DIR,
+  const fetched = await readFromOrigin(
+    projectDir,
     ["fetch", "--quiet", remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`],
     // Every attempt, with git's own output, into the update's raw log.
     { timeout: 120_000, log: true },
   );
-  if (!fetched.reachable) {
-    throw new Error(fetched.reason ?? `Could not fetch ${upstream}. Check the internet connection and try again.`);
+  if (!fetched.remote.reachable) {
+    if (source === "workstation-channel" && fetched.missingRef) {
+      await dropStaleChannelRef(projectDir, branch);
+      throw new Error(workstationRefMissingUpdateError(branch));
+    }
+    throw new Error(fetched.remote.reason ?? `Could not fetch ${upstream}. Check the internet connection and try again.`);
   }
-  // The code install.sh's step 1 raises for the same save, so the restart
-  // step's own save recognises it the way it does on the appliance.
-  await syncCheckoutToUpstream(local, upstream, "local-edits-saved");
+  return resolved;
 }
 
 /**
@@ -5402,13 +5467,21 @@ async function readHermesVersion(): Promise<string | null> {
   }
 }
 
-interface PinnedBranchCheck {
+export interface PinnedBranchCheck {
   target: { branch: string; currentSha: string; targetSha: string } | null;
   remote: RemoteReachability;
+  /**
+   * The channel the comparison was made on (src/lib/update-channel.ts):
+   * `branch` — the branch rules every Jetson follows — or `workstation`; null
+   * when the channel itself could not be decided, which `remote` says.
+   */
+  channel: UpdateChannel["kind"] | null;
 }
 
 /**
- * Compare the device against its pinned branch on origin.
+ * Compare the device against the branch it follows on origin: the
+ * Workstation channel's branch on a ClawBox Workstation, else its pinned
+ * branch.
  *
  * The fetch outcome is RETURNED, not swallowed. It used to be
  * `.catch(() => {})`, after which HEAD was compared against whatever
@@ -5417,7 +5490,18 @@ interface PinnedBranchCheck {
  * screen said "You're up to date" about a check that never happened
  * (TASK-655).
  */
-async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCheck> {
+export async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCheck> {
+  let channel: UpdateChannel;
+  try {
+    channel = currentUpdateChannel(projectDir);
+  } catch (err) {
+    if (!(err instanceof UpdateChannelError)) throw err;
+    // No channel, no comparison — and never the pin's branch in its place.
+    return { target: null, remote: { reachable: false, cause: "device", reason: err.message }, channel: null };
+  }
+  // The Workstation channel's branch, whatever the pin says (resolveUpdateBranch's rule 0).
+  if (channel.kind === "workstation") return compareWithOrigin(projectDir, channel.ref, "workstation");
+
   let branch: string;
   try {
     branch = (await readFile(path.join(projectDir, ".update-branch"), "utf-8")).trim();
@@ -5425,7 +5509,7 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
     // Only "there is no file" means "no branch is recorded". Any other read
     // error is a pin that IS there and could not be read.
     if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-      return { target: null, remote: noUpdateBranchReason() };
+      return { target: null, remote: noUpdateBranchReason(), channel: "branch" };
     }
     branch = "";
   }
@@ -5433,19 +5517,65 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
   // updater would resolve, `main` by default, instead of declining to look:
   // a box in that state could not see a release waiting for it (TASK-1213).
   if (!branch) branch = (await resolveEffectiveUpdateBranch(projectDir)).branch;
-  else if (!isSafeBranch(branch)) return { target: null, remote: noUpdateBranchReason() };
+  else if (!isSafeBranch(branch)) return { target: null, remote: noUpdateBranchReason(), channel: "branch" };
 
-  const remote = await reachOrigin(projectDir, ["fetch", "--quiet", "origin", branch], {
+  return compareWithOrigin(projectDir, branch, "branch");
+}
+
+/**
+ * origin answered that the channel's branch does not exist: forget the local
+ * copy of it, as `git fetch --prune` would. A copy left from before the branch
+ * was deleted is otherwise a version every local reader still sees — the
+ * What's new panel reads its package.json, the drift report its tip — while
+ * the check says nothing has been released. Best effort: a ref that cannot be
+ * removed changes no verdict here.
+ */
+async function dropStaleChannelRef(projectDir: string, branch: string): Promise<void> {
+  try {
+    await execGit(projectDir, ["update-ref", "-d", `refs/remotes/origin/${branch}`], { timeout: 10_000 });
+  } catch {
+    // No such ref, or a locked one: nothing to do.
+  }
+}
+
+/** Fetch `origin <branch>` and compare HEAD with it. */
+async function compareWithOrigin(
+  projectDir: string,
+  branch: string,
+  channel: UpdateChannel["kind"],
+): Promise<PinnedBranchCheck> {
+  // The Workstation channel names the ref it compares against, as step 1's
+  // fetch does: a checkout whose `remote.origin.fetch` was narrowed (say, to
+  // beta) would otherwise never write `origin/workstation`, and the comparison
+  // below would read a missing or stale ref. The branch rules keep the fetch
+  // they always made.
+  const fetchArgs = channel === "workstation"
+    ? ["fetch", "--quiet", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`]
+    : ["fetch", "--quiet", "origin", branch];
+  const fetched = await readFromOrigin(projectDir, fetchArgs, {
     timeout: 20_000,
     attempts: REMOTE_CHECK_ATTEMPTS,
     retryDelayMs: REMOTE_CHECK_RETRY_DELAY_MS,
   });
+  const remote = fetched.remote;
+  // origin has no workstation branch: nothing has been released to
+  // Workstations. Said as such, and decided here — a stale local
+  // `origin/workstation` left by a deleted branch is no target either.
+  if (channel === "workstation" && fetched.missingRef) {
+    await dropStaleChannelRef(projectDir, branch);
+    return {
+      target: null,
+      remote: { reachable: false, cause: "device", reason: workstationRefMissingReason(branch) },
+      channel,
+    };
+  }
   // The fetch landed but the comparison did not, so this check has NO verdict —
   // a different answer from "no update", and the only one the device is
   // entitled to give. A fetch that failed already carries the better reason.
   const unresolved = (): PinnedBranchCheck => ({
     target: null,
     remote: remote.reachable ? unresolvedTargetReason(branch) : remote,
+    channel,
   });
   try {
     const [{ stdout: currentOut }, { stdout: targetOut }] = await Promise.all([
@@ -5458,8 +5588,8 @@ async function getPinnedBranchTarget(projectDir: string): Promise<PinnedBranchCh
     // compared empty against empty and read as "equal", so a box with no refs
     // reported itself converged.
     if (!currentSha || !targetSha) return unresolved();
-    if (currentSha === targetSha) return { target: null, remote };
-    return { target: { branch, currentSha, targetSha }, remote };
+    if (currentSha === targetSha) return { target: null, remote, channel };
+    return { target: { branch, currentSha, targetSha }, remote, channel };
   } catch {
     return unresolved();
   }
@@ -5500,7 +5630,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   // ls-remote: they are this check's two anonymous requests to GitHub, and the
   // refusal both are retried for is caused by an address sending too many, so
   // they go one after the other rather than as a burst.
-  const [[targetVersion, { target: pinnedBranchTarget, remote: pinnedRemote }], openclawCurrent, openclawTarget, rawVersion, hermesCurrent, releaseRemote] = await Promise.all([
+  const [[targetVersion, { target: pinnedBranchTarget, remote: pinnedRemote, channel: updateChannel }], openclawCurrent, openclawTarget, rawVersion, hermesCurrent, releaseRemote] = await Promise.all([
     getTargetVersion().then(async (targetVersion) => [targetVersion, await getPinnedBranchTarget(PROJECT_DIR)] as const),
     // Nothing to read on the Hermes edition: there is no OpenClaw to report
     // there (see `openclawAbsent` above).
@@ -5529,7 +5659,13 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   // this device, which is why the address is checked too. Any one of them
   // failing means this check did not see the releases, so the worst answer is
   // what the device reports.
-  const remote = [releaseRemote, pinnedRemote, lastTagRemote].find((r) => !r.reachable) ?? REMOTE_REACHABLE;
+  //
+  // The tag list is one of them only on the branch rules, the one channel that
+  // offers a tag (see taggedClawboxTarget below): a Workstation whose own
+  // branch was fetched and compared has its verdict, whatever the tag lookup
+  // met. A channel that could not be decided already says so in pinnedRemote.
+  const tagRemote = updateChannel === "branch" ? lastTagRemote : REMOTE_REACHABLE;
+  const remote = [releaseRemote, pinnedRemote, tagRemote].find((r) => !r.reachable) ?? REMOTE_REACHABLE;
 
   // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
   // so it compares cleanly against the target tag.
@@ -5537,7 +5673,11 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 
   // Only report a target if it's strictly newer than the device's base tag.
   // (A dev box can sit on a local tag ahead of origin's latest release.)
-  const taggedClawboxTarget = targetVersion && compareSemverTags(targetVersion, baseTag) > 0
+  // Only on the branch rules: a release tag is cut on main, and a Workstation
+  // (or a box whose channel could not be decided) installs the workstation
+  // branch or nothing — never the tag. Offering it would name a version the
+  // update does not install.
+  const taggedClawboxTarget = updateChannel === "branch" && targetVersion && compareSemverTags(targetVersion, baseTag) > 0
     ? targetVersion
     : null;
   // `main` is the release channel and its releases are tagged, so a box behind
@@ -6953,6 +7093,28 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // run writes its own after its backup — so no run can ever set data aside
   // on an override it was not given.
   const remainingSteps = steps.slice(startFrom);
+
+  // THE UPDATE CHANNEL (src/lib/update-channel.ts), asked before anything that
+  // moves the checkout. Step 0 on an appliance is install.sh, which reads the
+  // pin and never this channel: a CLAWBOX_UPDATE_CHANNEL it cannot honour
+  // would otherwise move the tree first and be refused only at the restart
+  // step's resolveUpdateBranch, over a box already half-moved. Refused here
+  // the way the internet check below refuses: the box is as it was. Every box
+  // whose channel is decided — every Jetson with no override — passes.
+  if (remainingSteps.some((s) => s.id === "bootstrap_updater" || s.id === RESTART_STEP_ID)) {
+    try {
+      currentUpdateChannel(PROJECT_DIR);
+    } catch (err) {
+      if (!(err instanceof UpdateChannelError)) throw err;
+      console.error(`[Updater] refusing the update before step 1: ${err.message}`);
+      runtime.state.phase = "failed";
+      runtime.state.error = err.message;
+      runtime.state.currentStepIndex = -1;
+      await clearUpdateLock();
+      return;
+    }
+  }
+
   let schemaCheckedPin: string | null = null;
   const syncAhead = remainingSteps.some((s) => s.id === "bootstrap_updater");
   const downgradeScope = {

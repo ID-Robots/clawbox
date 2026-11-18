@@ -27,7 +27,13 @@
 #      climb went past where a 200k window compacts) and finish.
 #   4. The same climb as a delegated run through the assistant's routes, on
 #      whatever model the plan gives this box. It must complete; on a 1M model
-#      its transcript must show a compaction.
+#      its transcript must show a compaction. On a 200k model (every plan's
+#      today) Claude Code compacts at ~167k, and four 20k-token files read in
+#      one message are ~70k a turn: the run was back at the line two turns
+#      after each compact and died of "Autocompact is thrashing" (TASK-2638).
+#      claude-ds now cuts one read to a 25th of that window, so the model
+#      reads a file in ranges; the transcript's context per turn is printed so
+#      the gap between compactions can be read off it.
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
@@ -48,6 +54,7 @@ analyse() {
   python3 - "$1" <<'"'"'PY'"'"'
 import json, re, sys
 peak, comps, overflow, result = 0, [], None, None
+seq, seen = [], set()
 for line in open(sys.argv[1], errors="replace"):
     try:
         e = json.loads(line)
@@ -61,6 +68,9 @@ for line in open(sys.argv[1], errors="replace"):
         u = m.get("usage") or {}
         ctx = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
         peak = max(peak, ctx)
+        if m.get("id") not in seen:
+            seen.add(m.get("id"))
+            seq.append(str(ctx // 1000) + "k")
         for b in m.get("content") or []:
             txt = b.get("text") if isinstance(b, dict) else None
             if isinstance(txt, str) and re.search(r"maximum context length is \d+ tokens", txt):
@@ -68,12 +78,13 @@ for line in open(sys.argv[1], errors="replace"):
     if t == "system" and sub == "compact_boundary":
         md = e.get("compact_metadata") or e.get("compactMetadata") or {}
         comps.append({"trigger": md.get("trigger"), "pre": md.get("pre_tokens", md.get("preTokens"))})
+        seq.append("|compact|")
     if t == "result":
         r = str(e.get("result") or "")
         result = {"is_error": e.get("is_error"), "subtype": sub, "turns": e.get("num_turns"), "text": r[-300:]}
         if re.search(r"maximum context length is \d+ tokens", r):
             overflow = r[:300]
-print(json.dumps({"peak": peak, "compactions": comps, "overflow": overflow, "result": result}))
+print(json.dumps({"peak": peak, "compactions": comps, "overflow": overflow, "result": result, "turns": " ".join(seq)}))
 PY
 }
 '
@@ -89,7 +100,7 @@ FACTS=$(board '
   echo "tier: $(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get(\"clawai_tier\") or \"unset\")" "$REPO/data/config.json" 2>&1)"
   if cmp -s "$HOME/.local/bin/claude-ds" "$REPO/scripts/claude-ds"; then echo "wrapper: the installed claude-ds is the checkout'"'"'s"; else echo "wrapper: the installed claude-ds DIFFERS from the checkout'"'"'s"; fi
   fake=$(mktemp -d)
-  printf "#!/bin/sh\nenv | grep -E \"^(ANTHROPIC_MODEL|CLAUDE_CODE_AUTO_COMPACT_WINDOW|CLAUDE_CODE_MAX_OUTPUT_TOKENS|CLAUDE_AUTOCOMPACT_PCT_OVERRIDE)=\" | sort\n" > "$fake/claude"
+  printf "#!/bin/sh\nenv | grep -E \"^(ANTHROPIC_MODEL|CLAUDE_CODE_AUTO_COMPACT_WINDOW|CLAUDE_CODE_MAX_OUTPUT_TOKENS|CLAUDE_AUTOCOMPACT_PCT_OVERRIDE|CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS)=\" | sort\n" > "$fake/claude"
   chmod +x "$fake/claude"
   for m in "deepseek-v4-flash[1m]" deepseek-v4-flash; do
     echo "env for $m: $(cd "$fake" && PATH="$fake:$PATH" CLAUDE_DS_MODEL="$m" claude-ds -p x 2>/dev/null | tr "\n" " ")"
@@ -98,6 +109,16 @@ FACTS=$(board '
 ')
 while IFS= read -r line; do note "$line"; done <<< "$FACTS"
 TIER=$(printf '%s\n' "$FACTS" | sed -n 's/^tier: //p')
+# The cap this test exists for must be on the 200k model's environment and off
+# the 1M one's — and the wrapper the run uses must be the checkout's.
+case "$(printf '%s\n' "$FACTS" | sed -n 's/^env for deepseek-v4-flash: //p')" in
+  *CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS=8000*) ok "claude-ds caps one Read at 8000 tokens on the 200k model" ;;
+  *) not_ok "claude-ds does not cap one Read at 8000 tokens on the 200k model (an installed wrapper that is not the checkout's?)" ;;
+esac
+case "$(printf '%s\n' "$FACTS" | sed -n 's/^env for deepseek-v4-flash\[1m\]: //p')" in
+  *CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS*) not_ok "claude-ds caps a Read on the [1m] model, which has the room for Claude Code's default" ;;
+  *) ok "claude-ds leaves a Read at Claude Code's default on the [1m] model" ;;
+esac
 
 # ---- 2. what the proxy serves behind each id ------------------------------------
 
@@ -165,7 +186,7 @@ PY
 '
 
 task_for() {
-  printf '%s' "This session tests how the harness copes when the context window fills up, so its ONLY job is to read. Read the files f01.txt to f$(printf '%02d' "$1").txt in the current working folder, in order, with the Read tool: the whole file each time (no offset, no limit), four files per message (four Read calls in one message), never skipping a file and never reading one twice. Do not summarise them, do not run any command, do not write any file, do not use any other tool. If the conversation is compacted, carry on with the next file you have not read yet. When you have read f$(printf '%02d' "$1").txt, reply with exactly: ALL FILES READ"
+  printf '%s' "This session tests how the harness copes when the context window fills up, so its ONLY job is to read. Read the files f01.txt to f$(printf '%02d' "$1").txt in the current working folder, in order, with the Read tool: the whole file each time, four files per message (four Read calls in one message); if the Read tool says a file is too large to read whole, read that file in consecutive ranges with offset and limit until you have all of it. Never skip a file and never read any part of one twice. Do not summarise them, do not run any command, do not write any file, do not use any other tool. If the conversation is compacted, carry on with the next file you have not read yet. When you have read f$(printf '%02d' "$1").txt, reply with exactly: ALL FILES READ"
 }
 
 # ---- 3. a scripted claude-ds session on a 1M model -----------------------------
@@ -205,7 +226,8 @@ done
 DIRECT_OUT=$(board "$ANALYSE"'grep -m3 -E "^claude-ds:|unrecognized_model" "$1/.direct/stderr.log"; analyse "$1/.direct/stream.jsonl"' "$DIRECT_DIR")
 while IFS= read -r line; do note "scripted session stderr: $line"; done < <(printf '%s\n' "$DIRECT_OUT" | grep -v '^{')
 DIRECT=$(printf '%s\n' "$DIRECT_OUT" | grep '^{' | tail -n1)
-note "scripted session: $DIRECT"
+note "scripted session: $(printf '%s' "$DIRECT" | jq -c 'del(.turns)')"
+note "scripted session context per turn: $(printf '%s' "$DIRECT" | jq -r '.turns // ""')"
 d_peak=$(printf '%s' "$DIRECT" | jq -r '.peak // 0')
 d_auto=$(printf '%s' "$DIRECT" | jq -r '[.compactions[] | select(.trigger == "auto")] | length')
 d_first=$(printf '%s' "$DIRECT" | jq -r '[.compactions[] | select(.trigger == "auto") | .pre // 0] | first // 0')
@@ -266,7 +288,8 @@ if [ -n "$SESSION" ]; then
     f=$(find "$HOME/.claude-ds/projects" -name "$1.jsonl" 2>/dev/null | head -n1)
     [ -n "$f" ] && analyse "$f" || echo "{}"
   ' "$SESSION" | grep '^{' | tail -n1)
-  note "run transcript: $RUN"
+  note "run transcript: $(printf '%s' "$RUN" | jq -c 'del(.turns)')"
+  note "run context per turn: $(printf '%s' "$RUN" | jq -r '.turns // ""')"
   r_auto=$(printf '%s' "$RUN" | jq -r '[.compactions[]? | select(.trigger == "auto")] | length')
   r_peak=$(printf '%s' "$RUN" | jq -r '.peak // 0')
   # On a 200k model the compactions are the old behaviour, kept; either way a

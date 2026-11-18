@@ -3,6 +3,7 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "@/lib/runtime-path";
+import { recordAudit } from "@/lib/audit-log";
 import { get, set } from "@/lib/config-store";
 import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, CHPASSWD_STEP, chpasswdRecord } from "@/lib/chpasswd";
 import { getSystemUsername, verifyPassword, isSafePasswordChars, bumpSessionGeneration, createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
@@ -150,6 +151,10 @@ export async function POST(request: Request) {
 
     await set("password_configured", true);
     await set("password_configured_at", new Date().toISOString());
+    await recordAudit(
+      { event: "owner_password_change", actor: getSystemUsername(), detail: { firstSet: !passwordAlreadyConfigured } },
+      request,
+    );
 
     // On an actual password change, revoke every session minted under the old
     // password (bump the generation) — but re-issue the caller's OWN session at

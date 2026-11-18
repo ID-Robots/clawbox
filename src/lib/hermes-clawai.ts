@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import { getKnown, setMany } from "@/lib/config-store";
+import { CLOUD_AI_LOCKED_CODE, CLOUD_AI_LOCKED_MESSAGE, isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import {
   EXPLICIT_MODEL_PICKS_KEY,
   decideClawboxAiModelId,
@@ -204,6 +205,11 @@ export async function applyClawaiToHermes(
   tier: ClawboxAiTier,
   options: ApplyClawaiOptions = {},
 ): Promise<{ provider: string; model: string; tier: ClawboxAiTier; explicitPickKept: boolean }> {
+  // The local-only AI lock (TASK-2501): ClawBox AI is not written into Hermes
+  // as a provider, a picture model or a voice while it is on.
+  if (await isCloudAiLocked()) {
+    throw Object.assign(new ClawaiApplyError(CLOUD_AI_LOCKED_MESSAGE), { code: CLOUD_AI_LOCKED_CODE });
+  }
   const trimmed = token.trim();
   // A token that starts with "-" would be read by hermes as a flag. runHermesCli
   // never uses a shell, but argv position is still meaningful.
@@ -729,6 +735,8 @@ async function readHermesVisionSlot(): Promise<
  */
 export async function refreshClawaiVisionOnHermes(): Promise<void> {
   try {
+    // Under the local-only AI lock the probe picture is not sent.
+    if (await isCloudAiLocked()) return;
     const token = await getStoredClawaiToken();
     if (!token) return;
     try {
@@ -864,6 +872,12 @@ export async function migrateRetiredClawaiModelsInHermes(): Promise<boolean> {
  * each verdict that is not "this box is already correct" carries a line.
  */
 export async function reconcileClawaiModelsWithHermes(): Promise<void> {
+  if (clawaiModelsReconciled || Date.now() < clawaiRetryAfter) return;
+  // Nothing of ClawBox AI's is repaired into Hermes under the local-only AI lock.
+  if (await isCloudAiLocked()) return;
+  // Asked again after that await: a second caller may have passed the check
+  // above meanwhile and taken the latch, and two passes would double the CLI
+  // work and the repair budget.
   if (clawaiModelsReconciled || Date.now() < clawaiRetryAfter) return;
   clawaiModelsReconciled = true;
   try {

@@ -35,6 +35,7 @@
  * cloud" outranks a faster summary, and its long chats get the new-chat offer.
  */
 
+import { isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { get, set } from "@/lib/config-store";
 import { installedOpenclawCoreAtLeast } from "@/lib/openclaw-core-generation";
 import { runOpenclawConfigUnset, type OpenClawConfig, type OpenclawConfigSetArgs } from "@/lib/openclaw-config";
@@ -92,6 +93,10 @@ export async function localCompactionModelArmOps(
   if (compactionModelOf(config) !== undefined) return [];
   const cloud = cloudCompactionModel(config, previousPrimary);
   if (!cloud) return [];
+  // The local-only AI lock (TASK-2501): the conversation is not summarized by
+  // a cloud model either, so nothing is armed — the long chat gets the
+  // new-chat offer, as under Local-only mode.
+  if (await isCloudAiLocked()) return [];
   if (!(await installedOpenclawCoreAtLeast(2026, 10))) return [];
   return [[COMPACTION_MODEL_PATH, cloud]];
 }
@@ -124,12 +129,15 @@ export async function isClawboxCompactionModel(config: OpenClawConfig | null): P
  * compaction model back out: a primary off the box compacts with itself again.
  * (Local-only mode takes it out too, for its own reason — nothing of that
  * box's conversations may go to a cloud model — see local-ai/exclusive.)
+ * So does the local-only AI lock (TASK-2501), for the same reason: a write
+ * made under it takes ClawBox's cloud compaction model out whatever the
+ * primary. An owner's own compaction model is still never touched.
  */
 export async function localCompactionModelDisarmNeeded(
   config: OpenClawConfig | null,
   primary: string | null | undefined,
 ): Promise<boolean> {
-  if (isOnDeviceModel(primary)) return false;
+  if (isOnDeviceModel(primary) && !(await isCloudAiLocked())) return false;
   return isClawboxCompactionModel(config);
 }
 

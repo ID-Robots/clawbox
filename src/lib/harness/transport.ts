@@ -358,6 +358,8 @@ export interface TurnResult {
   readonly media?: readonly string[];
   /** Spoken-reply refs, kept apart from pictures — different affordances. */
   readonly audio?: readonly string[];
+  /** Download refs for every other file the reply named (a document, a zip), or absent. */
+  readonly files?: readonly string[];
   /**
    * The model's internal monologue for this turn, SEPARATE from `text`.
    *

@@ -306,7 +306,7 @@ vi.mock("@/lib/local-ai-token", () => ({
   markLocalAiTokenMigrated: vi.fn(),
 }));
 
-import { getAll, getKnown, set as setConfigKey, setMany } from "@/lib/config-store";
+import { get as getConfigKey, getAll, getKnown, set as setConfigKey, setMany } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
 import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel,
   setPrimaryModelWithoutCatalogValidation,
@@ -405,6 +405,21 @@ describe("POST /setup-api/ai-models/configure", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * The legacy auth-profiles.json this request wrote is STILL on disk: doctor
+   * did not import it. `access` answers ENOENT for everything by default (the
+   * file is a mock, nobody wrote it), which now reads as "doctor imported the
+   * file and failed afterwards" (SUP-1023) — the one fact the cases below that
+   * mean "doctor failed before migrating anything" must say otherwise.
+   */
+  function legacyFileStaysOnDisk() {
+    mockFs.access.mockImplementation(async (target) => {
+      if (!String(target).endsWith("auth-profiles.json")) {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }
     });
   }
 
@@ -1133,6 +1148,79 @@ describe("POST /setup-api/ai-models/configure", () => {
     );
     expect(tokenCommand).toMatch(/^config set gateway\.auth\.token [0-9a-f]{64}$/);
     expect(commands).not.toContain("config set gateway.auth.token clawbox");
+  });
+
+  describe("the local-only AI lock (TASK-2501)", () => {
+    // The lock is read through the store's tri-state reader; every other key answers as the file's beforeEach set it.
+    const lock = () => {
+      vi.mocked(getConfigKey).mockImplementation(async (key: string) => (key === "ai_cloud_lock" ? true : undefined));
+      vi.mocked(getKnown).mockImplementation(async (key: string) => ({ value: key === "ai_cloud_lock" ? true : undefined, known: true }));
+    };
+    const writes = () => configSetCalls(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+    // `clearAllMocks` keeps implementations: the lock must not outlive these cases.
+    afterEach(() => {
+      vi.mocked(getConfigKey).mockImplementation(async () => undefined);
+      vi.mocked(getKnown).mockImplementation(async () => ({ value: undefined, known: true }));
+    });
+
+    it("connects no cloud provider, ClawBox AI included, and writes nothing", async () => {
+      lock();
+      for (const body of [{ provider: "anthropic", apiKey: "sk-ant-api03-test" }, { provider: "clawai", apiKey: "claw_token_abc" }]) {
+        const res = await configurePost(jsonRequest(body));
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+      }
+      expect(writes()).toEqual([]);
+      expect(mockSetMany).not.toHaveBeenCalled();
+      expect(mockRestartGateway).not.toHaveBeenCalled();
+    });
+
+    it("refuses Settings' background sign-in before any task starts", async () => {
+      lock();
+      const { listBackgroundTasks } = await import("@/lib/background-tasks");
+      const before = listBackgroundTasks({ kind: "provider-sign-in" }).length;
+      const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-0123456789", background: true }));
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+      expect(listBackgroundTasks({ kind: "provider-sign-in" })).toHaveLength(before);
+    });
+
+    it("judges an OAuth handoff on the provider its tokens were minted for, not the body's", async () => {
+      lock();
+      mockFs.readFile.mockImplementation(async (file) =>
+        String(file).endsWith("oauth-device-tokens.json")
+          ? JSON.stringify({ provider: "openai", access_token: "access.token.jwt", refresh_token: "refresh-token", expires_in: 3600, createdAt: Date.now() })
+          : JSON.stringify({ version: 1, profiles: {} }),
+      );
+      const res = await configurePost(jsonRequest({ provider: "llamacpp", authMode: "subscription", oauthHandoff: true }));
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+      expect(writes()).toEqual([]);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+      // Left in place: a refusal is not a reason to throw away a sign-in.
+      expect(mockFs.unlink).not.toHaveBeenCalledWith(expect.stringContaining("oauth-device-tokens.json"));
+    });
+
+    it("still turns the on-device model on, with no ClawBox AI model behind it", async () => {
+      lock();
+      // A linked box: without the lock, the on-device primary gets ClawBox AI as its fallback.
+      mockGetAll.mockResolvedValue({ clawai_token: "claw_token_abc" });
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+      expect(res.status).toBe(200);
+      const calls = writes();
+      expect(calls.find((c) => c.path === "agents.defaults.model.primary")?.value).toBe("llamacpp/gemma4-e2b-it-q4_0");
+      expect(calls.some((c) => c.path === "models.providers.deepseek")).toBe(false);
+      const fallbacks = calls.filter((c) => c.path === "agents.defaults.model.fallbacks").map((c) => String(c.value));
+      expect(fallbacks.every((value) => !value.includes("deepseek"))).toBe(true);
+    });
+
+    it("puts ClawBox AI behind the same on-device model once the lock is off", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "claw_token_abc" });
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+      expect(res.status).toBe(200);
+      const fallbacks = writes().filter((c) => c.path === "agents.defaults.model.fallbacks").map((c) => String(c.value));
+      expect(fallbacks.some((value) => value.includes("deepseek"))).toBe(true);
+    });
   });
 
   it("preserves an externally managed gateway token when settings are saved", async () => {
@@ -4033,7 +4121,11 @@ describe("POST /setup-api/ai-models/configure", () => {
       // The early failure is the dangerous case: there is no .migrated-* file
       // yet, but the legacy auth-profiles.json we just wrote still prevents an
       // OpenClaw 2 gateway from starting.
-      vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor stopped before migration"));
+      // Persistent, not Once: a doctor that failed is run a second time before
+      // the save gives up (SUP-1023), and a second run that completed would be
+      // a different test.
+      vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("doctor stopped before migration"));
+      legacyFileStaysOnDisk();
       vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.8.1 (test)\n");
       mockFs.readdir.mockResolvedValueOnce([]);
 
@@ -4219,7 +4311,8 @@ describe("POST /setup-api/ai-models/configure", () => {
       // The half that must not move: a doctor that failed for any other reason
       // is a state the owner can act on with the command, and this arm is what
       // keeps the new sentence from swallowing it.
-      vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor exploded"));
+      vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("doctor exploded"));
+      legacyFileStaysOnDisk();
       vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.8.1 (test)\n");
       mockFs.readdir.mockResolvedValueOnce([]);
 
@@ -4310,7 +4403,8 @@ describe("POST /setup-api/ai-models/configure", () => {
     });
 
     it("keeps the legacy best-effort doctor behavior on an explicit OpenClaw 1 binary", async () => {
-      vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("v1 doctor unavailable"));
+      vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("v1 doctor unavailable"));
+      legacyFileStaysOnDisk();
       vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");
       mockFs.readdir.mockResolvedValueOnce([]);
 
@@ -5090,6 +5184,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       }],
       ["throws on a pre-SQLite core, whose legacy file is the store", () => {
         vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("v1 doctor unavailable"));
+        legacyFileStaysOnDisk();
         vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");
       }],
       ["is blocked on a pre-SQLite core", () => {
@@ -5106,18 +5201,12 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(mockPut).not.toHaveBeenCalled();
     });
 
-    // Claude's sign-in only. (The ClawBox AI device login, which `clawai/poll`
-    // posts as `authMode: "subscription"`, no longer reaches this doctor at all:
-    // its portal token is pasted — see "the device login's portal token" above.)
+    // Not Claude's, not ChatGPT's (the next block): Google's sign-in is the
+    // lane nobody has measured this gate on. (The ClawBox AI device login,
+    // which `clawai/poll` posts as `authMode: "subscription"`, no longer
+    // reaches this doctor at all: its portal token is pasted — see "the device
+    // login's portal token" above.)
     it.each<[string, Record<string, unknown>]>([
-      ["the ChatGPT sign-in", {
-        provider: "openai",
-        apiKey: "access.token.jwt",
-        idToken: "id.token.jwt",
-        authMode: "subscription",
-        refreshToken: "refresh-token",
-        expiresIn: 3600,
-      }],
       ["the Google sign-in", {
         provider: "google",
         apiKey: "access-token",
@@ -5133,6 +5222,422 @@ describe("POST /setup-api/ai-models/configure", () => {
       // …and the store was left alone.
       expect(mockRead).not.toHaveBeenCalled();
       expect(mockPut).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * SUP-1023 — "Credential migration failed" shown over a ChatGPT sign-in that
+   * had in fact gone through.
+   *
+   * `openclaw doctor --fix` imports the legacy auth-profiles.json FIRST and
+   * exits 1 for what it does after (measured on 2026.11.3: a config write that
+   * collided with another writer — "Doctor finished, but config fixes were not
+   * applied." — with the profile in the store and the file archived). The route
+   * read the exit code as the migration's verdict, answered 502 and rolled
+   * back a file that no longer existed. And the ChatGPT lane, unlike Claude's,
+   * never asked the store at all, so a stale or fenced `openai:chatgpt` that
+   * the migration kept in place of the new sign-in was a silent 200.
+   *
+   * Now: the same store check as Claude's lane; a doctor that failed is run
+   * once more when a second run can change the answer; and when the file it
+   * imported is gone, the store decides.
+   */
+  describe("a ChatGPT sign-in, a doctor that fails, and what the gateway's auth store holds (SUP-1023)", () => {
+    // Placeholders in the real ones' shape — this repository is public.
+    const ACCESS = "fake.chatgpt-access.jwt";
+    const ID_TOKEN = "fake.chatgpt-id.jwt";
+    const REFRESH = "fake-chatgpt-refresh-token";
+    const PROFILE = "openai:chatgpt";
+
+    type Held = Extract<GatewayAuthProfileRead, { kind: "present" }>;
+    const FENCE: Partial<Held> = { fingerprint: null, refreshFingerprint: null, expires: 1, fenced: true, fence: "failed" };
+    const ANOTHER: Partial<Held> = { fingerprint: "0123456789abcdef", refreshFingerprint: "fedcba9876543210", expires: 1_790_000_000_000 };
+
+    const mockRead = vi.mocked(readGatewayAuthProfile);
+    const mockPut = vi.mocked(putGatewayOAuthProfile);
+    const mockDoctor = vi.mocked(runOpenclawDoctorFix);
+
+    beforeEach(() => {
+      mockDoctor.mockResolvedValue("completed");
+    });
+
+    function signIn(body: Record<string, unknown> = {}) {
+      return jsonRequest({
+        provider: "openai",
+        apiKey: ACCESS,
+        idToken: ID_TOKEN,
+        authMode: "subscription",
+        refreshToken: REFRESH,
+        expiresIn: 3600,
+        ...body,
+      });
+    }
+
+    /** The bundle this request wrote to auth-profiles.json: what the migration was handed. */
+    function fileBundle(): GatewayOAuthBundle {
+      const write = mockFs.writeFile.mock.calls.find(([file]) => String(file).includes("auth-profiles.json"));
+      return JSON.parse(write?.[1] as string).profiles[PROFILE];
+    }
+
+    /** The store holding exactly this request's sign-in, or `instead` of it. */
+    function holding(instead: Partial<Held> = {}): GatewayAuthProfileRead {
+      const bundle = fileBundle();
+      return {
+        kind: "present",
+        store: "shared",
+        type: "oauth",
+        fingerprint: tokenFingerprint(bundle.access),
+        refreshFingerprint: tokenFingerprint(bundle.refresh),
+        expires: bundle.expires,
+        fenced: false,
+        fence: null,
+        storeUpdatedAtMs: Date.now(),
+        ...instead,
+      };
+    }
+
+    const lines = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.map((args) => args.map(String).join(" "));
+
+    function primaryWasWritten(): boolean {
+      return configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch))
+        .some((command) => command.startsWith("config set agents.defaults.model.primary openai/"));
+    }
+
+    function rolledBack(): boolean {
+      return mockFs.rename.mock.calls.some(
+        ([from, to]) => /auth-profiles\.json$/.test(String(from)) && /auth-profiles\.json\.failed-/.test(String(to)),
+      );
+    }
+
+    const NOT_MIGRATED = "Credential migration failed. The subscription sign-in was rolled back";
+
+    describe("when doctor completes", () => {
+      it("asks the store for the ChatGPT profile and writes nothing when the migration imported the sign-in", async () => {
+        mockRead.mockImplementation(() => holding());
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockRead).toHaveBeenCalledTimes(1);
+        expect(mockRead).toHaveBeenCalledWith(PROFILE);
+        expect(mockPut).not.toHaveBeenCalled();
+        expect(primaryWasWritten()).toBe(true);
+      });
+
+      it.each([
+        ["a failed refresh fence", FENCE, /an OAuth refresh fence \(failed\)/],
+        ["another sign-in", ANOTHER, /left as it was: present\)/],
+      ])("replaces %s the migration kept, in the shape the migration itself stores", async (_what, kept, said) => {
+        mockRead.mockImplementationOnce(() => holding(kept)).mockImplementation(() => holding());
+        mockPut.mockReturnValue({ ok: true, store: "shared" });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockPut).toHaveBeenCalledTimes(1);
+        // The bundle without its id_token — which is what core's own import
+        // leaves in the store (measured) — and with the SAME `expires` as the
+        // legacy file, or the read-back could never match.
+        const stored: Record<string, unknown> = { ...fileBundle() };
+        delete stored.id;
+        expect(fileBundle()).toMatchObject({ type: "oauth", provider: "openai", access: ACCESS, id: ID_TOKEN, refresh: REFRESH });
+        expect(mockPut).toHaveBeenCalledWith(PROFILE, stored);
+        expect(mockPut.mock.calls[0][1]).not.toHaveProperty("id");
+        expect(mockRead.mock.invocationCallOrder[1]).toBeGreaterThan(mockPut.mock.invocationCallOrder[0]);
+        expect(primaryWasWritten()).toBe(true);
+
+        const replaced = lines(warn).filter((line) => line.includes("ClawBox replaced it in place"));
+        expect(replaced).toHaveLength(1);
+        expect(replaced[0]).toContain("doctor --fix completed without storing");
+        expect(replaced[0]).toMatch(said);
+        for (const secret of [ACCESS, ID_TOKEN, REFRESH, tokenFingerprint(ACCESS), tokenFingerprint(REFRESH)]) {
+          expect(lines(warn).join("\n")).not.toContain(secret);
+        }
+        warn.mockRestore();
+      });
+
+      it("refuses, with the sentence the Claude lane gives, when the replace does not read back", async () => {
+        mockRead.mockImplementation(() => holding(FENCE));
+        mockPut.mockReturnValue({ ok: true, store: "shared" });
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+        const body = await res.json();
+        error.mockRestore();
+
+        expect(res.status).toBe(502);
+        expect(body.code).toBe("credential_not_stored");
+        expect(primaryWasWritten()).toBe(false);
+      });
+
+      it("passes, saying so, on a box with no store to ask (an OpenClaw 1 core)", async () => {
+        mockRead.mockReturnValue({ kind: "no-store" });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockPut).not.toHaveBeenCalled();
+        expect(lines(warn).some((line) => line.includes("carrying on with what doctor --fix reported"))).toBe(true);
+        warn.mockRestore();
+      });
+    });
+
+    describe("when doctor exits non-zero", () => {
+      it("runs it once more, and goes on when the second run completes", async () => {
+        mockDoctor.mockRejectedValueOnce(new Error("Config unavailable. Doctor could not complete maintenance."));
+        legacyFileStaysOnDisk();
+        mockRead.mockImplementation(() => holding());
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockDoctor).toHaveBeenCalledTimes(2);
+        expect(rolledBack()).toBe(false);
+        // The store is still asked, as after any completed doctor.
+        expect(mockRead).toHaveBeenCalledWith(PROFILE);
+        expect(primaryWasWritten()).toBe(true);
+        expect(lines(warn).some((line) => line.includes("completed on its second run"))).toBe(true);
+        warn.mockRestore();
+        error.mockRestore();
+      });
+
+      it("journals the END of what doctor said, not the start", async () => {
+        const banner = "(node:1) DeprecationWarning: Plugin SDK: createOpenClawCodingTools is deprecated.";
+        const verdict = "Doctor finished, but config fixes were not applied.";
+        mockDoctor.mockRejectedValue(new Error(`${banner}\n${"x".repeat(5000)}\n│\n└  ${verdict}`));
+        legacyFileStaysOnDisk();
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(502);
+        const journal = lines(error).filter((line) => line.includes("doctor --fix failed after the OAuth store write"));
+        expect(journal.length).toBeGreaterThan(0);
+        for (const line of journal) {
+          expect(line).toContain(verdict);
+          expect(line).not.toContain("DeprecationWarning");
+          expect(line.length).toBeLessThan(600);
+        }
+        error.mockRestore();
+      });
+
+      it("rolls back, as before, when both runs fail and the legacy file is still there", async () => {
+        mockDoctor.mockRejectedValue(new Error("doctor exploded"));
+        legacyFileStaysOnDisk();
+        mockFs.readdir.mockResolvedValue(["auth-profiles.json.migrated-2026-09-01T00-00-00-000Z"] as never);
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+        const body = await res.json();
+        error.mockRestore();
+
+        expect(res.status).toBe(502);
+        expect(body.error).toContain(NOT_MIGRATED);
+        expect(mockDoctor).toHaveBeenCalledTimes(2);
+        expect(rolledBack()).toBe(true);
+        expect(mockRead).not.toHaveBeenCalled();
+        expect(primaryWasWritten()).toBe(false);
+      });
+
+      it.each([
+        ["a run killed at its budget", () => Object.assign(new Error("openclaw doctor timed out after 180000ms"), { name: "OpenclawSpawnTimeoutError" })],
+        ["a config doctor cannot parse", () => new Error("Config at /x/openclaw.json is not parseable and cannot be repaired automatically. The file remains unchanged.")],
+        ["a CLI that cannot be run", () => Object.assign(new Error("spawn openclaw ENOENT"), { code: "ENOENT" })],
+      ])("does not run it again after %s", async (_what, failure) => {
+        mockDoctor.mockRejectedValue(failure());
+        legacyFileStaysOnDisk();
+        mockFs.readdir.mockResolvedValue(["auth-profiles.json.migrated-2026-09-01T00-00-00-000Z"] as never);
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+        error.mockRestore();
+
+        expect(res.status).toBe(502);
+        expect(mockDoctor).toHaveBeenCalledTimes(1);
+        expect(rolledBack()).toBe(true);
+      });
+
+      it.each(["blocked-by-legacy-exec-approvals", "blocked-by-service-ownership", "gateway-not-stopped"] as const)(
+        "does not run it again after a refusal doctor named (%s)",
+        async (named) => {
+          mockDoctor.mockResolvedValue(named);
+          legacyFileStaysOnDisk();
+          mockFs.readdir.mockResolvedValue(["auth-profiles.json.migrated-2026-09-01T00-00-00-000Z"] as never);
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          error.mockRestore();
+
+          expect(res.status).toBe(502);
+          expect(mockDoctor).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      describe("after it had imported the file (the file is gone)", () => {
+        beforeEach(() => {
+          // Both runs fail: the second one changes nothing here.
+          mockDoctor.mockRejectedValue(new Error("Doctor finished, but config fixes were not applied."));
+        });
+
+        it("goes on when the store holds the sign-in — the credential landed, the exit code was about something else", async () => {
+          mockRead.mockImplementation(() => holding());
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          const body = await res.json();
+          const said = lines(warn);
+          const failed = lines(error).filter((line) => line.includes("doctor --fix failed"));
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(200);
+          expect(body.success).toBe(true);
+          expect(rolledBack()).toBe(false);
+          expect(mockPut).not.toHaveBeenCalled();
+          expect(primaryWasWritten()).toBe(true);
+          expect(said.some((line) => line.includes("came after the migration and does not undo it"))).toBe(true);
+          // Both attempts, and nothing else, are in the journal as failures.
+          expect(failed).toHaveLength(2);
+        });
+
+        it("replaces what the migration kept in the store and goes on, saying which doctor it was", async () => {
+          mockRead.mockImplementationOnce(() => holding(FENCE)).mockImplementation(() => holding());
+          mockPut.mockReturnValue({ ok: true, store: "shared" });
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          const said = lines(warn);
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(200);
+          expect(mockPut).toHaveBeenCalledTimes(1);
+          expect(said.some((line) => line.includes("failed after importing the file, without storing"))).toBe(true);
+          expect(rolledBack()).toBe(false);
+        });
+
+        it.each([
+          ["no store to read", { kind: "no-store" } as GatewayAuthProfileRead],
+          ["a store it cannot read", { kind: "unreadable", cause: "database is locked" } as GatewayAuthProfileRead],
+        ])("rolls back over %s — nothing shows the credential is anywhere", async (_what, read) => {
+          mockRead.mockReturnValue(read);
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          const body = await res.json();
+          const said = lines(error);
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(502);
+          expect(body.error).toContain(NOT_MIGRATED);
+          expect(rolledBack()).toBe(true);
+          expect(primaryWasWritten()).toBe(false);
+          expect(said.some((line) => line.includes("and doctor --fix had failed: rolling the sign-in back"))).toBe(true);
+        });
+
+        it("refuses, as after a completed doctor, when the replace does not read back", async () => {
+          mockRead.mockImplementation(() => holding(FENCE));
+          mockPut.mockReturnValue({ ok: true, store: "shared" });
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          const body = await res.json();
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(502);
+          expect(body.code).toBe("credential_not_stored");
+        });
+
+        it("goes on when the second run answers with a refusal it names — the first run's import still stands", async () => {
+          mockDoctor.mockReset();
+          mockDoctor
+            .mockRejectedValueOnce(new Error("Doctor finished, but config fixes were not applied."))
+            .mockResolvedValueOnce("blocked-by-service-ownership");
+          mockRead.mockImplementation(() => holding());
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(200);
+          expect(mockDoctor).toHaveBeenCalledTimes(2);
+          expect(rolledBack()).toBe(false);
+          expect(primaryWasWritten()).toBe(true);
+        });
+
+        it("reads the store and writes nothing when the second run found the gateway running", async () => {
+          // The reviewer's case: a second run that finds the gateway up (another
+          // surface restarted it) is the collision this fix is about. A store
+          // that already holds the sign-in passes…
+          mockDoctor.mockReset();
+          mockDoctor
+            .mockRejectedValueOnce(new Error("Doctor finished, but config fixes were not applied."))
+            .mockResolvedValueOnce("gateway-not-stopped");
+          mockRead.mockImplementation(() => holding());
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(200);
+          expect(mockPut).not.toHaveBeenCalled();
+          expect(rolledBack()).toBe(false);
+        });
+
+        it("…and rolls back WITHOUT writing when it does not, because nothing may be written beside a running gateway", async () => {
+          mockDoctor.mockReset();
+          mockDoctor
+            .mockRejectedValueOnce(new Error("Doctor finished, but config fixes were not applied."))
+            .mockResolvedValueOnce("gateway-not-stopped");
+          mockRead.mockImplementation(() => holding(FENCE));
+          mockPut.mockReturnValue({ ok: true, store: "shared" });
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          const body = await res.json();
+          const said = lines(error);
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(502);
+          expect(body.error).toMatch(/busy restarting/i);
+          expect(mockPut).not.toHaveBeenCalled();
+          expect(rolledBack()).toBe(true);
+          expect(said.some((line) => line.includes("the gateway is not stopped: rolling the sign-in back"))).toBe(true);
+        });
+
+        it("still rolls back for a lane whose store this gate has not been measured on (Google's)", async () => {
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(jsonRequest({
+            provider: "google",
+            apiKey: "access-token",
+            authMode: "subscription",
+            projectId: "my-project-id",
+          }));
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(502);
+          expect(mockRead).not.toHaveBeenCalled();
+        });
+      });
     });
   });
 

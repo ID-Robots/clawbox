@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 
 import { createSessionCookie, getSessionGeneration, getSessionSigningSecret, isSafePasswordChars, readSessionClaims } from "@/lib/auth";
+import { recordAudit } from "@/lib/audit-log";
 import { readJsonObject } from "@/lib/bounded-json";
 import { changeUserPassword, checkUserPassword, rotateUserSessionVersion } from "@/lib/clawbox-users";
 import { checkLockout, recordFailure, recordSuccess, SHARED_BUCKET_MAX_LOCK_MS } from "@/lib/login-rate-limit";
@@ -232,6 +233,7 @@ export async function POST(req: Request) {
       case "ok":
         for (const bucket of buckets) await recordSuccess(bucket.key);
         console.log(`[users] ${username} changed their own password`);
+        await recordAudit({ event: "password_change", actor: username }, req);
         return withCookie(NextResponse.json({ ok: true }, { headers: NO_STORE }), ended.cookie);
       case "wrong":
         // Changed between the check and the change: charged like any wrong guess.

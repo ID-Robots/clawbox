@@ -24,6 +24,7 @@ import {
   roleMaxTurns,
   roleModelOptions,
   roleModelsFrom,
+  roleModelsUnderLock,
   roleModelsView,
   weakerEffort,
   type RoleModels,
@@ -177,8 +178,9 @@ describe("the defaults — a box that never chose", () => {
     anthropic: { planner: "claude-fable-5-2", worker: "claude-sonnet-5-5", reviewer: "claude-opus-5-5" },
     openai: { planner: "gpt-6-astra", worker: "gpt-5.6-sol", reviewer: "gpt-5.6-sol" },
     "clawbox-ai": { planner: "deepseek-v4-flash", worker: "deepseek-v4-flash", reviewer: "deepseek-v4-flash" },
+    local: { planner: "local-engine", worker: "local-engine", reviewer: "local-engine" },
   } as const;
-  const OWNER_MODEL = { anthropic: DEFAULT_ANTHROPIC_MODEL, openai: "gpt-6-astra", "clawbox-ai": null } as const;
+  const OWNER_MODEL = { anthropic: DEFAULT_ANTHROPIC_MODEL, openai: "gpt-6-astra", "clawbox-ai": null, local: null } as const;
 
   for (const provider of CODING_PROVIDERS) {
     for (const role of MODEL_ROLES) {
@@ -485,5 +487,32 @@ describe("the owner's edits", () => {
     expect(view.planner).toEqual({ provider: ROLE_AUTO, model: ROLE_AUTO, effort: ROLE_AUTO });
     expect(view.reviewer).toEqual({ provider: ROLE_AUTO, model: "standard", effort: ROLE_AUTO });
     expect(view.worker).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: ROLE_AUTO });
+  });
+});
+
+describe("the roles under the local-only AI lock (TASK-2501 PR-E)", () => {
+  it("takes every cloud pin off — its model with it — and keeps efforts and tiers", () => {
+    const stored: RoleModels = {
+      planner: { provider: "anthropic", model: "claude-fable-5-2", effort: "high" },
+      worker: { provider: "openai", model: "economy" },
+      reviewer: { provider: "clawbox-ai" },
+    };
+    expect(roleModelsUnderLock(stored)).toEqual({ planner: { effort: "high" }, worker: { model: "economy" } });
+  });
+
+  it("keeps a role already on the box's engine as it is, and changes nothing it was given", () => {
+    const stored: RoleModels = { worker: { provider: "local", model: "local-engine", effort: "medium" } };
+    const before = JSON.stringify(stored);
+    expect(roleModelsUnderLock(stored)).toEqual(stored);
+    expect(JSON.stringify(stored)).toBe(before);
+  });
+
+  it("runs every role on the engine's one model when the team is on the box's engine", () => {
+    for (const role of MODEL_ROLES) {
+      expect(resolveRoleRun(role, "local", null, "xhigh", roleModelsUnderLock({ [role]: { provider: "anthropic", model: "claude-opus-5-5" } }))).toMatchObject({ provider: "local", model: "local-engine" });
+    }
+    expect(roleModelOptions("local")).toEqual(["local-engine"]);
+    expect(isRoleModelId("local", "claude-opus-5-5")).toBe(false);
+    expect(relativeModelCost("local", "local-engine")).toBe(1);
   });
 });

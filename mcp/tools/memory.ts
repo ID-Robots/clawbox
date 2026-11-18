@@ -34,6 +34,7 @@
 
 import { z } from "zod";
 import { api, apiGet, type ApiOptions } from "../lib/api";
+import { installEdition } from "../lib/edition";
 import { ApiError, redact, ToolError, type ToolErrorCode } from "../lib/errors";
 import { json, text, type Ed, type Registrar, type ToolOpts } from "../lib/register";
 import { zBool, zEnumOf, zInt, zText } from "../lib/schema";
@@ -176,6 +177,7 @@ const NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
   owner_only: { code: "CONFLICT", next: `This box keeps that to the owner. Do not retry; tell the user they can do it in the Memory Shard app (${OPEN_APP} opens it).` },
   disabled: { code: "CONFLICT", next: "Memory Shard is switched off. Turn it on with memory_shard_enable if the user asks for that, or tell them it is off." },
   running: { code: "CONFLICT", next: "A pass is already running. Do not start another; memory_shard_status shows how far it has got." },
+  gateway_indexes: { code: "CONFLICT", next: "Nothing was started and nothing needs to be: the running assistant keeps this index up to date by itself. Do not retry. Only a full pass (mode full) rebuilds it, and that one stops the assistant while it runs, so it is the owner's to ask for." },
   not_running: { code: "CONFLICT", next: "No pass is running, so there is nothing to stop." },
   not_found: { code: "NOT_FOUND", next: "That folder is not inside the owner's Files, or is not a folder. Ask the user for its exact place in their Files." },
   hidden: { code: "BAD_ARGUMENT", next: "Hidden folders hold the box's and the apps' own files. Ask the user for the folder their documents are in." },
@@ -372,11 +374,13 @@ function describeMemoryStatus(s: MemoryStatusBody, searchHint: boolean): Record<
 }
 
 function registerMemoryStatus(reg: Registrar, edition: Ed): void {
-  const hermes = edition === "hermes";
+  // The search route answers only where there is no OpenClaw: on a dual box
+  // running Hermes the index is OpenClaw's and the route answers 409 `edition`.
+  const searchHint = edition === "hermes" && installEdition() !== "dual";
   reg.tool(
     "memory_shard_status",
     "Read the state of Memory Shard, the index of the folders the owner added: whether it is on and healthy, what it holds, why it wants a reindex and how far a pass has got. "
-      + (hermes ? "Search it with memory_shard_search. " : "")
+      + (searchHint ? "Search it with memory_shard_search. " : "")
       + "Use it when the user asks whether their documents are indexed, or how a reindex is going.",
     {},
     { editions: [edition], readOnly: true },
@@ -387,7 +391,7 @@ function registerMemoryStatus(reg: Registrar, edition: Ed): void {
         // it has one.
         timeoutMs: READ_MS,
       });
-      return json(describeMemoryStatus(status, hermes));
+      return json(describeMemoryStatus(status, searchHint));
     },
   );
 }

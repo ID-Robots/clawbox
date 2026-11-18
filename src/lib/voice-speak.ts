@@ -28,11 +28,13 @@ import crypto from "crypto";
 import { runChild } from "./child-run";
 import { createSerialLock } from "./serial-lock";
 import { sanitizeErrorMessage } from "./safe-error-text";
+import { CLOUD_AI_LOCKED_CODE } from "./ai-cloud-lock-shared";
 import { getActiveHarness } from "./harness";
 import { speakWithHermes } from "./hermes-tts";
 import { buildTtsInventory, KOKORO_STAMP } from "./local-models";
 import { readVoiceConfig } from "./voice-box";
-import { buildVoiceOutputStatus, cloudSpeechTarget, localCommandPath, cloudVoiceFrom, resolvePreferredEngine, type LocalVoiceProbe, type VoiceConfigView, type VoiceEngine, type VoiceEngineId } from "./voice-output";
+import { kokoroMemoryShortfall, type KokoroMemoryShortfall } from "./kokoro-memory-guard";
+import { buildVoiceOutputStatus, cloudSpeechTarget, localCommandPath, cloudVoiceFrom, LOCAL_TTS_PROVIDER_ID, resolvePreferredEngine, type LocalVoiceProbe, type VoiceConfigView, type VoiceEngine, type VoiceEngineId } from "./voice-output";
 import { readLocalVoice, readVoiceState } from "./voice-output-store";
 import { DEFAULT_LOCAL_VOICE, isCloudVoiceFor, isLocalVoice } from "./voice-catalog";
 import { compressSpeech } from "./tts-compress";
@@ -62,9 +64,19 @@ export const CLOUD_FIRST_BYTE_TIMEOUT_MS = 10_000;
 export const CLOUD_RESPONSE_TIMEOUT_MS = 45_000;
 const DEFAULT_CLOUD_MODEL = "gpt-4o-mini-tts";
 
-/** Megabytes as the script counts them, said as gigabytes: 2412 → "2.4", 3000 → "3". */
-function gigabytes(mb: number): string {
-  return (mb / 1000).toFixed(1).replace(/\.0$/, "");
+/**
+ * Kokoro's memory guard refused, said with its numbers: the one refusal of the
+ * box's own voice that is a fact about the box rather than the sentence, on
+ * whichever runtime ran the script (`localRefusal` here, Hermes' speech route
+ * in `speakReply`).
+ */
+export function memoryRefusal({ available, needed }: KokoroMemoryShortfall): Response {
+  return refuse(
+    `The box is short of memory for its voice right now (${available} GB free, needs ${needed} GB) — try again when less is running.`,
+    "local_memory",
+    502,
+    { available, needed },
+  );
 }
 
 /**
@@ -88,21 +100,24 @@ function localRefusal(stderr: string): Response {
     .map((line) => line.trim())
     .filter((line) => line.startsWith("- kokoro:"))
     .map((line) => line.slice(2));
-  const memory = reasons
-    .map((line) => /^kokoro: skipped, (\d+)MB available .*need >=(\d+)MB/.exec(line))
-    .find((m): m is RegExpExecArray => m !== null);
-  if (memory) {
-    const available = gigabytes(Number(memory[1]));
-    const needed = gigabytes(Number(memory[2]));
-    return refuse(
-      `The box is short of memory for its voice right now (${available} GB free, needs ${needed} GB) — try again when less is running.`,
-      "local_memory",
-      502,
-      { available, needed },
-    );
-  }
+  const memory = reasons.map(kokoroMemoryShortfall).find((m): m is KokoroMemoryShortfall => m !== null);
+  if (memory) return memoryRefusal(memory);
   const reason = reasons.map(sanitizeErrorMessage).find((r): r is string => r !== null) ?? null;
   return refuse(reason ? `${base} (${reason})` : base, "local_failed", 502, reason ? { reason } : {});
+}
+
+/**
+ * The box's own voice as `speakLocally` runs it, from Hermes' view of it.
+ * Hermes registers the same script as a command TEMPLATE
+ * (`clawbox-tts.sh --text-file={input_path} -- {output_path}`), while
+ * `speakLocally` calls the script with arguments of its own — so only the
+ * script's path is kept. No absolute path, no voice: `speakLocally` then
+ * answers `no_local_voice`.
+ */
+export function boxVoiceFromHermes(config: VoiceConfigView): VoiceConfigView {
+  const script = localCommandPath(config)?.split(/\s+/)[0] ?? null;
+  if (!script || !script.startsWith("/")) return {};
+  return { tts: { provider: LOCAL_TTS_PROVIDER_ID, providers: { [LOCAL_TTS_PROVIDER_ID]: { command: script } } } };
 }
 
 export async function speakLocally(config: VoiceConfigView, requestedVoice: unknown, text: string): Promise<Response> {
@@ -434,6 +449,17 @@ export async function speakReply(
     // replies would have, and not necessarily a WAV.
     if ((await getActiveHarness()) === "hermes") {
       const spoken = await speakWithHermes(text);
+      if (!spoken.ok && spoken.code === CLOUD_AI_LOCKED_CODE) {
+        // The local-only AI lock (TASK-2501) refused the cloud voice Hermes is
+        // still set to: the box's own voice speaks instead, as Auto does on
+        // OpenClaw. Hermes' setting is the owner's and is left as it is.
+        const local = await (speakers?.local ?? speakLocally)(boxVoiceFromHermes(await readVoiceConfig("hermes")), undefined, text);
+        return format ? await inReplyFormat(local, format) : local;
+      }
+      // Kokoro's memory guard, read out of Hermes' answer (TASK-2649): the
+      // box's own voice was short of memory, which Hermes' transport alone
+      // would have called a cloud refusal.
+      if (!spoken.ok && spoken.shortfall) return memoryRefusal(spoken.shortfall);
       if (!spoken.ok) return refuse("Could not speak that on this box.", spoken.code, spoken.status, spoken.reason ? { reason: spoken.reason } : {});
       const answer = new Response(spoken.audio, { headers: { "Content-Type": spoken.mime, ...NO_STORE } });
       return format ? await inReplyFormat(answer, format) : answer;

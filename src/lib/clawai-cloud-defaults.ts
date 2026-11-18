@@ -51,7 +51,8 @@ import {
 } from "@/lib/clawai-cloud-embeddings";
 import { invalidateMemoryStatusCache, startMemoryIndex } from "@/lib/clawkeep-memory";
 import { getActiveHarness } from "@/lib/harness";
-import { resolveClawaiToken } from "@/lib/harness/credentials";
+import { resolveClawaiEntitlementToken, resolveClawaiToken } from "@/lib/harness/credentials";
+import { isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import { readEmbedderPin } from "@/lib/memory-embedder";
 import { readEmbeddingPlacement, refreshCloudEmbeddingsKey, switchToCloudEmbeddings } from "@/lib/memory-shard";
 import type { EmbeddingSource } from "@/lib/memory-shard-state";
@@ -108,8 +109,16 @@ async function embeddingsRouteReady(linked: boolean, plan: ClawboxAiPlanTier | n
 
 /** The four facts the rule is a function of. */
 export async function readCloudDefaultsFacts(): Promise<CloudDefaultsFacts> {
-  const [token, entitlement] = await Promise.all([resolveClawaiToken(), readClawaiEntitlementTier()]);
-  const linked = token !== null;
+  const [account, aiToken, entitlement] = await Promise.all([
+    resolveClawaiEntitlementToken(),
+    resolveClawaiToken(),
+    readClawaiEntitlementTier(),
+  ]);
+  // Linked is about the account, so the local-only AI lock (TASK-2501) does not
+  // change it. The route probe below sends a request with the credential FOR
+  // AI use, which the lock withholds: under it the cloud embedder is not on
+  // offer, whatever the account covers, and nothing is asked of the proxy.
+  const linked = account !== null;
   // Both editions since 2026-09-18. The fence the old `false` stood for is
   // still there — ClawBox's own index sends the owner's text to the loopback
   // proxy or to this box's ClawBox AI account and nowhere else
@@ -122,7 +131,7 @@ export async function readCloudDefaultsFacts(): Promise<CloudDefaultsFacts> {
     linked,
     entitlement,
     embeddingsSupported,
-    embeddingsRouteReady: await embeddingsRouteReady(linked, entitlement, embeddingsSupported),
+    embeddingsRouteReady: aiToken !== null && await embeddingsRouteReady(linked, entitlement, embeddingsSupported),
   };
 }
 
@@ -191,7 +200,9 @@ async function readStatusAndVoice(): Promise<{ status: CloudDefaultsStatus; voic
   const facts = await readCloudDefaultsFacts();
   const defaults = resolveClawaiCloudDefaults(facts);
   const [stt, voice, embeddings, owners] = await Promise.all([
-    getSttPrimary(),
+    // The owner's own speech server (TASK-2501 PR-D) is on the owner's
+    // network: for the cloud defaults it is a local source like the box's own.
+    getSttPrimary().then((engine): CapabilitySource => (engine === "cloud" ? "cloud" : "local")),
     readVoiceSnapshot(),
     currentEmbeddingSource(defaults.embeddings.source),
     readOwnerChoices(),
@@ -306,6 +317,10 @@ export async function applyClawaiCloudDefaults(options: ApplyOptions = {}): Prom
     // subscription. Here the clear and the next probe cannot be separated.
     if (options.credentialChanged) forgetCloudEmbeddingsProbe();
     const applied: CloudDefaultsApplied = { moved: [], failed: [] };
+    // The local-only AI lock (TASK-2501): nothing is moved onto the cloud,
+    // whatever the plan covers. Said here rather than left to the null token
+    // below, so the no-op cannot depend on how the credential is read.
+    if (await isCloudAiLocked()) return applied;
     // A box with no credential can promote nothing, and this runs at every
     // boot: reading the whole state there would be a voice inventory and an
     // openclaw.json read bought for an answer that is already known.
@@ -395,6 +410,12 @@ async function promote(capability: CloudCapability, voice: VoiceSnapshot): Promi
  * as the engine that hears a box holding no credential for it.
  */
 async function promoteStt(): Promise<boolean> {
+  // Under the local-only AI lock (TASK-2501) there is no cloud to move
+  // transcription onto: a `cloud` written here would read back as the box's
+  // own engine and be "moved" again at every boot. The lock's own PR makes the
+  // whole applier stand down; this keeps the one write that would loop.
+  const { cloudAiLockOn } = await import("@/lib/feature-engine");
+  if (await cloudAiLockOn()) return false;
   const order = sttEngineOrder("cloud");
   let wrote = false;
   if (!openclawIsAbsent()) {

@@ -30,9 +30,8 @@ import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
 import { readPlanGate } from "@/lib/paid-plan-gate-server";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
-import { redactCredentialShapes, redactQuotedCredentialValues } from "@/lib/incident-sanitize";
 import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
-import { askOpenclawGateway, startOpenclawGatewayAfterOffline, stopOpenclawGatewayForOffline } from "@/lib/openclaw-auth-ops";
+import { askOpenclawGateway, openclawGatewayRuns, startOpenclawGatewayAfterOffline, stopOpenclawGatewayForOffline } from "@/lib/openclaw-auth-ops";
 import { resolveMemoryEmbedder } from "@/lib/memory-embedder";
 import {
   IndexPassAbortedError,
@@ -43,6 +42,7 @@ import {
   type LocalIndexProgressReporter,
 } from "@/lib/memory-index-local";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
+import { getEmbedProvisioningStatus, getEmbedProxyBaseUrl, isEmbedHealthy } from "@/lib/embed-server";
 import { memoryStatusTimeoutMs } from "@/lib/memory-status-timeout";
 import { processStore } from "@/lib/process-store";
 import { processStartKey } from "@/lib/process-identity";
@@ -724,6 +724,33 @@ async function collectMemoryStatusJson(agentId: string): Promise<unknown> {
 }
 
 /**
+ * Is "Memory embeddings are pending" the ONLY thing the gateway holds against
+ * this index?
+ *
+ * `memory.status` is answered from a read-only manager of its own, and that
+ * manager never starts the embedding provider: its `providerState.mode` is
+ * `pending` on every reading, straight after a search that returned vector
+ * scores included (OpenClaw 2026.11.3, the owner's box, 2026-11-15). The core
+ * words that state before it looks at anything else, so its health is
+ * `degraded` for an index that is valid, complete and searchable, and the card
+ * told the owner "The embedding model is not ready. Check the model, then try
+ * indexing again." — advice that stops the assistant for a full pass over an
+ * index with nothing wrong with it.
+ *
+ * So `pending` is read as "not asked", and what the core would have checked
+ * next is checked here instead: an identity it stands by, no pending changes,
+ * and a vector index it calls complete. Anything short of that keeps the
+ * core's verdict.
+ */
+function embeddingsOnlyPending(legacy: Record<string, unknown>): boolean {
+  const custom = asRecord(legacy.custom);
+  if (cleanString(asRecord(custom.providerState).mode) !== "pending") return false;
+  if (cleanString(asRecord(custom.indexIdentity).status) !== "valid") return false;
+  if (legacy.dirty !== false) return false;
+  return cleanString(asRecord(asRecord(legacy.vector).index).state) === "complete";
+}
+
+/**
  * `memory.status` over the running gateway, in the CLI's row shape
  * (`[{agentId, status}]`, `status.dbPath` the agent database the core keeps the
  * index in). Null when no gateway is there to answer.
@@ -742,22 +769,244 @@ async function memoryStatusFromGateway(agentId: string): Promise<unknown | null>
   const health = asRecord(answer);
   const legacy = asRecord(asRecord(health.details).legacy);
   if (Object.keys(legacy).length === 0) throw new Error("memory status unavailable: the gateway reported no index details");
-  // `vector.available` was the CLI's `--deep` probe; the gateway says the same
-  // thing as its own health (`ready`, else `degraded` with a sentence such as
-  // "Memory embeddings are pending"), which stands in for it here.
+  // `vector.available` was the CLI's `--deep` probe, and the gateway's own
+  // health is NOT that probe: it never asks the embedder (see EmbedderVerdict),
+  // so on 2026.11.3 a healthy box reads "degraded", "Memory embeddings are
+  // pending", for as long as the gateway runs. Not ready, the embedder's own
+  // probe decides. With no verdict from it, a reading that holds nothing but
+  // "pending" against the index (`embeddingsOnlyPending`) is read as ready, and
+  // any other keeps the gateway's verdict. Any answer the probe gave outweighs
+  // that reading, and so does an ok that ended (`lapsed`): it is the one
+  // reading that actually asked the embedder.
   const ready = cleanString(health.status) === "ready";
   const vector = asRecord(legacy.vector);
   const custom = asRecord(legacy.custom);
+  const providerState = asRecord(custom.providerState);
   const message = cleanString(health.message);
+  // A gate that THREW (the on-box embedder's own checks) says nothing about
+  // the embedder, and it may have hidden a not-ok held for it: that reading
+  // keeps the gateway's verdict, never the pending-only one.
+  let gateFailed = false;
+  const verdict = ready ? null : await embedderVerdictFor(agentId, legacy).catch(() => { gateFailed = true; return null; });
+  const provider = verdict?.provider || cleanString(legacy.provider);
+  // Over a COMPLETE vector index only: the core says "pending" before it says
+  // "incomplete", so a pending reading can sit over an index it has not
+  // finished embedding. "active" is what the CLI's `--deep` answer carried for
+  // the same state, and what `parseMemoryStatus` reads as healthy.
+  const promoted = verdict?.ok === true
+    && cleanString(providerState.mode) === "pending"
+    && cleanString(asRecord(vector.index).state) === "complete"
+    && Boolean(provider) && provider !== "none";
+  const noVerdict = !gateFailed && (!verdict || (verdict.ok === null && !verdict.lapsed));
+  const onlyPending = !ready && noVerdict && embeddingsOnlyPending(legacy);
+  const available = ready || promoted || onlyPending;
+  const reason = verdict?.ok === false && verdict.error ? verdict.error : message;
   return [{
     agentId,
     status: {
       ...legacy,
       dbPath: openclawAgentDbPath(agentId),
-      vector: { ...vector, available: ready && vector.enabled !== false },
-      custom: !ready && message && !cleanString(custom.providerUnavailableReason) ? { ...custom, providerUnavailableReason: message } : custom,
+      // The provider the probe started, when one named it: a fallback or none
+      // is a verdict of its own (`provider_mismatch`, `embedder_unavailable`).
+      ...(verdict?.provider ? { provider: verdict.provider } : {}),
+      // A not-ok from the probe is the answer about vector search: whatever
+      // the gateway's own flag says, it cannot run.
+      vector: {
+        ...vector,
+        available: available && vector.enabled !== false,
+        ...(verdict?.ok === false ? { semanticAvailable: false } : {}),
+      },
+      custom: promoted
+        ? { ...custom, providerState: { ...providerState, mode: "active" } }
+        : !available && reason && !cleanString(custom.providerUnavailableReason) ? { ...custom, providerUnavailableReason: reason } : custom,
     },
   }];
+}
+
+/**
+ * THE EMBEDDER'S OWN ANSWER, for the gateway arm. OpenClaw 2026.11.3's
+ * `memory.status` opens a fresh memory manager per call and reads its status
+ * without starting the embedder, so it says the same thing ("pending") over an
+ * embedder that answers and one that does not. The core's probe over the
+ * running gateway is `doctor.memory.status` with `deep: true` (one tiny embed);
+ * its answer is kept here, in this process, for ONE embedder setting and agent
+ * (`key`) — another key replaces it.
+ *
+ * `ok` is the core's answer: false stands until a probe the core answers ok
+ * replaces it, and null is no verdict (never answered, or an ok that ended).
+ * An ok ends when the calls themselves keep failing for an hour after its last
+ * answer, and, for the on-box embedder, when its model is no longer on disk.
+ * `provider` is the one the last UNCACHED answer named ("" until one did): a
+ * cached answer starts nothing and echoes the configuration.
+ *
+ * Asked again on the next reload after an invalidation (a pass's finish, a
+ * provider, source or cloud-embedder change: `statusGeneration` moved), else no
+ * sooner than 30 minutes after an ok and 10 minutes after anything else — but
+ * an ok answered from the core's own cache before any uncached answer named
+ * the provider is asked again at once, on the next reload.
+ */
+interface EmbedderVerdict {
+  key: string;
+  ok: boolean | null;
+  provider: string;
+  /**
+   * The core's sentence for a not-ok: the provider's reason in the row, which
+   * the API answer never carries (only the embedder-unavailable log line reads it).
+   */
+  error: string;
+  answeredAtMs: number;
+  nextAskAtMs: number;
+  /** `statusGeneration` when it was last asked. */
+  generation: number;
+  /** The last ask could not be made, or the core answered without checking. */
+  lastAskFailed: boolean;
+  /**
+   * An ok that ENDED (above), until the core answers again. Not the absence of
+   * a verdict: a box with nothing to say about its embedder reads
+   * memory.status's pending-only reading as ready (`embeddingsOnlyPending`),
+   * while this one has cause to doubt it, so the gateway's verdict stands.
+   */
+  lapsed: boolean;
+}
+let embedderVerdict: EmbedderVerdict | null = null;
+const EMBEDDER_OK_REASK_MS = 30 * 60_000;
+const EMBEDDER_RETRY_MS = 10 * 60_000;
+const EMBEDDER_OK_LAPSE_MS = 60 * 60_000;
+
+/**
+ * The verdict that applies to this reading, asked for first when it is due and
+ * may be asked; null when there is none.
+ *
+ * NEVER A WAKE. When memory search points at a loopback address, or at ClawBox's
+ * embed proxy under any host (whatever provider id names it), the probe goes
+ * through the proxy, which
+ * starts clawbox-embed.service — the ~2 GB it stops after ten idle minutes, and
+ * a start the box refuses when memory is short, which would come back as a false
+ * "not ready". So it is asked only while llama-server already answers its health
+ * URL, which wakes nothing. A probe then keeps the awake embedder awake for one
+ * more idle window; it never starts a sleeping one. OpenClaw's `local` embedder
+ * (a llama.cpp server OpenClaw manages) would be started by a probe, and
+ * `ollama` is a server that check cannot see: neither is asked at all.
+ */
+async function embedderVerdictFor(agentId: string, legacy: Record<string, unknown>): Promise<EmbedderVerdict | null> {
+  const config = await readEmbeddingConfig();
+  if (!config) return null;
+  const provider = config.provider || cleanString(legacy.requestedProvider);
+  if (provider === "local" || provider === "ollama") return null;
+  const onBox = isLoopbackBaseUrl(config.baseUrl) || isEmbedProxyUrl(config.baseUrl);
+  const key = JSON.stringify([agentId, config.provider, config.baseUrl, cleanString(legacy.model)]);
+  let held = embedderVerdict?.key === key ? embedderVerdict : null;
+  const due = !held || held.generation !== statusGeneration || Date.now() >= held.nextAskAtMs;
+  if (due && (!onBox || await isEmbedHealthy())) {
+    held = await askEmbedder(key, agentId, held);
+  } else if (onBox && held?.ok === true && !(await getEmbedProvisioningStatus()).installed) {
+    held = embedderVerdict = { ...held, ok: null, lapsed: true };
+  }
+  if (held?.ok === true && held.lastAskFailed && Date.now() - held.answeredAtMs >= EMBEDDER_OK_LAPSE_MS) {
+    held = embedderVerdict = { ...held, ok: null, lapsed: true };
+  }
+  return held;
+}
+
+/**
+ * Does `baseUrl` reach ClawBox's embed proxy, under whatever host: the box's
+ * own name or LAN address reaches it as well as loopback does. The path is the
+ * one `getEmbedProxyBaseUrl()` builds (its `/v1` aside), so the two cannot drift.
+ */
+function isEmbedProxyUrl(baseUrl: string | null): boolean {
+  if (!baseUrl) return false;
+  try {
+    const proxyPath = new URL(getEmbedProxyBaseUrl()).pathname.replace(/\/v1\/?$/, "");
+    const path = new URL(baseUrl).pathname.replace(/\/+$/, "");
+    return Boolean(proxyPath) && (path === proxyPath || path.startsWith(`${proxyPath}/`));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * One `doctor.memory.status {agentId, deep: true}`, bounded like the status
+ * read: STATUS_TIMEOUT_MS outlasts the core's own 60 s ping, so a dead embedder
+ * comes back as the core's not-ok rather than as a call that failed.
+ *
+ * Every ANSWERED `ok: false` is a not-ok, whatever its sentence: the core's
+ * "gateway memory check failed" also wraps an embedder that could not be
+ * created. A call that could not be made (a socket, a gateway gone or not
+ * ready, the bound) is no verdict, and neither is an answer that says it did
+ * not check (`checked: false`): either keeps what was there.
+ */
+async function askEmbedder(key: string, agentId: string, held: EmbedderVerdict | null): Promise<EmbedderVerdict> {
+  const generation = statusGeneration;
+  const kept = (): EmbedderVerdict => (embedderVerdict = {
+    key,
+    ok: held?.ok ?? null,
+    provider: held?.provider ?? "",
+    error: held?.error ?? "",
+    answeredAtMs: held?.answeredAtMs ?? 0,
+    nextAskAtMs: Date.now() + EMBEDDER_RETRY_MS,
+    generation,
+    lastAskFailed: true,
+    lapsed: held?.lapsed ?? false,
+  });
+  const couldNotAsk = (why: string): EmbedderVerdict => {
+    noteEmbedderProbe(key, `the core's embedder readiness probe (doctor.memory.status) could not be asked: ${why}`);
+    return kept();
+  };
+  let answer: Record<string, unknown>;
+  try {
+    const online = await askOpenclawGateway("doctor.memory.status", { agentId, deep: true }, STATUS_TIMEOUT_MS);
+    if (!online.answered) return couldNotAsk("no gateway is running");
+    answer = asRecord(online.result);
+  } catch (err) {
+    return couldNotAsk(errorClass(err));
+  }
+  const embedding = asRecord(answer.embedding);
+  if (typeof embedding.ok !== "boolean" || embedding.checked === false) return couldNotAsk("the core answered without checking");
+  const named = cleanString(answer.provider);
+  const provider = named && embedding.cached !== true ? named : held?.provider ?? "";
+  // No embedder at all (`none`) is the embedder-unavailable line's to say.
+  noteEmbedderProbe(key, embedding.ok || provider === "none"
+    ? ""
+    : `the embedder did not pass the core's readiness probe (doctor.memory.status): ${coreFailureLabels(cleanString(embedding.error)) || "no reason given"}`);
+  return (embedderVerdict = {
+    key,
+    ok: embedding.ok,
+    provider,
+    error: embedding.ok ? "" : cleanString(embedding.error),
+    answeredAtMs: Date.now(),
+    // An ok that only the core's 30 s cache has given (no uncached answer has
+    // named the provider yet) is asked again on the next reload, uncached.
+    nextAskAtMs: Date.now() + (!embedding.ok ? EMBEDDER_RETRY_MS : embedding.cached === true && !provider ? 0 : EMBEDDER_OK_REASK_MS),
+    generation,
+    lastAskFailed: false,
+    lapsed: false,
+  });
+}
+
+/**
+ * The probe's outcome in the device log, once per change for each embedder
+ * setting (`key`, compared but never printed), like the lines below: the card
+ * says only "not ready", and this is what tells a refused key from an endpoint
+ * that is down from a probe this box can no longer ask. A call that could not
+ * be made names its error's class and code only, never its message; a not-ok
+ * names the fixed labels `coreFailureLabels` finds in the core's sentence,
+ * never the sentence. An empty line (an ok) clears it, so the next failure is
+ * said again.
+ */
+let loggedEmbedderProbe = "";
+function noteEmbedderProbe(key: string, line: string): void {
+  const said = line ? `${key}\n${line}` : "";
+  if (said === loggedEmbedderProbe) return;
+  loggedEmbedderProbe = said;
+  if (line) console.warn(`[clawkeep-memory] ${line}`);
+}
+
+/** An error's class, and its code when it has one: never its message. */
+function errorClass(err: unknown): string {
+  const safe = (value: string) => value.replace(/[^\w.-]/g, "").slice(0, 64);
+  const name = safe(err instanceof Error ? err.name : typeof err) || "unknown";
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" || typeof code === "number" ? `${name} ${safe(String(code))}` : name;
 }
 
 /** One `openclaw memory status --agent <agentId> --deep --json` probe, parsed; rejects on a failure or a timeout. */
@@ -1173,7 +1422,13 @@ export async function parseMemoryStatus(
   // Search answers, so nothing above catches this either: it just never uses
   // the embedder the card names.
   else if (keywordOnly) health = "degraded";
-  else if (providerMode === "active" && indexIdentity === "valid") health = "healthy";
+  // `pending` is a provider nobody has asked yet, not one that fails to answer:
+  // the gateway reads memory.status from a manager that never starts it (see
+  // `embeddingsOnlyPending`). Everything that makes such a reading degraded —
+  // no vectors to search, a named reason, a fallback, a keyword-only index —
+  // has been ruled out above, so beside an identity the core stands by it is
+  // as healthy as a reading gets.
+  else if ((providerMode === "active" || providerMode === "pending") && indexIdentity === "valid") health = "healthy";
   // An index built by a different model — or one with no fingerprint at all —
   // is a KNOWN state, not an unknown one: search is degraded until it is
   // rebuilt, and the `error` below already says exactly that. Left as
@@ -1352,13 +1607,12 @@ function noteProviderFallback(status: ClawKeepMemoryStatus): void {
 
 /**
  * A configured embedder the core could not start, in the device log, once per
- * verdict like the line above — with the core's own reason, which is the one
- * thing that tells a refused key from an endpoint that is not there.
- *
- * The reason is the core's (already redacted by it for tools) and is put
- * through the credential shapes here as well, with addresses and paths taken
- * out: it is the device log, and the rule of the line above holds — never the
- * endpoint and never the key. It never reaches the status the API answers.
+ * verdict like the line above — with the fixed labels `coreFailureLabels`
+ * finds in the core's reason, which tell a refused key from an endpoint that
+ * is not there. The reason itself is never printed: it can be the readiness
+ * probe's sentence (`memoryStatusFromGateway` puts it in the reading), and the
+ * rule of the line above holds — never the endpoint and never the key. It
+ * never reaches the status the API answers either.
  */
 let loggedEmbedderUnavailable = "";
 function noteEmbedderUnavailable(status: ClawKeepMemoryStatus, raw: unknown): void {
@@ -1374,19 +1628,87 @@ function noteEmbedderUnavailable(status: ClawKeepMemoryStatus, raw: unknown): vo
   );
 }
 
-/** The core's own sentence for why no embedder started, made safe for the device log. */
+/** The fixed labels for the core's own sentence on why no embedder started. */
 function coreEmbedderFailure(raw: unknown, agentId: string): string {
   const custom = asRecord(asRecord(agentStatusRow(raw, agentId).status).custom);
-  const said = cleanString(custom.providerUnavailableReason) || cleanString(asRecord(custom.providerState).reason);
-  if (!said) return "";
-  const line = redactCredentialShapes(said, "[redacted]")
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[endpoint]")
-    .replace(/(?:~|\/(?:home|root|tmp|var|srv|opt|usr|etc|mnt|media|data))\/\S*/g, "[path]")
-    .replace(/\s+/g, " ")
-    .slice(0, 200);
-  // A quoted value under a credential name comes out last, on what the cut kept;
-  // the second cut only takes off what a longer placeholder pushed past it.
-  return redactQuotedCredentialValues(line, "[redacted]").slice(0, 200);
+  return coreFailureLabels(cleanString(custom.providerUnavailableReason) || cleanString(asRecord(custom.providerState).reason));
+}
+
+/**
+ * What the device log may say about a sentence the core wrote on its embedder:
+ * the labels of this table whose pattern it matches, in table order, and never
+ * a piece of the sentence. The sentence is free text that a remote server can
+ * write, and redacting credentials out of it by their shapes always left some
+ * shape behind; here the line can only say words written in this file, so
+ * nothing the sentence holds can reach the log.
+ *
+ * Every pattern is linear (no nested quantifier) and only tested, so no match
+ * reaches the output. A misread label is a wrong word, never a leak.
+ */
+const CORE_FAILURE_TABLE: ReadonlyArray<readonly [label: string, pattern: RegExp]> = [
+  // HTTP statuses (4xx and 5xx cannot be an address octet).
+  ["HTTP 400", /\b400\b/],
+  ["HTTP 401", /\b401\b/],
+  ["HTTP 402", /\b402\b/],
+  ["HTTP 403", /\b403\b/],
+  ["HTTP 404", /\b404\b/],
+  ["HTTP 408", /\b408\b/],
+  ["HTTP 413", /\b413\b/],
+  ["HTTP 422", /\b422\b/],
+  ["HTTP 429", /\b429\b/],
+  ["HTTP 500", /\b500\b/],
+  ["HTTP 502", /\b502\b/],
+  ["HTTP 503", /\b503\b/],
+  ["HTTP 504", /\b504\b/],
+  // Node's socket and DNS codes, undici's and the TLS ones worth telling apart.
+  ["ECONNREFUSED", /\bECONNREFUSED\b/],
+  ["ECONNRESET", /\bECONNRESET\b/],
+  ["ETIMEDOUT", /\bETIMEDOUT\b/],
+  ["ENOTFOUND", /\bENOTFOUND\b/],
+  ["EAI_AGAIN", /\bEAI_AGAIN\b/],
+  ["EHOSTUNREACH", /\bEHOSTUNREACH\b/],
+  ["ENETUNREACH", /\bENETUNREACH\b/],
+  ["EPIPE", /\bEPIPE\b/],
+  ["UND_ERR_CONNECT_TIMEOUT", /\bUND_ERR_CONNECT_TIMEOUT\b/],
+  ["UND_ERR_HEADERS_TIMEOUT", /\bUND_ERR_HEADERS_TIMEOUT\b/],
+  ["UND_ERR_BODY_TIMEOUT", /\bUND_ERR_BODY_TIMEOUT\b/],
+  ["UND_ERR_SOCKET", /\bUND_ERR_SOCKET\b/],
+  ["CERT_HAS_EXPIRED", /\bCERT_HAS_EXPIRED\b/],
+  ["DEPTH_ZERO_SELF_SIGNED_CERT", /\bDEPTH_ZERO_SELF_SIGNED_CERT\b/],
+  ["SELF_SIGNED_CERT_IN_CHAIN", /\bSELF_SIGNED_CERT_IN_CHAIN\b/],
+  ["UNABLE_TO_VERIFY_LEAF_SIGNATURE", /\bUNABLE_TO_VERIFY_LEAF_SIGNATURE\b/],
+  ["ERR_TLS_CERT_ALTNAME_INVALID", /\bERR_TLS_CERT_ALTNAME_INVALID\b/],
+  // Words.
+  ["timeout", /\btime[ds]? ?out\b/i],
+  ["unauthorized", /\bunauthori[sz]ed\b/i],
+  ["forbidden", /\bforbidden\b/i],
+  ["invalid key", /\binvalid[ _](?:api[ _])?key\b/i],
+  ["rate limited", /\brate[ _-]?limit/i],
+  ["quota", /quota/i],
+  ["not found", /\bnot found\b/i],
+  ["refused", /\brefused\b/i],
+  ["aborted", /\baborted\b/i],
+  ["fetch failed", /\bfetch failed\b/i],
+  ["certificate", /\bcertificate\b/i],
+];
+
+/** Every label `coreFailureLabels` can say, in the order it says them. */
+export const CORE_FAILURE_LABELS: readonly string[] = CORE_FAILURE_TABLE.map(([label]) => label);
+
+/** What it says for a sentence in which no label is found. */
+export const CORE_FAILURE_UNRECOGNISED = "no recognised detail";
+
+/**
+ * The labels for `said`, joined with ", "; `CORE_FAILURE_UNRECOGNISED` when
+ * there are none, and "" for no sentence at all. Only its first 1,000
+ * characters are read: text a remote server wrote can be one long run, and
+ * matching must stay cheap on the web server's only thread.
+ */
+function coreFailureLabels(said: string): string {
+  const head = said.slice(0, 1_000);
+  if (!head) return "";
+  const found = CORE_FAILURE_TABLE.filter(([, pattern]) => pattern.test(head)).map(([label]) => label);
+  return found.join(", ") || CORE_FAILURE_UNRECOGNISED;
 }
 
 /**
@@ -1500,7 +1822,11 @@ function reloadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
  * an index a pass has changed since (`cachedStatusUnsettled`) and no pass is
  * going now, the answer is the probe's, not the cache's. That read is the
  * card's flip out of "running", and the probe it waits on is the one the
- * finish already started — ~8 s, up to 90 s on a cold box — so the card
+ * finish already started — ~8 s, up to 90 s on a cold box. On the gateway arm
+ * it is two calls, memory.status and the embedder's own probe, each bounded by
+ * STATUS_TIMEOUT_MS; a socket closed mid-call is asked again after the wait for
+ * a starting gateway, so one call can take about twice its bound plus that
+ * wait — so the card
  * says "Indexing…" for the length of the probe rather than drawing the
  * mid-rebuild identity for 30 s. `peekMemoryStatus` never waits, and
  * `resolveIndexMode` reads through `lastMemoryStatus` for the same reason.
@@ -1985,13 +2311,33 @@ function fixedFailure(
 }
 
 /**
+ * What the core prints on its way OUT of every run, pass or fail: the receipt
+ * for closing the agent database (`[state/agent-db] agent database clean-close
+ * receipt: written`, sometimes behind a clock). Never the reason for anything.
+ */
+const CLOSE_RECEIPT_RE = /\[state\/agent-db\] agent database clean-close receipt\b/;
+
+/** One redraw of the reporter's counter (`Indexing session files… 19158/30949 · elapsed 36:10 · eta 22:15 62%`). */
+const PROGRESS_REDRAW_RE = /^Indexing [a-z ]+… \d+\/\d+ · elapsed [\d:]+/;
+
+/**
  * The CLI's own last word, for the device log.
  *
  * Only the tail is kept (see `createIndexProgressReader`): nothing here needs
- * the transcript — just whatever it said before it gave up.
+ * the transcript — just whatever it said before it gave up. Its LAST line is
+ * not that since OpenClaw 2026.11.3: the core closes the agent database after
+ * the failure and says so, so every failed pass was logged as "agent database
+ * clean-close receipt: written" and the reason one line up — `Memory index
+ * failed (main): worker task capacity reached` on the owner's box, after 82
+ * minutes with the assistant stopped — was thrown away. The receipt and the
+ * counter's redraws are skipped: the last line that says something is the one
+ * kept.
  */
-function lastMeaningfulLine(text: string): string {
-  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+export function lastMeaningfulLine(text: string): string {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !CLOSE_RECEIPT_RE.test(line) && !PROGRESS_REDRAW_RE.test(line));
   return lines.length ? lines[lines.length - 1].slice(0, 300) : "";
 }
 
@@ -2253,6 +2599,10 @@ function localFailure(error: unknown): { error: string; errorCode: MemoryRunErro
  * resolveIndexMode). It starts nothing, so it takes no lock and writes no run
  * record — the status banner already says what the owner has to do.
  *
+ * The fourth is `gateway_indexes`: an incremental pass on OpenClaw, which the
+ * running gateway does by itself. The schedule's slot always; the owner's
+ * press while the gateway is up. It starts nothing and stops nothing either.
+ *
  * `embedderChanged` is the one pass the switch does not govern, and only on
  * the OpenClaw arm: the rebuild the box owes the CORE'S OWN index after it
  * wrote a new embedder into `memory.search` itself. That index exists whether
@@ -2303,10 +2653,16 @@ export async function startMemoryIndex(
   if (heldBack) return { accepted: false, declined: "full_reindex_required", run: await readMemoryRunState() };
   // OpenClaw 2026.11.3 runs `memory index` only with the gateway stopped, and
   // its running gateway keeps the index current by itself (it syncs on file
-  // changes and on search, docs/cli/memory.md). A schedule's incremental slot
-  // is that same work, so on OpenClaw it does not stop the chat for it; an
-  // owner's pass (and a full one the box itself needs) still runs, offline.
-  if (trigger === "schedule" && mode === "incremental" && !openclawIsAbsent()) {
+  // changes and on search, docs/cli/memory.md). An incremental pass is that
+  // same work, so on OpenClaw nothing stops the chat for it: not the
+  // schedule's slot, and not the owner's "Index now" while a gateway is up
+  // to do it. That press used to stop the assistant, wait a minute for a stop
+  // that takes five on a gateway in use, give up and start it again — six
+  // minutes down, nothing indexed, three times on the owner's box on
+  // 2026-11-15. With no gateway running there is nobody else to do the work
+  // and nothing to stop, so the owner's pass runs. A FULL pass (the owner's
+  // rebuild, and the one the box itself needs) still runs, offline.
+  if (mode === "incremental" && !openclawIsAbsent() && (trigger === "schedule" || await openclawGatewayRuns())) {
     return { accepted: false, declined: "gateway_indexes", run: await readMemoryRunState() };
   }
   if (!await acquireRunLock()) {
@@ -2382,9 +2738,10 @@ export async function startMemoryIndex(
   // Ends the run claim's heartbeat (the OpenClaw arm below); a no-op otherwise.
   let releaseClaim: () => Promise<void> = async () => {};
   if (!localArm) {
-    // The stop can take a minute (the gateway drains first), longer than a
-    // run may sit with no child before the reconcile calls it interrupted and
-    // frees the lock — so the claim is re-stamped while it waits.
+    // The stop can take minutes (a gateway in use drains until its unit's
+    // stop timeout, and the stop is waited out), far longer than a run may sit
+    // with no child before the reconcile calls it interrupted and frees the
+    // lock — so the claim is re-stamped while it waits.
     // Every stamp this call writes is remembered: the run on record is this
     // call's only while it carries one of them (another run's record carries
     // its own start time).

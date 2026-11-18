@@ -710,7 +710,7 @@ describe("POST /setup-api/ai-models/configure and the gateway doctor --fix stopp
   });
 
   it("restarts the gateway when doctor --fix fails and the sign-in is rolled back", async () => {
-    vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor exited 1"));
+    vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("doctor exited 1"));
     // A migrated sibling proves an OpenClaw 2 store: the route archives the
     // legacy file and answers 502 — the exit the owner actually hit.
     mockFs.readdir.mockResolvedValueOnce([MIGRATED_SIBLING] as never);
@@ -749,7 +749,7 @@ describe("POST /setup-api/ai-models/configure and the gateway doctor --fix stopp
   });
 
   it("tells the owner the assistant is offline when that restart fails too", async () => {
-    vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor exited 1"));
+    vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("doctor exited 1"));
     mockFs.readdir.mockResolvedValueOnce([MIGRATED_SIBLING] as never);
     // An updater holds a runtime mask on the unit: restart is refused and this
     // route must not unmask it.
@@ -785,7 +785,7 @@ describe("POST /setup-api/ai-models/configure and the gateway doctor --fix stopp
   });
 
   it("does not tell the owner the assistant is offline over a merely slow restart", async () => {
-    vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor exited 1"));
+    vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("doctor exited 1"));
     mockFs.readdir.mockResolvedValueOnce([MIGRATED_SIBLING] as never);
     // A faithful stand-in for a cold Jetson: `systemctl restart` succeeded and
     // the gateway IS coming back, it just has not bound :18789 inside the

@@ -655,3 +655,107 @@ describe("a save the store could not record, and Hermes' provider block", () => 
     expect(sets.some((set) => set["providers.clawext.base_url"] === BASE)).toBe(true);
   });
 });
+
+describe("the reasoning switch (TASK-2497)", () => {
+  type Entry = { reasoning: boolean; compat?: Record<string, unknown> };
+  const entry = () => ((openclaw.models as { providers: Record<string, { models: Entry[] }> }).providers.clawext.models[0]);
+  const CONTRACT = { supportedReasoningEfforts: ["none", "low", "medium", "high"], reasoningEffortMap: { off: "none" } };
+
+  /** The engine: `/models` as before, and a completion that reasons or not. */
+  let completions: Record<string, unknown>[];
+  let reasons: boolean;
+  beforeEach(() => {
+    completions = [];
+    reasons = true;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/chat/completions")) {
+        completions.push(JSON.parse(String(init?.body)));
+        const message = reasons ? { role: "assistant", content: "5", reasoning_content: "2 + 3 = 5" } : { role: "assistant", content: "5" };
+        return new Response(JSON.stringify({ choices: [{ index: 0, message }] }), { status: 200 });
+      }
+      seenAuth.push((init?.headers as Record<string, string> | undefined)?.Authorization ?? null);
+      return new Response(JSON.stringify({ object: "list", data: engineModels.map((id) => ({ id })) }), { status: 200 });
+    }));
+  });
+
+  it("a save without it writes the model exactly as before: reasoning false, no effort contract", async () => {
+    const body = await (await POST(req("POST", saveBody()))).json();
+    expect(body).toMatchObject({ success: true, reasoning: false });
+    expect(entry().reasoning).toBe(false);
+    expect(entry()).not.toHaveProperty("compat");
+    expect((store.external_engine as { reasoning: boolean }).reasoning).toBe(false);
+    expect(completions).toEqual([]);
+  });
+
+  it("a save with it writes reasoning true with Off sent as none, records it, and GET reads it back", async () => {
+    const body = await (await POST(req("POST", saveBody({ reasoning: true })))).json();
+    expect(body).toMatchObject({ success: true, reasoning: true });
+    expect(entry()).toMatchObject({ reasoning: true, compat: CONTRACT });
+    expect((store.external_engine as { reasoning: boolean }).reasoning).toBe(true);
+    const got = await (await GET(req("GET"))).json();
+    expect(got).toMatchObject({ configured: true, reasoning: true, unsupported: [] });
+    // A save never sends a completion: only Test asks whether the engine reasons.
+    expect(completions).toEqual([]);
+  });
+
+  it("a re-save with it off drops the contract; on again puts it back", async () => {
+    await POST(req("POST", saveBody({ reasoning: true })));
+    await POST(req("POST", saveBody({ apiKey: undefined, reasoning: false })));
+    expect(entry().reasoning).toBe(false);
+    expect(entry()).not.toHaveProperty("compat");
+    expect((store.external_engine as { reasoning: boolean }).reasoning).toBe(false);
+    await POST(req("POST", saveBody({ apiKey: undefined, reasoning: true })));
+    expect(entry()).toMatchObject({ reasoning: true, compat: CONTRACT });
+  });
+
+  it("remove puts the previous Local AI back, and a later save starts from what it is sent", async () => {
+    await POST(req("POST", saveBody({ reasoning: true })));
+    const res = await DELETE(req("DELETE"));
+    expect(await res.json()).toMatchObject({ success: true, removed: true });
+    expect((openclaw.models as { providers: Record<string, unknown> }).providers.clawext).toBeUndefined();
+    expect((openclaw.agents as { defaults: { model: { primary: string } } }).defaults.model.primary).toBe("llamacpp/gemma4-e2b-it-q4_0");
+    expect(store.external_engine).toBeUndefined();
+    expect(store.local_ai_provider).toBe("llamacpp");
+    await POST(req("POST", saveBody({ reasoning: true })));
+    expect(entry()).toMatchObject({ reasoning: true, compat: CONTRACT });
+    expect((store.external_engine as { previous: { store: Record<string, unknown> } }).previous.store.local_ai_provider).toBe("llamacpp");
+  });
+
+  it("Test asked to detect it sends one low-effort completion and says whether the engine reasons, writing nothing", async () => {
+    const yes = await (await TEST(req("POST", saveBody({ detectReasoning: true })))).json();
+    expect(yes).toMatchObject({ ok: true, reasoningDetected: true });
+    expect(completions).toHaveLength(1);
+    expect(completions[0]).toMatchObject({ model: MODEL, reasoning_effort: "low", stream: false });
+    reasons = false;
+    const no = await (await TEST(req("POST", saveBody({ detectReasoning: true })))).json();
+    expect(no).toMatchObject({ ok: true, reasoningDetected: false });
+    expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+    expect(store.external_engine).toBeUndefined();
+    expect(JSON.stringify([yes, no])).not.toContain("2 + 3");
+  });
+
+  it("Test without the ask, or for a model the engine does not list, sends no completion", async () => {
+    const plain = await (await TEST(req("POST", saveBody()))).json();
+    expect(plain).toMatchObject({ ok: true });
+    expect(plain).not.toHaveProperty("reasoningDetected");
+    engineModels = ["something-else"];
+    const missing = await (await TEST(req("POST", saveBody({ detectReasoning: true })))).json();
+    expect(missing).toMatchObject({ ok: false, code: "model_not_listed" });
+    expect(missing).not.toHaveProperty("reasoningDetected");
+    expect(completions).toEqual([]);
+  });
+
+  it("on Hermes the switch is kept in the record but writes nothing into config.yaml, and GET says Hermes does not take it", async () => {
+    vi.mocked(getActiveHarness).mockResolvedValue("hermes");
+    vi.mocked(resolveHermesConfigValue).mockImplementation(async (key: string) =>
+      key === "model.provider" ? { state: "value", value: "clawlocal" } : { state: "absent" });
+    const res = await POST(req("POST", saveBody({ reasoning: true })));
+    expect(res.status).toBe(200);
+    expect((store.external_engine as { reasoning: boolean }).reasoning).toBe(true);
+    const keys = vi.mocked(patchHermesConfig).mock.calls.flatMap(([p]) => Object.keys(p.set ?? {}));
+    expect(keys.some((k) => /reason/i.test(k))).toBe(false);
+    const got = await (await GET(req("GET"))).json();
+    expect(got.unsupported).toEqual(["maxTokens", "imageInput", "reasoning"]);
+    expect(got.reasoning).toBe(true);
+  });
+});

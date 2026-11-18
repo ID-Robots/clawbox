@@ -29,9 +29,14 @@ RUNTIME=$(board_runtime)
 note "agent runtime: $RUNTIME"
 
 # One line per clawbox MCP server on the board: "<pid> <hermes|openclaw|other>
-# <age in s>". The pattern cannot match the script that runs it.
+# <age in s> <chat|->", where "chat" marks a server inside the process tree of
+# clawbox-hermes-dashboard, the long-lived Hermes that carries the chat's
+# turns. Other hermes processes (a one-shot `hermes chat -q`, a cron run, an
+# earlier test's) hold servers of their own. The pattern cannot match the
+# script that runs it.
 # shellcheck disable=SC2016  # expanded on the board
 SERVERS='
+dash=$(systemctl show -p MainPID --value clawbox-hermes-dashboard.service 2>/dev/null)
 for pid in $(pgrep -f "mcp/clawbox-mc[p][.]ts" 2>/dev/null); do
   ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d " ")
   age=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d " ")
@@ -41,9 +46,16 @@ for pid in $(pgrep -f "mcp/clawbox-mc[p][.]ts" 2>/dev/null); do
     *openclaw*) who=openclaw ;;
     *) who=other ;;
   esac
-  printf "%s %s %s\n" "$pid" "$who" "$age"
+  chat=-
+  up=$ppid
+  for _ in 1 2 3 4 5 6; do
+    [ -n "$up" ] && [ "$up" -gt 1 ] 2>/dev/null || break
+    if [ -n "$dash" ] && [ "$dash" != 0 ] && [ "$up" = "$dash" ]; then chat=chat; break; fi
+    up=$(ps -o ppid= -p "$up" 2>/dev/null | tr -d " ")
+  done
+  printf "%s %s %s %s\n" "$pid" "$who" "$age" "$chat"
 done'
-servers() { board "$SERVERS" | grep -E '^[0-9]+ [a-z]+ [0-9]+$'; }
+servers() { board "$SERVERS" | grep -E '^[0-9]+ [a-z]+ [0-9]+ (chat|-)$'; }
 # Is this pid still a clawbox MCP server?
 alive() { servers | awk -v p="$1" '$1 == p { found = 1 } END { exit !found }'; }
 
@@ -127,10 +139,19 @@ AFTER=$(servers)
 note "clawbox MCP servers before: $(printf '%s' "$BEFORE" | tr '\n' ';') after: $(printf '%s' "$AFTER" | tr '\n' ';')"
 
 if [ "$RUNTIME" = hermes ]; then
-  # The longest-lived server Hermes holds is the one its chat uses.
-  HELD=$(printf '%s\n' "$AFTER" | awk '$2 == "hermes"' | sort -k3,3nr | head -n 1 | cut -d' ' -f1)
+  # The server the chat holds: one under the dashboard that carries the chat —
+  # the one the warm-up opened when it opened one, else the oldest there (the
+  # dashboard keeps its server for its whole life). Not merely the oldest
+  # hermes-held one: a server left by an earlier test's other hermes process
+  # may idle out, and that says nothing about the chat (TASK-2638). With no
+  # dashboard in the tree, the server the warm-up opened.
+  NEW=$(comm -13 <(printf '%s\n' "$BEFORE" | cut -d' ' -f1 | sort) <(printf '%s\n' "$AFTER" | awk '$2 == "hermes"' | cut -d' ' -f1 | sort))
+  CHAT=$(printf '%s\n' "$AFTER" | awk '$2 == "hermes" && $4 == "chat"' | sort -k3,3nr | cut -d' ' -f1)
+  HELD=$(grep -xF -f <(printf '%s\n' "$NEW" | grep .) <<<"$CHAT" 2>/dev/null | head -n 1)
+  [ -n "$HELD" ] || HELD=$(printf '%s\n' "$CHAT" | grep . | head -n 1)
+  [ -n "$HELD" ] || HELD=$(printf '%s\n' "$NEW" | grep . | head -n 1)
   if [ -z "$HELD" ]; then
-    skip "no long-lived Hermes process holds a clawbox MCP server on this box (the chat ran a one-shot hermes chat)"
+    skip "no clawbox MCP server under the Hermes dashboard and none opened by the warm-up (the chat ran a one-shot hermes chat; servers: $(printf "%s" "$AFTER" | tr "\n" ";"))"
     finish
   fi
 else

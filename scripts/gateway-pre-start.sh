@@ -395,6 +395,21 @@ if [ -z "${CLAWBOX_OPENCLAW_2026_10:-}" ]; then
 fi
 export CLAWBOX_OPENCLAW_2026_10
 
+# OpenClaw 2026.11.5 RETIRED the heartbeat config: `agents.defaults.heartbeat`
+# and `agents.entries.*.heartbeat` are no longer keys (a config that still holds
+# one is invalid until `openclaw doctor --fix` has turned the monitor into an
+# ordinary automation job and removed it), and a `config set` or `config unset`
+# of them is refused. Same precedence as the two flags above: an explicit value
+# wins; an unknown core is 0, which keeps the old behaviour.
+if [ -z "${CLAWBOX_OPENCLAW_2026_11_5:-}" ]; then
+  CLAWBOX_OPENCLAW_2026_11_5=0
+  if [ -n "${CLAWBOX_OPENCLAW_EFFECTIVE:-}" ] \
+     && [ "$(printf '%s\n' 2026.11.5 "$CLAWBOX_OPENCLAW_EFFECTIVE" | sort -V | head -1)" = "2026.11.5" ]; then
+    CLAWBOX_OPENCLAW_2026_11_5=1
+  fi
+fi
+export CLAWBOX_OPENCLAW_2026_11_5
+
 "${CLAWBOX_STEP:-:}" "start-loop recovery"
 
 # ── Start-loop recovery: a database the core refuses at every start ─────────
@@ -1300,6 +1315,8 @@ import json, os, re, sys, tempfile, secrets, shutil, time
 CLAWBOX_OPENCLAW_V2 = os.environ.get("CLAWBOX_OPENCLAW_V2") == "1"
 # OpenClaw 2026.10+: the keys the agent-database work writes (see the bash block).
 CLAWBOX_OPENCLAW_2026_10 = os.environ.get("CLAWBOX_OPENCLAW_2026_10") == "1"
+# OpenClaw 2026.11.5+: the retired heartbeat key, the on-device model's tool list.
+CLAWBOX_OPENCLAW_2026_11_5 = os.environ.get("CLAWBOX_OPENCLAW_2026_11_5") == "1"
 
 # Gateway auth token gates LAN access to the agent's privileged tools
 # (run_command / file_write / system_power). Earlier builds wrote the public
@@ -2350,7 +2367,7 @@ if isinstance(_lai_providers, dict):
 # Settings -> Local AI -> External engine makes an OpenAI-compatible endpoint
 # the owner runs the box's Local AI: `models.providers.clawext` in this file,
 # the primary through chat/model, and a record in the device store
-# (`external_engine`: base URL, model, window, output cap, image input — the
+# (`external_engine`: base URL, model, window, output cap, image input, reasoning — the
 # key in its own 0600 file, data/.external-engine-key). Nothing above touches a
 # provider it does not own, so a start keeps the entry as it is; this block is
 # the half that PUTS IT BACK when the store says an engine is selected and the
@@ -2432,19 +2449,30 @@ if _ext_record is not None:
             # No key file: keep whatever key the entry already carries.
             _ext_key = _ext_entry.get("apiKey") if isinstance(_ext_entry.get("apiKey"), str) and _ext_entry.get("apiKey") else "none"
         _ext_name = [p for p in _ext_model.split("/") if p][-1]
+        # TASK-2497: a reasoning engine keeps `reasoning: true` and its effort
+        # contract (EXTERNAL_ENGINE_REASONING_COMPAT in src/lib/external-engine.ts:
+        # Off sent as `none`, low/medium/high as they are); anything but an
+        # explicit true in the record — a record from before the switch — is off.
+        _ext_reasoning = _ext_record.get("reasoning") is True
+        _ext_model_entry = {
+            "id": _ext_model,
+            "name": _ext_name,
+            "reasoning": _ext_reasoning,
+            "input": ["text", "image"] if _ext_record.get("imageInput") is True else ["text"],
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            "contextWindow": _ext_ctx,
+            "maxTokens": min(_ext_max, _ext_ctx),
+        }
+        if _ext_reasoning:
+            _ext_model_entry["compat"] = {
+                "supportedReasoningEfforts": ["none", "low", "medium", "high"],
+                "reasoningEffortMap": {"off": "none"},
+            }
         _ext_want = {
             "baseUrl": _ext_base,
             "api": "openai-completions",
             "apiKey": _ext_key,
-            "models": [{
-                "id": _ext_model,
-                "name": _ext_name,
-                "reasoning": False,
-                "input": ["text", "image"] if _ext_record.get("imageInput") is True else ["text"],
-                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-                "contextWindow": _ext_ctx,
-                "maxTokens": min(_ext_max, _ext_ctx),
-            }],
+            "models": [_ext_model_entry],
         }
         _ext_merged = dict(_ext_entry)
         _ext_merged.update(_ext_want)
@@ -3969,6 +3997,49 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
 # import a TS constant. It must name a model production allows, because the
 # proxy matches the bare id and answers 400 on a miss.
 CLAWBOX_TRANSCRIBE_MODEL_ID = "gpt-4o-mini-transcribe"
+
+
+def _clawbox_cloud_ai_locked():
+    """Is the local-only AI lock on (TASK-2501)? FAILING CLOSED.
+
+    The device-store key `ai_cloud_lock`: `true` or `"pinned"` is on. An
+    absent store is a box that never wrote a setting, so unlocked; a store that
+    is there and cannot be read or parsed is not known to be unlocked, so it
+    reads as LOCKED — `cloudAiLockOn` in src/lib/feature-engine.ts, the rule
+    the web server reads it by; keep the two in step. The lock's own module
+    (PR-A, `ai-cloud-lock.ts`) replaces both readers once it is on beta.
+
+    Under the lock the speech migrations below write no cloud row and take
+    back the ones ClawBox wrote: the transcription row and its endpoint, and
+    the stamped cloud voice. `except Exception`, as wide as the sibling store
+    readers, because this runs inside the unguarded heredoc under `set -e`.
+    """
+    import os
+
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return False
+    try:
+        with open(_store_path) as _fh:
+            _store = json.load(_fh)
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return True
+    if not isinstance(_store, dict):
+        return True
+    _lock = _store.get("ai_cloud_lock")
+    return _lock is True or _lock == "pinned"
+# end of the local-only AI lock reader
+
+
+_clawbox_ai_locked = _clawbox_cloud_ai_locked()
+# Set by EVERY change this start makes because the lock is on — a cloud
+# transcription row or endpoint taken back, a locked seed, the audio switch
+# turned off, ClawBox's own cloud voice withdrawn, cloud voices held aside. The
+# config on disk still lets that cloud leg run, so the gateway config write
+# below must not start the gateway on it if the write fails.
+_clawbox_lock_applied = False
 # The auth profile the cloud row names as its OWN bearer, and it is now
 # load-bearing rather than belt-and-braces. This row's provider is `openai` —
 # the only bundled media-understanding provider that speaks the proxy's
@@ -4009,6 +4080,12 @@ CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL = {
 # matched by name rather than full path because HOME is the script's to
 # resolve, and a path check here would call a moved workspace foreign.
 CLAWBOX_STT_CLIENT_SCRIPT = "stt-client.py"
+# The owner's own speech server (TASK-2501 PR-D): a CLI row running the app's
+# scripts/stt-endpoint-client.py, which reads `stt_endpoint` and its key from
+# the device store and keeps the private-address rule. Ours like the on-box
+# row; `buildAudioModels` (src/lib/stt-preference.ts) writes it field for field.
+CLAWBOX_STT_ENDPOINT_SCRIPT = "stt-endpoint-client.py"
+CLAWBOX_STT_SCRIPTS = (CLAWBOX_STT_CLIENT_SCRIPT, CLAWBOX_STT_ENDPOINT_SCRIPT)
 # The modes `isKeyModeProfile` (src/lib/auth-profile-mode.ts) reads as a
 # key of the profile's own; anything else — `oauth` above all — is not.
 CLAWBOX_KEY_PROFILE_MODES = ("token", "api_key", "api-key")
@@ -4031,7 +4108,10 @@ def _is_clawbox_audio_model(_entry):
     if _entry.get("type") == "cli":
         _args = _entry.get("args")
         _named = [_entry.get("command")] + (list(_args) if isinstance(_args, list) else [])
-        return any(isinstance(_v, str) and _v.endswith(CLAWBOX_STT_CLIENT_SCRIPT) for _v in _named)
+        return any(
+            isinstance(_v, str) and any(_v.endswith(_script) for _script in CLAWBOX_STT_SCRIPTS)
+            for _v in _named
+        )
     return _entry in (CLAWBOX_CLOUD_AUDIO_MODEL, CLAWBOX_LEGACY_CLOUD_AUDIO_MODEL)
 
 
@@ -4137,6 +4217,44 @@ def _clawbox_local_stt_row():
         "type": "cli",
         "command": "/usr/bin/python3",
         "args": [_script, "{{MediaPath}}"],
+        "timeoutSeconds": 120,
+    }
+
+
+def _clawbox_endpoint_stt_row():
+    """The owner's own speech server's CLI row when it is the chosen engine, else None.
+
+    Chosen means `stt_primary` is `endpoint` and an `stt_endpoint` record with
+    an http(s) base URL and a model is saved — `resolveSttPrimary` and
+    `sttEndpointFromValue` (src/lib/stt-preference.ts, src/lib/stt-endpoint.ts)
+    say the rest. Unreadable reads as not chosen: the seed then falls back to
+    the box's own engine, and the web server's boot pass writes the list from
+    the same store a moment later.
+    """
+    import os
+
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return None
+    try:
+        with open(_store_path) as _fh:
+            _store = json.load(_fh)
+    except Exception:
+        return None
+    if not isinstance(_store, dict) or _store.get("stt_primary") != "endpoint":
+        return None
+    _record = _store.get("stt_endpoint")
+    if not isinstance(_record, dict):
+        return None
+    _base = _record.get("baseUrl")
+    _model = _record.get("model")
+    if not (isinstance(_base, str) and _base.startswith(("http://", "https://")) and isinstance(_model, str) and _model.strip()):
+        return None
+    _root = os.environ.get("CLAWBOX_ROOT") or os.path.dirname(os.path.dirname(_store_path))
+    return {
+        "type": "cli",
+        "command": "/usr/bin/python3",
+        "args": [os.path.join(_root, "scripts", CLAWBOX_STT_ENDPOINT_SCRIPT), "{{MediaPath}}"],
         "timeoutSeconds": 120,
     }
 
@@ -4337,7 +4455,11 @@ if _clawai_openai_route_is_ours:
     # Asked once: the seed and the repair below both stand down on it. The
     # reason why, or None while a ClawBox AI credential backs the cloud row.
     _audio_cloud_refused = (
-        "the openai credential is a ChatGPT sign-in, which OpenClaw will not send to a custom endpoint"
+        # The local-only AI lock first (TASK-2501): no cloud row is seeded or
+        # kept, and the withdrawal below takes ours and our endpoint back.
+        "local-only AI is on, so no recording is sent to a cloud transcription engine"
+        if _clawbox_ai_locked
+        else "the openai credential is a ChatGPT sign-in, which OpenClaw will not send to a custom endpoint"
         if _openai_signed_in_with_oauth(cfg)
         else _clawai_transcribe_profile_problem(cfg)
     )
@@ -4354,10 +4476,18 @@ if _clawai_openai_route_is_ours:
     _audio_seed = None
     if not _audio_route_taken and _audio_models is None and not _audio_models_move_in_flight:
         _audio_local_row = _clawbox_local_stt_row()
-        _audio_seed = ([_audio_local_row] if _audio_local_row else []) + (
-            [] if _audio_cloud_refused else [dict(CLAWBOX_CLOUD_AUDIO_MODEL)]
-        )
-        if _audio_local_row:
+        # The owner's own speech server leads when it is the chosen engine
+        # (`sttEngineOrder("endpoint")`); under the lock it is the whole list,
+        # as is the box's own engine without one (`lockedSttOrder`).
+        _audio_endpoint_row = _clawbox_endpoint_stt_row()
+        _audio_seed = ([_audio_endpoint_row] if _audio_endpoint_row else []) + (
+            [_audio_local_row] if _audio_local_row else []
+        ) + ([] if _audio_cloud_refused else [dict(CLAWBOX_CLOUD_AUDIO_MODEL)])
+        if _clawbox_ai_locked:
+            _audio_seed = _audio_seed[:1]
+        if _audio_endpoint_row:
+            print("  Channel voice notes go to the owner's own speech server first")
+        elif _audio_local_row:
             print("  Channel voice notes try the Whisper engine installed on this box first")
 
     def _audio_write_seed(_rows):
@@ -4395,6 +4525,9 @@ if _clawai_openai_route_is_ours:
         if _audio_seed:
             _audio_write_seed(_audio_seed)
             changed = True
+            if _clawbox_ai_locked:
+                # On disk there is no list, so the core auto-detects one.
+                _clawbox_lock_applied = True
     elif _audio_models is None or (
         # The endpoint only ever travels WITH the cloud row. A list Settings
         # wrote without one — the box's own engine alone, because no ClawBox
@@ -4446,10 +4579,14 @@ if _clawai_openai_route_is_ours:
                 _audio_models[:] = _audio_kept
                 print("  Withdrew the ClawBox AI transcription row: %s" % _audio_cloud_refused)
                 changed = True
+                if _clawbox_ai_locked:
+                    _clawbox_lock_applied = True
         if _audio_has_base_url and _same_endpoint(_audio_base_url, _clawai_proxy_base_url):
             del _audio["baseUrl"]
             print("  Removed the ClawBox AI transcription endpoint along with its row")
             changed = True
+            if _clawbox_ai_locked:
+                _clawbox_lock_applied = True
     elif not _audio_route_taken and isinstance(_audio_models, list) and _is_clawbox_audio_models(_audio_models):
         _audio_repaired = False
         for _row in _audio_models:
@@ -4466,6 +4603,88 @@ if _clawai_openai_route_is_ours:
                 " the image migration no longer writes models.providers.openai.apiKey"
             )
             changed = True
+
+
+# THE LOCAL-ONLY AI LOCK AND AUDIO AUTO-DETECTION (TASK-2501 PR-D).
+#
+# With no audio row at all the core AUTO-DETECTS a transcription engine — the
+# reply model, then any provider holding a key for a transcription API (OpenAI,
+# Groq, Deepgram …), then local CLIs (OpenClaw docs/nodes/audio.md). On a
+# locked box with no engine of its own that would send a voice note to
+# whichever cloud it finds, so the switch is turned off; once there is a row
+# again, or the lock is lifted, the switch ClawBox turned off — and only that
+# one, marked by `data/.channel-audio-lock-off` — is turned back on.
+# `syncChannelAudio` (src/lib/stt-channel.ts) keeps the same switch and the
+# same mark. An endpoint of the owner's own with no rows is their route and is
+# left as it is. Outside the `claw_` gate on purpose: a locked box with no
+# ClawBox AI link at all is the one this is most for.
+def _clawbox_audio_lock_off_marker():
+    import os
+
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    return os.path.join(os.path.dirname(_store_path), ".channel-audio-lock-off") if _store_path else ""
+
+
+# The mark, removed only once the config it switched back on is written (the
+# gateway config write, as `_clawbox_tts_held_to_remove`): a write that fails
+# leaves it, so the next start switches the audio back on again.
+_clawbox_audio_mark_to_remove = None
+
+
+def _clawbox_audio_lock_switch():
+    import os
+
+    global changed, _clawbox_lock_applied, _clawbox_audio_mark_to_remove
+    _marker = _clawbox_audio_lock_off_marker()
+    _tools = cfg.get("tools") if isinstance(cfg.get("tools"), dict) else {}
+    _media = _tools.get("media") if isinstance(_tools.get("media"), dict) else {}
+    _audio = _media.get("audio") if isinstance(_media.get("audio"), dict) else {}
+    if bool(globals().get("CLAWBOX_OPENCLAW_V2", False)):
+        _list = _media.get("models")
+        _rows = [
+            _r for _r in (_list if isinstance(_list, list) else [])
+            if isinstance(_r, dict) and "audio" in (_r.get("capabilities") or [])
+        ]
+    else:
+        _list = _audio.get("models")
+        _rows = list(_list) if isinstance(_list, list) else []
+    _base = _audio.get("baseUrl")
+    _proxy = globals().get("_clawai_proxy_base_url") or ""
+    _owner_route = (
+        isinstance(_base, str) and bool(_base.strip())
+        and not (_proxy and _base.strip().rstrip("/") == _proxy.rstrip("/"))
+    )
+    if globals().get("_clawbox_ai_locked") and not _rows and not _owner_route:
+        if _audio.get("enabled") is not False:
+            if _marker:
+                try:
+                    with open(_marker, "w") as _fh:
+                        _fh.write("")
+                except OSError:
+                    print("  WARNING: could not mark the audio switch as ClawBox's; turning it off anyway")
+            _audio["enabled"] = False
+            _media["audio"] = _audio
+            _tools["media"] = _media
+            cfg["tools"] = _tools
+            changed = True
+            _clawbox_lock_applied = True
+            print("  Channel transcription off: local-only AI is on and this box has no engine of its own")
+    elif _marker and os.path.exists(_marker):
+        if _audio.get("enabled") is False:
+            del _audio["enabled"]
+            changed = True
+            _clawbox_audio_mark_to_remove = _marker
+            print("  Channel transcription back on: the switch local-only AI turned off is no longer needed")
+        else:
+            # Nothing of ours to switch back on, so nothing to write first: a
+            # mark kept now would one day turn on a switch the owner set.
+            try:
+                os.unlink(_marker)
+            except OSError:
+                pass
+
+
+_clawbox_audio_lock_switch()
 
 
 # Migration: ClawBox AI cloud voice (text to speech).
@@ -4603,7 +4822,15 @@ _clawai_speech_withdrawable = bool(
     _clawai_plan_tier and _clawai_plan_tier != CLAWBOX_SPEECH_DEVICE_TIER
 )
 
-if _clawai_openai_route_is_ours and _clawai_speech_entitled:
+# THE LOCAL-ONLY AI LOCK (TASK-2501) overrides the plan in both directions: a
+# locked box is never armed, and the cloud voice ClawBox stamped is withdrawn
+# by the arm below — the same delete a downgrade gets, so lifting the lock on
+# an entitled box arms it again at the next start. `tts.provider` is left as
+# it is, for the downgrade's reason: with our entry gone the gateway falls
+# through to the voice on the box. The reader is the transcription block's.
+_clawai_speech_locked = bool(globals().get("_clawbox_cloud_ai_locked", lambda: False)())
+
+if _clawai_openai_route_is_ours and _clawai_speech_entitled and not _clawai_speech_locked:
     _messages = cfg.get("messages")
     if not isinstance(_messages, dict):
         _messages = {}
@@ -4702,7 +4929,7 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
                     cfg["messages"] = _messages
                 changed = True
 
-elif _clawai_openai_route_is_ours and _clawai_speech_withdrawable:
+elif _clawai_openai_route_is_ours and (_clawai_speech_withdrawable or _clawai_speech_locked):
     # ONLY OVER A PLAN WE HAVE ACTUALLY BEEN TOLD. This condition used to be
     # `_clawai_openai_route_is_ours` alone, so every reading that was not a
     # positive "pro" reached the delete: a device store that was absent, or
@@ -4793,11 +5020,243 @@ elif _clawai_openai_route_is_ours and _clawai_speech_withdrawable:
             )
         ):
             del _tts_providers["openai"]
+            if _clawai_speech_locked:
+                # Withdrawn for the lock: the config on disk still speaks
+                # through it, and the pass below may find nothing more to move.
+                _clawbox_lock_applied = True
             print(
-                "  Removed the ClawBox AI cloud voice: this box's plan no longer includes it"
+                "  Removed the ClawBox AI cloud voice: %s"
+                % (
+                    "local-only AI is on, so this box speaks with its own voice only"
+                    if _clawai_speech_locked
+                    else "this box's plan no longer includes it"
+                )
             )
             changed = True
 
+
+
+# THE GATEWAY'S OWN VOICES UNDER THE LOCAL-ONLY AI LOCK (TASK-2501 PR-D).
+#
+# The arm above stands down and our stamped entry is withdrawn, but the gateway
+# speaks a channel reply with `tts.provider` and falls through EVERY other
+# configured speech provider (`resolveTtsProviderOrder`), so an owner's own
+# ElevenLabs or OpenAI entry — or Microsoft's Edge switched on — would still be
+# a cloud leg. Under the lock the box speaks with its own voice only:
+#   - every speech provider that is not on the box is HELD: moved out of the
+#     config into `data/.tts-local-only-held.json` (0600; it can carry the
+#     owner's own key, like the other key files beside it), Microsoft's switch
+#     turned off, and a cloud `provider` pointed at the on-box one;
+#   - lifting the lock puts back exactly what was held, and the selection only
+#     where it still names the voice the lock chose.
+# The held file is written BEFORE the config moves. A box whose held file cannot
+# be written (or read) still FAILS CLOSED, and still loses nothing: each cloud
+# entry is held IN PLACE, renamed to `clawbox-held--<id>` under the same
+# `providers` record — a key no speech plugin registers, so it is out of the
+# gateway's chain, with every value kept for the next unlock — and the previous
+# selection beside them as `clawbox-held--provider`. An owner's key is never
+# lost to a lock, and no cloud voice speaks under it.
+# "Local" is `isLocalProviderId` (src/lib/voice-output.ts), transcribed.
+CLAWBOX_TTS_LOCAL_PROVIDER_ID = "tts-local-cli"
+CLAWBOX_TTS_HELD_PREFIX = "clawbox-held--"
+# The held file, removed only once the config it was restored into is written.
+_clawbox_tts_held_to_remove = None
+# Holding cloud voices aside sets `_clawbox_lock_applied` (defined beside the
+# lock reader, and already set when the arm above withdrew our own voice): the
+# config on disk still lets them speak, so it must not be started on if the
+# write fails. Never reset here, or a withdrawal with nothing left to hold
+# would start on the cloud config.
+
+
+def _clawbox_tts_is_local(_id):
+    import re as _re
+
+    _id = str(_id).strip().lower()
+    return _id == CLAWBOX_TTS_LOCAL_PROVIDER_ID or bool(
+        _re.search(r"(?:^|[-_.])(local|cli|piper|kokoro)(?:$|[-_.])", _id)
+    )
+
+
+def _clawbox_tts_lock_pass():
+    import os
+
+    global changed
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return
+    _held_path = os.path.join(os.path.dirname(_store_path), ".tts-local-only-held.json")
+    _v2 = bool(globals().get("CLAWBOX_OPENCLAW_V2", False))
+    _messages = cfg.get("messages") if isinstance(cfg.get("messages"), dict) else {}
+    _homes = []
+    if _v2 and isinstance(cfg.get("tts"), dict):
+        _homes.append(("tts", cfg.get("tts")))
+    if isinstance(_messages.get("tts"), dict):
+        _homes.append(("messages.tts", _messages.get("tts")))
+    _held_unreadable = False
+    try:
+        with open(_held_path) as _fh:
+            _held = json.load(_fh)
+    except FileNotFoundError:
+        _held = None
+    except Exception:
+        # Never written over (it may hold an owner's key), never trusted.
+        _held = None
+        _held_unreadable = True
+    _held_foreign = False
+    if not (isinstance(_held, dict) and _held.get("version") == 1 and isinstance(_held.get("homes"), dict)):
+        # A file there in a shape ClawBox did not write is left alone too,
+        # never written over: the lock then holds in place.
+        _held_foreign = _held is not None
+        _held = None
+
+    if globals().get("_clawai_speech_locked"):
+        _next = _held if _held is not None else {"version": 1, "homes": {}}
+        _moves = []
+        for _name, _home in _homes:
+            _providers = _home.get("providers")
+            if not isinstance(_providers, dict):
+                continue
+            _record = _next["homes"].setdefault(_name, {"providers": {}})
+            _locals = [_id for _id in _providers if _clawbox_tts_is_local(_id) and not str(_id).startswith(CLAWBOX_TTS_HELD_PREFIX)]
+            for _id, _entry in list(_providers.items()):
+                # Already held in place by an earlier locked start.
+                if _clawbox_tts_is_local(_id) or str(_id).startswith(CLAWBOX_TTS_HELD_PREFIX):
+                    continue
+                if _id == "microsoft":
+                    _cur = _entry.get("enabled") if isinstance(_entry, dict) else None
+                    if _cur is not False:
+                        _record.setdefault("microsoft", {"enabled": _cur} if isinstance(_entry, dict) and "enabled" in _entry else {})
+                        _moves.append((_providers, _id, "off"))
+                    continue
+                _record["providers"][_id] = _entry
+                _moves.append((_providers, _id, "hold"))
+            _provider = _home.get("provider")
+            if isinstance(_provider, str) and _provider.strip() and not _clawbox_tts_is_local(_provider) and _locals:
+                _chosen = CLAWBOX_TTS_LOCAL_PROVIDER_ID if CLAWBOX_TTS_LOCAL_PROVIDER_ID in _locals else _locals[0]
+                _record.setdefault("provider", _provider)
+                # The voice the lock chose, so the unlock gives the owner's
+                # selection back only over that one, never over a later pick.
+                _record["selected"] = _chosen
+                _moves.append((_home, _chosen, "select"))
+        if not _moves:
+            return
+        _in_file = not (_held_unreadable or _held_foreign)
+        if _in_file:
+            try:
+                _tmp = _held_path + ".tmp"
+                _fd = os.open(_tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(_fd, "w") as _fh:
+                    json.dump(_next, _fh)
+                os.replace(_tmp, _held_path)
+            except OSError:
+                _in_file = False
+        for _target, _key, _how in _moves:
+            if _how == "hold":
+                if not _in_file:
+                    _target.setdefault(CLAWBOX_TTS_HELD_PREFIX + _key, _target[_key])
+                del _target[_key]
+            elif _how == "off":
+                _entry = _target.get(_key) if isinstance(_target.get(_key), dict) else {}
+                if not _in_file:
+                    _target.setdefault(CLAWBOX_TTS_HELD_PREFIX + _key, {"enabled": _entry["enabled"]} if "enabled" in _entry else {})
+                _entry["enabled"] = False
+                _target[_key] = _entry
+            else:
+                if not _in_file and isinstance(_target.get("providers"), dict):
+                    _target["providers"].setdefault(CLAWBOX_TTS_HELD_PREFIX + "provider", {"provider": _target.get("provider"), "selected": _key})
+                _target["provider"] = _key
+        changed = True
+        global _clawbox_lock_applied
+        _clawbox_lock_applied = True
+        if _in_file:
+            print("  Local-only AI is on: the gateway speaks with this box's own voice only (cloud voices held aside)")
+        else:
+            print("  WARNING: local-only AI is on and the held speech providers file could not be "
+                  + ("read" if _held_unreadable else "used (it is not one ClawBox wrote)" if _held_foreign else "written")
+                  + "; the cloud voices are held in place in the gateway config instead (out of its speech chain, nothing lost)")
+        return
+
+    _clawbox_tts_restore_in_place(_homes)
+
+    if _held is None:
+        if _held_unreadable:
+            print("  WARNING: the held speech providers could not be read; leaving them for the next start")
+        elif os.path.exists(_held_path):
+            print("  WARNING: the held speech providers file is not one ClawBox wrote; leaving it")
+        return
+    for _name, _record in _held["homes"].items():
+        if not isinstance(_record, dict):
+            continue
+        if _name == "tts":
+            _home = cfg.get("tts") if isinstance(cfg.get("tts"), dict) else None
+            if _home is None and _v2:
+                _home = {}
+                cfg["tts"] = _home
+        else:
+            _home = _messages.get("tts") if isinstance(_messages.get("tts"), dict) else None
+        if _home is None:
+            continue
+        _providers = _home.get("providers") if isinstance(_home.get("providers"), dict) else {}
+        for _id, _entry in (_record.get("providers") or {}).items():
+            if _id not in _providers:
+                _providers[_id] = _entry
+        _ms = _record.get("microsoft")
+        if isinstance(_ms, dict) and isinstance(_providers.get("microsoft"), dict) and _providers["microsoft"].get("enabled") is False:
+            if "enabled" in _ms:
+                _providers["microsoft"]["enabled"] = _ms["enabled"]
+            else:
+                del _providers["microsoft"]["enabled"]
+        _home["providers"] = _providers
+        _clawbox_tts_restore_selection(_home, _record.get("provider"), _record.get("selected"))
+    # Removed only after the config these entries went back into is written
+    # (below, after the gateway config write): a failed write keeps them here.
+    global _clawbox_tts_held_to_remove
+    _clawbox_tts_held_to_remove = _held_path
+    changed = True
+    print("  Local-only AI is off: the speech providers it held aside are back")
+
+
+def _clawbox_tts_restore_selection(_home, _prev, _selected):
+    """The owner's selection back, only over the voice the lock chose: an owner
+    who picked another voice while locked keeps it. A record from before the
+    lock remembered its choice falls back to any voice on the box."""
+    _now = _home.get("provider")
+    if not (isinstance(_prev, str) and isinstance(_now, str)):
+        return
+    if (_now == _selected) if isinstance(_selected, str) else _clawbox_tts_is_local(_now):
+        _home["provider"] = _prev
+
+
+def _clawbox_tts_restore_in_place(_homes):
+    """Unlocked: put back what a lock held IN PLACE (see the header above)."""
+    global changed
+    _restored = False
+    for _name, _home in _homes:
+        _providers = _home.get("providers")
+        if not isinstance(_providers, dict):
+            continue
+        for _key in [k for k in list(_providers) if isinstance(k, str) and k.startswith(CLAWBOX_TTS_HELD_PREFIX)]:
+            _id = _key[len(CLAWBOX_TTS_HELD_PREFIX):]
+            _val = _providers.pop(_key)
+            _restored = True
+            if _id == "provider":
+                if isinstance(_val, dict):
+                    _clawbox_tts_restore_selection(_home, _val.get("provider"), _val.get("selected"))
+            elif _id == "microsoft":
+                _ms = _providers.get("microsoft")
+                if isinstance(_val, dict) and isinstance(_ms, dict) and _ms.get("enabled") is False:
+                    if "enabled" in _val:
+                        _ms["enabled"] = _val["enabled"]
+                    else:
+                        del _ms["enabled"]
+            elif _id and _id not in _providers:
+                _providers[_id] = _val
+    if _restored:
+        changed = True
+        print("  Local-only AI is off: the speech providers it held in place are back")
+
+
+_clawbox_tts_lock_pass()
 
 # --- memory index defaults ---
 # The memory-search index lives in each agent's database
@@ -5039,6 +5498,55 @@ if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
         changed = True
 # --- end memory index defaults ---
 
+# The on-device model's six tools, by config (OpenClaw 2026.11.5+).
+#
+# clawbox-local-lean narrows a turn on the llamacpp model to six tools with the
+# `before_prompt_build` hook's `toolsAllow`. Up to 2026.11.3 that took the other
+# tools off the turn. 2026.11.5 keeps every tool of the agent's catalog active,
+# narrows only which ones may be called, and sizes the turn (its pre-prompt
+# context check and the compaction budget) from that whole catalog. With Tool
+# Search off, as the ~2B model needs it (below), that is ~84k estimated tokens
+# against Gemma's 32768-token window: every turn on the on-device model ended
+# "Context overflow: the system prompt, injected context, or tool definitions
+# exceed the model's context window" before the model was asked (measured on a
+# lab board, 68-local-ai-chat). HARNESS FIRST: the core's own per-provider tool
+# policy, `tools.byProvider.<provider>.allow`, applies when the tools are built,
+# before anything is sized; with it the same turn is a ~1.4k-token prompt and
+# answers. It narrows only the llamacpp provider's turns, so it does not follow
+# the primary. ClawBox writes exactly {"allow": [the six]} where the provider has
+# no entry and removes only that exact value (on an older core, which narrows
+# through the hook alone); an owner's own entry is never touched. Keep the list
+# in step with LEAN_TOOLS in scripts/openclaw-plugins/clawbox-local-lean/local-lean.mjs.
+_LOCAL_LEAN_TOOLS = ["read", "write", "clawbox__webapp_create", "web_fetch", "web_search", "clawbox__browser_open"]
+_lt_tools = cfg.get("tools")
+_lt_by = _lt_tools.get("byProvider") if isinstance(_lt_tools, dict) else None
+_lt_value = _lt_by.get("llamacpp") if isinstance(_lt_by, dict) else None
+_lt_ours = (
+    isinstance(_lt_value, dict)
+    and list(_lt_value.keys()) == ["allow"]
+    and _lt_value["allow"] == _LOCAL_LEAN_TOOLS
+)
+if bool(globals().get("CLAWBOX_OPENCLAW_2026_11_5", False)):
+    if (
+        (_lt_tools is None or isinstance(_lt_tools, dict))
+        and (_lt_by is None or (isinstance(_lt_by, dict) and "llamacpp" not in _lt_by))
+    ):
+        if _lt_tools is None:
+            _lt_tools = {}
+            cfg["tools"] = _lt_tools
+        if _lt_by is None:
+            _lt_by = {}
+            _lt_tools["byProvider"] = _lt_by
+        _lt_by["llamacpp"] = {"allow": list(_LOCAL_LEAN_TOOLS)}
+        changed = True
+        print("  Narrowed the on-device model's tools to its six by config (tools.byProvider.llamacpp): OpenClaw 2026.11.5 sizes a turn from every active tool")
+elif _lt_ours:
+    del _lt_by["llamacpp"]
+    if not _lt_by:
+        del _lt_tools["byProvider"]
+    changed = True
+    print("  Removed the on-device model's config tool list: this core narrows its turns through the lean hook alone")
+
 # Reconciliation: OpenClaw's Tool Search vs a primary on the on-device model.
 #
 # Off while the primary is `llamacpp/*`, OpenClaw's default otherwise — the
@@ -5166,25 +5674,65 @@ if changed:
     # write and OSError on ENOSPC, and it sat outside the `try` that existed
     # to contain exactly those.
     tmp_path = None
+    # Whether the config itself landed: the bookkeeping after it is inside the
+    # same `try`, and its failure is not a failed config write.
+    cfg_written = False
     try:
         tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
         with os.fdopen(tmp_fd, "w") as f:
             json.dump(cfg, f, indent=2)
         os.replace(tmp_path, cfg_path)
+        cfg_written = True
         print("  Updated gateway config")
+        # Read through globals(): the block is also run on its own (tests).
+        if globals().get("_clawbox_tts_held_to_remove"):
+            try:
+                os.unlink(globals()["_clawbox_tts_held_to_remove"])
+            except OSError:
+                pass
+        if globals().get("_clawbox_audio_mark_to_remove"):
+            try:
+                os.unlink(globals()["_clawbox_audio_mark_to_remove"])
+            except OSError:
+                pass
         _record_memory_rebuild(_memory_index_changes)
         _record_keyword_only_rebuild()
     except Exception as exc:
-        if tmp_path is not None:
+        if tmp_path is not None and not cfg_written:
             try:
                 os.unlink(tmp_path)
             except Exception:
                 pass
-        print(
-            "  WARN: could not write the gateway config (%s: %s); the gateway starts on the config already on disk"
-            % (type(exc).__name__, exc),
-            file=sys.stderr,
-        )
+        if cfg_written:
+            # The config is on disk, lock and all; only the rebuild bookkeeping
+            # after it failed. That never stops a start.
+            print(
+                "  WARN: the gateway config was written but its follow-up bookkeeping failed (%s: %s)"
+                % (type(exc).__name__, exc),
+                file=sys.stderr,
+            )
+        elif globals().get("_clawbox_lock_applied"):
+            # The one exception to "carry on" above: under the local-only AI
+            # lock (TASK-2501) this start took a cloud leg out (a voice, a
+            # transcription row, audio auto-detection) and the config on disk
+            # still has it, so starting on it would break the lock. Failing closed
+            # costs the gateway its start: systemd retries until its start
+            # limit, and past it the gateway stays down until a start can
+            # write the config (a restart once there is room, or the next
+            # boot). Under the lock that is the chosen trade: no chat rather
+            # than a cloud voice.
+            print(
+                "  ERROR: local-only AI is on and the gateway config that keeps its cloud legs out could not be written (%s: %s); the gateway is not started on the old config"
+                % (type(exc).__name__, exc),
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        else:
+            print(
+                "  WARN: could not write the gateway config (%s: %s); the gateway starts on the config already on disk"
+                % (type(exc).__name__, exc),
+                file=sys.stderr,
+            )
 else:
     print("  Gateway config already correct, skipping write")
     # It changes nothing in the config, so it needs no write to land first.
@@ -7094,7 +7642,26 @@ def at_optout(value, literal):
 batch = []
 unset_heartbeat = False
 flipped = []
+# OpenClaw 2026.11.5 retired the heartbeat key (the exported flag is set by the
+# core's own version, above): there is nothing at the opt-out literal to take
+# back, and a `config unset` of it would be refused. The monitor is an
+# automation job there, and the Settings switch drives that job.
+#
+# WHAT THIS GIVES UP, on purpose: a box still holding a generation-1 record
+# (seeded off by a build from before the 2026-09-15 ruling and never booted
+# since) that reaches a 2026.11.5 core keeps its monitor as Doctor converted it,
+# disabled. By the time this plan runs, Doctor has already turned the monitor
+# into a job and removed the key (the update's own `openclaw doctor --fix`,
+# which install.sh runs right after installing the core, and this script's
+# start-guard for a config the core still refuses at boot; measured on a lab
+# board), so the `0m` this row looks for is gone with or without this skip, and
+# once converted a seeded-off job cannot be told from one the owner switched
+# off: enabling it here would undo a choice that may be theirs. Settings ->
+# Harness switches it on.
+HEARTBEAT_RETIRED = os.environ.get("CLAWBOX_OPENCLAW_2026_11_5") == "1"
 for path, literal, default in WANTED:
+    if default is None and HEARTBEAT_RETIRED:
+        continue
     # A box whose generation 2 is recorded is here only for the single-engine
     # rows: its three keys are the owner's, and a check-in they switched off since
     # must not be switched back on by a pass that came for something else.

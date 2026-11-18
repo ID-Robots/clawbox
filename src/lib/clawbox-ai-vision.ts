@@ -26,6 +26,7 @@
  * and on a ClawBox AI link, never per turn.
  */
 import { get as configGet, set as configSet } from "@/lib/config-store";
+import { CLOUD_AI_LOCKED_CODE, isCloudAiLocked } from "@/lib/ai-cloud-lock";
 import {
   CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_PROVIDER,
@@ -171,6 +172,11 @@ async function looks(
 export async function probeClawboxAiVision(
   { token, baseUrl, fetchImpl = fetch }: { token: string; baseUrl?: string | null; fetchImpl?: typeof fetch },
 ): Promise<ClawboxAiVisionProbe> {
+  // The local-only AI lock (TASK-2501): the probe picture is not sent either.
+  // "unknown" is the verdict that moves nothing.
+  if (await isCloudAiLocked()) {
+    return { verdict: "unknown", model: null, flash: "unknown", fallback: null, why: [CLOUD_AI_LOCKED_CODE] };
+  }
   const url = await clawboxAiVisionProbeUrl(baseUrl);
   const why: string[] = [];
   const flash = await looks(CLAWBOX_AI_FLASH_MODEL_ID, { token, baseUrl: url, fetchImpl }, why);

@@ -120,3 +120,68 @@ describe("clawai-connect — session TTL", () => {
     ).toBe(true);
   });
 });
+
+describe("clawai-connect — a conditional write (TASK-2501)", () => {
+  const base: import("@/lib/clawai-connect").ClawAiConnectSession = {
+    device_id: "mine",
+    user_code: "AAAA-BBBB",
+    interval: 5,
+    createdAt: 1_000,
+    status: "configuring",
+    provider: "clawai",
+    scope: "entitlement",
+    tier: "free",
+  };
+
+  it("writes while the stored session is still the owner's, and not over a newer one", async () => {
+    await connect.writeClawAiSession(base);
+    expect(await connect.writeClawAiSessionIfCurrent(base, { ...base, status: "complete" })).toBe(true);
+    expect((await connect.readClawAiSession())?.status).toBe("complete");
+    const newer = { ...base, device_id: "newer", createdAt: 2_000, status: "pending" as const, scope: "primary" as const };
+    await connect.writeClawAiSession(newer);
+    expect(await connect.writeClawAiSessionIfCurrent(base, { ...base, status: "error", error: "x" })).toBe(false);
+    expect(await connect.readClawAiSession()).toEqual(newer);
+    // The same code started again is a different session too.
+    await connect.writeClawAiSession({ ...base, createdAt: 3_000 });
+    expect(await connect.writeClawAiSessionIfCurrent(base, { ...base, status: "complete" })).toBe(false);
+  });
+
+  it("never recreates a session cleared while a conditional write was queued", async () => {
+    await connect.writeClawAiSession(base);
+    const cleared = connect.clearClawAiSession();
+    const conditional = connect.writeClawAiSessionIfCurrent(base, { ...base, status: "complete" });
+    await cleared;
+    expect(await conditional).toBe(false);
+    expect(await connect.readClawAiSession()).toBeNull();
+  });
+
+  it("lets only one of two claims from the same state win", async () => {
+    await connect.writeClawAiSession({ ...base, status: "pending" });
+    const claim = { ...base, status: "configuring" as const };
+    const [first, second] = await Promise.all([
+      connect.writeClawAiSessionIfCurrent(base, claim, "pending"),
+      connect.writeClawAiSessionIfCurrent(base, { ...claim, configuringStartedAt: 9_999 }, "pending"),
+    ]);
+    expect([first, second]).toEqual([true, false]);
+    expect(await connect.readClawAiSession()).toEqual(claim);
+    // A finished session is not claimed again either.
+    await connect.writeClawAiSession({ ...base, status: "complete" });
+    expect(await connect.writeClawAiSessionIfCurrent(base, claim, "pending")).toBe(false);
+    expect((await connect.readClawAiSession())?.status).toBe("complete");
+  });
+
+  it("writes nothing when there is no session", async () => {
+    expect(await connect.writeClawAiSessionIfCurrent(base, base)).toBe(false);
+    expect(await connect.readClawAiSession()).toBeNull();
+  });
+
+  it("orders a plain write queued behind it after it", async () => {
+    await connect.writeClawAiSession(base);
+    const newer = { ...base, device_id: "newer", createdAt: 2_000 };
+    const conditional = connect.writeClawAiSessionIfCurrent(base, { ...base, status: "complete" });
+    const plain = connect.writeClawAiSession(newer);
+    expect(await conditional).toBe(true);
+    await plain;
+    expect(await connect.readClawAiSession()).toEqual(newer);
+  });
+});
