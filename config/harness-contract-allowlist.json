@@ -27,6 +27,15 @@
    "expires": "2027-01-15"
   },
   {
+   "harness": "openclaw",
+   "kind": "config",
+   "name": "agents.defaults.heartbeat.every",
+   "category": "version-guarded",
+   "reason": "OpenClaw before 2026.11.5 only: the one-time flip of a box the previous build seeded off (`config unset`) runs only when the plan names the key at its opt-out literal, and the plan skips that row on a core the boot script identifies as 2026.11.5 or later (CLAWBOX_OPENCLAW_2026_11_5), where the key was retired and the heartbeat is an automation job.",
+   "sites": ["scripts/gateway-pre-start.sh:7679"],
+   "expires": "2027-01-15"
+  },
+  {
    "harness": "hermes",
    "kind": "event",
    "name": "approval.request",

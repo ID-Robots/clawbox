@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
+import { auditActorOf, clearAuditLogForReset, recordAudit, unsealAuditLog } from "@/lib/audit-log";
 import { padResponseTime } from "@/lib/login-rate-limit";
 import {
   checkReproveLockout,
@@ -755,12 +756,33 @@ async function resetSystemPasswordToDefault(): Promise<void> {
   }
 }
 
+/** Whether a factory reset is running in this process — one flag for every route bundle's copy. */
+function resetFlight(): { running: boolean } {
+  const g = globalThis as unknown as Record<symbol, { running: boolean } | undefined>;
+  const key = Symbol.for("clawbox.factoryReset.running");
+  let state = g[key];
+  if (!state) {
+    state = { running: false };
+    g[key] = state;
+  }
+  return state;
+}
+
 function scheduleReboot(): void {
   setTimeout(async () => {
     try {
       await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reboot"], { timeout: 10_000 });
     } catch (err) {
       console.error("[Reset] Reboot failed:", err instanceof Error ? err.message : err);
+      // The wipe went through and only the reboot failed: a confirmed failure
+      // of the reset's last step. The audit log stays sealed for as long as
+      // this process lives (src/lib/audit-log.ts), so this process ends now —
+      // clawbox-setup runs under `Restart=always` and systemd brings it back,
+      // unsealed — and every request that began before the wipe ends with it:
+      // none of them can write the previous owner back into the log. SIGTERM,
+      // so production-server.js closes its listeners as for any stop.
+      console.error("[Reset] restarting the web server so the audit log records again");
+      process.kill(process.pid, "SIGTERM");
     }
   }, 1_000);
 }
@@ -781,6 +803,8 @@ export async function POST(request: Request) {
     await padResponseTime(startedAt);
     return unauthorized;
   }
+  // Read now: the wipe below takes the session secret that names them.
+  const resetBy = await auditActorOf(request);
 
   // A session is what stops a stranger; it is not what stops the owner losing
   // the box to one misdirected click, and a stolen or shared browser carries a
@@ -814,6 +838,23 @@ export async function POST(request: Request) {
 
   const refused = await reproveOwnerPassword(body.password ?? "", buckets, startedAt);
   if (refused) return refused;
+
+  // One reset at a time. A second one overlapping the first would find the
+  // audit log the first sealed (src/lib/audit-log.ts) and could release it at
+  // its own failure gate while the first is on its way to the reboot — a
+  // sign-in that resolved the previous owner could then write them back — and
+  // two wipes of one disk at once are no better. Held until the process ends
+  // after a reset that went through; any other ending lets the next one start.
+  const flight = resetFlight();
+  if (flight.running) {
+    await padResponseTime(startedAt);
+    return NextResponse.json(
+      { error: "A factory reset is already running on this ClawBox.", code: "reset_in_progress" },
+      { status: 409 },
+    );
+  }
+  flight.running = true;
+  let wentThrough = false;
 
   try {
     await maskAndStopGateway();
@@ -860,7 +901,15 @@ export async function POST(request: Request) {
     const clawkeepFailures = await removeDirectoryContents(CLAWKEEP_DATA_DIR);
     // Previous-owner home-dir state (SSH keys, browser profile, user files…).
     const homeFailures = await wipeHomeUserState();
-    const allFailures = [...dataFailures, ...openclawFailures, ...clawkeepFailures, ...homeFailures];
+    // The audit log is cleared once more under its own lock: a line queued
+    // during the wipe (a sign-in at that moment, carrying the previous
+    // owner's name and address) is written first and removed with the rest,
+    // never left to recreate the file. A clear that fails is a wipe failure.
+    const auditFailures = await clearAuditLogForReset().then(
+      () => [] as string[],
+      (err: unknown) => [labelFailure("audit-log", err instanceof Error ? err.message : String(err))],
+    );
+    const allFailures = [...dataFailures, ...openclawFailures, ...clawkeepFailures, ...homeFailures, ...auditFailures];
 
     // 4. Seed minimal openclaw.json with token-based gateway auth so the
     // gateway can still bind on LAN after reboot. The token is a freshly
@@ -913,11 +962,20 @@ export async function POST(request: Request) {
     // retry. Gate first so an incomplete wipe leaves the box reachable.
     if (allFailures.length > 0) {
       console.warn(`[Reset] Aborting reboot — ${allFailures.length} wipe failure(s)`);
+      // A confirmed failure, and the one place the audit log's seal is
+      // released: no reboot follows, the box keeps running and keeps its log.
+      // Past this gate the seal holds until the process ends.
+      unsealAuditLog();
       return NextResponse.json(
         { error: `Factory reset incomplete: ${allFailures.length} file deletion(s) failed`, failures: allFailures },
         { status: 500 },
       );
     }
+
+    // The one line the wiped box keeps of its past: that it was reset, when
+    // and by whom (the old log was cleared above). No address: the box may be
+    // about to change hands.
+    await recordAudit({ event: "factory_reset", actor: resetBy });
 
     // 6. Delete saved WiFi connections so device returns to AP mode after reboot
     await deleteWifiConnections().catch((err) => {
@@ -937,6 +995,7 @@ export async function POST(request: Request) {
     }
 
     scheduleReboot();
+    wentThrough = true;
 
     const response = NextResponse.json({ success: true });
     response.cookies.set("clawbox_session", "", {
@@ -960,5 +1019,7 @@ export async function POST(request: Request) {
       { error },
       { status: 500 },
     );
+  } finally {
+    if (!wentThrough) flight.running = false;
   }
 }

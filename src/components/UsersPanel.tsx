@@ -17,6 +17,8 @@ import { useT } from "@/lib/i18n";
 import OpenClawSharingCard from "./OpenClawSharingCard";
 import OrgModeCard from "./OrgModeCard";
 import StaffMcpCard from "./StaffMcpCard";
+import UserLimitsCard from "./UserLimitsCard";
+import AuditLogCard from "./AuditLogCard";
 import UserPasswordReset from "./UserPasswordReset";
 import { checkUsername, USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
 
@@ -491,6 +493,9 @@ export default function UsersPanel() {
       <OpenClawSharingCard />
       <OrgModeCard onChange={setOrgMode} />
       {listing && <StaffMcpCard users={listing.users.map((u) => u.username)} orgMode={orgMode} />}
+      {/* ── The owner's limits for everyone else, and the audit log (owner only) ── */}
+      <UserLimitsCard />
+      <AuditLogCard />
 
       {/* ── What another user gets: on an organisation box, much less ── */}
       <div className="rounded-xl border border-white/10 p-4">

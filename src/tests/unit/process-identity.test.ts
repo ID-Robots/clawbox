@@ -3,7 +3,8 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { processStartKey } from "@/lib/process-identity";
 
-// It starts a real process (`sleep`): both ceilings, as test-timeout-hygiene asks.
+// Starts a real process (`sleep`), so it carries both ceilings like every
+// other such suite (test-timeout-hygiene.test.ts).
 vi.setConfig({ testTimeout: 15_000, hookTimeout: 15_000 });
 
 /**

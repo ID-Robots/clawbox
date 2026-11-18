@@ -62,11 +62,13 @@ describe("transcript store", () => {
       timestamp: 1,
       media: ["/setup-api/chat/media?path=%2Fa.png"],
       audio: ["/setup-api/chat/media?path=%2Fb.wav"],
+      files: ["/setup-api/chat/media?path=%2Fc.docx&download=1"],
       turnId: "run-1",
     });
     const [row] = await store.readTranscript();
     expect(row.media).toEqual(["/setup-api/chat/media?path=%2Fa.png"]);
     expect(row.audio).toEqual(["/setup-api/chat/media?path=%2Fb.wav"]);
+    expect(row.files).toEqual(["/setup-api/chat/media?path=%2Fc.docx&download=1"]);
     expect(row.turnId).toBe("run-1");
   });
 

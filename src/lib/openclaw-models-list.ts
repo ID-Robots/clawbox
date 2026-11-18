@@ -23,7 +23,7 @@
  */
 
 /** The OpenClaw version every copy in this module was checked against. */
-export const MODELS_LIST_CHECKED_AT = "2026.11.3";
+export const MODELS_LIST_CHECKED_AT = "2026.11.5";
 
 /**
  * What `openclaw models list --provider <p> --all --json [--refresh]` sends a

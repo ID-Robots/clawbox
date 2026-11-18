@@ -358,9 +358,12 @@ function homeWithoutCloudVoices<T extends { providers?: unknown } | undefined>(h
  * (TASK-2501): every cloud voice left out — ClawBox AI's and an owner's own
  * OpenAI or ElevenLabs entry alike — and the model provider the cloud pick
  * falls back to with them, so `cloudSpeechTarget` answers null, Auto resolves
- * to the box's own voice and the Play button never reaches a cloud host. The
- * file itself is not rewritten: unlocking gives the owner back the voices they
- * had.
+ * to the box's own voice (Kokoro) and neither the Play button nor a spoken
+ * chat reply reaches a cloud host. The file itself is not rewritten: lifting
+ * the lock gives the owner back the voices they had. PURE.
+ *
+ * The same function, by name and rule, as the lock PR's (PR-A); whichever
+ * lands second takes the other's.
  */
 export function withoutCloudVoices(config: VoiceConfigView): VoiceConfigView {
   const tts = homeWithoutCloudVoices(config.tts);

@@ -68,7 +68,9 @@ describe("gateway-proxy", () => {
       expect(response.headers.get("location")).toContain("clawbox.local");
     });
 
-    it("uses canonical origin for unknown hosts", () => {
+    // SUP-1027: a box reached remotely (tunnel, custom domain) is not on the
+    // LAN, so an absolute `http://clawbox.local/setup` is unreachable for it.
+    it("redirects unknown hosts with a relative Location, never a .local origin", () => {
       const request = createRequest("http://unknown.example.com/", {
         host: "unknown.example.com",
       });
@@ -76,7 +78,18 @@ describe("gateway-proxy", () => {
       const response = gatewayProxy.redirectToSetup(request);
 
       expect(response.status).toBe(302);
-      expect(response.headers.get("location")).toContain("clawbox.local");
+      expect(response.headers.get("location")).toBe("/setup");
+    });
+
+    it("redirects a request with no usable Host header with a relative Location", () => {
+      const request = createRequest("http://unknown.example.com/", {
+        host: "bad host:99999",
+      });
+
+      const response = gatewayProxy.redirectToSetup(request);
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("location")).toBe("/setup");
     });
 
     it("preserves https when forwarded", () => {

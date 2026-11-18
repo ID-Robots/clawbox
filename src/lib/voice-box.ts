@@ -14,7 +14,7 @@
  */
 
 import { promises as fs } from "fs";
-import { isCloudAiLocked } from "@/lib/ai-cloud-lock";
+import { cloudAiLockOn } from "@/lib/feature-engine";
 import { getActiveHarness } from "@/lib/harness";
 import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
 import { CLOUD_TTS_ENTITLED_TIER } from "@/lib/clawai-cloud-defaults-state";
@@ -82,8 +82,8 @@ async function exists(p: string): Promise<boolean> {
 export async function readVoiceConfig(harness: ActiveHarness): Promise<VoiceConfigView> {
   // The local-only AI lock (TASK-2501): no cloud voice is usable, so none is
   // read — the selector, Auto, the Play button and the chat's spoken replies
-  // all see only the box's own voice.
-  if (await isCloudAiLocked()) return withoutCloudVoices(await readVoiceConfigUnlocked(harness));
+  // all see only the box's own voice (Kokoro). Failing closed (`cloudAiLockOn`).
+  if (await cloudAiLockOn()) return withoutCloudVoices(await readVoiceConfigUnlocked(harness));
   return await readVoiceConfigUnlocked(harness);
 }
 

@@ -88,19 +88,36 @@ export async function installedOpenclawCoreGeneration(): Promise<OpenclawCoreGen
 }
 
 /**
- * Whether the INSTALLED core is `year.month` or later: for a config key one
- * release introduced and an older core would refuse (its config schema is
- * strict, so an unknown key is `Unrecognized key` and a gateway that will not
- * start). `false` for an older core, and also for one that cannot be read: a
- * key that may be refused is not written on a guess — the boot script, which
- * reads the same manifest, adds it at the next start once the core is known.
+ * Whether a core `version` string is `year.month` (patch `patch`, default 0) or
+ * later: `null` when the string says nothing about a release (unreadable, or
+ * not beginning with a date), because "cannot tell" is a third answer that a
+ * caller guarding a retired or introduced config key has to be able to refuse
+ * on. Prereleases (`2026.11.5-beta.1`) count as the release they lead up to, as
+ * the boot script's own comparison does.
  */
-export async function installedOpenclawCoreAtLeast(year: number, month: number): Promise<boolean> {
-  const version = await installedOpenclawCoreVersion();
-  const match = version === null ? null : CORE_VERSION_RE.exec(version);
-  if (!match) return false;
-  const [y, m] = [Number(match[1]), Number(match[2])];
-  return y > year || (y === year && m >= month);
+export function coreVersionAtLeast(version: string | null, year: number, month: number, patch = 0): boolean | null {
+  const match = version === null ? null : CORE_VERSION_RE.exec(version.trim());
+  if (!match) return null;
+  const [y, m, p] = [Number(match[1]), Number(match[2]), Number(match[3])];
+  return y > year || (y === year && (m > month || (m === month && p >= patch)));
+}
+
+/**
+ * Whether the INSTALLED core is `year.month` (patch `patch`, default 0) or
+ * later: for a config key one release introduced or retired and an older (or
+ * newer) core would refuse (its config schema is strict, so an unknown key is
+ * `Unrecognized key` and a gateway that will not start). `false` for an older
+ * core, and also for one that cannot be read: a key that may be refused is not
+ * written on a guess — the boot script, which reads the same manifest, adds it
+ * at the next start once the core is known. A caller that must tell "older"
+ * from "cannot tell" asks `installedOpenclawCoreVersion` and
+ * `coreVersionAtLeast` instead.
+ *
+ * The patch is for a boundary inside a month: the heartbeat config went away in
+ * 2026.11.5, after 2026.11.3 had still carried it.
+ */
+export async function installedOpenclawCoreAtLeast(year: number, month: number, patch = 0): Promise<boolean> {
+  return coreVersionAtLeast(await installedOpenclawCoreVersion(), year, month, patch) === true;
 }
 
 /**

@@ -20,11 +20,19 @@ import { isClawboxAiToken } from "@/lib/clawai-token";
 import { get, set } from "@/lib/config-store";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
 import type { OpenClawConfig } from "@/lib/openclaw-config";
+import { cloudAiLockOn } from "@/lib/feature-engine";
 import { localSttInstalled, PYTHON3, sttClientScriptPath } from "@/lib/stt-local";
+import { readSttEndpoint, sttEndpointClientPath } from "@/lib/stt-endpoint";
 import { isKeyModeProfile } from "@/lib/auth-profile-mode";
 import type { AuthProfileEntries } from "@/lib/subscription-surface";
 
-export type SttEngine = "cloud" | "local";
+/**
+ * `cloud`: ClawBox AI. `local`: faster-whisper on this box. `endpoint`: the
+ * owner's own OpenAI-compatible speech server on this box or the LAN
+ * (stt-endpoint.ts, TASK-2501 PR-D). The last two never leave the owner's
+ * network; under the local-only AI lock they are the only engines there are.
+ */
+export type SttEngine = "cloud" | "local" | "endpoint";
 
 /** The config-store key. */
 export const STT_PRIMARY_KEY = "stt_primary";
@@ -142,7 +150,7 @@ export function cloudTranscribeProblem(
 }
 
 export function isSttEngine(value: unknown): value is SttEngine {
-  return value === "cloud" || value === "local";
+  return value === "cloud" || value === "local" || value === "endpoint";
 }
 
 /**
@@ -179,9 +187,28 @@ export function isSttEngine(value: unknown): value is SttEngine {
  * says otherwise. Without an engine on the box the cloud is the only answer, so
  * it stays the default there.
  */
-export function resolveSttPrimary(stored: unknown, cloudConfigured: boolean, localInstalled: boolean): SttEngine {
+export function resolveSttPrimary(
+  stored: unknown,
+  cloudConfigured: boolean,
+  localInstalled: boolean,
+  endpointConfigured = false,
+  locked = false,
+): SttEngine {
+  // THE LOCAL-ONLY AI LOCK (TASK-2501) has no cloud to choose: a stored or
+  // defaulted `cloud` reads as the owner's own server when one is saved, else
+  // the engine on the box. An explicit `local` pick keeps the box's engine
+  // while it is installed.
+  if (locked) {
+    if (stored === "endpoint" && endpointConfigured) return "endpoint";
+    if (stored === "local" && (localInstalled || !endpointConfigured)) return "local";
+    return endpointConfigured ? "endpoint" : "local";
+  }
+  // The owner's own server is only ever first because the owner chose it, and
+  // only while it is saved: a removed endpoint hands the box back to the rule
+  // below, exactly as before the engine existed.
+  if (stored === "endpoint" && endpointConfigured) return "endpoint";
   if (!cloudConfigured) return "local";
-  if (isSttEngine(stored)) return stored;
+  if (stored === "cloud" || stored === "local") return stored;
   return localInstalled ? "local" : "cloud";
 }
 
@@ -190,23 +217,62 @@ export async function readStoredSttPrimary(): Promise<unknown> {
   return await get(STT_PRIMARY_KEY);
 }
 
+/** Everything the transcribe route needs to know to walk its chain. */
+export interface SttRoute {
+  /** The engine tried first. */
+  primary: SttEngine;
+  /** Every engine tried, in order. Under the lock: the primary alone. */
+  order: SttEngine[];
+  /** The local-only AI lock is on: no cloud leg, no fallback. */
+  locked: boolean;
+}
+
+/** The primary and its chain, read over the store, the credential, the box and the lock. */
+export async function getSttRoute(): Promise<SttRoute> {
+  const [locked, stored, endpoint] = await Promise.all([cloudAiLockOn(), readStoredSttPrimary(), readSttEndpoint()]);
+  // Under the lock the ClawBox AI credential is never asked for: nothing here
+  // may send it anywhere, and its answer could not change the engine.
+  const [token, local] = await Promise.all([locked ? Promise.resolve(null) : resolveClawaiToken(), localSttInstalled()]);
+  const primary = resolveSttPrimary(stored, token !== null, local.installed, endpoint !== null, locked);
+  return { primary, order: sttEngineOrder(primary, locked), locked };
+}
+
 /** The engine tried first. */
 export async function getSttPrimary(): Promise<SttEngine> {
-  const [stored, token, local] = await Promise.all([
-    readStoredSttPrimary(),
-    resolveClawaiToken(),
-    localSttInstalled(),
-  ]);
-  return resolveSttPrimary(stored, token !== null, local.installed);
+  return (await getSttRoute()).primary;
 }
 
 export async function setSttPrimary(primary: SttEngine): Promise<void> {
   await set(STT_PRIMARY_KEY, primary);
 }
 
-/** The primary, then the other one as its fallback. */
-export function sttEngineOrder(primary: SttEngine): SttEngine[] {
+/**
+ * The primary, then the others as its fallback — the fail-open chain every box
+ * has had: a recording the first engine could not hear goes to the next.
+ *
+ * UNDER THE LOCAL-ONLY AI LOCK THE CHAIN IS THE PRIMARY ALONE, and it is never
+ * the cloud: a recording the chosen engine could not hear is an error the
+ * owner reads, not a quiet trip to another engine (TASK-2501: fail closed).
+ * The owner's own server is in the chain only when it is the primary, so a
+ * box that never saved one walks exactly the two-engine chain it always did.
+ */
+export function sttEngineOrder(primary: SttEngine, locked = false): SttEngine[] {
+  if (locked) return primary === "cloud" ? [] : [primary];
+  if (primary === "endpoint") return ["endpoint", "local", "cloud"];
   return primary === "cloud" ? ["cloud", "local"] : ["local", "cloud"];
+}
+
+/**
+ * An order a caller built without the lock, as the lock allows it: the first
+ * engine alone, and the lock's default — the owner's server when one is saved,
+ * else the box's engine — where that first engine is the cloud. PURE. The
+ * same answer {@link resolveSttPrimary} gives a locked box with a stored
+ * `cloud`, so the microphone and channel voice notes agree.
+ */
+export function lockedSttOrder(order: readonly SttEngine[], endpointConfigured: boolean): SttEngine[] {
+  const first = order[0];
+  if (first === undefined || first === "cloud") return [endpointConfigured ? "endpoint" : "local"];
+  return [first];
 }
 
 /** One `tools.media.models[]` entry, in either of the shapes OpenClaw accepts. */
@@ -236,10 +302,28 @@ export function buildAudioModels(
   order: readonly SttEngine[],
   localInstalled: boolean,
   cloudBacked: boolean,
+  endpointConfigured = false,
 ): AudioModelEntry[] {
   const entries: AudioModelEntry[] = [];
   for (const engine of order) {
-    if (engine === "cloud") {
+    if (engine === "endpoint") {
+      // The owner's own server, through the client script that reads the same
+      // record and key the microphone does and keeps the same address rule
+      // (stt-endpoint.ts). A CLI row, not an `openai` provider row with a
+      // per-entry `baseUrl`: the core resolves that row's credential from the
+      // `openai` provider — a keyless LAN server has none, a ChatGPT sign-in is
+      // refused on any custom endpoint, and an owner's own OpenAI key would be
+      // sent to the LAN server. The script carries the endpoint's own key, from
+      // its 0600 file, and nothing else.
+      if (!endpointConfigured) continue;
+      entries.push({
+        type: "cli",
+        command: PYTHON3,
+        args: [sttEndpointClientPath(), "{{MediaPath}}"],
+        timeoutSeconds: 120,
+        capabilities: ["audio"],
+      });
+    } else if (engine === "cloud") {
       if (!cloudBacked) continue;
       // capabilities says where the row may be used; OpenClaw 2's shared
       // tools.media.models list requires it on every row.

@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 
 import { getSystemUsername, isSafePasswordChars } from "@/lib/auth";
+import { recordAudit } from "@/lib/audit-log";
 import { readJsonObject } from "@/lib/bounded-json";
 import { findUser, resetUserPassword, rotateUserSessionVersion } from "@/lib/clawbox-users";
 import { personSession } from "@/lib/owner-session";
@@ -91,6 +92,7 @@ export async function POST(req: Request) {
     switch (result) {
       case "ok":
         console.log(`[users] the owner reset ${username}'s password`);
+        await recordAudit({ event: "user_password_reset", actor: who.username, target: username }, req);
         return NextResponse.json({ ok: true }, { headers: NO_STORE });
       case "wrong":
         return refuse(404, "unknown_user", `"${username}" is not a ClawBox user's account on this box.`);

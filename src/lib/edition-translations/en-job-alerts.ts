@@ -29,6 +29,18 @@ export const jobAlertsEn: Record<string, string> = {
   "jobAlerts.problem.skipping": "Skipped {count} times in a row",
   "jobAlerts.problem.overdue": "Did not run when it was due",
   "jobAlerts.problem.stopped": "Failed, now switched off",
+  // Who is told on Telegram (TASK-2543): the bot's approved users, ticked by the owner.
+  "jobAlerts.recipients.title": "Who gets them on Telegram",
+  "jobAlerts.recipients.helper":
+    "Only the people ticked here get these alerts from the bot. Everyone else the bot talks to does not.",
+  "jobAlerts.recipients.default":
+    "Not chosen yet, so the first {count} approved users get them, as before. Tick or untick someone to choose.",
+  "jobAlerts.recipients.none": "Nobody is ticked: these alerts reach this desktop only.",
+  "jobAlerts.recipients.stale": "Picked but no longer approved on the bot, so skipped: {count}.",
+  "jobAlerts.recipients.limit": "Up to {count} people can be picked.",
+  "jobAlerts.recipients.unreadable":
+    "The saved choice could not be read, so no alert goes to Telegram until it is chosen again.",
+  "jobAlerts.recipients.reset": "Back to the default",
 
   "jobAlerts.notice.failedOnce": "Scheduled job “{name}” failed.",
   "jobAlerts.notice.failing": "Scheduled job “{name}” failed {count} times in a row.",

@@ -99,6 +99,12 @@ export default defineConfig({
       // there turned `routes/providers/status.test.ts` red. All three readers
       // spell it `OPENCLAW_AGENTS_DIR || …`, so empty means "no override".
       OPENCLAW_AGENTS_DIR: "",
+      // The pause before the sign-in save runs `doctor --fix` a second time
+      // (src/lib/openclaw-doctor-recovery.ts): three seconds on a device, so a
+      // writer that collided with the first run is done, and nothing a suite
+      // wants to wait for in every case that rolls a sign-in back. The suite
+      // that pins the real default clears this itself.
+      CLAWBOX_DOCTOR_RETRY_PAUSE_MS: "0",
     },
     projects: [
       {

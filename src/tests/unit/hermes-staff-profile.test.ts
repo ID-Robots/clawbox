@@ -90,7 +90,7 @@ describe("a staff profile's config", () => {
 describe("ensureStaffHermesProfile", () => {
   it("makes the profile once and keeps it following the owner's config", async () => {
     const made = await ensureStaffHermesProfile("maria", root);
-    expect(made).toEqual(staffHermesProfilePaths("maria", root));
+    expect(made).toEqual({ ...staffHermesProfilePaths("maria", root), mcpApplied: true });
     expect(made!.profile).toBe("clawbox-staff-maria");
     expect(made!.home).toBe(path.join(root, "profiles", "clawbox-staff-maria"));
     expect(fs.statSync(made!.home).mode & 0o777).toBe(0o700);

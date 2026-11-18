@@ -257,6 +257,11 @@ export function openclawServerEntries(servers: unknown): ServerRead[] {
   return entriesOf(servers, "openclaw");
 }
 
+/** Hermes' `mcp_servers` as this module reads it — for a caller that already holds config.yaml (src/lib/hermes-staff-profile.ts). */
+export function hermesServerEntries(servers: unknown): ServerRead[] {
+  return entriesOf(servers, "hermes");
+}
+
 async function readOpenclawServers(): Promise<ServerRead[]> {
   // STRICT, like readClawboxMcpRegistration: a file this process could not read
   // is "could not look", never "no servers".
@@ -281,6 +286,15 @@ async function readHermesServers(): Promise<ServerRead[]> {
   // box's credentials.
   const doc = yaml.load(text, { schema: yaml.JSON_SCHEMA });
   return entriesOf(isPlainObject(doc) ? doc.mcp_servers : undefined, "hermes");
+}
+
+/**
+ * One harness's servers, STRICT: a config that cannot be read throws ("could
+ * not look" is never "no servers"). The servers the owner can grant to
+ * members of staff are the active harness's (src/lib/staff-mcp.ts).
+ */
+export function readServersOf(harness: McpHarness): Promise<ServerRead[]> {
+  return harness === "hermes" ? readHermesServers() : readOpenclawServers();
 }
 
 export interface HarnessMcpServers {
