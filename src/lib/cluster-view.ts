@@ -437,9 +437,9 @@ export const ENGINE_TIMEOUT_MS = 2_500;
 const METRICS_MAX_BYTES = 1024 * 1024;
 
 const LAN = new net.BlockList();
-LAN.addSubnet("10.0.0.0", 8, "ipv4");
-LAN.addSubnet("172.16.0.0", 12, "ipv4");
-LAN.addSubnet("192.168.0.0", 16, "ipv4");
+LAN.addSubnet("10.0.0.0", 8, "ipv4"); // public-hygiene: allow RFC 1918 range of the LAN rule
+LAN.addSubnet("172.16.0.0", 12, "ipv4"); // public-hygiene: allow RFC 1918 range of the LAN rule
+LAN.addSubnet("192.168.0.0", 16, "ipv4"); // public-hygiene: allow RFC 1918 range of the LAN rule
 LAN.addSubnet("127.0.0.0", 8, "ipv4");
 LAN.addAddress("::1", "ipv6");
 LAN.addSubnet("fc00::", 7, "ipv6");

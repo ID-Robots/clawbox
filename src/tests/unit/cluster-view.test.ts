@@ -22,6 +22,9 @@ import {
 } from "@/lib/cluster-view";
 import { parseSparkOutput, type ClusterSnapshot } from "@/lib/cluster-shared";
 
+// The collector script and `runScript` start real processes (`sh`), which on a loaded runner can take a while.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 /**
  * Settings → System → Cluster (TASK-2670), server half. Nothing here reads a real
  * machine except the two tests that say so: every Spark is a scripted answer,
@@ -428,25 +431,25 @@ describe("clusterAnswer: remembering, and never blocking", () => {
 
 describe("isLanAddress and lanRefusal", () => {
   it("is loopback, RFC 1918 and unique-local — and nothing else", () => {
-    for (const a of ["10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.9", "127.0.0.1", "::1", "fd00::1", "fc12::9", "::ffff:10.0.0.1", "[::1]"]) {
+    for (const a of ["10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.9", "127.0.0.1", "::1", "fd00::1", "fc12::9", "::ffff:10.0.0.1", "[::1]"]) { // public-hygiene: allow RFC 1918 example address for the LAN rule
       expect(isLanAddress(a), a).toBe(true);
     }
-    for (const a of ["8.8.8.8", "172.32.0.1", "172.15.255.255", "169.254.169.254", "100.64.0.1", "2001:db8::1", "fe80::1", "::ffff:8.8.8.8", "not-an-address", ""]) {
+    for (const a of ["8.8.8.8", "172.32.0.1", "172.15.255.255", "169.254.169.254", "100.64.0.1", "2001:db8::1", "fe80::1", "::ffff:8.8.8.8", "not-an-address", ""]) { // public-hygiene: allow RFC 1918 example address for the LAN rule
       expect(isLanAddress(a), a).toBe(false);
     }
   });
 
   it("judges a name by EVERY address it resolves to, and leaves a name that does not resolve to the request", async () => {
-    expect(await lanRefusal("engine.lan", async () => [{ address: "192.168.1.5" }])).toBeNull();
-    expect(await lanRefusal("engine.lan", async () => [{ address: "192.168.1.5" }, { address: "93.184.216.34" }])).not.toBeNull();
+    expect(await lanRefusal("engine.lan", async () => [{ address: "192.168.1.5" }])).toBeNull(); // public-hygiene: allow RFC 1918 example address for the LAN rule
+    expect(await lanRefusal("engine.lan", async () => [{ address: "192.168.1.5" }, { address: "93.184.216.34" }])).not.toBeNull(); // public-hygiene: allow RFC 1918 example address for the LAN rule
     expect(await lanRefusal("nowhere.invalid", async () => { throw new Error("ENOTFOUND"); })).toBeNull();
     expect(await lanRefusal("93.184.216.34", async () => [])).not.toBeNull();
-    expect(await lanRefusal("[fd00::5]", async () => [])).toBeNull();
+    expect(await lanRefusal("[fd00::5]", async () => [])).toBeNull(); // public-hygiene: allow RFC 1918 example address for the LAN rule
   });
 });
 
 describe("clusterAnswer: the engine", () => {
-  const TARGET: EngineTarget = { baseUrl: "http://192.168.1.50:8000/v1", apiKey: "k-test-placeholder", modelId: "deepseek-test" };
+  const TARGET: EngineTarget = { baseUrl: "http://192.168.1.50:8000/v1", apiKey: "k-test-placeholder", modelId: "deepseek-test" }; // public-hygiene: allow RFC 1918 example address for the LAN rule
 
   const metricsText = (tokens: number) => [
     "# TYPE vllm:num_requests_running gauge",
@@ -489,7 +492,7 @@ describe("clusterAnswer: the engine", () => {
     expect(engine.gate).toMatchObject({ online: true });
     // First read of a running total is no rate yet: n/a, not 0.
     expect(engine.metrics).toEqual({ available: true, active: 3, queued: 2, tokensPerSecond: null });
-    expect(seen.map((s) => s.url).sort()).toEqual(["http://192.168.1.50:8000/metrics", "http://192.168.1.50:8000/v1/models"]);
+    expect(seen.map((s) => s.url).sort()).toEqual(["http://192.168.1.50:8000/metrics", "http://192.168.1.50:8000/v1/models"]); // public-hygiene: allow RFC 1918 example address for the LAN rule
     expect(seen.every((s) => s.auth === "Bearer k-test-placeholder")).toBe(true);
   });
 
@@ -570,7 +573,7 @@ describe("clusterAnswer: the engine", () => {
     setup({ fetchImpl: impl, readEngine: async () => TARGET, lookup: async () => [], run: runnerBy({ local: ok(GOOD("spark-a")) }) });
     const engine = await engineOf();
     expect(engine.metrics?.available).toBe(false);
-    expect(seen.every((s) => s.url.startsWith("http://192.168.1.50:8000/"))).toBe(true);
+    expect(seen.every((s) => s.url.startsWith("http://192.168.1.50:8000/"))).toBe(true); // public-hygiene: allow RFC 1918 example address for the LAN rule
   });
 
   it("is bounded when a name lookup never answers: the gate is reported down at the deadline, the Sparks are not held up", async () => {
