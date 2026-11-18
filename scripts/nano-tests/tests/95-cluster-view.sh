@@ -70,8 +70,9 @@ fi
 # Put the checkout's .env back as it was and restart the web server onto it,
 # stop the engine fixture, remove the second account. Each step says how it
 # went; the folder (with the .env backup and the account's name) is removed
-# only when every step worked. SC2317: run by the EXIT trap.
-# shellcheck disable=SC2016,SC2317
+# only when every step worked. SC2317/SC2329: run by the EXIT trap, so never
+# called by name.
+# shellcheck disable=SC2016,SC2317,SC2329
 restore() {
   local out line
   out=$(board '
