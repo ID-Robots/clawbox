@@ -24,6 +24,8 @@ beforeAll(async () => {
 
 beforeEach(() => {
   fs.rmSync(path.join(ROOT, "data"), { recursive: true, force: true });
+  // The seal lives on globalThis for the life of the process: no case starts sealed.
+  audit.unsealAuditLog();
 });
 
 afterAll(() => {
@@ -154,27 +156,34 @@ describe("reading", () => {
 });
 
 describe("a factory reset", () => {
-  it("seals every copy of the module, as separate route bundles load it, and the seal lapses on its own", async () => {
+  it("seals every copy of the module, as separate route bundles load it, for as long as the process lives", async () => {
     vi.resetModules();
     const other = await import("@/lib/audit-log");
     expect(other).not.toBe(audit);
     await audit.clearAuditLogForReset();
     try {
+      expect(other.auditLogSealed()).toBe(true);
       // Written through the other copy: dropped all the same.
       await other.recordAudit({ event: "login", actor: "previous-owner" });
       expect(fs.existsSync(audit.auditLogPath())).toBe(false);
-      // Five minutes on, no reboot came: the log records again.
+      // A reset that runs longer than five minutes (model deletion, a slow
+      // disk), or a day: still sealed — nothing but the failure gate or the
+      // end of the process releases it.
       const now = Date.now();
-      const spy = vi.spyOn(Date, "now").mockReturnValue(now + 5 * 60_000 + 1);
-      try {
-        await other.recordAudit({ event: "login", actor: "owner" });
-      } finally {
-        spy.mockRestore();
+      for (const later of [5 * 60_000 + 1, 6 * 60_000, 24 * 60 * 60_000]) {
+        const spy = vi.spyOn(Date, "now").mockReturnValue(now + later);
+        try {
+          await other.recordAudit({ event: "login", actor: "previous-owner" });
+        } finally {
+          spy.mockRestore();
+        }
       }
-      expect(lines().map((l) => l.actor)).toEqual(["owner"]);
+      expect(fs.existsSync(audit.auditLogPath())).toBe(false);
+      expect(audit.auditLogSealed()).toBe(true);
     } finally {
       audit.unsealAuditLog();
     }
+    expect(other.auditLogSealed()).toBe(false);
   });
 
   it("seals the log: a sign-in that finishes after the clear writes nothing, the reset's own line does", async () => {

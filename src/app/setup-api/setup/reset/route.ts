@@ -924,7 +924,9 @@ export async function POST(request: Request) {
     // retry. Gate first so an incomplete wipe leaves the box reachable.
     if (allFailures.length > 0) {
       console.warn(`[Reset] Aborting reboot — ${allFailures.length} wipe failure(s)`);
-      // No reboot follows: the box keeps running, and keeps its audit log.
+      // A confirmed failure, and the one place the audit log's seal is
+      // released: no reboot follows, the box keeps running and keeps its log.
+      // Past this gate the seal holds until the process ends.
       unsealAuditLog();
       return NextResponse.json(
         { error: `Factory reset incomplete: ${allFailures.length} file deletion(s) failed`, failures: allFailures },

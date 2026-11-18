@@ -141,6 +141,9 @@ describe("POST /setup-api/setup/reset", () => {
     });
 
     session = installSessionFixture();
+    // The audit log's seal lives on globalThis for the life of the process
+    // (src/lib/audit-log.ts): every case starts unsealed.
+    (await import("@/lib/audit-log")).unsealAuditLog();
     const mod = await import("@/app/setup-api/setup/reset/route");
     // The handler requires a session, the owner's password and the typed word
     // (TASK-443), so every call in this file carries all three. The gate itself
@@ -497,6 +500,34 @@ describe("POST /setup-api/setup/reset", () => {
     expect(res.status).toBe(500);
     expect(body.error).toContain("incomplete");
     expect(body.failures).toBeDefined();
+  });
+
+  it("leaves the audit log sealed after a reset that went through, until the process ends (TASK-2446)", async () => {
+    const audit = await import("@/lib/audit-log");
+    const res = await resetPost();
+    expect(res.status).toBe(200);
+    expect(audit.auditLogSealed()).toBe(true);
+    // However long it is before the reboot actually comes.
+    const now = Date.now();
+    const spy = vi.spyOn(Date, "now").mockReturnValue(now + 60 * 60_000);
+    try {
+      expect(audit.auditLogSealed()).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("releases the audit log's seal when the reset stops at its failure gate (TASK-2446)", async () => {
+    const audit = await import("@/lib/audit-log");
+    mockFs.readdir
+      .mockResolvedValueOnce(["file1.json", "file2.json"] as unknown as ReaddirResult)
+      .mockResolvedValue([] as unknown as ReaddirResult);
+    mockFs.rm
+      .mockResolvedValueOnce()
+      .mockRejectedValueOnce(new Error("Permission denied"));
+    const res = await resetPost();
+    expect(res.status).toBe(500);
+    expect(audit.auditLogSealed()).toBe(false);
   });
 
   it("returns 500 on unexpected error", async () => {
@@ -860,6 +891,9 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     setupExecFileMock({ nmcli: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
 
     session = installSessionFixture();
+    // The audit log's seal lives on globalThis for the life of the process
+    // (src/lib/audit-log.ts): every case starts unsealed.
+    (await import("@/lib/audit-log")).unsealAuditLog();
     const mod = await import("@/app/setup-api/setup/reset/route");
     // The handler requires a session, the owner's password and the typed word
     // (TASK-443), so every call in this file carries all three. The gate itself
@@ -1119,6 +1153,9 @@ describe("POST /setup-api/setup/reset — a non-directory where a directory belo
     setupExecFileMock({ nmcli: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
 
     session = installSessionFixture();
+    // The audit log's seal lives on globalThis for the life of the process
+    // (src/lib/audit-log.ts): every case starts unsealed.
+    (await import("@/lib/audit-log")).unsealAuditLog();
     const mod = await import("@/app/setup-api/setup/reset/route");
     resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
       method: "POST",
@@ -1348,6 +1385,9 @@ describe("POST /setup-api/setup/reset — ~/Projects and loose files in the home
     setupExecFileMock({ nmcli: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
 
     session = installSessionFixture();
+    // The audit log's seal lives on globalThis for the life of the process
+    // (src/lib/audit-log.ts): every case starts unsealed.
+    (await import("@/lib/audit-log")).unsealAuditLog();
     const mod = await import("@/app/setup-api/setup/reset/route");
     resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
       method: "POST",
