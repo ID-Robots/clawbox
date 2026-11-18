@@ -96,6 +96,8 @@ interface StubConfig {
   device?: string;
   compute_type?: string;
   fail_models?: string[];
+  /** Appended to the load failure's message, to make it run to several lines. */
+  fail_detail?: string;
   default_text?: string;
   transcripts?: Record<string, string>;
 }
@@ -173,7 +175,7 @@ const FASTER_WHISPER_STUB = [
   "    return _hf_hub_download(name)",
   "",
   "def _hf_hub_download(name):",
-  '    raise RuntimeError("stub: no weights for " + name)',
+  '    raise RuntimeError("stub: no weights for " + name + CFG.get("fail_detail", ""))',
   "",
   "class WhisperModel:",
   '    def __init__(self, model_size_or_path, device="cpu", compute_type="default", **kwargs):',
@@ -530,6 +532,28 @@ describe.skipIf(!hasPython3)("scripts/bench/stt-bench.py", () => {
     const lenient = run([...args, "--skip-missing"]);
     expect(lenient.status).toBe(0);
     expect(lenient.stdout).toContain("Variants not measured");
+  });
+
+  it("keeps a cause that runs to several lines whole, and in front", () => {
+    // huggingface_hub's offline errors are two sentences on two lines: the
+    // second alone ("Check your internet connection…") does not say which
+    // model, nor that it was a load that failed.
+    configure({
+      compute_types: { cpu: ["int8"] },
+      delay: 0.02,
+      fail_models: ["small"],
+      fail_detail: "\nCheck your internet connection or see how to run the library in offline mode.",
+      default_text: "hello",
+    });
+    const out = path.join(dir, "report.json");
+    run([
+      "--models", "small", "--compute", "int8", "--reps", "1", "--cache", cache,
+      "--samples", manifestFile([{ id: "en-1", lang: "en", seconds: 1.0, reference: "hello" }]),
+      "--out", out,
+    ]);
+    const lines = String(readReport(out).variants[0].skipped).split("\n");
+    expect(lines[0]).toContain("no weights for small");
+    expect(lines[1]).toContain("Check your internet connection");
   });
 
   it("records a worker that dies mid-run as a failure, not as fast", () => {

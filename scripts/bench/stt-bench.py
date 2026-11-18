@@ -603,13 +603,20 @@ def cause_first(stderr: str) -> str:
     characters, and a log line is read from the left. Led by "Traceback (most
     recent call last):" the cause is the part that gets cut — and how many
     frames come before it depends on the interpreter (3.13 began printing the
-    source lines of `-c` code, the worker's own frame included). So the last
-    line leads, and the frames follow for whoever needs them.
+    source lines of `-c` code, the worker's own frame included). So the cause
+    leads, and the frames follow for whoever needs them.
+
+    The cause is everything after the last indented line: a traceback indents
+    its frames, their source lines and carets, and not the exception, whose
+    message can run to several lines (huggingface_hub's do). Output with no
+    such shape leads with its last line.
     """
     lines = stderr.strip().splitlines()
-    if len(lines) < 2:
-        return stderr.strip()
-    return "\n".join([lines[-1].strip(), *lines[:-1]])
+    last_indented = max((i for i, line in enumerate(lines) if line[:1].isspace()), default=-1)
+    start = last_indented + 1 if 0 <= last_indented < len(lines) - 1 else len(lines) - 1
+    if start <= 0:
+        return "\n".join(lines)
+    return "\n".join([*lines[start:], *lines[:start]])
 
 
 def read_tagged_line(proc: subprocess.Popen, name: str, what: str, timeout: float, stderr_tail) -> dict:
