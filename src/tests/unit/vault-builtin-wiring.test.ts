@@ -187,8 +187,10 @@ describe("the service: installed and started on every box, loopback only", () =>
   });
 
   it("says so when a vault it started or restarted does not stay up, and tries no apt it cannot have", () => {
-    // The real functions, a systemctl stand-in that tells what the unit does
-    // after the --no-block call, and no waiting worth the name.
+    // The real functions and a systemctl stand-in. Before the --no-block call
+    // the unit is FAKE_BEFORE on pid 1111; after it, each is-active probe takes
+    // the next "state:pid" of FAKE_AFTER (the last one repeats) and `show`
+    // answers the pid of the probe last taken.
     const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "vault-up-")));
     const bin = path.join(tmp, "bin");
     fs.mkdirSync(bin);
@@ -196,10 +198,14 @@ describe("the service: installed and started on every box, loopback only", () =>
       path.join(bin, "systemctl"),
       [
         "#!/bin/sh",
+        'tok() { n=$(cat "$FAKE_DIR/n" 2>/dev/null || echo 1); set -- $FAKE_AFTER; [ "$n" -le $# ] || n=$#; eval "echo \\${$n}"; }',
         'case "$1" in',
         "  is-enabled) echo enabled ;;",
-        '  is-active) if [ -f "$FAKE_DIR/called" ]; then s=$FAKE_AFTER; else s=$FAKE_BEFORE; fi; [ "$s" = up ] ;;',
-        '  show) if [ -f "$FAKE_DIR/called" ] && [ "$FAKE_NEW_PID" = 1 ]; then echo 2222; else echo 1111; fi ;;',
+        "  is-active)",
+        '    if [ ! -f "$FAKE_DIR/called" ]; then [ "$FAKE_BEFORE" = up ]; exit; fi',
+        '    n=$(( $(cat "$FAKE_DIR/n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$FAKE_DIR/n"',
+        '    [ "$(tok | cut -d: -f1)" = up ] ;;',
+        '  show) if [ -f "$FAKE_DIR/called" ]; then tok | cut -d: -f2; else echo 1111; fi ;;',
         '  start|restart) echo "$1" >> "$FAKE_DIR/called" ;;',
         "esac",
         "",
@@ -208,42 +214,50 @@ describe("the service: installed and started on every box, loopback only", () =>
     );
     fs.writeFileSync(path.join(bin, "apt-get"), '#!/bin/sh\necho "$*" >> "$FAKE_DIR/apt"\n', { mode: 0o755 });
     const fns = ["ensure_vault_service", "vault_came_up", "ensure_vault_packages"].map((n) => `${shellFunction(INSTALL_SH, n)}\n}\n`).join("");
-    const run = (stubs: string, env: Record<string, string>) => {
+    const run = (stubs: string, before: "up" | "down", after: string) => {
       const dir = fs.mkdtempSync(path.join(tmp, "case-"));
-      const r = spawnSync("bash", ["-c", `${fns}${stubs}\nensure_vault_service; echo "rc=$?"`], {
-        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, FAKE_DIR: dir, VAULT_UP_WAIT_S: "2", VAULT_UP_STEADY_S: "0", ...env },
+      // ensure_vault_service is the script's last command: its status is the exit status.
+      const r = spawnSync("bash", ["-c", `${fns}${stubs}\nensure_vault_service`], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`, FAKE_DIR: dir, FAKE_BEFORE: before, FAKE_AFTER: after, VAULT_UP_WAIT_S: "2", VAULT_UP_STEADY_S: "0" },
         encoding: "utf8",
       });
+      expect(r.error).toBeUndefined();
+      expect(r.signal).toBeNull();
       const calls = fs.existsSync(path.join(dir, "called")) ? fs.readFileSync(path.join(dir, "called"), "utf8").trim() : "";
-      return { out: `${r.stdout}${r.stderr}`, calls, apt: fs.existsSync(path.join(dir, "apt")) };
+      return { status: r.status, out: `${r.stdout}${r.stderr}`, calls, apt: fs.existsSync(path.join(dir, "apt")) };
     };
     const installed = "dpkg_installed() { return 0; }\nvault_runs_previous_build() { return 0; }";
+    const flapping = Array.from({ length: 12 }, (_, i) => `up:${i % 2 ? 3333 : 2222}`).join(" ");
     try {
-      // A start that comes up: no warning.
-      let r = run(installed, { FAKE_BEFORE: "down", FAKE_AFTER: "up", FAKE_NEW_PID: "1" });
+      // A start that comes up and stays on its pid: no warning.
+      let r = run(installed, "down", "up:2222");
       expect(r.calls).toBe("start");
-      expect(r.out).toContain("rc=0");
+      expect(r.status).toBe(0);
       expect(r.out).not.toContain("Warning");
-      // A start whose launcher exits: the update says so, and the step is not "ok".
-      r = run(installed, { FAKE_BEFORE: "down", FAKE_AFTER: "down", FAKE_NEW_PID: "1" });
+      // A start whose launcher never comes up: the update says so, and the step is not "ok".
+      r = run(installed, "down", "down:0");
+      expect(r.status).toBe(1);
       expect(r.out).toContain("Warning: clawbox-vault.service did not stay up after its start");
-      expect(r.out).toContain("rc=1");
+      // Up on its first probe, gone on the next (the steady check is what sees it).
+      r = run(installed, "down", "up:2222 down:0");
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("did not stay up after its start");
+      // Active all along, but on another pid at every look: a launcher systemd keeps restarting.
+      r = run(installed, "down", flapping);
+      expect(r.status).toBe(1);
+      expect(r.out).toContain("did not stay up after its start");
       // A restart onto this build: up only counts on a NEW process.
-      r = run(installed, { FAKE_BEFORE: "up", FAKE_AFTER: "up", FAKE_NEW_PID: "1" });
+      r = run(installed, "up", "up:2222");
       expect(r.calls).toBe("restart");
-      expect(r.out).toContain("rc=0");
-      r = run(installed, { FAKE_BEFORE: "up", FAKE_AFTER: "up", FAKE_NEW_PID: "0" });
+      expect(r.status).toBe(0);
+      r = run(installed, "up", "up:1111");
+      expect(r.status).toBe(1);
       expect(r.out).toContain("Warning: clawbox-vault.service did not stay up after its restart");
-      expect(r.out).toContain("rc=1");
-      // The packages are missing and apt cannot be had: no apt-get run, a warning, rc 1.
-      r = run("dpkg_installed() { return 1; }\nwait_for_apt() { return 1; }\nvault_runs_previous_build() { return 1; }", {
-        FAKE_BEFORE: "up",
-        FAKE_AFTER: "up",
-        FAKE_NEW_PID: "0",
-      });
+      // The packages are missing and apt cannot be had: no apt-get run, a warning, status 1.
+      r = run("dpkg_installed() { return 1; }\nwait_for_apt() { return 1; }\nvault_runs_previous_build() { return 1; }", "up", "up:1111");
       expect(r.apt).toBe(false);
+      expect(r.status).toBe(1);
       expect(r.out).toContain("Warning: ClawBox Vault packages not installed: pass gnupg (apt is busy");
-      expect(r.out).toContain("rc=1");
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

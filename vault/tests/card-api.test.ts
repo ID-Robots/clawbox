@@ -46,7 +46,7 @@ const mcpCall: VaultCall = async (method, path, body) => {
 /** Plays the extension and the human for the next card command. */
 async function humanAnswers(
   decision: "confirm" | "decline" | "ignore",
-): Promise<{ command: Record<string, unknown> | undefined; secretStatusBeforeConfirm?: number; secretStatusAfterDecline?: number }> {
+): Promise<{ command: Record<string, unknown> | undefined; secretStatusBeforeConfirm?: number; afterDecline?: { status: number; body: Record<string, unknown> } }> {
   const polled = await asExt("/api/ext/commands?wait=2000");
   const command = (polled.body.commands as Array<Record<string, unknown>>)[0];
   if (!command) return { command };
@@ -67,7 +67,7 @@ async function humanAnswers(
   }
   // Declined: asking for the card now must still be refused.
   const after = await asExt("/api/ext/card-secret", { body: { commandId: command.id } }, { secret: true });
-  return { command, secretStatusBeforeConfirm: early.status, secretStatusAfterDecline: after.status };
+  return { command, secretStatusBeforeConfirm: early.status, afterDecline: { status: after.status, body: after.body } };
 }
 
 beforeAll(async () => {
@@ -242,7 +242,9 @@ describe("agent card fill: only after the human confirms", () => {
     expect(human.command).toMatchObject({ kind: "card", card: { label: "Travel Visa", brand: "visa", last4: "4242", exp: "11/33" } });
     expect(JSON.stringify(human.command)).not.toContain(NUMBER);
     expect(human.secretStatusBeforeConfirm).toBe(404);
-    expect(human.secretStatusAfterDecline).toBe(404);
+    expect(human.afterDecline?.status).toBe(404);
+    // The refusal is the plain error and nothing of the card.
+    expect(human.afterDecline?.body).toEqual({ error: "no confirmed card fill command" });
     expect(result.body).toMatchObject({ status: "declined", card: { label: "Travel Visa", last4: "4242" } });
     expect(result.body.name).toBeUndefined();
   });

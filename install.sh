@@ -4217,14 +4217,17 @@ ensure_vault_service() {
 }
 
 # vault_came_up OLD_PID — after a --no-block start or restart: within
-# VAULT_UP_WAIT_S (30) seconds the unit is active on a MainPID other than
-# OLD_PID (0 for a start), and is still active on that same pid
+# VAULT_UP_WAIT_S (30) seconds of wall clock the unit is active on a MainPID
+# other than OLD_PID (0 for a start), and is still active on that same pid
 # VAULT_UP_STEADY_S (3) seconds later, so a launcher that exits at once is
 # reported here instead of only in the journal. It only watches: the unit's
-# own Restart=on-failure retries are left to systemd either way.
+# own Restart=on-failure retries are left to systemd either way. The deadline
+# is $SECONDS as a delta, asked first, as in restore_previous_build: a count of
+# sleeps would stretch by however long each systemctl query took. The queries
+# themselves are not cut short (nothing in the installer is, for being slow).
 vault_came_up() {
-  local old=${1:-0} waited=0 limit=${VAULT_UP_WAIT_S:-30} steady=${VAULT_UP_STEADY_S:-3} pid
-  while [ "$waited" -lt "$limit" ]; do
+  local old=${1:-0} limit=${VAULT_UP_WAIT_S:-30} steady=${VAULT_UP_STEADY_S:-3} pid started=$SECONDS
+  while [ $((SECONDS - started)) -lt "$limit" ]; do
     if systemctl is-active --quiet clawbox-vault.service 2>/dev/null; then
       pid="$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)"
       case "$pid" in
@@ -4234,12 +4237,10 @@ vault_came_up() {
           systemctl is-active --quiet clawbox-vault.service 2>/dev/null \
             && [ "$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)" = "$pid" ] \
             && return 0
-          waited=$((waited + steady))
           ;;
       esac
     fi
     sleep 1
-    waited=$((waited + 1))
   done
   return 1
 }
