@@ -254,6 +254,19 @@ describe("an OpenClaw pass off a terminal that rewrites chunks without adding an
     expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "succeeded", errorCode: "" });
     expect(existsSync(fake.termed)).toBe(false);
   });
+
+  it("is still stopped as `stalled` once it stops writing, though it wrote to its index first", async () => {
+    // The write mark only moves on a commit: an index left as it was after a
+    // few writes is a pass that stopped moving.
+    process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS = "1500";
+    noTerminal();
+    const fake = await fakeIndexer({ steps: 3, stepMs: 200, chunks: true, replace: true, hang: true });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    expect(await settledMemoryRun(tmpDir, { tries: 1_000 })).toMatchObject({ status: "failed", errorCode: "stalled" });
+    expect(await fs.readFile(fake.termed, "utf8")).toBe("TERM");
+  });
 });
 
 describe("an OpenClaw pass the owner stops", () => {
