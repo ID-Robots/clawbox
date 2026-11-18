@@ -37,17 +37,33 @@ function parse(data: unknown): SessionUser | null {
   };
 }
 
+/** The lookup, headers and body together, has this long: one that stalls counts as failed, and the next ask tries again. */
+export const SESSION_USER_TIMEOUT_MS = 15_000;
+
+/** /users/me under one deadline over the request and its body; null for any failure, a stall included. */
+function lookUpSessionUser(): Promise<SessionUser | null> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(null);
+    }, SESSION_USER_TIMEOUT_MS);
+  });
+  const asked = fetch("/setup-api/users/me", { cache: "no-store", signal: controller.signal })
+    .then((r) => (r.ok ? r.json() : null))
+    .then(parse)
+    .catch(() => null);
+  return Promise.race([asked, expired]).finally(() => clearTimeout(timer));
+}
+
 /** One request per page load, shared by every component that asks. A failure is retried on the next ask. */
 export function fetchSessionUser(): Promise<SessionUser | null> {
   if (!pending) {
-    pending = fetch("/setup-api/users/me", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then(parse)
-      .catch(() => null)
-      .then((user) => {
-        if (!user) pending = null;
-        return user;
-      });
+    pending = lookUpSessionUser().then((user) => {
+      if (!user) pending = null;
+      return user;
+    });
   }
   return pending;
 }
@@ -59,17 +75,19 @@ export function fetchSessionUser(): Promise<SessionUser | null> {
  * different people: the chat, whose cached tabs and main conversation are
  * the signed-in person's own.
  */
-export function useSettledSessionUser(): SessionUser | null | undefined {
+export function useSettledSessionUser(askAgainWhen?: unknown): SessionUser | null | undefined {
   const [user, setUser] = useState<SessionUser | null | undefined>(undefined);
+  // `askAgainWhen` changing asks again — after a lookup that failed only: a
+  // settled user is kept, and `fetchSessionUser` answers it from memory.
   useEffect(() => {
     let live = true;
     void fetchSessionUser().then((u) => {
-      if (live) setUser(u);
+      if (live) setUser((known) => known ?? u);
     });
     return () => {
       live = false;
     };
-  }, []);
+  }, [askAgainWhen]);
   return user;
 }
 

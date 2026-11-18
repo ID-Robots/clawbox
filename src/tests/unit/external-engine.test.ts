@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, statSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -34,6 +34,7 @@ import {
   probeExternalEngine,
   probeExternalEngineReasoning,
   readExternalEngineKey,
+  readExternalEngineKeyWrittenAt,
   writeExternalEngineKey,
 } from "@/lib/external-engine";
 
@@ -215,9 +216,72 @@ describe("openclawExternalProviderDefinition", () => {
   });
 });
 
+describe("the key file's write time (TASK-2670)", () => {
+  it("is when the key was written, and a rollback can put back the time an earlier write had", () => {
+    expect(readExternalEngineKeyWrittenAt()).toBeNull();
+    const before = Date.now();
+    writeExternalEngineKey(KEY);
+    const after = Date.now();
+    const written = readExternalEngineKeyWrittenAt()!;
+    // Now, within the filesystem's coarse clock — never a time ahead of the write.
+    expect(written).toBeGreaterThanOrEqual(before - 2_000);
+    expect(written).toBeLessThanOrEqual(after + 2_000);
+    const earlier = Date.parse("2026-11-01T08:00:00.000Z");
+    writeExternalEngineKey("sk-previous-key-placeholder-0123456789", earlier);
+    expect(Math.abs(readExternalEngineKeyWrittenAt()! - earlier)).toBeLessThan(1_000);
+    expect(readExternalEngineKey()).toBe("sk-previous-key-placeholder-0123456789");
+    expect(statSync(path.join(root, "data", ".external-engine-key")).mode & 0o777).toBe(0o600);
+  });
+
+  it("still puts the key back when its old time cannot be set, and leaves no temp file when the write fails", async () => {
+    const fsModule = await import("node:fs");
+    const utimes = vi.spyOn(fsModule.default, "utimesSync").mockImplementation(() => {
+      throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+    });
+    try {
+      writeExternalEngineKey("sk-previous-key-placeholder-0123456789", Date.parse("2026-11-01T08:00:00.000Z"));
+      expect(readExternalEngineKey()).toBe("sk-previous-key-placeholder-0123456789");
+      // Not the old time: newer than its record, which the Cluster view withholds.
+      expect(readExternalEngineKeyWrittenAt()!).toBeGreaterThan(Date.parse("2026-11-02T00:00:00.000Z"));
+    } finally {
+      utimes.mockRestore();
+    }
+    const rename = vi.spyOn(fsModule.default, "renameSync").mockImplementation(() => {
+      throw Object.assign(new Error("gone"), { code: "ENOENT" });
+    });
+    try {
+      expect(() => writeExternalEngineKey(KEY)).toThrow("gone");
+    } finally {
+      rename.mockRestore();
+    }
+    expect(readdirSync(path.join(root, "data")).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+});
+
 describe("probeExternalEngine", () => {
   const ok = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
   const opts = { baseUrl: "http://192.0.2.10:8000/v1", modelId: "Qwen/Qwen3-32B" };
+
+  it("lets go of a refusal's body, so the connection is not held by a body nobody reads", async () => {
+    for (const status of [401, 302, 500]) {
+      const cancel = vi.fn(async () => {});
+      const res = new Response("streaming…", { status, headers: status === 302 ? { location: "http://192.0.2.11/v1/models" } : {} });
+      Object.defineProperty(res, "body", { value: { cancel } });
+      const fetchImpl = vi.fn(async () => res);
+      const r = await probeExternalEngine({ ...opts, apiKey: KEY, fetchImpl: fetchImpl as unknown as typeof fetch });
+      expect(r.ok, String(status)).toBe(false);
+      expect(cancel, String(status)).toHaveBeenCalled();
+    }
+  });
+
+  it("starts no request once the caller's own deadline has fired", async () => {
+    const fetchImpl = vi.fn(async () => ok({ data: [{ id: "Qwen/Qwen3-32B" }] }));
+    const controller = new AbortController();
+    controller.abort();
+    const r = await probeExternalEngine({ ...opts, apiKey: KEY, fetchImpl: fetchImpl as unknown as typeof fetch, signal: controller.signal });
+    expect(r).toMatchObject({ ok: false, code: "unreachable" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 
   it("lists the models and sends the key as a bearer, without following redirects", async () => {
     const fetchImpl = vi.fn(async () => ok({ object: "list", data: [{ id: "Qwen/Qwen3-32B" }, { id: "other" }] }));

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
+import { localAiTransitionMark, onLocalAiTransitionStart, withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
 
 /**
  * One Local AI transition at a time (TASK-2376): the external engine's save
@@ -40,5 +40,71 @@ describe("withLocalAiTransitionLock", () => {
     const failed = withLocalAiTransitionLock(async () => { throw new Error("boom"); });
     await expect(failed).rejects.toThrow("boom");
     await expect(withLocalAiTransitionLock(async () => "next")).resolves.toBe("next");
+  });
+});
+
+describe("localAiTransitionMark", () => {
+  it("says a transition is running while one is, and moves its stamp when one starts and when it ends — a failed one included", async () => {
+    const idle = localAiTransitionMark();
+    expect(idle.running).toBe(false);
+    const gate = deferred();
+    let during: ReturnType<typeof localAiTransitionMark> | null = null;
+    const run = withLocalAiTransitionLock(async () => {
+      during = localAiTransitionMark();
+      await gate.promise;
+      throw new Error("save failed");
+    });
+    await Promise.resolve();
+    expect(during).not.toBeNull();
+    expect(during!.running).toBe(true);
+    expect(during!.generation).not.toBe(idle.generation);
+    gate.resolve();
+    await expect(run).rejects.toThrow("save failed");
+    const after = localAiTransitionMark();
+    expect(after.running).toBe(false);
+    expect(after.generation).not.toBe(during!.generation);
+    expect(after.generation).not.toBe(idle.generation);
+  });
+});
+
+describe("onLocalAiTransitionStart", () => {
+  it("tells a listener when a transition starts, until it stops listening", async () => {
+    const heard: string[] = [];
+    const stop = onLocalAiTransitionStart(() => heard.push("start"));
+    await withLocalAiTransitionLock(async () => {
+      heard.push("inside");
+    });
+    expect(heard).toEqual(["start", "inside"]);
+    stop();
+    await withLocalAiTransitionLock(async () => {});
+    expect(heard).toEqual(["start", "inside"]);
+  });
+
+  it("a listener that throws does not stop the transition", async () => {
+    const stop = onLocalAiTransitionStart(() => {
+      throw new Error("listener broke");
+    });
+    await expect(withLocalAiTransitionLock(async () => "ran")).resolves.toBe("ran");
+    stop();
+  });
+
+  it("a listener whose promise rejects or never settles neither holds the queue nor goes unhandled", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    const stopA = onLocalAiTransitionStart((async () => {
+      throw new Error("async listener broke");
+    }) as unknown as () => void);
+    const stopB = onLocalAiTransitionStart((() => new Promise(() => {})) as unknown as () => void);
+    try {
+      await expect(withLocalAiTransitionLock(async () => "first")).resolves.toBe("first");
+      await expect(withLocalAiTransitionLock(async () => "second")).resolves.toBe("second");
+      await new Promise((r) => setTimeout(r, 20));
+      expect(unhandled).toEqual([]);
+    } finally {
+      stopA();
+      stopB();
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });

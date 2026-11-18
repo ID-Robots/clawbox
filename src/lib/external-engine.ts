@@ -72,15 +72,52 @@ export function readExternalEngineKey(): string | null {
   }
 }
 
-/** Write the key 0600, atomically (temp + rename), so a crash never leaves half a key. */
-export function writeExternalEngineKey(key: string): void {
+/**
+ * When the key file was last written (ms since the epoch), or null when there
+ * is none. A save writes the key just BEFORE it stamps the record's `savedAt`,
+ * so a key written after the record it sits beside is not that record's — the
+ * Cluster view withholds it then (TASK-2670).
+ */
+export function readExternalEngineKeyWrittenAt(): number | null {
+  try {
+    return fs.statSync(keyPath()).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write the key 0600, atomically (temp + rename), so a crash never leaves half a key.
+ * `writtenAt` puts back the time an earlier write had: a save that rolls back
+ * restores the previous key as it was, still older than its record.
+ */
+export function writeExternalEngineKey(key: string, writtenAt?: number | null): void {
   const target = keyPath();
   fs.mkdirSync(path.dirname(target), { recursive: true });
   // Unique per write, so two writers never share a temp file.
   const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  fs.writeFileSync(tmp, key, { mode: 0o600 });
-  fs.chmodSync(tmp, 0o600);
-  fs.renameSync(tmp, target);
+  try {
+    fs.writeFileSync(tmp, key, { mode: 0o600 });
+    fs.chmodSync(tmp, 0o600);
+    if (typeof writtenAt === "number" && Number.isFinite(writtenAt)) {
+      const at = new Date(writtenAt);
+      try {
+        fs.utimesSync(tmp, at, at);
+      } catch {
+        // The key still goes back: a key whose old time could not be restored
+        // is newer than its record, which the Cluster view withholds (fails closed).
+      }
+    }
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    // No temp file left behind holding a key.
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // never written, or already renamed
+    }
+    throw err;
+  }
 }
 
 export function deleteExternalEngineKey(): void {
@@ -265,7 +302,7 @@ function modelIdsOf(payload: unknown): string[] | null {
 }
 
 /** The body as text, or null once it passes `maxBytes` (the read is cancelled there). */
-async function readCapped(res: Response, maxBytes: number): Promise<string | null> {
+export async function readCapped(res: Response, maxBytes: number): Promise<string | null> {
   const declared = Number(res.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
     await res.body?.cancel().catch(() => {});
@@ -330,6 +367,11 @@ export async function probeExternalEngine(options: {
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
   lookupImpl?: LookupFn;
+  /**
+   * The caller's own deadline. Once it has fired no request is started (a name
+   * lookup that outlived it ends in `unreachable`), and one under way is cut.
+   */
+  signal?: AbortSignal;
 }): Promise<ProbeResult> {
   const doFetch = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
@@ -341,10 +383,14 @@ export async function probeExternalEngine(options: {
       error: `That address is ${refused}, which is never an AI engine.`,
     };
   }
+  if (options.signal?.aborted) {
+    return { ok: false, code: "unreachable", error: `The engine at ${options.baseUrl} was not asked: the caller's deadline passed.` };
+  }
   const url = `${options.baseUrl}/models`;
   const headers: Record<string, string> = { Accept: "application/json" };
   if (options.apiKey && options.apiKey !== NO_KEY_PLACEHOLDER) headers.Authorization = `Bearer ${options.apiKey}`;
   const started = Date.now();
+  const deadline = AbortSignal.timeout(timeoutMs);
   let res: Response;
   try {
     res = await doFetch(url, {
@@ -352,7 +398,7 @@ export async function probeExternalEngine(options: {
       headers,
       redirect: "manual",
       cache: "no-store",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: options.signal ? AbortSignal.any([options.signal, deadline]) : deadline,
     });
   } catch (err) {
     const code = networkCode(err);
@@ -365,6 +411,9 @@ export async function probeExternalEngine(options: {
         : `Could not reach ${options.baseUrl}${code ? ` (${code})` : ""}. Check the address and that the engine is running and reachable from this box.`,
     };
   }
+  // A refusal's body is never read: let it go, so the connection does not stay
+  // busy with a body nobody wants (a probe that polls would pile them up).
+  if (!res.ok) await res.body?.cancel().catch(() => {});
   if (res.status === 401 || res.status === 403) {
     return {
       ok: false,

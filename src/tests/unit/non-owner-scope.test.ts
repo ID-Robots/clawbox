@@ -87,6 +87,30 @@ describe("nonOwnerVerdict — what stays the owner's", () => {
     expect(verdict(url, method)).toBe("deny");
   });
 
+  it("the owner's cluster (TASK-2670): refuses every method, however the path is spelled — and an organisation box's member too", () => {
+    for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE"]) {
+      for (const url of [
+        "/setup-api/system/cluster",
+        "/setup-api/system/cluster?availability=1",
+        "/setup-api/system/cluster/",
+        "/setup-api/system//cluster",
+        "/setup-api/System/Cluster",
+        "/setup-api/system/%63luster",
+      ]) {
+        expect(verdict(url, method), `${method} ${url}`).toBe("deny");
+      }
+    }
+    const u = new URL("/setup-api/system/cluster", "http://clawbox.local");
+    expect(
+      nonOwnerVerdict({ pathname: u.pathname, method: "GET", searchParams: u.searchParams, intent: "fetch", username: "alice", orgMode: true }),
+    ).toBe("deny");
+  });
+
+  it("leaves the rest of System to every user: the device's own figures are not the cluster", () => {
+    expect(verdict("/setup-api/system/stats")).toBe("allow");
+    expect(verdict("/setup-api/system/info")).toBe("allow");
+  });
+
   it.each([
     // The model the whole box chats on — a user's first desktop load moved it.
     ["POST", "/setup-api/chat/model"],

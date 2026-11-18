@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useId, useRef, useCallback } from "react";
+import { useState, useEffect, useId, useLayoutEffect, useRef, useCallback } from "react";
 import { useMobileBack } from "@/lib/mobile-back";
 import SystemUpdateApp, { componentNeedsUpdate, shipsOpenclaw, type VersionInfo } from "@/components/SystemUpdateApp";
 import Image from "next/image";
@@ -40,6 +40,7 @@ import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/t
 import { QRCodeSVG } from "qrcode.react";
 import { cleanVersion } from "@/lib/version-utils";
 import { formatBytes as formatByteCount } from "@/lib/format-bytes";
+import ClusterPanel, { useClusterAvailable } from "@/components/ClusterPanel";
 import { BuildIdentityRows, useBuildIdentity } from "./BuildIdentityPanel";
 import { useReconnect } from "@/hooks/useReconnect";
 import { useModalDialog } from "@/hooks/useModalDialog";
@@ -256,14 +257,24 @@ const SECTIONS = ["appearance", "account", "monitors", "wifi", "ai", "localAi", 
  */
 const USERS_LINK = "users";
 
-/** The two views System holds: the device's figures, and who can sign in. */
-type SystemView = "device" | "users";
+/**
+ * The views System holds: the device's figures, who can sign in, and — for the
+ * owner of a Workstation with other Sparks configured — the cluster (TASK-2670).
+ */
+type SystemView = "device" | "users" | "cluster";
 
 /** System's tabs, in order; each named by the key that already names it elsewhere in Settings. */
 const SYSTEM_VIEWS: { id: SystemView; icon: string; labelKey: string }[] = [
   { id: "device", icon: "computer", labelKey: "settings.device" },
   { id: "users", icon: "group", labelKey: "settings.users" },
 ];
+
+/** The Cluster tab, drawn after the others and only where there is a cluster (`useClusterAvailable`). */
+const CLUSTER_SYSTEM_VIEW: { id: SystemView; icon: string; labelKey: string } = {
+  id: "cluster",
+  icon: "hub",
+  labelKey: "cluster.tab",
+};
 
 /** The System view a deep-link value asks for: Users for the old Users link, the device's figures for any other. */
 function toSystemView(value: unknown): SystemView {
@@ -685,6 +696,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const jobAlertsShown = useCallback(() => setShowJobAlerts(false), []);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(initialSection);
+  const [isMobile, setIsMobile] = useState(false);
+  // The System pane is the one on screen: on a phone Back closes the pane (the
+  // list shows again) while `section` stays "system".
+  const systemPaneVisible = (isMobile ? mobileSection : section) === "system";
   // Which of System's two views is open (System → Users or the device's
   // figures). Only the owner has the choice: anyone else signed in is never
   // shown Users, wherever a link asked to go — so until /users/me has said who
@@ -692,7 +707,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // No answer at all is the owner's, as it is on the desktop (page.tsx); the
   // route behind the panel judges each request itself either way.
   const [systemView, setSystemView] = useState<SystemView>(peekPendingSystemView);
-  const sessionUser = useSettledSessionUser();
+  // A lookup that failed (null) is asked again each time System opens: the
+  // Cluster tab is drawn only for a settled owner.
+  const sessionUser = useSettledSessionUser(systemPaneVisible);
   const usersAllowed: boolean | null = sessionUser === undefined ? null : sessionUser?.isOwner !== false;
   // Which sections this person is drawn. Until /users/me answers, the owner's
   // set (as the desktop draws), minus Account, which is a user's alone. A
@@ -722,7 +739,21 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     if (!shown(section)) setSection(DEFAULT_SECTION);
     if (mobileSection !== null && !shown(mobileSection)) setMobileSection(DEFAULT_SECTION);
   }, [sessionUser, section, mobileSection, sectionShown]);
-  const systemShows: SystemView | null = systemView === "device" ? "device" : usersAllowed === null ? null : usersAllowed ? "users" : "device";
+  // The Cluster tab is the OWNER's alone and only on a box with a cluster to show
+  // (a Workstation with its other Sparks configured). Not `usersAllowed`, which
+  // is also true while /users/me has not answered: nobody but a settled owner
+  // asks the cluster route, so a staff user's Settings never calls it. The route
+  // refuses them 403 whatever is drawn.
+  const [clusterAvailable, clusterGone] = useClusterAvailable(boxReads && sessionUser?.isOwner === true && systemPaneVisible);
+  const systemShows: SystemView | null = systemView === "device"
+    ? "device"
+    : usersAllowed === null
+      ? null
+      : !usersAllowed
+        ? "device"
+        : systemView === "cluster" && !clusterAvailable
+          ? "device"
+          : systemView;
   useEffect(() => {
     let alive = true;
     const answer = (available: boolean) => {
@@ -921,7 +952,6 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       window.removeEventListener(OPEN_CLAWAI_OFFER_EVENT, offerHandler);
     };
   }, []);
-  const [isMobile, setIsMobile] = useState(false);
   // On a phone a section is a level below the list: Back returns to the list
   // rather than closing Settings (lib/mobile-back).
   useMobileBack(isMobile && mobileSection !== null, () => setMobileSection(null));
@@ -3627,31 +3657,70 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
    * which had a sidebar row of its own until TASK-2130. Anyone else signed in
    * gets System without the tabs, and no Users anywhere.
    */
+  const systemViews = clusterAvailable ? [...SYSTEM_VIEWS, CLUSTER_SYSTEM_VIEW] : SYSTEM_VIEWS;
   const systemTabId = (view: SystemView) => `${systemTabsId}-tab-${view}`;
   const systemPanelId = (view: SystemView) => `${systemTabsId}-panel-${view}`;
   /** A view's container is a tab panel where there are tabs, and a plain block where there are none. */
   const systemPanelProps = (view: SystemView) => usersAllowed === true
     ? { role: "tabpanel", id: systemPanelId(view), "aria-labelledby": systemTabId(view) }
     : {};
+  // When the Cluster tab goes — the panel's own read said there is no cluster,
+  // or the availability check did — focus on that tab or inside its panel would
+  // be left on nothing: it moves to Device. Focus anywhere else stays put. One
+  // rule for both ways the tab can go, so it lives on `clusterAvailable`.
+  const clusterHadFocus = useRef(false);
+  useEffect(() => {
+    const onFocusIn = (e: FocusEvent) => {
+      const target = e.target instanceof Element ? e.target : null;
+      clusterHadFocus.current = target !== null && (
+        target.id === `${systemTabsId}-tab-cluster`
+        || !!document.getElementById(`${systemTabsId}-panel-cluster`)?.contains(target)
+      );
+    };
+    // Focus that leaves for nowhere (a click on the page's background) is not
+    // on Cluster any more. Focus lost because the focused element was REMOVED
+    // is the case this rule is for, so an element no longer in the page keeps it.
+    const onFocusOut = (e: FocusEvent) => {
+      if (e.relatedTarget) return; // focusin on the new element decides
+      const left = e.target instanceof Element ? e.target : null;
+      queueMicrotask(() => {
+        if (left?.isConnected) clusterHadFocus.current = false;
+      });
+    };
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
+    return () => {
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
+    };
+  }, [systemTabsId]);
+  const clusterShownBefore = useRef(clusterAvailable);
+  useLayoutEffect(() => {
+    if (clusterShownBefore.current && !clusterAvailable && clusterHadFocus.current) {
+      clusterHadFocus.current = false;
+      document.getElementById(`${systemTabsId}-tab-device`)?.focus();
+    }
+    clusterShownBefore.current = clusterAvailable;
+  }, [clusterAvailable, systemTabsId]);
   // The tabs pattern's keys: the arrows move between the two (and open the
   // one they land on), Home and End go to the first and the last.
   const onSystemTabKey = (e: React.KeyboardEvent) => {
-    const at = SYSTEM_VIEWS.findIndex((v) => v.id === systemShows);
-    const last = SYSTEM_VIEWS.length - 1;
-    const to = e.key === "ArrowRight" ? (at + 1) % SYSTEM_VIEWS.length
-      : e.key === "ArrowLeft" ? (at + last) % SYSTEM_VIEWS.length
+    const at = systemViews.findIndex((v) => v.id === systemShows);
+    const last = systemViews.length - 1;
+    const to = e.key === "ArrowRight" ? (at + 1) % systemViews.length
+      : e.key === "ArrowLeft" ? (at + last) % systemViews.length
         : e.key === "Home" ? 0
           : e.key === "End" ? last
             : -1;
     if (to < 0) return;
     e.preventDefault();
-    const next = SYSTEM_VIEWS[to].id;
+    const next = systemViews[to].id;
     setSystemView(next);
     document.getElementById(systemTabId(next))?.focus();
   };
   const systemTabs = usersAllowed === true && (
     <div role="tablist" aria-label={t("settings.system")} onKeyDown={onSystemTabKey} className="max-w-xl flex gap-1 bg-white/[0.04] rounded-xl p-1 mb-5" data-testid="settings-system-tabs">
-      {SYSTEM_VIEWS.map((view) => {
+      {systemViews.map((view) => {
         const selected = systemShows === view.id;
         return (
           <button
@@ -6414,6 +6483,20 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         {activeSection === "system" && systemShows === "users" && (
           <div className="max-w-xl" {...systemPanelProps("users")}>
             <UsersPanel />
+          </div>
+        )}
+        {activeSection === "system" && systemShows === "cluster" && (
+          // tabIndex: the tabs pattern's way from the selected tab into the panel,
+          // which can hold nothing focusable yet (the first read is pending).
+          <div className="max-w-xl" {...systemPanelProps("cluster")} tabIndex={0}>
+            <ClusterPanel
+              onUnavailable={() => {
+                // The box says it has no cluster after all: the tab goes, and
+                // Device opens (focus follows, with the rule on `clusterAvailable`).
+                clusterGone();
+                setSystemView("device");
+              }}
+            />
           </div>
         )}
         {activeSection === "system" && systemShows === "device" && (
