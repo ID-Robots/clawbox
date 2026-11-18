@@ -560,8 +560,11 @@ export async function POST(req: NextRequest) {
         }
         // In a folder drop the file's own name is the last segment of its
         // place in the folder; the part's filename is the same name as the
-        // browser read it, and is not what decides where it lands.
-        const leaf = segments ? segments[segments.length - 1] : safeLeafName(info.filename);
+        // browser read it, and is not what decides where it lands. A part that
+        // sends no filename at all (busboy still hands an octet-stream part to
+        // `file`, with `filename` undefined) is not a file upload, and is
+        // refused on either path.
+        const leaf = !info.filename ? null : segments ? segments[segments.length - 1] : safeLeafName(info.filename);
         if (!leaf) {
           fail(new BadUpload("Invalid filename"));
           return;

@@ -134,6 +134,16 @@ describe("/setup-api/chat/attachments — a dropped folder", () => {
     expect(res.status).toBe(400);
   });
 
+  it("refuses a folder part that carries no filename, even with a relative path", async () => {
+    // busboy treats such a part as a file with `filename` undefined; the
+    // relative path alone must not be enough to land it.
+    const named = body([["batch", BATCH], ["relativePath", "site/a.txt"]], "a.txt", Buffer.from("x"));
+    const unnamed = Buffer.from(named.toString("latin1").replace('; filename="a.txt"', ""), "latin1");
+    const res = await POST(request(unnamed));
+    expect(res.status).toBe(400);
+    expect(fs.existsSync(path.join(stagingDir(), BATCH))).toBe(false);
+  });
+
   it("refuses a folder deeper than a drop may be", async () => {
     const deep = `${Array.from({ length: 40 }, (_, i) => `d${i}`).join("/")}/a.txt`;
     expect((await stage(deep)).status).toBe(400);

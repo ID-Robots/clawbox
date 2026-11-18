@@ -628,13 +628,18 @@ export async function POST(req: NextRequest) {
         busboy.on("file", (_field, fileStream, info) => {
           activeFileStream = fileStream as unknown as Readable;
           fileStream.on("error", fail);
-          fileName = info.filename;
-          const destPath = fence.resolve(path.join(dir, fileName));
-          if (!destPath) {
+          // busboy also hands `file` an application/octet-stream part that
+          // carries no filename (`filename` is undefined, @types/busboy 1.5.5).
+          // With nothing to name the file after, the join below would resolve
+          // to the folder itself, so the part is refused here.
+          const partName = info.filename;
+          const destPath = partName ? fence.resolve(path.join(dir, partName)) : null;
+          if (!partName || !destPath) {
             fileStream.resume();
             fail(new UploadRefused("Invalid destination", 400, "invalid_destination"));
             return;
           }
+          fileName = partName;
           absPath = destPath;
           // A file of that name gives its room back to the quota, which is
           // then held on the part's own bytes — and a body that declared more
