@@ -565,6 +565,17 @@ fails, release the board with `nano-ci release "$SERIAL"`. `NANO_SHA` defaults
 to the commit your checkout is on — `10-build-identity` compares the board
 with it.
 
+One suite at a time per board. Tests that switch something box-wide (the chat
+model, Local AI, memory search) put it back when they end, so a second suite on
+the same board changes it under the first suite's tests. A lease does not stop
+that, because runs can share a lease's owner. So `run.sh` claims the board
+itself before the first test runs (`~/.cache/clawbox-nano-tests/suite.claim`
+on the board). It keeps the claim valid past the running test's deadline plus
+300 s (`NANO_CLAIM_MARGIN`), renewing it before a test when it would expire too
+soon, and gives it back when it ends or is cancelled. A second
+`run.sh` on that board exits 2 before any test and names the run that holds the
+claim. A claim left by a run that died lapses at its expiry.
+
 ## Adding a test
 
 1. Create `scripts/nano-tests/tests/NN-what-it-checks.sh`. `NN` sets the order;
