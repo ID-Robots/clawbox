@@ -374,7 +374,11 @@ function startMeasuring(): { landedUnder: (abs: string) => boolean; end: () => v
   return {
     landedUnder(abs: string) {
       const k = path.resolve(abs);
-      for (const [p, seq] of state.at) if (seq > since && (p === k || p.startsWith(k + path.sep))) return true;
+      // At it, under it — or at a folder it is in: a folder renamed or moved
+      // into a place on its path puts a different source there.
+      for (const [p, seq] of state.at) {
+        if (seq > since && (p === k || p.startsWith(k + path.sep) || k.startsWith(p + path.sep))) return true;
+      }
       return false;
     },
     end() {

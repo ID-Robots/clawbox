@@ -10,6 +10,7 @@ import {
   noteHomeChange,
   openQuotaWrite,
   resetHomeUsageForTests,
+  SETTLE_ATTEMPTS,
   withHomeLock,
 } from "@/lib/home-usage";
 
@@ -212,7 +213,7 @@ describe("the last check before a write lands (TASK-2663)", () => {
     w.finish(0);
   });
 
-  it("keeps a stale figure, unmarked, when the walk before the check stops short", async () => {
+  it("makes the figure a floor when the walk before the check stops short, and does not walk at every check", async () => {
     expect((await homeUsage(HOME))?.bytes).toBe(6000);
     const w = (await openQuotaWrite(HOME, 10_000))!;
     noteHomeChange(HOME);
@@ -224,16 +225,76 @@ describe("the last check before a write lands (TASK-2663)", () => {
     } finally {
       clock.mockRestore();
     }
-    // The figure it had stands (it errs high) ...
-    expect(w.usedBytes).toBe(6000);
-    // ... and the next check does not walk the home again.
+    // A floor grants no room ...
+    expect(w.truncated).toBe(true);
+    expect(w.admits(1, 0)).toBe(false);
+    // ... to this write or the next one, and nothing is walked again for them.
     const walks = vi.spyOn(fs.promises, "opendir");
     try {
       await w.settle();
+      const next = (await openQuotaWrite(HOME, 10_000))!;
+      expect(next.truncated).toBe(true);
+      expect(next.ceiling(0)).toBe(0);
+      next.finish(0);
       expect(walks).not.toHaveBeenCalled();
     } finally {
       walks.mockRestore();
     }
+    w.finish(0);
+  });
+
+  it("never uses a walk that a move in the home ran during: it walks again", async () => {
+    expect((await homeUsage(HOME))?.bytes).toBe(6000);
+    const w = (await openQuotaWrite(HOME, 10_000))!;
+    // a.txt is deleted: the figure is only marked (6000; 5000 on disk).
+    fs.unlinkSync(path.join(HOME, "a.txt"));
+    noteHomeChange(HOME);
+    // Once the walk has read the home's own folder, a move in the home
+    // carries Documents/deep/c.txt (3000) up into it: that walk misses it.
+    const realOpendir = fs.promises.opendir.bind(fs.promises);
+    let moved = false;
+    const spy = vi.spyOn(fs.promises, "opendir").mockImplementation(async (p, ...rest) => {
+      if (!moved && String(p) === path.join(HOME, "Documents")) {
+        moved = true;
+        fs.renameSync(path.join(HOME, "Documents", "deep", "c.txt"), path.join(HOME, "c.txt"));
+        noteHomeChange(HOME);
+      }
+      return realOpendir(p as string, ...(rest as []));
+    });
+    try {
+      await w.settle();
+    } finally {
+      spy.mockRestore();
+    }
+    // Not the 2000 that walk counted: the next walk's 5000.
+    expect(moved).toBe(true);
+    expect(w.usedBytes).toBe(5000);
+    expect(w.admits(5000, 0)).toBe(true);
+    expect(w.admits(5001, 0)).toBe(false);
+    w.finish(0);
+  });
+
+  it("grants no room when the home changes under every walk before the check", async () => {
+    expect((await homeUsage(HOME))?.bytes).toBe(6000);
+    const w = (await openQuotaWrite(HOME, 10_000))!;
+    noteHomeChange(HOME);
+    const realOpendir = fs.promises.opendir.bind(fs.promises);
+    let walks = 0;
+    const spy = vi.spyOn(fs.promises, "opendir").mockImplementation(async (p, ...rest) => {
+      if (String(p) === HOME) {
+        walks++;
+        noteHomeChange(HOME);
+      }
+      return realOpendir(p as string, ...(rest as []));
+    });
+    try {
+      await w.settle();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(walks).toBe(SETTLE_ATTEMPTS);
+    expect(w.truncated).toBe(true);
+    expect(w.admits(1, 0)).toBe(false);
     w.finish(0);
   });
 

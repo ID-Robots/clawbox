@@ -324,6 +324,38 @@ describe("B: a move into the home whose source changes while it is measured", ()
   });
 });
 
+describe("B: a move whose source's folder is replaced while it is measured", () => {
+  it("measures it again when renames put another folder where one on its path was, and refuses the move", async () => {
+    // Ivan moves Shared/outer/pack (100 KB). While it is measured, the owner
+    // renames Shared/outer away and another folder — whose pack holds 2 MB —
+    // into its place: Shared/outer/pack is now a different, larger folder.
+    const pack = path.join(SHARED, "outer", "pack");
+    fs.mkdirSync(pack, { recursive: true });
+    fs.writeFileSync(path.join(pack, "small.bin"), Buffer.alloc(100 * KB));
+    fs.mkdirSync(path.join(SHARED, "other", "pack"), { recursive: true });
+    fs.writeFileSync(path.join(SHARED, "other", "pack", "big.bin"), Buffer.alloc(2 * MB));
+    const others: number[] = [];
+    measureWindow.folder = pack;
+    measureWindow.during = async () => {
+      who.current = { username: "owner", isOwner: true };
+      try {
+        others.push((await renameTo(["Shared", "outer"], "outer-old")).status);
+        others.push((await renameTo(["Shared", "other"], "outer")).status);
+      } finally {
+        who.current = { username: "ivan", isOwner: false };
+      }
+    };
+    const move = await moveInto("Home", ["Shared/outer/pack"]);
+    const now = await homeNow();
+    console.log(`[B ancestor] owner's renames ${others.join(",")}, Ivan's move ${move.status}, home on disk ${now.onDisk} of quota ${MB}`);
+    expect(others).toEqual([200, 200]);
+    expect(move.status).toBe(507);
+    expect(fs.existsSync(path.join(SHARED, "outer", "pack", "big.bin"))).toBe(true);
+    expect(fs.existsSync(path.join(IVAN, "pack"))).toBe(false);
+    expect(now.onDisk).toBeLessThanOrEqual(MB);
+  });
+});
+
 describe("an upload and a move into one home at once", () => {
   it("lands only what fits: the upload that finished first, not the move measured beside it", async () => {
     // 1 MB quota. Ivan uploads new.bin (700 KB) and, while it is on its way,

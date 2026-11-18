@@ -40,6 +40,8 @@ import path from "@/lib/runtime-path";
 export const MAX_WALK_ENTRIES = 200_000;
 /** The longest a walk may take before it reports a floor. */
 export const WALK_BUDGET_MS = 15_000;
+/** Walks `QuotaWrite.settle` tries before it grants no room, when a change in the home invalidates each. */
+export const SETTLE_ATTEMPTS = 3;
 /** How long a measured usage is trusted (writes made here keep it current meanwhile). */
 export const USAGE_CACHE_MS = 60_000;
 /** lstat calls in flight at once during a walk, and the directory read batch. */
@@ -318,8 +320,10 @@ export interface QuotaWrite {
   readonly usedBytes: number;
   readonly quotaBytes: number;
   /**
-   * The home could not be measured whole: its figure is a floor, and a floor
-   * grants no room — `ceiling` answers 0 and the write is refused.
+   * The home could not be measured whole — when the write began, or by the
+   * walk before its last check (`settle`) — or kept changing under that walk:
+   * its figure is a floor, and a floor grants no room — `ceiling` answers 0,
+   * `admits` refuses, and the refusal is `quota_unmeasured`.
    */
   readonly truncated: boolean;
   /**
@@ -347,8 +351,11 @@ export interface QuotaWrite {
    * Before the last check, under the home's lock: a figure that was only
    * marked stale (a delete or a move while writes were open) is walked again
    * now, leaving out the open writes' temporary files, so `admits` answers by
-   * what the home really holds — not by bytes already deleted. A walk that
-   * fails or stops short keeps the figure as it was.
+   * what the home really holds — not by bytes already deleted. A walk that a
+   * delete or a move in the home ran during is never used (it may have missed
+   * a file moved into a folder it had already read): walked again, up to
+   * `SETTLE_ATTEMPTS` times, and then this write is granted no room. A walk
+   * that fails or stops short makes the figure a floor, for every write.
    */
   settle(): Promise<void>;
   /** The write landed `addedBytes` (net of anything it replaced), or failed (0). */
@@ -394,13 +401,20 @@ export async function openQuotaWrite(home: string, quotaBytes: number, replacing
   // What the home holds NOW: a write that finished since this one began has
   // moved the cached figure and left `others()`.
   const held = () => cache.get(k)?.bytes ?? usage.bytes;
-  const room = (replacedBytes: number) => (usage.truncated ? 0 : Math.max(0, quotaBytes - held() - others() + replacedBytes));
+  // Set when the walk before the last check could not be trusted (`settle`).
+  let unsettled = false;
+  // A floor grants no room: the figure this write opened on, the figure as it
+  // is now (a walk before a check that stopped short), or one never settled.
+  const unmeasured = () => usage.truncated || cache.get(k)?.truncated === true || unsettled;
+  const room = (replacedBytes: number) => (unmeasured() ? 0 : Math.max(0, quotaBytes - held() - others() + replacedBytes));
   return {
     get usedBytes() {
       return held();
     },
     quotaBytes,
-    truncated: usage.truncated,
+    get truncated() {
+      return unmeasured();
+    },
     ceiling(passed: number) {
       mine.passed = Math.max(mine.passed, passed);
       return room(replaced);
@@ -417,27 +431,35 @@ export async function openQuotaWrite(home: string, quotaBytes: number, replacing
     },
     async settle() {
       if (!open || !cache.get(k)?.stale) return;
-      const asked = changes.get(k) ?? 0;
       // Asked file by file as the walk goes: a write that opens its temporary
       // file while the home is walked is left out as well.
       const openTemp = (file: string) => {
         for (const w of openWrites.get(k) ?? []) if (w.temp === file) return true;
         return false;
       };
-      const fresh = await measureHomeUsage(k, { skip: openTemp });
-      const now = cache.get(k);
-      if (!now) return;
-      // A delete or a move that asked for a walk while this one ran may or
-      // may not be in it: the figure stays marked, and the next check walks.
-      const askedAgain = (changes.get(k) ?? 0) !== asked;
-      if (!fresh || fresh.truncated) {
-        // Not measurable whole now: the figure stands — it holds every write
-        // this process landed and no delete, so it errs high — and is not
-        // walked again at every check; it is walked once it is old.
-        if (!askedAgain) cache.set(k, { ...now, stale: false });
-        return;
+      for (let attempt = 1; attempt <= SETTLE_ATTEMPTS; attempt++) {
+        const asked = changes.get(k) ?? 0;
+        const fresh = await measureHomeUsage(k, { skip: openTemp });
+        const now = cache.get(k);
+        if (!now) return;
+        if (!fresh || fresh.truncated) {
+          // Not measurable whole: a floor, which grants no room — to this
+          // write and to every other until the home is measured again — and
+          // is not walked again at every check meanwhile.
+          cache.set(k, { ...now, truncated: true, stale: false });
+          return;
+        }
+        if ((changes.get(k) ?? 0) === asked) {
+          cache.set(k, { bytes: fresh.bytes, truncated: false, measuredAt: fresh.measuredAt });
+          return;
+        }
+        // A delete or a move in the home ran while it was walked: a file it
+        // moved into a folder the walk had already read was missed. Never
+        // used for a check; walked again.
       }
-      cache.set(k, { bytes: fresh.bytes, truncated: false, measuredAt: fresh.measuredAt, ...(askedAgain ? { stale: true } : {}) });
+      // The home kept changing under every walk: no figure here is proven,
+      // so this write is granted no room.
+      unsettled = true;
     },
     finish(addedBytes: number) {
       if (!open) return;
