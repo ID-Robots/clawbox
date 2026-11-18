@@ -34,7 +34,7 @@ ensure_on_release || finish
 KILLS=0
 # A running build retitles itself `next-build (vNN)`; `node … next build` is
 # its command line before that.
-# shellcheck disable=SC2317  # called by wait_app_update as its tick
+# shellcheck disable=SC2317,SC2329  # called by wait_app_update as its tick
 kill_builds() {
   local n
   # Matched on the process's own command line, never with `pkill -f`: the
