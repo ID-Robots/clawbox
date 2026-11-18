@@ -37,6 +37,30 @@ pre-configured with OpenClaw.
 Two ClawBox Workstation units connected over NVIDIA ConnectX can work with models up
 to ~405 billion parameters.
 
+## Cluster view
+
+A Workstation built from several Sparks shows them all on one page: **Settings → System → Cluster**,
+for the owner of the box only. Each Spark has a card with its hostname, whether it is online, CPU,
+memory, GPU, temperature and disk, and the engine has its own card with the inference gate, the active
+and queued requests and the tokens per second it is producing. A Spark that cannot be reached raises a
+warning at the top of the page.
+
+The System page's own figures are the Spark you are signed in to, which can mislead on a cluster: its
+memory is its share of the model, and its GPU can read 0% because the engine spans every Spark. A GB10's
+GPU has no memory of its own, so the cluster view shows the Spark's system memory as unified memory.
+
+The view reads the other Sparks over SSH, read-only, using the key trust the Sparks already have: nothing
+is installed on them and nothing leaves your network. The tab appears once the box knows which Sparks to
+read. Add them to the `.env` file in the ClawBox folder and restart ClawBox:
+
+```bash
+CLAWBOX_CLUSTER_PEERS="spark-b spark-c spark-d"
+```
+
+List the other Sparks, not the one you are on, as names this box can already `ssh` to without a password.
+The engine's load comes from its own `/metrics` page (vLLM, SGLang and llama.cpp all have one); when the
+engine has none, the figures show n/a.
+
 ## ClawBox vs Workstation
 
 | Spec | ClawBox | ClawBox Workstation |

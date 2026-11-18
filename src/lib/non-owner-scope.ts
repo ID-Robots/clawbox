@@ -37,6 +37,10 @@
 //      polls `/setup-api/ai-models/status`, and the box follows it exactly as
 //      it would for the owner's own poll (src/lib/clawai-plan-follow.ts).
 //
+// THE OWNER'S CLUSTER is the owner's too (TASK-2670): Settings → System →
+// Cluster, which reads a Workstation's other Sparks over ssh, answers a user 403
+// on every method (`OWNER_CLUSTER_API`) and is not drawn for them.
+//
 // A DENY-list now, where it used to be an allow-list of the four per-user
 // surfaces a non-owner had: the exceptions are what is named, and a route
 // added later is the owner's desktop for every user, like everything else.
@@ -114,6 +118,15 @@ const OWNER_ACCOUNT_API: ReadonlySet<string> = new Set([
   "/setup-api/system/credentials/verify",
   "/setup-api/setup/reset",
 ]);
+
+/**
+ * The owner's cluster (TASK-2670): Settings → System → Cluster reads a
+ * Workstation's other Sparks over ssh. Not a secret and not an AI setting — the
+ * owner's view of THEIR hardware, which a user's System page does not draw —
+ * and refused to a user on every method, so a user's browser never makes the
+ * request and a hand-typed one is not answered.
+ */
+const OWNER_CLUSTER_API: ReadonlySet<string> = new Set(["/setup-api/system/cluster"]);
 
 /** Routes whose answer IS a secret only the owner holds: the Control UI page with the gateway token in it. */
 const OWNER_SECRET_API: ReadonlySet<string> = new Set([
@@ -313,7 +326,7 @@ export function nonOwnerVerdict(req: NonOwnerRequest): NonOwnerVerdict {
   const shared = req.openclawShared === true;
 
   // The exceptions first, on the canonical path.
-  if (OWNER_ACCOUNT_API.has(canon)) return "deny";
+  if (OWNER_ACCOUNT_API.has(canon) || OWNER_CLUSTER_API.has(canon)) return "deny";
   if (!isRead && (BOX_AI_SETTINGS_API.has(canon) || BOX_AI_SETTINGS_PREFIXES.some((p) => underPrefix(canon, p)))) {
     return "deny";
   }

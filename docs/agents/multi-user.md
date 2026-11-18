@@ -19,6 +19,8 @@ Every ClawBox user is a real Linux account. The **owner** is the install user (`
 
 ## Updates are the owner's, on every box (TASK-2435)
 
+The owner's CLUSTER (TASK-2670) is the owner's too: `GET /setup-api/system/cluster` — a Workstation's other Sparks read over ssh — answers a user other than the owner **403 `owner_only`** (the route, `requireSession(…, { ownerOnly: true })`, and the middleware, `OWNER_CLUSTER_API` in `src/lib/non-owner-scope.ts`, on every method and spelling), and Settings → System draws no Cluster tab for them and never calls the route.
+
 "Update available", What's new and every update action answer a user other than the owner **403 `owner_only`** on every box: middleware refuses them `/setup-api/update/**` and `system/update-branch` (`UPDATE_API_TREE` in `src/lib/non-owner-scope.ts`), except `GET update/status`, which the `/updating` lock screen every user is sent to polls. `system_update` joined `OWNER_ONLY_APP_IDS`, so the System Update app and Settings → System Update are hidden from them. The desktop asks `update/versions` and `whats-new` only for the owner (`desktopNoticePolicy`, `src/lib/org-mode.ts`). The agent's MCP bearer is unchanged: it never starts an update, it asks the owner (`update/run` → `requestPowerApproval`).
 
 ## Organisation mode (`org_mode`, TASK-2435)

@@ -19,6 +19,7 @@ import { dbMaintenanceEn } from "@/lib/edition-translations/en-db-maintenance";
 import { modelAvailabilityEn } from "@/lib/edition-translations/en-model-availability";
 import { jobAlertsEn } from "@/lib/edition-translations/en-job-alerts";
 import { updateNoticeEn } from "@/lib/edition-translations/en-update-notice";
+import { clusterEn } from "@/lib/edition-translations/en-cluster";
 import { bg } from "@/lib/edition-translations/bg";
 import { de } from "@/lib/edition-translations/de";
 import { es } from "@/lib/edition-translations/es";
@@ -191,6 +192,8 @@ describe("edition-translations (TASK-458)", () => {
       ["updateNoticeEn", updateNoticeEn, (k) => k.startsWith("updateNotice.")],
       // Settings → AI providers on a box whose AI is the owner's own (TASK-2497).
       ["cloudProvidersEn", cloudProvidersEn, (k) => k.startsWith("cloudProviders.")],
+      // Settings → System → Cluster, the owner's view of a Workstation's Sparks (TASK-2670).
+      ["clusterEn", clusterEn, (k) => k.startsWith("cluster.")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {

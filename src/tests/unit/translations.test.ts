@@ -105,6 +105,8 @@ describe("translations", () => {
         "updateNotice",
         // Settings → AI providers: "Hide cloud AI providers" and the local-first page (TASK-2497).
         "cloudProviders",
+        // Settings → System → Cluster: a Workstation's Sparks and its engine (TASK-2670).
+        "cluster",
         // The desktop's corner card for long work Settings started (background tasks).
         "backgroundTasks",
         "clawaiUsage",

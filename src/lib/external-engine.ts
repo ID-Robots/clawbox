@@ -265,7 +265,7 @@ function modelIdsOf(payload: unknown): string[] | null {
 }
 
 /** The body as text, or null once it passes `maxBytes` (the read is cancelled there). */
-async function readCapped(res: Response, maxBytes: number): Promise<string | null> {
+export async function readCapped(res: Response, maxBytes: number): Promise<string | null> {
   const declared = Number(res.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > maxBytes) {
     await res.body?.cancel().catch(() => {});
