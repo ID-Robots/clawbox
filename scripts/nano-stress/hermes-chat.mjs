@@ -40,7 +40,9 @@ export function takeSseFrames(buf) {
  * `settled`). `settleHeaders`, the box's bearer, signs those re-attaches: the
  * route closes a re-attach made on a person's session when that session
  * stops holding (its 5 s recheck), and only the turn's end closes one made
- * with the bearer. Without it the owner's headers are used.
+ * with the bearer. Without it nothing can confirm a turn ended: every
+ * settle check fails, so a session takes no turn after its first and the
+ * cleanup leaves it alone (board-stress.mjs refuses a Hermes run without it).
  */
 export function createHermesDriver({ dash, headers, settleHeaders = null, log = () => {}, settleMs = 20_000, replayCloseMs = 2_000 }) {
   let warned = false;
@@ -78,9 +80,11 @@ export function createHermesDriver({ dash, headers, settleHeaders = null, log = 
    * earlier turn ended, that turn was this one.
    */
   async function settled(key) {
-    if (!settleHeaders && !warned) {
-      warned = true;
-      log("no bearer for the Hermes settle checks: they use the owner's session, whose re-attach the route may close on its 5 s session recheck");
+    // The owner's session is never used for this: the route's 5 s recheck
+    // can close its re-attach while the turn runs on. No bearer, no proof.
+    if (!settleHeaders) {
+      if (!warned) { warned = true; log("no bearer for the Hermes settle checks: no turn's end can be confirmed"); }
+      return false;
     }
     const deadline = Date.now() + settleMs;
     const ac = new AbortController();
@@ -89,7 +93,7 @@ export function createHermesDriver({ dash, headers, settleHeaders = null, log = 
       while (!ac.signal.aborted) {
         try {
           const res = await fetch(`${dash}/setup-api/hermes/chat?${new URLSearchParams({ sessionKey: key })}`, {
-            headers: (settleHeaders || headers)({ Accept: "text/event-stream" }),
+            headers: settleHeaders({ Accept: "text/event-stream" }),
             signal: ac.signal,
           });
           if (res.status === 204) return true;

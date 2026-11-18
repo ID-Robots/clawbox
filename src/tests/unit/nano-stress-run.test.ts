@@ -244,7 +244,9 @@ afterAll(async () => {
 
 // ---- the Hermes driver alone ------------------------------------------------------
 describe("the Hermes turn", () => {
-  const live = () => createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra });
+  // The box's bearer, as board-stress.mjs hands it over for settle checks.
+  const bearer = (extra = {}) => ({ Authorization: "Bearer stub-mcp-token", ...extra });
+  const live = () => createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleHeaders: bearer });
   const sess = () => ({ key: `stress-test-${crypto.randomBytes(3).toString("hex")}`, sessionId: null as string | null, hermesIds: new Set<string>() });
   const ask = "Reply with exactly this text and nothing else: STRESS-0A1B2C";
 
@@ -296,7 +298,7 @@ describe("the Hermes turn", () => {
     dash.reset("hang");
     dash.attach = "held"; // the route still holds a running turn under the key
     const held = sess();
-    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleMs: 400 });
+    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleHeaders: bearer, settleMs: 400 });
     const r2 = await driver.turn(held, ask, 300);
     expect(r2.error?.kind).toBe("timeout");
     expect(r2.error?.message).toContain("its Stop was not confirmed within 0 s, so no more turns go to this session");
@@ -307,7 +309,7 @@ describe("the Hermes turn", () => {
   });
 
   it("takes only a 204 or a replayed end of the turn as settled, never a bare end of stream", async () => {
-    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleMs: 1500 });
+    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleHeaders: bearer, settleMs: 1500 });
     dash.reset("hang");
     dash.attach = "replay";
     const replayed = sess();
@@ -324,7 +326,7 @@ describe("the Hermes turn", () => {
   });
 
   it("sends a session's next turn only once the route has ENDED the previous one, not just answered it", async () => {
-    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleMs: 1200 });
+    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleHeaders: bearer, settleMs: 1200 });
     dash.reset("answer");
     const s = sess();
     expect((await driver.turn(s, ask, 5000)).error).toBeNull();
@@ -344,7 +346,7 @@ describe("the Hermes turn", () => {
   });
 
   it("does not take a re-attach closed after `done` while the turn runs on as the turn's end", async () => {
-    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleMs: 2500, replayCloseMs: 300 });
+    const driver = createHermesDriver({ dash: dash.url, headers: (extra = {}) => extra, settleHeaders: bearer, settleMs: 2500, replayCloseMs: 300 });
     dash.reset("answer");
     const s = sess();
     await driver.turn(s, ask, 5000);
@@ -357,7 +359,6 @@ describe("the Hermes turn", () => {
 
   it("signs its settle checks with the bearer, whose re-attach no session recheck can close", async () => {
     const owner = (extra = {}) => ({ Cookie: "clawbox_session=stub", ...extra });
-    const bearer = (extra = {}) => ({ Authorization: "Bearer stub-mcp-token", ...extra });
     // With the bearer, a turn that answered but has not ended is never taken as ended.
     const driver = createHermesDriver({ dash: dash.url, headers: owner, settleHeaders: bearer, settleMs: 1200 });
     dash.reset("answer");
@@ -367,14 +368,20 @@ describe("the Hermes turn", () => {
     expect((await driver.turn(s, ask, 5000)).error?.kind).toBe("blocked");
     expect(dash.attachAuth.every((a) => a === "Bearer stub-mcp-token")).toBe(true);
     expect(dash.posts.filter((p) => p.sessionKey === s.key)).toHaveLength(1);
-    // Signed with the owner's session instead, a recheck close delivered at
-    // once would pass for the turn's end: why the board side uses the bearer.
-    const fooled = createHermesDriver({ dash: dash.url, headers: owner, settleMs: 1200 });
+    // With no bearer it fails closed: the owner's session is never asked (a
+    // recheck close delivered at once would pass for the turn's end), no
+    // turn's end is confirmed, and the session takes no second turn.
+    const logs: string[] = [];
+    const bare = createHermesDriver({ dash: dash.url, headers: owner, settleMs: 1200, log: (l: string) => logs.push(l) });
     dash.reset("answer");
-    const t = sess();
-    await fooled.turn(t, ask, 5000);
     dash.attach = "recheck";
-    expect((await fooled.turn(t, ask, 5000)).error).toBeNull();
+    const t = sess();
+    expect((await bare.turn(t, ask, 5000)).error).toBeNull();
+    expect((await bare.turn(t, ask, 5000)).error?.kind).toBe("blocked");
+    expect(t.blocked).toBe(true);
+    expect(dash.attaches).toBe(0);
+    expect(dash.posts).toHaveLength(1);
+    expect(logs).toContain("no bearer for the Hermes settle checks: no turn's end can be confirmed");
   });
 
   it("blocks the session when the Stop itself failed, even if the route shows no turn", async () => {
@@ -733,6 +740,23 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     expect(code, out).toBe(1);
     expect(out).toContain("the stress run did not start on the board");
     expect(readRaw(results, "hermes").tool).toBe("clawbox-nano-stress");
+    expect(fs.existsSync(boardDir)).toBe(false);
+  });
+
+  it("refuses a Hermes run on a box with no MCP bearer, before any session exists", async () => {
+    dash.runtime = "hermes";
+    dash.reset("answer");
+    const { results, env } = fixture();
+    // The board script's own view of the box has no token (lib.sh on the
+    // host side still reads the fixture's, to learn the runtime).
+    const bare = path.join(root, "repo-without-token");
+    fs.cpSync(env.FAKE_REPO!, bare, { recursive: true });
+    fs.rmSync(path.join(bare, "data/.mcp-token"));
+    const { code, out } = await runSh({ ...env, CLAWBOX_REPO: bare }, ["--results", results, "stand-in", ...STRESS]);
+    expect(code, out).toBe(1);
+    expect(dash.posts).toHaveLength(0);
+    expect(fs.readFileSync(path.join(results, "board-hermes.log"), "utf8")).toContain("a Hermes run cannot confirm its turns ended without it");
+    expect(readRaw(results, "hermes")).toMatchObject({ final: false, steps: [], turns: [] });
     expect(fs.existsSync(boardDir)).toBe(false);
   });
 });

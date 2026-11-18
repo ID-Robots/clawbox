@@ -514,14 +514,15 @@ async function openclawTurn(sess, message, timeoutMs, stopSignal) {
 // does) for the Hermes settle checks only: the chat route watches a re-attach
 // made on a person's session and closes it when that session stops holding,
 // which a turn's end cannot be told from; the bearer has no session and is
-// not watched. Without the file the owner's session is used (hermes-chat.mjs).
+// not watched. A Hermes run without it does not start (main()).
 function bearerHeaders() {
   try {
     const token = fs.readFileSync(path.join(REPO, "data/.mcp-token"), "utf8").trim();
     return token ? (extra = {}) => ({ Authorization: `Bearer ${token}`, ...extra }) : null;
   } catch { return null; }
 }
-const hermes = createHermesDriver({ dash: DASH, headers: ownerHeaders, settleHeaders: bearerHeaders(), log });
+const HERMES_SETTLE_HEADERS = bearerHeaders();
+const hermes = createHermesDriver({ dash: DASH, headers: ownerHeaders, settleHeaders: HERMES_SETTLE_HEADERS, log });
 
 // ---- sessions --------------------------------------------------------------------
 let RUNTIME = null;
@@ -927,6 +928,11 @@ async function main() {
   units.gateway = RUNTIME === "openclaw" ? "clawbox-gateway" : "clawbox-hermes-dashboard";
   log(`runtime ${RUNTIME}, run ${RUN_ID}, steps ${cfg.steps.join(",")}`);
   if (RUNTIME === "openclaw") GW_TOKEN = await gatewayToken();
+  // Fail closed: without the bearer no Hermes turn's end can be confirmed, so
+  // no session could be reused or cleaned up safely. Refused before any turn.
+  if (RUNTIME === "hermes" && !HERMES_SETTLE_HEADERS) {
+    throw new Error(`no MCP bearer in ${path.join(REPO, "data/.mcp-token")}: a Hermes run cannot confirm its turns ended without it`);
+  }
   if (!(await waitHealthy(180))) throw new Error(`${RUNTIME} is not healthy before the run`);
   await refreshUnits();
   startSampler();
