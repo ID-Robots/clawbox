@@ -510,7 +510,18 @@ async function openclawTurn(sess, message, timeoutMs, stopSignal) {
 }
 
 // ---- Hermes: the desktop chat's own route, streamed (scripts/nano-stress/hermes-chat.mjs)
-const hermes = createHermesDriver({ dash: DASH, headers: ownerHeaders, log });
+// The box's MCP bearer (data/.mcp-token, read here as scripts/nano-tests/lib.sh
+// does) for the Hermes settle checks only: the chat route watches a re-attach
+// made on a person's session and closes it when that session stops holding,
+// which a turn's end cannot be told from; the bearer has no session and is
+// not watched. Without the file the owner's session is used (hermes-chat.mjs).
+function bearerHeaders() {
+  try {
+    const token = fs.readFileSync(path.join(REPO, "data/.mcp-token"), "utf8").trim();
+    return token ? (extra = {}) => ({ Authorization: `Bearer ${token}`, ...extra }) : null;
+  } catch { return null; }
+}
+const hermes = createHermesDriver({ dash: DASH, headers: ownerHeaders, settleHeaders: bearerHeaders(), log });
 
 // ---- sessions --------------------------------------------------------------------
 let RUNTIME = null;

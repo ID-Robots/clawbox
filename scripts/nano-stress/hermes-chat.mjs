@@ -36,9 +36,14 @@ export function takeSseFrames(buf) {
 /**
  * The Hermes driver for one run. `deps` are the host's own pieces: the
  * dashboard's base URL, the owner-signed headers, and the run's log line;
- * `settleMs` bounds the wait for a Stopped turn to settle (see `settled`).
+ * `settleMs` bounds the wait for a turn to be confirmed ended (see
+ * `settled`). `settleHeaders`, the box's bearer, signs those re-attaches: the
+ * route closes a re-attach made on a person's session when that session
+ * stops holding (its 5 s recheck), and only the turn's end closes one made
+ * with the bearer. Without it the owner's headers are used.
  */
-export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 20_000, replayCloseMs = 2_000 }) {
+export function createHermesDriver({ dash, headers, settleHeaders = null, log = () => {}, settleMs = 20_000, replayCloseMs = 2_000 }) {
+  let warned = false;
   async function stop(key, turnId) {
     const q = new URLSearchParams({ sessionKey: key, ...(turnId ? { turnId } : {}) });
     try {
@@ -57,20 +62,26 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
    * GET re-attaches to the key's newest live turn — a running one if there is
    * one — and replays its frames (204: no turn on record). Settled means a
    * 204, or a replayed end of that turn (a done, error or stopped frame) with
-   * the stream closing at once (within `replayCloseMs`): the route builds the
-   * whole replay of an ENDED turn, close included, when the stream starts. A
-   * re-attach that stays open (a `done` can go out before the turn ends) or
-   * closes later — when the turn ends then, or when the route's 5 s owner
-   * session recheck closes it while the turn runs on — is not trusted: it is
-   * dropped and asked again, and the next re-attach of an ended turn closes
-   * at once. A stream with no end in it proves nothing either. Not settled
-   * by `settleMs`, or no answer by then, is not.
+   * the stream closing. Made with the bearer (`settleHeaders`), a re-attach
+   * has no session recheck: it closes when the turn ends (or the web server,
+   * and every turn it holds, goes), so its close after a replayed end is the
+   * turn's end. On top of that the close must come at once (within
+   * `replayCloseMs`): the route builds the whole replay of an ENDED turn,
+   * close included, when the stream starts. A re-attach that stays open (a
+   * `done` can go out before the turn ends) or closes later is dropped and
+   * asked again, and the next re-attach of an ended turn closes at once. A
+   * stream with no end in it proves nothing either. Not settled by
+   * `settleMs`, or no answer by then, is not.
    *
    * Asked before each turn on a session that had one (the previous turn has
    * ended), and after a Stop that did stop a registered turn: with every
    * earlier turn ended, that turn was this one.
    */
   async function settled(key) {
+    if (!settleHeaders && !warned) {
+      warned = true;
+      log("no bearer for the Hermes settle checks: they use the owner's session, whose re-attach the route may close on its 5 s session recheck");
+    }
     const deadline = Date.now() + settleMs;
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), settleMs);
@@ -78,7 +89,7 @@ export function createHermesDriver({ dash, headers, log = () => {}, settleMs = 2
       while (!ac.signal.aborted) {
         try {
           const res = await fetch(`${dash}/setup-api/hermes/chat?${new URLSearchParams({ sessionKey: key })}`, {
-            headers: headers({ Accept: "text/event-stream" }),
+            headers: (settleHeaders || headers)({ Accept: "text/event-stream" }),
             signal: ac.signal,
           });
           if (res.status === 204) return true;

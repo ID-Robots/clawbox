@@ -59,7 +59,11 @@ turn's end (done, error, stopped) with the stream closing at once (within
 included, when the stream starts; a re-attach that stays open (a `done` can go
 out before the turn ends) or closes later (when the turn ends then, or when
 the route's 5 s owner-session recheck closes it) is dropped and asked again,
-as is a stream with no end in it. The same check
+as is a stream with no end in it. These re-attaches are signed with the box's
+MCP bearer (`data/.mcp-token`, as `scripts/nano-tests/lib.sh` reads it): the
+route watches a re-attach made on a person's session and closes it when that
+session stops holding, but not one made with the bearer, so only the turn's
+end closes it. The same check
 runs before every next turn on a Hermes session, outside the measured
 latency, so a Stop can only ever find the current turn. A turn whose Stop failed, whose Stop found no turn running (the POST may
 still be in its setup, the Stop held for it expires, and a replay does not say

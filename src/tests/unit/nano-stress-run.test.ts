@@ -48,8 +48,12 @@ class Dashboard {
   // it; "replay" an ended turn (its frames, then its "stopped" frame);
   // "answered" a turn that sent its `done` but has not ended yet (open);
   // "answered-cut" the same, closed 600 ms later while the turn runs on (the
-  // route's owner-session recheck closing the listener).
-  attach: "none" | "held" | "eof" | "replay" | "answered" | "answered-cut" = "none";
+  // route's owner-session recheck closing the listener); "recheck" the same
+  // turn, whose re-attach the route closes at once when it was made on a
+  // person's session (a recheck close delivered late) and never when it was
+  // made with the bearer, which the route does not watch.
+  attach: "none" | "held" | "eof" | "replay" | "answered" | "answered-cut" | "recheck" = "none";
+  attachAuth: string[] = [];
   attaches = 0;
   // The Stop request itself fails (HTTP 500).
   failStop = false;
@@ -71,6 +75,7 @@ class Dashboard {
     this.onPost = null;
     this.attach = "none";
     this.attaches = 0;
+    this.attachAuth = [];
     this.failStop = false;
     this.stoppedCount = 1;
     this.errorStatus = 502;
@@ -99,12 +104,14 @@ class Dashboard {
       if (url.pathname !== "/setup-api/hermes/chat") return this.json(res, 404, { error: "not here" });
       if (req.method === "GET") {
         this.attaches++;
+        this.attachAuth.push(String(req.headers.authorization || req.headers.cookie || ""));
         if (this.attach === "none") { res.writeHead(204); res.end(); return; }
         res.writeHead(200, { "Content-Type": "text/event-stream" });
         res.write(`event: delta\ndata: ${JSON.stringify({ text: "…" })}\n\n`);
         if (this.attach === "eof") { res.end(); return; }
         if (this.attach === "replay") { res.end("event: stopped\ndata: {}\n\n"); return; }
-        if (this.attach === "answered" || this.attach === "answered-cut") res.write(`event: done\ndata: ${JSON.stringify({ text: "x" })}\n\n`);
+        if (this.attach === "answered" || this.attach === "answered-cut" || this.attach === "recheck") res.write(`event: done\ndata: ${JSON.stringify({ text: "x" })}\n\n`);
+        if (this.attach === "recheck" && !String(req.headers.authorization || "").startsWith("Bearer ")) { res.end(); return; }
         if (this.attach === "answered-cut") { setTimeout(() => res.end(), 600); return; }
         this.heldStops.add(res);
         return;
@@ -348,6 +355,28 @@ describe("the Hermes turn", () => {
     expect(dash.posts).toHaveLength(1);
   });
 
+  it("signs its settle checks with the bearer, whose re-attach no session recheck can close", async () => {
+    const owner = (extra = {}) => ({ Cookie: "clawbox_session=stub", ...extra });
+    const bearer = (extra = {}) => ({ Authorization: "Bearer stub-mcp-token", ...extra });
+    // With the bearer, a turn that answered but has not ended is never taken as ended.
+    const driver = createHermesDriver({ dash: dash.url, headers: owner, settleHeaders: bearer, settleMs: 1200 });
+    dash.reset("answer");
+    const s = sess();
+    await driver.turn(s, ask, 5000);
+    dash.attach = "recheck";
+    expect((await driver.turn(s, ask, 5000)).error?.kind).toBe("blocked");
+    expect(dash.attachAuth.every((a) => a === "Bearer stub-mcp-token")).toBe(true);
+    expect(dash.posts.filter((p) => p.sessionKey === s.key)).toHaveLength(1);
+    // Signed with the owner's session instead, a recheck close delivered at
+    // once would pass for the turn's end: why the board side uses the bearer.
+    const fooled = createHermesDriver({ dash: dash.url, headers: owner, settleMs: 1200 });
+    dash.reset("answer");
+    const t = sess();
+    await fooled.turn(t, ask, 5000);
+    dash.attach = "recheck";
+    expect((await fooled.turn(t, ask, 5000)).error).toBeNull();
+  });
+
   it("blocks the session when the Stop itself failed, even if the route shows no turn", async () => {
     dash.reset("hang");
     dash.failStop = true;
@@ -522,6 +551,8 @@ describe.skipIf(!hasTools)("run.sh on a stand-in board", () => {
     expect(raw.steps.map((s: { id: string }) => s.id)).toEqual(["ramp-1"]);
     expect(raw.turns.map((t: { ok: boolean }) => t.ok)).toEqual([true, true]);
     expect(dash.posts).toHaveLength(2);
+    // The second turn waited for the first to end, asked with the box's bearer.
+    expect(dash.attachAuth).toEqual(["Bearer stub-mcp-token"]);
     expect(fs.readFileSync(path.join(results, "stress-hermes.md"), "utf8")).toContain("| ramp-1 | 1 | 2/2 |");
     expect(fs.readFileSync(path.join(root, "hermes-calls"), "utf8")).toBe(`sessions delete --yes ${HERMES_SESSION}\n`.repeat(2));
     const log = fs.readFileSync(path.join(results, "board-hermes.log"), "utf8");
