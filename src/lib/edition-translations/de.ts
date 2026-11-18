@@ -2270,4 +2270,5 @@ export const de: Record<string, string> = {
   "cluster.engineReason.addressRefused": "Die Adresse des Gateways ist nicht zulässig.",
   "cluster.engineUnreadable": "Diese Box konnte die Einstellungen ihrer KI-Engine nicht lesen; die Engine wird daher nicht angezeigt.",
   "cluster.engineChanging": "Die KI-Einstellungen werden gerade geändert, daher wurde die Engine nicht abgefragt. Ihre Auslastung erscheint wieder, sobald das abgeschlossen ist.",
+  "cluster.engineUnbound": "Der gespeicherte API-Schlüssel gehört nicht zur gespeicherten Engine und wurde daher nicht gesendet. Speichern Sie die Engine unter Einstellungen → Lokale KI → Externe Engine erneut.",
 };

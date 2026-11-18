@@ -2267,4 +2267,5 @@ export const sv: Record<string, string> = {
   "cluster.engineReason.addressRefused": "Gatewayens adress är inte tillåten.",
   "cluster.engineUnreadable": "Den här boxen kunde inte läsa inställningarna för sin AI-motor, så motorn visas inte.",
   "cluster.engineChanging": "AI-inställningarna ändras just nu, så motorn lästes inte av. Belastningen visas igen när det är klart.",
+  "cluster.engineUnbound": "Den sparade API-nyckeln hör inte till den sparade AI-motorn, så den skickades inte. Spara motorn igen under Inställningar → Lokal AI → Extern AI-motor.",
 };

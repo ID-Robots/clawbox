@@ -25,6 +25,7 @@ import {
   openclawExternalProviderDefinition,
   probeExternalEngine,
   readExternalEngineKey,
+  readExternalEngineKeyWrittenAt,
   writeExternalEngineKey,
   type ExternalEngineRecord,
   type PreviousLocalAiState,
@@ -447,6 +448,9 @@ export async function saveExternalEngine(input: SaveInput): Promise<SaveOutcome>
   const firstSave = existing === null;
   const previous: PreviousLocalAiState = firstSave ? { store: previousStoreOf(state) } : existing.previous;
   const keyBefore = readExternalEngineKey();
+  // Put back WITH its old write time on a rollback: the Cluster view sends a key
+  // only when it is not newer than the record beside it (TASK-2670).
+  const keyWrittenBefore = readExternalEngineKeyWrittenAt();
   writeExternalEngineKey(key || NO_KEY_PLACEHOLDER);
 
   const record: ExternalEngineRecord = {
@@ -467,7 +471,7 @@ export async function saveExternalEngine(input: SaveInput): Promise<SaveOutcome>
   } catch (err) {
     // The key on file goes back to what the harness still holds.
     if (firstSave || keyBefore === null) deleteExternalEngineKey();
-    else writeExternalEngineKey(keyBefore);
+    else writeExternalEngineKey(keyBefore, keyWrittenBefore);
     if (err instanceof ExternalEngineRefusal) throw err;
     throw new ExternalEngineRefusal(
       "write_failed",
@@ -489,7 +493,7 @@ export async function saveExternalEngine(input: SaveInput): Promise<SaveOutcome>
   } catch (err) {
     // The harness names the engine but the store could not: put the key and
     // the harness back, so no engine is left that Settings cannot see or remove.
-    const undone = await rollBackUnrecordedSave({ record, existing, harness, keyBefore }).then(() => true, (undoErr) => {
+    const undone = await rollBackUnrecordedSave({ record, existing, harness, keyBefore, keyWrittenBefore }).then(() => true, (undoErr) => {
       console.error("[external-engine] undoing the unrecorded save failed:", scrub(undoErr, key));
       return false;
     });
@@ -524,14 +528,15 @@ export async function saveExternalEngine(input: SaveInput): Promise<SaveOutcome>
  * file goes back, and so does the harness — out again on a first save, the
  * previous engine's definition on a re-save (whose record the store still holds).
  */
-async function rollBackUnrecordedSave({ record, existing, harness, keyBefore }: {
+async function rollBackUnrecordedSave({ record, existing, harness, keyBefore, keyWrittenBefore }: {
   record: ExternalEngineRecord;
   existing: ExternalEngineRecord | null;
   harness: Harness;
   keyBefore: string | null;
+  keyWrittenBefore: number | null;
 }): Promise<void> {
   if (existing === null || keyBefore === null) deleteExternalEngineKey();
-  else writeExternalEngineKey(keyBefore);
+  else writeExternalEngineKey(keyBefore, keyWrittenBefore);
   if (existing === null) {
     if (harness === "hermes") await removeFromHermes(record);
     else await removeFromOpenclaw(record, harness);

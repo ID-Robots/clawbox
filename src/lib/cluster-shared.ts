@@ -64,11 +64,13 @@ export type EngineGateReason =
 
 /**
  * Why the engine was not read at all: its saved record could not be read
- * ("unreadable" — not the same as "none is set up"), or the AI settings were
+ * ("unreadable" — not the same as "none is set up"), the AI settings were
  * being changed at that moment ("changing"), when the saved address and the key
- * file may not belong to the same engine, so the key is sent nowhere.
+ * file may not belong to the same engine, or the key file was written after the
+ * record beside it ("unbound": a save that failed half way and could not put
+ * the old key back), so the key is not that engine's. The key is sent nowhere.
  */
-export type EngineUnread = "unreadable" | "changing";
+export type EngineUnread = "unreadable" | "changing" | "unbound";
 
 export interface EngineView {
   /** An engine address is known (the external engine, or `CLAWBOX_CLUSTER_ENGINE_URL`). */
@@ -279,8 +281,25 @@ export function parseSparkOutput(stdout: string): ParsedSpark | null {
 // name{labels} value [timestamp] — a quoted label value may hold `}` or spaces.
 const SAMPLE_RE = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{(?:[^}"]|"(?:[^"\\]|\\.)*")*\})?\s+(\S+)(?:\s+-?\d+)?\s*$/;
 
-/** Metric name → its series (the label set as the engine wrote it, `""` for none) → value. */
+/** Metric name → its series (the label set in canonical form, `""` for none) → value. */
 export type PrometheusSeries = Map<string, Map<string, number>>;
+
+// name="value" inside a label set; the value may hold escaped quotes.
+const LABEL_RE = /([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"/g;
+
+/**
+ * A label set as ONE spelling, whatever order the engine printed it in:
+ * `{model_name="m",engine="0"}` and `{engine="0",model_name="m"}` are the same
+ * series. Pairs sorted by name; no labels is `""`.
+ */
+export function canonicalLabels(raw: string): string {
+  if (!raw) return "";
+  const pairs: [string, string][] = [];
+  for (const m of raw.matchAll(LABEL_RE)) pairs.push([m[1], m[2]]);
+  if (pairs.length === 0) return "";
+  pairs.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  return `{${pairs.map(([name, value]) => `${name}="${value}"`).join(",")}}`;
+}
 
 /**
  * Every sample of a Prometheus text exposition, one value per series. NaN and
@@ -295,7 +314,7 @@ export function parsePrometheusSeries(text: string): PrometheusSeries {
     if (!m) continue;
     const value = Number(m[3]);
     if (!Number.isFinite(value)) continue;
-    const labels = m[2] ?? "";
+    const labels = canonicalLabels(m[2] ?? "");
     const series = out.get(m[1]) ?? new Map<string, number>();
     series.set(labels, (series.get(labels) ?? 0) + value);
     out.set(m[1], series);

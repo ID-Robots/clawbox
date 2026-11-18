@@ -2271,4 +2271,5 @@ export const nl: Record<string, string> = {
   "cluster.engineReason.addressRefused": "Het adres van de gateway is niet toegestaan.",
   "cluster.engineUnreadable": "Deze box kon de instellingen van zijn AI-engine niet lezen, dus de engine wordt niet getoond.",
   "cluster.engineChanging": "De AI-instellingen worden op dit moment gewijzigd, dus de engine is niet uitgelezen. De belasting wordt weer getoond zodra dat klaar is.",
+  "cluster.engineUnbound": "De opgeslagen API-sleutel hoort niet bij de opgeslagen engine en is daarom niet verzonden. Sla de engine opnieuw op via Instellingen → Lokale AI → Externe engine.",
 };

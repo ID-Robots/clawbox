@@ -286,6 +286,13 @@ describe("ClusterPanel: the engine", () => {
     expect(screen.queryByTestId("cluster-engine-gate")).toBeNull();
   });
 
+  it("says the saved key does not belong to the saved engine, and where to save it again", async () => {
+    answer = snapshot({ engine: { configured: true, unread: "unbound", checkedAt: 0 } });
+    render(<ClusterPanel />);
+    expect((await screen.findByTestId("cluster-engine-unbound")).textContent).toMatch(/does not belong to the saved engine/);
+    expect(screen.queryByTestId("cluster-engine-gate")).toBeNull();
+  });
+
   it("says the AI settings are being changed, with no gate or load drawn, while they are", async () => {
     answer = snapshot({ engine: { configured: true, unread: "changing", checkedAt: 0 } });
     render(<ClusterPanel />);
@@ -435,6 +442,23 @@ describe("ClusterPanel: reading the route", () => {
     await waitFor(() => expect(container.firstChild).toBeNull());
   });
 
+  it("a read that ends after the panel was closed tells Settings nothing", async () => {
+    let release: (() => void) | null = null;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise((resolve) => {
+      release = () => resolve({ ok: true, status: 200, json: async () => ({ enabled: false }) });
+    })));
+    const onUnavailable = vi.fn();
+    const { unmount } = render(<ClusterPanel onUnavailable={onUnavailable} />);
+    await waitFor(() => expect(release).not.toBeNull());
+    // The owner went to another tab while the read was out.
+    unmount();
+    await act(async () => {
+      release?.();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(onUnavailable).not.toHaveBeenCalled();
+  });
+
   it("tells Settings when the box says it has no cluster after all, and stops asking", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const onUnavailable = vi.fn();
@@ -579,6 +603,34 @@ describe("useClusterAvailable", () => {
       await vi.advanceTimersByTimeAsync(10 * 60_000);
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets no question still out bring the tab back after the panel's own answer, and asks afresh when System opens again", async () => {
+    answer = { enabled: true };
+    const { result, rerender } = renderHook(({ on }) => useClusterAvailable(on), { initialProps: { on: true } });
+    await waitFor(() => expect(result.current[0]).toBe(true));
+    // System left and opened again: a new question, whose answer is held back.
+    let release: (() => void) | null = null;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise((resolve) => {
+      release = () => resolve({ ok: true, status: 200, json: async () => ({ enabled: true }) });
+    })));
+    rerender({ on: false });
+    rerender({ on: true });
+    await waitFor(() => expect(release).not.toBeNull());
+    // The panel's snapshot says there is no cluster first…
+    act(() => result.current[1]());
+    expect(result.current[0]).toBe(false);
+    // …and the late "enabled: true" changes nothing.
+    await act(async () => {
+      release?.();
+      await new Promise((r) => setTimeout(r, 20));
+    });
+    expect(result.current[0]).toBe(false);
+    // Opening System again asks afresh.
+    serve();
+    rerender({ on: false });
+    rerender({ on: true });
+    await waitFor(() => expect(result.current[0]).toBe(true));
   });
 
   it("is taken back by the panel's own definite answer", async () => {

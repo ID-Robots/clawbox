@@ -692,6 +692,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const jobAlertsShown = useCallback(() => setShowJobAlerts(false), []);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(initialSection);
+  const [isMobile, setIsMobile] = useState(false);
+  // The System pane is the one on screen: on a phone Back closes the pane (the
+  // list shows again) while `section` stays "system".
+  const systemPaneVisible = (isMobile ? mobileSection : section) === "system";
   // Which of System's two views is open (System → Users or the device's
   // figures). Only the owner has the choice: anyone else signed in is never
   // shown Users, wherever a link asked to go — so until /users/me has said who
@@ -699,7 +703,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // No answer at all is the owner's, as it is on the desktop (page.tsx); the
   // route behind the panel judges each request itself either way.
   const [systemView, setSystemView] = useState<SystemView>(peekPendingSystemView);
-  const sessionUser = useSettledSessionUser();
+  // A lookup that failed (null) is asked again each time System opens: the
+  // Cluster tab is drawn only for a settled owner.
+  const sessionUser = useSettledSessionUser(systemPaneVisible);
   const usersAllowed: boolean | null = sessionUser === undefined ? null : sessionUser?.isOwner !== false;
   // Which sections this person is drawn. Until /users/me answers, the owner's
   // set (as the desktop draws), minus Account, which is a user's alone. A
@@ -733,7 +739,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // is also true while /users/me has not answered: nobody but a settled owner
   // asks the cluster route, so a staff user's Settings never calls it. The route
   // refuses them 403 whatever is drawn.
-  const [clusterAvailable, clusterGone] = useClusterAvailable(boxReads && sessionUser?.isOwner === true && section === "system");
+  const [clusterAvailable, clusterGone] = useClusterAvailable(boxReads && sessionUser?.isOwner === true && systemPaneVisible);
   const systemShows: SystemView | null = systemView === "device"
     ? "device"
     : usersAllowed === null
@@ -941,7 +947,6 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       window.removeEventListener(OPEN_CLAWAI_OFFER_EVENT, offerHandler);
     };
   }, []);
-  const [isMobile, setIsMobile] = useState(false);
   // On a phone a section is a level below the list: Back returns to the list
   // rather than closing Settings (lib/mobile-back).
   useMobileBack(isMobile && mobileSection !== null, () => setMobileSection(null));
@@ -6443,9 +6448,17 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
           <div className="max-w-xl" {...systemPanelProps("cluster")} tabIndex={0}>
             <ClusterPanel
               onUnavailable={() => {
-                // The box says it has no cluster after all: the tab goes, and Device opens.
+                // The box says it has no cluster after all: the tab goes, and
+                // Device opens. Focus on the Cluster tab or in its panel would be
+                // left on nothing, so it moves to Device; focus elsewhere stays.
+                const focused = document.activeElement;
+                const clusterFocused = focused !== null && (
+                  focused.id === systemTabId("cluster")
+                  || !!document.getElementById(systemPanelId("cluster"))?.contains(focused)
+                );
                 clusterGone();
                 setSystemView("device");
+                if (clusterFocused) document.getElementById(systemTabId("device"))?.focus();
               }}
             />
           </div>

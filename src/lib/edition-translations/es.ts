@@ -2266,4 +2266,5 @@ export const es: Record<string, string> = {
   "cluster.engineReason.addressRefused": "La dirección de la puerta no está permitida.",
   "cluster.engineUnreadable": "Esta caja no pudo leer los ajustes de su motor de IA, así que el motor no se muestra.",
   "cluster.engineChanging": "Los ajustes de IA se están cambiando ahora mismo, así que el motor no se ha consultado. Su carga volverá a mostrarse cuando termine.",
+  "cluster.engineUnbound": "La clave de API guardada no pertenece al motor guardado, así que no se envió. Guarde el motor de nuevo en Ajustes → IA local → Motor externo.",
 };

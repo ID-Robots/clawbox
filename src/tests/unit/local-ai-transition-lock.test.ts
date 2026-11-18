@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { localAiTransitionMark, withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
+import { localAiTransitionMark, onLocalAiTransitionStart, withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
 
 /**
  * One Local AI transition at a time (TASK-2376): the external engine's save
@@ -64,5 +64,27 @@ describe("localAiTransitionMark", () => {
     expect(after.running).toBe(false);
     expect(after.generation).not.toBe(during!.generation);
     expect(after.generation).not.toBe(idle.generation);
+  });
+});
+
+describe("onLocalAiTransitionStart", () => {
+  it("tells a listener when a transition starts, until it stops listening", async () => {
+    const heard: string[] = [];
+    const stop = onLocalAiTransitionStart(() => heard.push("start"));
+    await withLocalAiTransitionLock(async () => {
+      heard.push("inside");
+    });
+    expect(heard).toEqual(["start", "inside"]);
+    stop();
+    await withLocalAiTransitionLock(async () => {});
+    expect(heard).toEqual(["start", "inside"]);
+  });
+
+  it("a listener that throws does not stop the transition", async () => {
+    const stop = onLocalAiTransitionStart(() => {
+      throw new Error("listener broke");
+    });
+    await expect(withLocalAiTransitionLock(async () => "ran")).resolves.toBe("ran");
+    stop();
   });
 });

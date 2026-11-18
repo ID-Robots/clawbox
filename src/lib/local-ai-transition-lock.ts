@@ -20,12 +20,21 @@ const state = processStore("clawbox.local-ai-transition-lock", () => ({
   running: 0,
   /** Moves whenever a transition starts or ends. */
   generation: 0,
+  /** Told when a transition starts (`onLocalAiTransitionStart`). */
+  listeners: new Set<() => void>(),
 }));
 
 export function withLocalAiTransitionLock<T>(fn: () => Promise<T>): Promise<T> {
   const guarded = async (): Promise<T> => {
     state.running = (state.running ?? 0) + 1;
     state.generation = (state.generation ?? 0) + 1;
+    for (const listener of [...(state.listeners ?? [])]) {
+      try {
+        listener();
+      } catch {
+        // A reader's problem is not the transition's.
+      }
+    }
     try {
       return await fn();
     } finally {
@@ -48,4 +57,17 @@ export function withLocalAiTransitionLock<T>(fn: () => Promise<T>): Promise<T> {
  */
 export function localAiTransitionMark(): { running: boolean; generation: number } {
   return { running: (state.running ?? 0) > 0, generation: state.generation ?? 0 };
+}
+
+/**
+ * Be told the moment a transition starts — a reader with requests in flight
+ * that must not go on once the engine's settings may change under it. Returns
+ * the function that stops it.
+ */
+export function onLocalAiTransitionStart(listener: () => void): () => void {
+  state.listeners ??= new Set();
+  state.listeners.add(listener);
+  return () => {
+    state.listeners?.delete(listener);
+  };
 }

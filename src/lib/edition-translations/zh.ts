@@ -2279,4 +2279,5 @@ export const zh: Record<string, string> = {
   "cluster.engineReason.addressRefused": "不允许使用该网关的地址。",
   "cluster.engineUnreadable": "本机无法读取其 AI 引擎设置，因此不显示该引擎。",
   "cluster.engineChanging": "AI 设置正在更改，因此未读取引擎。更改完成后将再次显示其负载。",
+  "cluster.engineUnbound": "保存的 API 密钥不属于已保存的引擎，因此未发送。请在 设置 → 本地 AI → 外部引擎 中重新保存该引擎。",
 };

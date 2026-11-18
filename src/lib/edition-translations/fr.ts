@@ -2271,4 +2271,5 @@ export const fr: Record<string, string> = {
   "cluster.engineReason.addressRefused": "L'adresse de la passerelle n'est pas autorisée.",
   "cluster.engineUnreadable": "Cet appareil n'a pas pu lire les réglages de son moteur d'IA ; le moteur n'est donc pas affiché.",
   "cluster.engineChanging": "Les réglages d'IA sont en cours de modification, le moteur n'a donc pas été interrogé. Sa charge s'affichera de nouveau une fois l'opération terminée.",
+  "cluster.engineUnbound": "La clé d'API enregistrée n'appartient pas au moteur enregistré ; elle n'a donc pas été envoyée. Enregistrez à nouveau le moteur dans Paramètres → IA locale → Moteur externe.",
 };

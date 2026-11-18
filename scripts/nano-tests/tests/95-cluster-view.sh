@@ -49,12 +49,20 @@ note "agent runtime: $RUNTIME"
 # resolves (RFC 6761): neither can ever be a machine.
 PEERS="192.0.2.1 no-such-peer.invalid"
 
+# A folder of this run's own. One that already exists may hold an earlier run's
+# cleanup records (an account it could not remove, a .env backup): it is left
+# alone, and this run does not start.
 # shellcheck disable=SC2016  # expanded on the board
 SETUP='
 DIR=$1
-mkdir -p "$DIR" && chmod 700 "$DIR" && echo OK
+if [ -e "$DIR" ]; then echo "EXISTS"; exit 0; fi
+mkdir -m 700 "$DIR" && echo OK
 '
-if [ "$(board "$SETUP" "$DIR" | tail -n1)" != OK ]; then
+SETUP_OUT=$(board "$SETUP" "$DIR" | tail -n1)
+if [ "$SETUP_OUT" = EXISTS ]; then
+  not_ok "the test folder $DIR is already on the board (an earlier run's cleanup records?); it was left as it is"
+  finish
+elif [ "$SETUP_OUT" != OK ]; then
   not_ok "could not make the test folder on the board"
   finish
 fi
@@ -73,21 +81,34 @@ restore() {
       kill "$(cat "$DIR/engine.pid")" 2>/dev/null
       rm -f "$DIR/engine.pid"
     fi
+    rm -f "$REPO/.env.cluster-test"
     env_ok=1
+    # Put back whole or not at all: a copy is checked beside the .env, then
+    # renamed over it, so a failed write never leaves half a file in place.
+    STAGED="$REPO/.env.cluster-test-restore"
     if [ -e "$DIR/env.absent" ]; then
       if rm -f "$ENV_FILE"; then echo "ENV removed (there was none)"; else echo "ENV_FAIL could not remove the test .env"; env_ok=0; fi
     elif [ -e "$DIR/env.orig" ]; then
-      if cat "$DIR/env.orig" > "$ENV_FILE" && cmp -s "$DIR/env.orig" "$ENV_FILE"; then echo "ENV restored"; else echo "ENV_FAIL could not write the .env back"; env_ok=0; fi
+      if cp -p "$DIR/env.orig" "$STAGED" && cmp -s "$DIR/env.orig" "$STAGED" && mv -f "$STAGED" "$ENV_FILE"; then
+        echo "ENV restored"
+      else
+        rm -f "$STAGED"
+        echo "ENV_FAIL could not put the .env back; the backup is kept in $DIR/env.orig"; env_ok=0
+      fi
     else
       echo "ENV untouched"
     fi
     if [ -e "$DIR/env.touched" ]; then
-      sudo -n /usr/bin/systemctl restart clawbox-setup.service
-      restarted=$?
-      if [ "$restarted" = 0 ]; then
-        echo "RESTART ok"
+      if [ "$env_ok" = 1 ]; then
+        sudo -n /usr/bin/systemctl restart clawbox-setup.service
+        restarted=$?
+        if [ "$restarted" = 0 ]; then
+          echo "RESTART ok"
+        else
+          echo "RESTART_FAIL the web server could not be restarted onto the restored .env"; env_ok=0
+        fi
       else
-        echo "RESTART_FAIL the web server could not be restarted onto the restored .env"; env_ok=0
+        echo "RESTART_FAIL not restarted: the original .env is not back, so the running web server keeps the test settings until it is"
       fi
     fi
     if [ "$env_ok" = 1 ]; then rm -f "$DIR/env.orig" "$DIR/env.absent" "$DIR/env.new" "$DIR/env.touched"; fi
@@ -96,11 +117,16 @@ restore() {
     user_ok=1
     if [ -s "$DIR/user" ]; then
       name=$(cat "$DIR/user")
-      for _ in $(seq 1 60); do
-        [ "$(owner_api GET "/setup-api/system/cluster?availability=1" | head -n1)" = 200 ] && break
+      # Short probes inside a bounded wait, so the removal (or the note of what
+      # is left) always happens well before the deadline of the runner.
+      ready=no
+      until_s=$(( $(date +%s) + 240 ))
+      while [ "$(date +%s)" -lt "$until_s" ]; do
+        if [ "$(API_MAX_TIME=10 owner_api GET "/setup-api/system/cluster?availability=1" | head -n1)" = 200 ]; then ready=yes; break; fi
         sleep 5
       done
-      code=$(owner_api DELETE /setup-api/users "{\"username\":\"$name\"}" | head -n1)
+      code=000
+      [ "$ready" = yes ] && code=$(API_MAX_TIME=60 owner_api DELETE /setup-api/users "{\"username\":\"$name\"}" | head -n1)
       # 404 is "not in the ClawBox user list", which a half-made account can
       # also be: the Linux account must be gone too (getent: 2 = no such entry).
       getent passwd "$name" >/dev/null 2>&1
@@ -142,9 +168,17 @@ USER_OUT=$(board '
   DIR=$1
   NAME="nanoci$(tr -dc a-z0-9 </dev/urandom | head -c 6)"
   PASS="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 24)"
-  printf "%s" "$NAME" > "$DIR/user"
+  # The name is noted BEFORE the account is made, so the cleanup can remove an
+  # account whose creation answered nothing clear; no note, no account.
+  if ! printf "%s" "$NAME" > "$DIR/user"; then printf "FAIL could not note the account name, so none was made\n"; exit 0; fi
   r=$(owner_api POST /setup-api/users "{\"username\":\"$NAME\",\"password\":\"$PASS\"}")
   code=$(printf "%s\n" "$r" | head -n1)
+  # A name that is taken belongs to an account of someone else: never one for the cleanup to remove.
+  if [ "$code" = 409 ] && printf "%s" "$r" | grep -q user_exists; then
+    rm -f "$DIR/user"
+    printf "FAIL the name %s belongs to an existing account, which is left alone\n" "$NAME"
+    exit 0
+  fi
   if [ "$code" != 201 ]; then printf "FAIL create %s %s\n" "$code" "$(printf "%s\n" "$r" | tail -n +2 | head -c 200)"; exit 0; fi
   jar=$(mktemp)
   login=$(printf "%s" "{\"username\":\"$NAME\",\"password\":\"$PASS\",\"duration\":1200}" \
@@ -161,11 +195,11 @@ case "$USER_OUT" in
 esac
 
 # call_as WHO PATH — one request on the board as the owner, as the staff user
-# ("staff") or with no session ("none"): the status, then the body, then the
-# seconds it took. The cookie reaches curl on its stdin only.
+# ("staff") or with no session ("none"): the status, the milliseconds it took,
+# then the body. The cookie reaches curl on its stdin only.
 # shellcheck disable=SC2016
 CALL='
-DIR=$1; who=$2; path=$3
+DIR=$1; who=$2; path=$3; max=${4:-60}
 cookie=""
 case "$who" in
   owner) cookie=$(node -e "const fs = require(\"fs\"), crypto = require(\"crypto\");
@@ -178,26 +212,27 @@ case "$who" in
   staff) cookie=$(cat "$DIR/user-cookie") ;;
 esac
 out=$(mktemp)
-start=$(date +%s)
+start=$(date +%s%N)
 if [ -n "$cookie" ]; then
   code=$(printf "header = \"Cookie: clawbox_session=%s\"\nheader = \"Origin: http://127.0.0.1\"\n" "$cookie" \
-    | curl -sS -o "$out" -w "%{http_code}" --max-time 60 -K - "$DASHBOARD$path" 2>/dev/null)
+    | curl -sS -o "$out" -w "%{http_code}" --max-time "$max" -K - "$DASHBOARD$path" 2>/dev/null)
 else
-  code=$(curl -sS -o "$out" -w "%{http_code}" --max-time 60 "$DASHBOARD$path" 2>/dev/null)
+  code=$(curl -sS -o "$out" -w "%{http_code}" --max-time "$max" "$DASHBOARD$path" 2>/dev/null)
 fi
-end=$(date +%s)
-printf "%s\n%s\n" "${code:-000}" "$((end - start))"
+end=$(date +%s%N)
+printf "%s\n%s\n" "${code:-000}" "$(( (end - start) / 1000000 ))"
 cat "$out"
 rm -f "$out"
 '
 CALL_STATUS=000
-CALL_SECONDS=0
+CALL_MS=0
 CALL_BODY=
+# call_as WHO PATH [MAX_SECONDS]
 call_as() {
   local out
-  out=$(board "$CALL" "$DIR" "$1" "$2")
+  out=$(board "$CALL" "$DIR" "$1" "$2" "${3:-60}")
   CALL_STATUS=$(printf '%s\n' "$out" | sed -n 1p)
-  CALL_SECONDS=$(printf '%s\n' "$out" | sed -n 2p)
+  CALL_MS=$(printf '%s\n' "$out" | sed -n 2p)
   CALL_BODY=$(printf '%s\n' "$out" | tail -n +3)
   case "$CALL_STATUS" in [0-9][0-9][0-9]) ;; *) CALL_STATUS=000 ;; esac
 }
@@ -315,7 +350,7 @@ base="$DIR/env.orig"
 [ -e "$DIR/env.absent" ] && base=/dev/null
 # awk, not grep: it answers 0 whether or not a line was dropped, so any
 # non-zero status (an unreadable backup, a failed redirection) is a failure.
-if ! awk '"'"'!/^[[:space:]]*(export[[:space:]]+)?CLAWBOX_CLUSTER_(PEERS|VIEW|ENGINE_URL)=/'"'"' "$base" > "$DIR/env.new"; then
+if ! awk '"'"'!/^[[:space:]]*(export[[:space:]]+)?CLAWBOX_CLUSTER_(PEERS|VIEW|ENGINE_URL)[[:space:]]*=/'"'"' "$base" > "$DIR/env.new"; then
   echo "FAIL could not read the .env backup"
   exit 0
 fi
@@ -327,9 +362,17 @@ if ! {
   echo "FAIL could not write the new .env"
   exit 0
 fi
+# Staged beside the .env and checked, then renamed over it: never half a file.
+STAGED="$REPO/.env.cluster-test"
+rm -f "$STAGED"
+if ! { { [ ! -e "$ENV_FILE" ] || cp -p "$ENV_FILE" "$STAGED"; } && cat "$DIR/env.new" > "$STAGED" && cmp -s "$DIR/env.new" "$STAGED"; }; then
+  rm -f "$STAGED"
+  echo "FAIL could not stage the new .env; it was not changed"
+  exit 0
+fi
 # The cleanup restarts the web server only where this marker is: no marker, no change.
-if ! : > "$DIR/env.touched"; then echo "FAIL could not mark the .env as changed; it was not changed"; exit 0; fi
-if ! cat "$DIR/env.new" > "$ENV_FILE"; then echo "FAIL could not write $ENV_FILE"; exit 0; fi
+if ! : > "$DIR/env.touched"; then rm -f "$STAGED"; echo "FAIL could not mark the .env as changed; it was not changed"; exit 0; fi
+if ! mv -f "$STAGED" "$ENV_FILE"; then rm -f "$STAGED"; echo "FAIL could not put the new .env in place"; exit 0; fi
 sudo -n /usr/bin/systemctl restart clawbox-setup.service
 restarted=$?
 if [ "$restarted" != 0 ]; then echo "FAIL could not restart the web server"; exit 0; fi
@@ -339,20 +382,22 @@ echo OK
 # answer the owner. Polling starts only once the write and the restart worked.
 RESTART_ERROR=
 restart_with() {
-  local out i
+  local out until_s
   out=$(board "$WRITE_ENV" "$DIR" "$1" "$2" "$ENGINE_URL" 2>&1 | tail -n1)
   if [ "$out" != OK ]; then
     RESTART_ERROR=${out:-the board did not answer the .env step}
     return 1
   fi
-  # The dashboard goes down for the restart and comes back: wait for it.
+  # The dashboard goes down for the restart and comes back: wait for it, with
+  # short probes and a bounded wait.
   sleep 5
-  for i in $(seq 1 60); do
-    call_as owner "/setup-api/system/cluster?availability=1"
+  until_s=$(( SECONDS + 240 ))
+  while [ "$SECONDS" -lt "$until_s" ]; do
+    call_as owner "/setup-api/system/cluster?availability=1" 15
     [ "$CALL_STATUS" = 200 ] && return 0
     sleep 5
   done
-  RESTART_ERROR="the web server did not come back after the restart"
+  RESTART_ERROR="the web server did not come back within 4 minutes of the restart"
   return 1
 }
 
@@ -405,14 +450,14 @@ wait "$bg"
 c1=$(cat "$out.end" 2>/dev/null || echo 0)
 keys=$(grep -c "key=yes" "$DIR/engine-hits")
 hits=$(wc -l < "$DIR/engine-hits")
-printf "%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n" "$stats" "$((s1 - s0))" "$(( (c1 - c0) / 1000 ))" "$held" "$s0" "$s1" "$c1" "$hits" "$keys"
+printf "%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n" "$stats" "$((s1 - s0))" "$((c1 - c0))" "$held" "$s0" "$s1" "$c1" "$hits" "$keys"
 cat "$out"
 rm -f "$out" "$out.end"
 '
 COUT=$(board "$CONCURRENT" "$DIR")
 STATS_STATUS=$(printf '%s\n' "$COUT" | sed -n 1p)
 STATS_MS=$(printf '%s\n' "$COUT" | sed -n 2p)
-CLUSTER_SECONDS=$(printf '%s\n' "$COUT" | sed -n 3p)
+CLUSTER_MS=$(printf '%s\n' "$COUT" | sed -n 3p)
 HELD=$(printf '%s\n' "$COUT" | sed -n 4p)
 STATS_START=$(printf '%s\n' "$COUT" | sed -n 5p)
 STATS_END=$(printf '%s\n' "$COUT" | sed -n 6p)
@@ -429,10 +474,12 @@ else
   not_ok "the cluster route answered $CALL_STATUS with the peers down: $(printf '%s' "$CALL_BODY" | head -c 200)"
   finish
 fi
-if [ "$(num "$CLUSTER_SECONDS" 99)" -le 15 ]; then
-  ok "it did not hang: the answer took ${CLUSTER_SECONDS} s with two peers that never answer and an engine that holds (the ceiling is 7 s)"
+# Each Spark's read stops at 7 s and the engine's at 6 s, all at once: 15 s is
+# the most an answer may take with room for the board's own load.
+if [ "$(num "$CLUSTER_MS" 99999)" -le 15000 ]; then
+  ok "it did not hang: the answer took ${CLUSTER_MS} ms with two peers that never answer and an engine that holds (limit 15000 ms; a Spark's read stops at 7 s, the engine's at 6 s)"
 else
-  not_ok "the cluster route took ${CLUSTER_SECONDS} s"
+  not_ok "the cluster route took ${CLUSTER_MS} ms (limit 15000 ms)"
 fi
 if [ "$HELD" = yes ] && [ "$STATS_STATUS" = 200 ] && [ "$(num "$STATS_MS" 99999)" -le 3000 ] \
   && [ "$(num "$STATS_START" 0)" -gt 0 ] && [ "$(num "$STATS_END" 0)" -lt "$(num "$CLUSTER_END" 0)" ]; then
@@ -472,10 +519,10 @@ fi
 FIRST_READ=$(body_json '[.sparks[].checkedAt] | map(tostring) | join(",")')
 call_as owner "/setup-api/system/cluster"
 SECOND_READ=$(body_json '[.sparks[].checkedAt] | map(tostring) | join(",")')
-if [ "$CALL_STATUS" = 200 ] && [ -n "$FIRST_READ" ] && [ "$SECOND_READ" = "$FIRST_READ" ] && [ "$(num "$CALL_SECONDS" 99)" -le 2 ]; then
-  ok "the next answer is served from memory: the same readings (checkedAt ${FIRST_READ}), in ${CALL_SECONDS} s"
+if [ "$CALL_STATUS" = 200 ] && [ -n "$FIRST_READ" ] && [ "$SECOND_READ" = "$FIRST_READ" ] && [ "$(num "$CALL_MS" 99999)" -le 2000 ]; then
+  ok "the next answer is served from memory: the same readings (checkedAt ${FIRST_READ}), in ${CALL_MS} ms (limit 2000 ms)"
 else
-  not_ok "the second answer ($CALL_STATUS in ${CALL_SECONDS} s) is not the remembered one: checkedAt ${SECOND_READ:-none} vs ${FIRST_READ:-none}"
+  not_ok "the second answer ($CALL_STATUS in ${CALL_MS} ms, limit 2000 ms) is not the remembered one: checkedAt ${SECOND_READ:-none} vs ${FIRST_READ:-none}"
 fi
 
 # --- 4. staff, with a cluster configured -------------------------------------

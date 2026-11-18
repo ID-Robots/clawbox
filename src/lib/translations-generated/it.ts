@@ -1048,6 +1048,7 @@ const table: Record<string, string> = {
   "cluster.engineReason.unreachable": "Il gateway non ha risposto.",
   "cluster.engineTokens": "Token al secondo",
   "cluster.engineTokensValue": "{value} tok/s",
+  "cluster.engineUnbound": "La chiave API salvata non appartiene al motore salvato, quindi non è stata inviata. Salva di nuovo il motore in Impostazioni → IA locale → Motore esterno.",
   "cluster.engineUnreadable": "Questo dispositivo non è riuscito a leggere le impostazioni del suo motore AI, quindi il motore non viene mostrato.",
   "cluster.failure.auth": "Ha rifiutato la chiave SSH di questo dispositivo.",
   "cluster.failure.failed": "Ha risposto, ma i suoi valori non si sono potuti leggere.",

@@ -1048,6 +1048,7 @@ const table: Record<string, string> = {
   "cluster.engineReason.unreachable": "The gate did not answer.",
   "cluster.engineTokens": "Tokens per second",
   "cluster.engineTokensValue": "{value} tok/s",
+  "cluster.engineUnbound": "The saved API key does not belong to the saved engine, so it was not sent. Save the engine again under Settings → Local AI → External engine.",
   "cluster.engineUnreadable": "This box could not read its AI engine settings, so the engine is not shown.",
   "cluster.failure.auth": "Refused this box's SSH key.",
   "cluster.failure.failed": "Answered, but its figures could not be read.",

@@ -34,6 +34,7 @@ import {
   probeExternalEngine,
   probeExternalEngineReasoning,
   readExternalEngineKey,
+  readExternalEngineKeyWrittenAt,
   writeExternalEngineKey,
 } from "@/lib/external-engine";
 
@@ -215,9 +216,45 @@ describe("openclawExternalProviderDefinition", () => {
   });
 });
 
+describe("the key file's write time (TASK-2670)", () => {
+  it("is when the key was written, and a rollback can put back the time an earlier write had", () => {
+    expect(readExternalEngineKeyWrittenAt()).toBeNull();
+    const before = Date.now();
+    writeExternalEngineKey(KEY);
+    const written = readExternalEngineKeyWrittenAt()!;
+    expect(written).toBeGreaterThanOrEqual(before - 2_000);
+    const earlier = Date.parse("2026-11-01T08:00:00.000Z");
+    writeExternalEngineKey("sk-previous-key-placeholder-0123456789", earlier);
+    expect(Math.abs(readExternalEngineKeyWrittenAt()! - earlier)).toBeLessThan(1_000);
+    expect(readExternalEngineKey()).toBe("sk-previous-key-placeholder-0123456789");
+    expect(statSync(path.join(root, "data", ".external-engine-key")).mode & 0o777).toBe(0o600);
+  });
+});
+
 describe("probeExternalEngine", () => {
   const ok = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
   const opts = { baseUrl: "http://192.0.2.10:8000/v1", modelId: "Qwen/Qwen3-32B" };
+
+  it("lets go of a refusal's body, so the connection is not held by a body nobody reads", async () => {
+    for (const status of [401, 302, 500]) {
+      const cancel = vi.fn(async () => {});
+      const res = new Response("streaming…", { status, headers: status === 302 ? { location: "http://192.0.2.11/v1/models" } : {} });
+      Object.defineProperty(res, "body", { value: { cancel } });
+      const fetchImpl = vi.fn(async () => res);
+      const r = await probeExternalEngine({ ...opts, apiKey: KEY, fetchImpl: fetchImpl as unknown as typeof fetch });
+      expect(r.ok, String(status)).toBe(false);
+      expect(cancel, String(status)).toHaveBeenCalled();
+    }
+  });
+
+  it("starts no request once the caller's own deadline has fired", async () => {
+    const fetchImpl = vi.fn(async () => ok({ data: [{ id: "Qwen/Qwen3-32B" }] }));
+    const controller = new AbortController();
+    controller.abort();
+    const r = await probeExternalEngine({ ...opts, apiKey: KEY, fetchImpl: fetchImpl as unknown as typeof fetch, signal: controller.signal });
+    expect(r).toMatchObject({ ok: false, code: "unreachable" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
 
   it("lists the models and sends the key as a bearer, without following redirects", async () => {
     const fetchImpl = vi.fn(async () => ok({ object: "list", data: [{ id: "Qwen/Qwen3-32B" }, { id: "other" }] }));

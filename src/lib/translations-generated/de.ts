@@ -1048,6 +1048,7 @@ const table: Record<string, string> = {
   "cluster.engineReason.unreachable": "Das Gateway hat nicht geantwortet.",
   "cluster.engineTokens": "Token pro Sekunde",
   "cluster.engineTokensValue": "{value} tok/s",
+  "cluster.engineUnbound": "Der gespeicherte API-Schlüssel gehört nicht zur gespeicherten Engine und wurde daher nicht gesendet. Speichern Sie die Engine unter Einstellungen → Lokale KI → Externe Engine erneut.",
   "cluster.engineUnreadable": "Diese Box konnte die Einstellungen ihrer KI-Engine nicht lesen; die Engine wird daher nicht angezeigt.",
   "cluster.failure.auth": "Hat den SSH-Schlüssel dieser Box abgelehnt.",
   "cluster.failure.failed": "Hat geantwortet, aber seine Werte konnten nicht gelesen werden.",

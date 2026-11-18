@@ -1048,6 +1048,7 @@ const table: Record<string, string> = {
   "cluster.engineReason.unreachable": "Gatewayen svarade inte.",
   "cluster.engineTokens": "Tokens per sekund",
   "cluster.engineTokensValue": "{value} tok/s",
+  "cluster.engineUnbound": "Den sparade API-nyckeln hör inte till den sparade AI-motorn, så den skickades inte. Spara motorn igen under Inställningar → Lokal AI → Extern AI-motor.",
   "cluster.engineUnreadable": "Den här boxen kunde inte läsa inställningarna för sin AI-motor, så motorn visas inte.",
   "cluster.failure.auth": "Nekade den här boxens SSH-nyckel.",
   "cluster.failure.failed": "Svarade, men värdena kunde inte läsas.",

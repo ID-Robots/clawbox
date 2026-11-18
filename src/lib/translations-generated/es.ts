@@ -1048,6 +1048,7 @@ const table: Record<string, string> = {
   "cluster.engineReason.unreachable": "La puerta no respondió.",
   "cluster.engineTokens": "Tokens por segundo",
   "cluster.engineTokensValue": "{value} tok/s",
+  "cluster.engineUnbound": "La clave de API guardada no pertenece al motor guardado, así que no se envió. Guarde el motor de nuevo en Ajustes → IA local → Motor externo.",
   "cluster.engineUnreadable": "Esta caja no pudo leer los ajustes de su motor de IA, así que el motor no se muestra.",
   "cluster.failure.auth": "Rechazó la clave SSH de esta caja.",
   "cluster.failure.failed": "Respondió, pero no se pudieron leer sus datos.",

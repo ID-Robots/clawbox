@@ -1048,6 +1048,7 @@ const table: Record<string, string> = {
   "cluster.engineReason.unreachable": "Шлюзът не отговори.",
   "cluster.engineTokens": "Токени в секунда",
   "cluster.engineTokensValue": "{value} tok/s",
+  "cluster.engineUnbound": "Запазеният API ключ не принадлежи на запазения двигател, затова не беше изпратен. Запазете двигателя отново в Настройки → Локален AI → Външен двигател.",
   "cluster.engineUnreadable": "Това устройство не можа да прочете настройките на своя AI двигател, затова двигателят не е показан.",
   "cluster.failure.auth": "Отхвърли SSH ключа на това устройство.",
   "cluster.failure.failed": "Отговори, но данните му не можаха да бъдат прочетени.",

@@ -81,15 +81,20 @@ const AVAILABILITY_RETRIES = 8;
  */
 export function useClusterAvailable(active: boolean): [boolean, () => void] {
   const [available, setAvailable] = useState(false);
+  // Which round of asking is current: an answer, or a retry, from an older one
+  // (System closed since, or the panel's own answer came first) changes nothing.
+  const round = useRef(0);
+  const retry = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => {
     if (!active) return;
-    let live = true;
-    let retry: ReturnType<typeof setTimeout> | undefined;
+    round.current += 1;
+    const mine = round.current;
+    const current = () => round.current === mine;
     let attempt = 0;
     const ask = () => {
       getJson("/setup-api/system/cluster?availability=1")
         .then((res) => {
-          if (!live) return;
+          if (!current()) return;
           if (res.ok) {
             const enabled = (res.data as { enabled?: unknown } | null)?.enabled;
             if (typeof enabled === "boolean") {
@@ -104,22 +109,28 @@ export function useClusterAvailable(active: boolean): [boolean, () => void] {
         })
         .catch(() => {
           // Not an answer: what was known stays, and the question is asked again.
-          if (live) again();
+          if (current()) again();
         });
     };
     const again = () => {
       if (attempt >= AVAILABILITY_RETRIES) return;
       const delay = Math.min(AVAILABILITY_RETRY_MS * 2 ** attempt, AVAILABILITY_RETRY_MAX_MS);
       attempt += 1;
-      retry = setTimeout(ask, delay);
+      retry.current = setTimeout(ask, delay);
     };
     ask();
     return () => {
-      live = false;
-      clearTimeout(retry);
+      round.current += 1;
+      clearTimeout(retry.current);
     };
   }, [active]);
-  const gone = useCallback(() => setAvailable(false), []);
+  // The panel's own definite answer: no question still out may bring the tab
+  // back; opening System again asks afresh.
+  const gone = useCallback(() => {
+    round.current += 1;
+    clearTimeout(retry.current);
+    setAvailable(false);
+  }, []);
   return [active && available, gone];
 }
 
@@ -328,6 +339,10 @@ function EngineCardView({ engine, locale }: { engine: EngineView; locale: string
         <p className="text-xs text-[var(--text-muted)]" data-testid="cluster-engine-changing">
           {tr("cluster.engineChanging", "The AI settings are being changed right now, so the engine was not read. Its load shows again once that is done.")}
         </p>
+      ) : engine.unread === "unbound" ? (
+        <p className="text-xs text-[var(--text-muted)]" data-testid="cluster-engine-unbound">
+          {tr("cluster.engineUnbound", "The saved API key does not belong to the saved engine, so it was not sent. Save the engine again under Settings → Local AI → External engine.")}
+        </p>
       ) : !engine.configured ? (
         <p className="text-xs text-[var(--text-muted)]" data-testid="cluster-engine-none">
           {tr("cluster.engineNone", "No AI engine is set up. Add one under Settings → Local AI → External engine.")}
@@ -404,10 +419,19 @@ export default function ClusterPanel({ onUnavailable }: {
   const [gone, setGone] = useState(false);
   const busy = useRef(false);
   const goneRef = useRef(false);
+  // A read that ends after the panel was closed (the owner went to Users) speaks
+  // to nobody: it must not draw, and must not move Settings to Device.
+  const mounted = useRef(false);
   const onUnavailableRef = useRef(onUnavailable);
   useEffect(() => {
     onUnavailableRef.current = onUnavailable;
   }, [onUnavailable]);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const read = useCallback(async () => {
     // One read at a time: a slow cluster must not stack requests behind itself.
@@ -416,6 +440,7 @@ export default function ClusterPanel({ onUnavailable }: {
     busy.current = true;
     try {
       const res = await getJson("/setup-api/system/cluster");
+      if (!mounted.current) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = res.data as ClusterAnswer | null;
       if (data?.enabled === true) {
@@ -429,7 +454,7 @@ export default function ClusterPanel({ onUnavailable }: {
       }
       setFailed(false);
     } catch {
-      setFailed(true);
+      if (mounted.current) setFailed(true);
     } finally {
       busy.current = false;
     }

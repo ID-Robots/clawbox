@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  canonicalLabels,
   engineSampleFrom,
   engineSampleUsable,
   parsePrometheus,
@@ -230,6 +231,22 @@ describe("engineSampleFrom", () => {
     const sample = engineSampleFrom(parsePrometheusSeries("process_cpu_seconds_total 12\nhttp_requests_total 9\n"));
     expect(sample).toEqual({ active: null, queued: null, rate: null, tokens: null });
     expect(engineSampleUsable(sample)).toBe(false);
+  });
+});
+
+describe("canonicalLabels", () => {
+  it("spells a label set one way whatever order it was printed in", () => {
+    expect(canonicalLabels('{model_name="m",engine="0"}')).toBe('{engine="0",model_name="m"}');
+    expect(canonicalLabels('{engine="0", model_name="m"}')).toBe('{engine="0",model_name="m"}');
+    expect(canonicalLabels('{note="a \\"quoted\\" b",engine="1"}')).toBe('{engine="1",note="a \\"quoted\\" b"}');
+    expect(canonicalLabels("")).toBe("");
+    expect(canonicalLabels("{}")).toBe("");
+  });
+
+  it("keeps a counter one series when the engine reorders its labels between reads", () => {
+    const first = engineSampleFrom(parsePrometheusSeries('vllm:generation_tokens_total{engine="0",model_name="m"} 100\n'));
+    const second = engineSampleFrom(parsePrometheusSeries('vllm:generation_tokens_total{model_name="m",engine="0"} 200\n'));
+    expect(tokensPerSecondBetween({ at: 0, tokens: first.tokens! }, { at: 10_000, tokens: second.tokens! })).toBe(10);
   });
 });
 

@@ -1048,6 +1048,7 @@ const table: Record<string, string> = {
   "cluster.engineReason.unreachable": "La passerelle n'a pas répondu.",
   "cluster.engineTokens": "Jetons par seconde",
   "cluster.engineTokensValue": "{value} tok/s",
+  "cluster.engineUnbound": "La clé d'API enregistrée n'appartient pas au moteur enregistré ; elle n'a donc pas été envoyée. Enregistrez à nouveau le moteur dans Paramètres → IA locale → Moteur externe.",
   "cluster.engineUnreadable": "Cet appareil n'a pas pu lire les réglages de son moteur d'IA ; le moteur n'est donc pas affiché.",
   "cluster.failure.auth": "A refusé la clé SSH de cet appareil.",
   "cluster.failure.failed": "A répondu, mais ses valeurs n'ont pas pu être lues.",

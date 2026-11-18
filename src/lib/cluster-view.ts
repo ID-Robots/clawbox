@@ -55,16 +55,17 @@ import { spawn, type ChildProcess } from "child_process";
 import net from "net";
 import os from "os";
 import { lookup as dnsLookup } from "dns/promises";
-import { resolveConfigRoot } from "./config-store";
+import { getKnown, resolveConfigRoot } from "./config-store";
 import {
   NO_KEY_PLACEHOLDER,
+  externalEngineFromState,
   probeExternalEngine,
   readCapped,
-  readExternalEngine,
   readExternalEngineKey,
+  readExternalEngineKeyWrittenAt,
 } from "./external-engine";
-import { externalEngineOrigin, normalizeExternalBaseUrl } from "./external-engine-shared";
-import { localAiTransitionMark } from "./local-ai-transition-lock";
+import { EXTERNAL_ENGINE_STORE_KEY, externalEngineOrigin, normalizeExternalBaseUrl } from "./external-engine-shared";
+import { localAiTransitionMark, onLocalAiTransitionStart } from "./local-ai-transition-lock";
 import { isWorkstationHost, probeUpdateHost } from "./update-channel";
 import {
   COLLECTOR_PREFIX,
@@ -164,12 +165,22 @@ export interface EngineTarget {
  */
 export const ENGINE_CHANGING = "changing" as const;
 
+/**
+ * What `readEngine` answers when the key file was written after the record it
+ * sits beside — a save that failed after writing its key and could not put the
+ * old one back: the key is not that engine's, and is sent nowhere.
+ */
+export const ENGINE_UNBOUND = "unbound" as const;
+
+/** A save writes the key a moment before it stamps the record; this much later is still that save's. */
+export const KEY_BINDING_SLACK_MS = 2_000;
+
 export interface ClusterDeps {
   env: NodeJS.ProcessEnv;
   now: () => number;
   run: ScriptRunner;
   isWorkstation: () => boolean;
-  readEngine: () => Promise<EngineTarget | null | typeof ENGINE_CHANGING>;
+  readEngine: () => Promise<EngineTarget | null | typeof ENGINE_CHANGING | typeof ENGINE_UNBOUND>;
   fetchImpl: typeof fetch;
   lookup: LookupFn;
 }
@@ -276,7 +287,9 @@ function defaultIsWorkstation(): boolean {
   return value;
 }
 
-async function defaultReadEngine(env: NodeJS.ProcessEnv): Promise<EngineTarget | null | typeof ENGINE_CHANGING> {
+async function defaultReadEngine(
+  env: NodeJS.ProcessEnv,
+): Promise<EngineTarget | null | typeof ENGINE_CHANGING | typeof ENGINE_UNBOUND> {
   // The record and the key file are two reads, and a save writes the new key
   // before the new record (src/lib/external-engine-ops.ts): a pair read across a
   // save could send one engine's key to the other's address. Every writer of
@@ -284,16 +297,28 @@ async function defaultReadEngine(env: NodeJS.ProcessEnv): Promise<EngineTarget |
   // transition runs, and used only when none started in between.
   const before = localAiTransitionMark();
   if (before.running) return ENGINE_CHANGING;
-  const record = await readExternalEngine();
+  // The store's tri-state read: a store that cannot be read is not "no engine".
+  const stored = await getKnown(EXTERNAL_ENGINE_STORE_KEY);
+  if (!stored.known) throw new Error("the settings store could not be read");
+  const record = externalEngineFromState({ [EXTERNAL_ENGINE_STORE_KEY]: stored.value });
   const key = readExternalEngineKey();
+  const keyWrittenAt = readExternalEngineKeyWrittenAt();
   const after = localAiTransitionMark();
   if (after.running || after.generation !== before.generation) return ENGINE_CHANGING;
   const recordKey = key && key !== NO_KEY_PLACEHOLDER ? key : null;
   const override = normalizeExternalBaseUrl(unquote(env[CLUSTER_ENGINE_URL_ENV]));
+  // The stored key and model belong to the engine they were saved for: they go
+  // to that engine's origin and nowhere else.
+  const same = override === null || (record !== null && externalEngineOrigin(record.baseUrl) === externalEngineOrigin(override));
+  if (record && recordKey && same) {
+    // ...and only while the key is that save's: a key written after its record
+    // (a save that failed half way, its old key not put back) is not.
+    const savedAt = Date.parse(record.savedAt);
+    if (Number.isFinite(savedAt) && keyWrittenAt !== null && keyWrittenAt > savedAt + KEY_BINDING_SLACK_MS) {
+      return ENGINE_UNBOUND;
+    }
+  }
   if (override) {
-    // The stored key and model belong to the engine they were saved for: they
-    // go to the same origin and nowhere else.
-    const same = record !== null && externalEngineOrigin(record.baseUrl) === externalEngineOrigin(override);
     return { baseUrl: override, apiKey: same ? recordKey : null, modelId: same && record ? record.modelId : "" };
   }
   if (record) return { baseUrl: record.baseUrl, apiKey: recordKey, modelId: record.modelId };
@@ -401,8 +426,10 @@ echo "${COLLECTOR_PREFIX} cpu2 $(head -n 1 /proc/stat 2>/dev/null </dev/null)"
 echo "${COLLECTOR_PREFIX} up $(cat /proc/uptime 2>/dev/null </dev/null)"
 grep -E '^(MemTotal|MemAvailable|MemFree):' /proc/meminfo 2>/dev/null </dev/null | while read -r l; do echo "${COLLECTOR_PREFIX} mem $l"; done
 if command -v nvidia-smi >/dev/null 2>&1; then
+  # --foreground keeps timeout in this process group, which the deadline stops whole.
   T=""
-  command -v timeout >/dev/null 2>&1 && T="timeout 4"
+  if timeout --foreground 1 true >/dev/null 2>&1 </dev/null; then T="timeout --foreground -k 1 4"
+  elif command -v timeout >/dev/null 2>&1; then T="timeout 4"; fi
   $T nvidia-smi --query-gpu=name,utilization.gpu,temperature.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null </dev/null | head -n 1 | while read -r l; do echo "${COLLECTOR_PREFIX} gpu $l"; done
 fi
 for z in /sys/class/thermal/thermal_zone*/temp; do
@@ -562,11 +589,22 @@ function gateReason(code: string): EngineGateReason {
   }
 }
 
+/** One engine read's own state: what stops it, which settings it read, and what it may remember once it is the answer. */
+interface EngineReadContext {
+  /** Fired at the deadline, or when a Local AI transition starts. */
+  signal: AbortSignal;
+  /** The transition stamp at the read's start: token baselines are kept per settings generation. */
+  generation: number;
+  /** Token baselines to keep, committed only when this read is the one answered. */
+  staged: (() => void)[];
+}
+
 async function readEngineMetrics(
   d: ClusterDeps,
   target: EngineTarget,
-  deadline: AbortSignal,
+  ctx: EngineReadContext,
 ): Promise<NonNullable<EngineView["metrics"]>> {
+  const deadline = ctx.signal;
   const origin = externalEngineOrigin(target.baseUrl);
   const withoutV1 = target.baseUrl.replace(/\/v1$/, "");
   const bases = [...new Set([withoutV1, origin].filter(Boolean))];
@@ -597,9 +635,13 @@ async function readEngineMetrics(
       const at = d.now();
       let tokensPerSecond = sample.rate !== null ? Math.round(sample.rate * 10) / 10 : null;
       if (sample.tokens !== null) {
+        // The same page under other settings (another engine behind the same
+        // address) is another stream: baselines are kept per settings generation.
+        const memoKey = `${ctx.generation}|${url}`;
         const read: TokenRead = { at, tokens: sample.tokens };
-        if (tokensPerSecond === null) tokensPerSecond = tokensPerSecondBetween(engineTokenMemo.get(url) ?? null, read);
-        rememberTokens(url, read);
+        if (tokensPerSecond === null) tokensPerSecond = tokensPerSecondBetween(engineTokenMemo.get(memoKey) ?? null, read);
+        // Kept only if the whole engine read is the answer (`readEngine`).
+        ctx.staged.push(() => rememberTokens(memoKey, read));
       }
       return { available: true, active: sample.active, queued: sample.queued, tokensPerSecond };
     } catch {
@@ -616,8 +658,9 @@ async function readEngineMetrics(
  */
 export const ENGINE_DEADLINE_MS = 6_000;
 
-async function readEngineUnbounded(d: ClusterDeps, deadline: AbortSignal): Promise<EngineView> {
-  let target: EngineTarget | null | typeof ENGINE_CHANGING;
+async function readEngineUnbounded(d: ClusterDeps, ctx: EngineReadContext): Promise<EngineView> {
+  const deadline = ctx.signal;
+  let target: EngineTarget | null | typeof ENGINE_CHANGING | typeof ENGINE_UNBOUND;
   try {
     target = await d.readEngine();
   } catch {
@@ -625,6 +668,7 @@ async function readEngineUnbounded(d: ClusterDeps, deadline: AbortSignal): Promi
     return { configured: false, unread: "unreadable", checkedAt: d.now() };
   }
   if (target === ENGINE_CHANGING) return { configured: true, unread: "changing", checkedAt: d.now() };
+  if (target === ENGINE_UNBOUND) return { configured: true, unread: "unbound", checkedAt: d.now() };
   if (!target) return { configured: false };
   const view: EngineView = { configured: true, ...(target.modelId ? { model: target.modelId } : {}) };
 
@@ -650,7 +694,7 @@ async function readEngineUnbounded(d: ClusterDeps, deadline: AbortSignal): Promi
       lookupImpl: d.lookup,
       signal: deadline,
     }).catch(() => null),
-    readEngineMetrics(d, target, deadline),
+    readEngineMetrics(d, target, ctx),
   ]);
   const checkedAt = d.now();
   if (probe?.ok) return { ...view, checkedAt, gate: { online: true, latencyMs: probe.latencyMs }, metrics };
@@ -662,7 +706,17 @@ async function readEngineUnbounded(d: ClusterDeps, deadline: AbortSignal): Promi
 async function readEngine(d: ClusterDeps): Promise<EngineView> {
   // Fired at the deadline: the read that lost the race starts no request after
   // it and leaves the token baseline alone (`Promise.race` cancels nothing).
+  // Fired too when a Local AI transition starts while the read runs: the
+  // address and the key it read may stop belonging together, so no request it
+  // has not sent yet goes out, the ones under way are cut, and the answer says
+  // the settings are changing.
   const deadline = new AbortController();
+  let changed = false;
+  const stopWatching = onLocalAiTransitionStart(() => {
+    changed = true;
+    deadline.abort();
+  });
+  const ctx: EngineReadContext = { signal: deadline.signal, generation: localAiTransitionMark().generation, staged: [] };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<EngineView>((resolve) => {
     timer = setTimeout(() => {
@@ -677,9 +731,15 @@ async function readEngine(d: ClusterDeps): Promise<EngineView> {
     }, ENGINE_DEADLINE_MS);
   });
   try {
-    return await Promise.race([readEngineUnbounded(d, deadline.signal), late]);
+    const answer = await Promise.race([readEngineUnbounded(d, ctx), late]);
+    if (changed) return { configured: true, unread: "changing", checkedAt: d.now() };
+    // The read that IS the answer keeps its token baselines; one the deadline
+    // gave up on keeps none, even what it finished before the deadline.
+    if (!deadline.signal.aborted) for (const commit of ctx.staged) commit();
+    return answer;
   } finally {
     clearTimeout(timer);
+    stopWatching();
   }
 }
 

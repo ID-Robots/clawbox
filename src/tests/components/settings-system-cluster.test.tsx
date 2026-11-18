@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 import { _resetSessionUserForTest } from "@/lib/use-session-user";
@@ -149,18 +149,29 @@ describe("Settings → System → Cluster", () => {
   });
 
   it("takes the Cluster tab away and opens Device when the cluster read says there is none after all", async () => {
-    await openSystem();
-    const tab = await screen.findByRole("tab", { name: "Cluster" });
-    // The peers were taken out between the tab's check and the first read.
-    clusterEnabled = false;
-    fireEvent.click(tab);
-    await waitFor(() => expect(screen.queryByRole("tab", { name: "Cluster" })).toBeNull());
-    expect(await screen.findByRole("heading", { name: "Resources" })).toBeTruthy();
-    expect(screen.queryByTestId("cluster-panel")).toBeNull();
-    // Nothing keeps polling the cluster route behind the Device view.
-    const asked = clusterCalls().length;
-    await new Promise((r) => setTimeout(r, 200));
-    expect(clusterCalls().length).toBe(asked);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await openSystem();
+      const tab = await screen.findByRole("tab", { name: "Cluster" });
+      // The peers were taken out between the tab's check and the first read.
+      clusterEnabled = false;
+      fireEvent.click(tab);
+      tab.focus();
+      await waitFor(() => expect(screen.queryByRole("tab", { name: "Cluster" })).toBeNull());
+      expect(await screen.findByRole("heading", { name: "Resources" })).toBeTruthy();
+      expect(screen.queryByTestId("cluster-panel")).toBeNull();
+      // The keyboard user is left on Device, not on a tab that is gone.
+      expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Device" }));
+      // Nothing keeps polling the cluster route behind the Device view: a whole
+      // polling interval (5 s) and more passes without a request.
+      const asked = clusterCalls().length;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(12_000);
+      });
+      expect(clusterCalls().length).toBe(asked);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("goes back to the device's own figures from the Cluster tab", async () => {

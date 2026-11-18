@@ -1048,6 +1048,7 @@ const table: Record<string, string> = {
   "cluster.engineReason.unreachable": "网关没有响应。",
   "cluster.engineTokens": "每秒令牌数",
   "cluster.engineTokensValue": "{value} tok/s",
+  "cluster.engineUnbound": "保存的 API 密钥不属于已保存的引擎，因此未发送。请在 设置 → 本地 AI → 外部引擎 中重新保存该引擎。",
   "cluster.engineUnreadable": "本机无法读取其 AI 引擎设置，因此不显示该引擎。",
   "cluster.failure.auth": "拒绝了本机的 SSH 密钥。",
   "cluster.failure.failed": "已响应，但无法读取其数据。",

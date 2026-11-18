@@ -2271,4 +2271,5 @@ export const ja: Record<string, string> = {
   "cluster.engineReason.addressRefused": "ゲートのアドレスは許可されていません。",
   "cluster.engineUnreadable": "このボックスは AI エンジンの設定を読み取れなかったため、エンジンは表示されません。",
   "cluster.engineChanging": "AI 設定を変更中のため、エンジンは読み取られませんでした。変更が終わると負荷が再び表示されます。",
+  "cluster.engineUnbound": "保存された API キーは保存されたエンジンのものではないため、送信されませんでした。設定 → ローカル AI → 外部エンジンでエンジンを保存し直してください。",
 };

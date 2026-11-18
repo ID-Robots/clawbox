@@ -1048,6 +1048,7 @@ const table: Record<string, string> = {
   "cluster.engineReason.unreachable": "De gateway antwoordde niet.",
   "cluster.engineTokens": "Tokens per seconde",
   "cluster.engineTokensValue": "{value} tok/s",
+  "cluster.engineUnbound": "De opgeslagen API-sleutel hoort niet bij de opgeslagen engine en is daarom niet verzonden. Sla de engine opnieuw op via Instellingen → Lokale AI → Externe engine.",
   "cluster.engineUnreadable": "Deze box kon de instellingen van zijn AI-engine niet lezen, dus de engine wordt niet getoond.",
   "cluster.failure.auth": "Weigerde de SSH-sleutel van deze box.",
   "cluster.failure.failed": "Antwoordde, maar de waarden konden niet worden gelezen.",

@@ -2282,4 +2282,5 @@ export const it: Record<string, string> = {
   "cluster.engineReason.addressRefused": "L'indirizzo del gateway non è consentito.",
   "cluster.engineUnreadable": "Questo dispositivo non è riuscito a leggere le impostazioni del suo motore AI, quindi il motore non viene mostrato.",
   "cluster.engineChanging": "Le impostazioni AI sono in corso di modifica, quindi il motore non è stato interrogato. Il suo carico tornerà visibile al termine.",
+  "cluster.engineUnbound": "La chiave API salvata non appartiene al motore salvato, quindi non è stata inviata. Salva di nuovo il motore in Impostazioni → IA locale → Motore esterno.",
 };

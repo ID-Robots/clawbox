@@ -1048,6 +1048,7 @@ const table: Record<string, string> = {
   "cluster.engineReason.unreachable": "ゲートが応答しませんでした。",
   "cluster.engineTokens": "毎秒のトークン数",
   "cluster.engineTokensValue": "{value} tok/s",
+  "cluster.engineUnbound": "保存された API キーは保存されたエンジンのものではないため、送信されませんでした。設定 → ローカル AI → 外部エンジンでエンジンを保存し直してください。",
   "cluster.engineUnreadable": "このボックスは AI エンジンの設定を読み取れなかったため、エンジンは表示されません。",
   "cluster.failure.auth": "このボックスの SSH キーが拒否されました。",
   "cluster.failure.failed": "応答はありましたが、数値を読み取れませんでした。",

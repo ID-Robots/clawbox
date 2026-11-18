@@ -59,17 +59,19 @@ export function fetchSessionUser(): Promise<SessionUser | null> {
  * different people: the chat, whose cached tabs and main conversation are
  * the signed-in person's own.
  */
-export function useSettledSessionUser(): SessionUser | null | undefined {
+export function useSettledSessionUser(askAgainWhen?: unknown): SessionUser | null | undefined {
   const [user, setUser] = useState<SessionUser | null | undefined>(undefined);
+  // `askAgainWhen` changing asks again — after a lookup that failed only: a
+  // settled user is kept, and `fetchSessionUser` answers it from memory.
   useEffect(() => {
     let live = true;
     void fetchSessionUser().then((u) => {
-      if (live) setUser(u);
+      if (live) setUser((known) => known ?? u);
     });
     return () => {
       live = false;
     };
-  }, []);
+  }, [askAgainWhen]);
   return user;
 }
 

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { _resetSessionUserForTest, mayUseOwnerApis, useMayUseOwnerApis } from "@/lib/use-session-user";
+import { _resetSessionUserForTest, mayUseOwnerApis, useMayUseOwnerApis, useSettledSessionUser } from "@/lib/use-session-user";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
 import { useWhatsNew } from "@/lib/use-whats-new";
@@ -34,6 +34,26 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   _resetSessionUserForTest();
+});
+
+describe("useSettledSessionUser: asking again after a failed lookup (TASK-2670)", () => {
+  it("asks again when told to after a failure, and keeps a settled user without a new request", async () => {
+    stubUsersMe({ ok: false });
+    const { result, rerender } = renderHook(({ when }) => useSettledSessionUser(when), { initialProps: { when: false } });
+    await waitFor(() => expect(result.current).toBeNull());
+    // The route is back; System opens: the lookup is made again.
+    const fetchMock = stubUsersMe({ ok: true, body: { username: "clawbox", isOwner: true } });
+    rerender({ when: true });
+    await waitFor(() => expect(result.current?.isOwner).toBe(true));
+    expect(calledFor(fetchMock, "/setup-api/users/me")).toBe(true);
+    // Settled: opening System again asks nothing.
+    const again = stubUsersMe({ ok: false });
+    rerender({ when: false });
+    rerender({ when: true });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calledFor(again, "/setup-api/users/me")).toBe(false);
+    expect(result.current?.isOwner).toBe(true);
+  });
 });
 
 describe("mayUseOwnerApis", () => {
