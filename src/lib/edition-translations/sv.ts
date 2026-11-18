@@ -2265,4 +2265,6 @@ export const sv: Record<string, string> = {
   "cluster.engineReason.unauthorized": "Gatewayen nekade API-nyckeln.",
   "cluster.engineReason.badResponse": "Gatewayen svarade med något som inte är en motors svar.",
   "cluster.engineReason.addressRefused": "Gatewayens adress är inte tillåten.",
+  "cluster.engineUnreadable": "Den här boxen kunde inte läsa inställningarna för sin AI-motor, så motorn visas inte.",
+  "cluster.engineChanging": "AI-inställningarna ändras just nu, så motorn lästes inte av. Belastningen visas igen när det är klart.",
 };

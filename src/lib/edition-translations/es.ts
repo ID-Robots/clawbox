@@ -2264,4 +2264,6 @@ export const es: Record<string, string> = {
   "cluster.engineReason.unauthorized": "La puerta rechazó la clave de API.",
   "cluster.engineReason.badResponse": "La puerta respondió con algo que no es la respuesta de un motor.",
   "cluster.engineReason.addressRefused": "La dirección de la puerta no está permitida.",
+  "cluster.engineUnreadable": "Esta caja no pudo leer los ajustes de su motor de IA, así que el motor no se muestra.",
+  "cluster.engineChanging": "Los ajustes de IA se están cambiando ahora mismo, así que el motor no se ha consultado. Su carga volverá a mostrarse cuando termine.",
 };

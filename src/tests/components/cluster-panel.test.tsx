@@ -277,6 +277,22 @@ describe("ClusterPanel: the engine", () => {
     expect((await screen.findByTestId("cluster-engine-none")).textContent).toMatch(/No AI engine is set up/);
     expect(screen.queryByTestId("cluster-engine-active")).toBeNull();
   });
+
+  it("says the engine settings could not be read — not that there is no engine — when reading them failed", async () => {
+    answer = snapshot({ engine: { configured: false, unread: "unreadable", checkedAt: 0 } });
+    render(<ClusterPanel />);
+    expect((await screen.findByTestId("cluster-engine-unreadable")).textContent).toMatch(/could not read its AI engine settings/);
+    expect(screen.queryByTestId("cluster-engine-none")).toBeNull();
+    expect(screen.queryByTestId("cluster-engine-gate")).toBeNull();
+  });
+
+  it("says the AI settings are being changed, with no gate or load drawn, while they are", async () => {
+    answer = snapshot({ engine: { configured: true, unread: "changing", checkedAt: 0 } });
+    render(<ClusterPanel />);
+    expect((await screen.findByTestId("cluster-engine-changing")).textContent).toMatch(/being changed right now/);
+    expect(screen.queryByTestId("cluster-engine-gate")).toBeNull();
+    expect(screen.queryByTestId("cluster-engine-active")).toBeNull();
+  });
 });
 
 describe("ClusterPanel: reading the route", () => {
@@ -329,6 +345,64 @@ describe("ClusterPanel: reading the route", () => {
     expect(fetchMock.mock.calls.length).toBe(first + 1);
   });
 
+  it("starts no second read while one is still waiting for its answer, and polls again once it has one", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let hold: (() => void) | null = null;
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(() => {
+      calls += 1;
+      if (calls === 1) {
+        // The first read is held open across a polling tick.
+        return new Promise((resolve) => {
+          hold = () => resolve({ ok: true, status: 200, json: async () => snapshot() });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => snapshot() });
+    }));
+    render(<ClusterPanel />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100);
+    });
+    expect(calls).toBe(1);
+    await act(async () => {
+      hold?.();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    await screen.findByTestId("cluster-sparks");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100);
+    });
+    expect(calls).toBe(2);
+  });
+
+  it("gives up on a read whose headers came but whose body stalls, so the polling does not stop for good", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let calls = 0;
+    vi.stubGlobal("fetch", vi.fn(() => {
+      calls += 1;
+      if (calls === 1) {
+        // Headers at once; the body never arrives.
+        return Promise.resolve({ ok: true, status: 200, json: () => new Promise(() => {}) });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => snapshot() });
+    }));
+    render(<ClusterPanel />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100);
+    });
+    // Still the stalled body: no second read yet.
+    expect(calls).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_100);
+    });
+    // Given up at the deadline (an alert), and the next poll got through.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100);
+    });
+    expect(calls).toBeGreaterThanOrEqual(2);
+    await screen.findByTestId("cluster-sparks");
+  });
+
   it("gives up on a read that never settles, so the polling does not stop for good", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     let calls = 0;
@@ -361,6 +435,30 @@ describe("ClusterPanel: reading the route", () => {
     await waitFor(() => expect(container.firstChild).toBeNull());
   });
 
+  it("tells Settings when the box says it has no cluster after all, and stops asking", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const onUnavailable = vi.fn();
+    render(<ClusterPanel onUnavailable={onUnavailable} />);
+    await screen.findByTestId("cluster-sparks");
+    expect(onUnavailable).not.toHaveBeenCalled();
+    // A failure is not that answer: the tab stays.
+    answer = new TypeError("network down");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100);
+    });
+    expect(onUnavailable).not.toHaveBeenCalled();
+    answer = { enabled: false };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100);
+    });
+    expect(onUnavailable).toHaveBeenCalledTimes(1);
+    const asked = fetchMock.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+    expect(fetchMock.mock.calls.length).toBe(asked);
+  });
+
   it("draws nothing but the alert for a refusal (a user who is not the owner)", async () => {
     status = 403;
     answer = { error: "Only the box owner can do this.", code: "owner_only" };
@@ -372,7 +470,7 @@ describe("ClusterPanel: reading the route", () => {
 
 describe("useClusterAvailable", () => {
   it("asks nothing until it is told it may", async () => {
-    const { result } = renderHook(() => useClusterAvailable(false));
+    const { result } = renderHook(() => useClusterAvailable(false)[0]);
     expect(result.current).toBe(false);
     await new Promise((r) => setTimeout(r, 20));
     expect(fetchMock).not.toHaveBeenCalled();
@@ -380,7 +478,7 @@ describe("useClusterAvailable", () => {
 
   it("asks the availability question — and only that — once, and is true when the box has a cluster", async () => {
     answer = { enabled: true };
-    const { result, rerender } = renderHook(({ on }) => useClusterAvailable(on), { initialProps: { on: true } });
+    const { result, rerender } = renderHook(({ on }) => useClusterAvailable(on)[0], { initialProps: { on: true } });
     await waitFor(() => expect(result.current).toBe(true));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith("/setup-api/system/cluster?availability=1", expect.objectContaining({ cache: "no-store" }));
@@ -393,7 +491,7 @@ describe("useClusterAvailable", () => {
       status = stat;
       answer = body;
       serve();
-      const { result, unmount } = renderHook(() => useClusterAvailable(true));
+      const { result, unmount } = renderHook(() => useClusterAvailable(true)[0]);
       await waitFor(() => expect(fetchMock).toHaveBeenCalled());
       await new Promise((r) => setTimeout(r, 10));
       expect(result.current, `${stat} ${JSON.stringify(body)}`).toBe(false);
@@ -401,14 +499,14 @@ describe("useClusterAvailable", () => {
     }
     answer = new TypeError("down");
     serve();
-    const { result } = renderHook(() => useClusterAvailable(true));
+    const { result } = renderHook(() => useClusterAvailable(true)[0]);
     await new Promise((r) => setTimeout(r, 20));
     expect(result.current).toBe(false);
   });
 
   it("keeps what it knew when a later request merely fails — a hiccup does not take the tab from the owner", async () => {
     answer = { enabled: true };
-    const { result, rerender } = renderHook(({ on }) => useClusterAvailable(on), { initialProps: { on: true } });
+    const { result, rerender } = renderHook(({ on }) => useClusterAvailable(on)[0], { initialProps: { on: true } });
     await waitFor(() => expect(result.current).toBe(true));
     rerender({ on: false });
     answer = new TypeError("down");
@@ -433,9 +531,67 @@ describe("useClusterAvailable", () => {
     await waitFor(() => expect(result.current).toBe(false));
   });
 
+  it("asks again after a failure that is not an answer, and stops once one arrives", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    status = 503;
+    answer = {};
+    const { result } = renderHook(() => useClusterAvailable(true)[0]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.current).toBe(false);
+    // The route is back: the next try finds the cluster, and the tab appears without reopening System.
+    status = 200;
+    answer = { enabled: true };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_100);
+    });
+    expect(result.current).toBe(true);
+    const asked = fetchMock.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000);
+    });
+    expect(fetchMock.mock.calls.length).toBe(asked);
+  });
+
+  it("gives up asking after a bounded number of tries, and stops when System is left", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    answer = new TypeError("down");
+    serve();
+    const { rerender } = renderHook(({ on }) => useClusterAvailable(on)[0], { initialProps: { on: true } });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+    });
+    // The first request and at most eight more, however long System stays open.
+    expect(fetchMock.mock.calls.length).toBe(9);
+
+    answer = new TypeError("down");
+    serve();
+    rerender({ on: false });
+    rerender({ on: true });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    rerender({ on: false });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("is taken back by the panel's own definite answer", async () => {
+    answer = { enabled: true };
+    const { result } = renderHook(() => useClusterAvailable(true));
+    await waitFor(() => expect(result.current[0]).toBe(true));
+    act(() => result.current[1]());
+    expect(result.current[0]).toBe(false);
+  });
+
   it("goes back to false when it is switched off", async () => {
     answer = { enabled: true };
-    const { result, rerender } = renderHook(({ on }) => useClusterAvailable(on), { initialProps: { on: true } });
+    const { result, rerender } = renderHook(({ on }) => useClusterAvailable(on)[0], { initialProps: { on: true } });
     await waitFor(() => expect(result.current).toBe(true));
     rerender({ on: false });
     expect(result.current).toBe(false);

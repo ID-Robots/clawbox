@@ -30,22 +30,30 @@
  * the host key must already be known: an unknown or changed key is a failure
  * to show, not a prompt, and not a key to trust on first sight.
  *
- * NEVER BLOCKS THE PAGE. Every read is remembered for a few seconds and shared
- * by whoever asks meanwhile. A Spark that has been read once is answered from
- * what is known while a fresh read runs behind the answer, so a Spark that
- * went away costs the page nothing but a stale card for one refresh.
+ * HOW LONG A PAGE WAITS. Every read is remembered for a few seconds and shared
+ * by whoever asks meanwhile. A card read within the last `STALE_MS` (30 s) is
+ * answered from memory while a fresh read runs behind the answer, so a Spark
+ * that went away costs the page a stale card for one refresh, not a wait. Past
+ * that — and on the first read after a restart — the answer waits for the fresh
+ * read, a Spark that does not answer included: up to the seven-second ceiling
+ * (the engine's read has six).
  *
- * NOTHING LEAVES THE LAN. The Sparks are the owner's own list (an ssh target is
- * a name the owner chose, and ssh's own config may map it anywhere, so it is not
- * second-guessed here). The only other requests go to the engine's address, and
- * only when that address is loopback or private (RFC 1918, unique-local): the
- * check is made on the literal and on every address a name resolves to. A name
- * that is rebound between that check and the connection is not defended
+ * WHAT IS CONTACTED. The Sparks are the owner's own list, reached the way the
+ * owner's ssh reaches them: a target is a name the owner chose, and ssh's own
+ * config may map it anywhere (an alias, a jump host), so it is not checked
+ * against the local network here — keeping peer connections on the network is
+ * the owner's ssh setup. The only other requests go to the engine's address,
+ * and only when that address is loopback or private (RFC 1918, unique-local):
+ * the check is made on the literal and on every address a preliminary lookup
+ * of the name gives. The connection is not pinned to those addresses, so a
+ * name that is rebound between that check and the connection is not defended
  * against, which is the limit of the external engine's own probe as well.
+ * Redirects are never followed.
  */
 
-import { spawn } from "child_process";
+import { spawn, type ChildProcess } from "child_process";
 import net from "net";
+import os from "os";
 import { lookup as dnsLookup } from "dns/promises";
 import { resolveConfigRoot } from "./config-store";
 import {
@@ -56,12 +64,13 @@ import {
   readExternalEngineKey,
 } from "./external-engine";
 import { externalEngineOrigin, normalizeExternalBaseUrl } from "./external-engine-shared";
+import { localAiTransitionMark } from "./local-ai-transition-lock";
 import { isWorkstationHost, probeUpdateHost } from "./update-channel";
 import {
   COLLECTOR_PREFIX,
   engineSampleFrom,
   engineSampleUsable,
-  parsePrometheus,
+  parsePrometheusSeries,
   parseSparkOutput,
   tokensPerSecondBetween,
   type ClusterAnswer,
@@ -70,6 +79,7 @@ import {
   type EngineView,
   type SparkCard,
   type SparkFailure,
+  type TokenRead,
 } from "./cluster-shared";
 
 export const CLUSTER_PEERS_ENV = "CLAWBOX_CLUSTER_PEERS";
@@ -147,12 +157,19 @@ export interface EngineTarget {
   modelId: string;
 }
 
+/**
+ * What `readEngine` answers while the AI settings are being changed: the saved
+ * record and the key file may then belong to two different engines, so neither
+ * is used (src/lib/local-ai-transition-lock.ts).
+ */
+export const ENGINE_CHANGING = "changing" as const;
+
 export interface ClusterDeps {
   env: NodeJS.ProcessEnv;
   now: () => number;
   run: ScriptRunner;
   isWorkstation: () => boolean;
-  readEngine: () => Promise<EngineTarget | null>;
+  readEngine: () => Promise<EngineTarget | null | typeof ENGINE_CHANGING>;
   fetchImpl: typeof fetch;
   lookup: LookupFn;
 }
@@ -175,14 +192,37 @@ function childEnvironment(): NodeJS.ProcessEnv {
   return keep as unknown as NodeJS.ProcessEnv;
 }
 
-/** spawn with a hard ceiling: the answer arrives by the deadline whatever the child does. */
+/**
+ * SIGKILL to the child's whole process group. The child leads a group of its
+ * own (`detached`), so a pipeline its shell is waiting on (`df … | tail`) or an
+ * ssh it started goes with it, and cannot outlive the deadline and overlap the
+ * next read. Falls back to the child alone where there is no group to signal.
+ */
+function killTree(child: ChildProcess | undefined): void {
+  if (!child) return;
+  try {
+    if (child.pid && process.platform !== "win32") {
+      process.kill(-child.pid, "SIGKILL");
+      return;
+    }
+  } catch {
+    // No such group (already gone): try the child itself.
+  }
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // already gone
+  }
+}
+
+/** spawn with a hard ceiling: the answer arrives by the deadline whatever the child does, and nothing it started is left running. */
 export const runScript: ScriptRunner = (command, args, input, timeoutMs) =>
   new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let settled = false;
     let timedOut = false;
-    let child: ReturnType<typeof spawn>;
+    let child: ChildProcess | undefined;
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
@@ -191,29 +231,31 @@ export const runScript: ScriptRunner = (command, args, input, timeoutMs) =>
     };
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        child?.kill("SIGKILL");
-      } catch {
-        // already gone
-      }
+      killTree(child);
       finish(null);
     }, timeoutMs);
     try {
-      child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"], env: childEnvironment() });
+      child = spawn(command, args, {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: childEnvironment(),
+        // Its own process group, so the deadline stops everything it started.
+        detached: process.platform !== "win32",
+      });
     } catch {
       finish(null);
       return;
     }
-    child.stdout?.on("data", (chunk: Buffer) => {
+    const proc = child;
+    proc.stdout?.on("data", (chunk: Buffer) => {
       if (stdout.length < MAX_OUTPUT_BYTES) stdout += chunk.toString("utf8");
     });
-    child.stderr?.on("data", (chunk: Buffer) => {
+    proc.stderr?.on("data", (chunk: Buffer) => {
       if (stderr.length < 4096) stderr += chunk.toString("utf8");
     });
-    child.on("error", () => finish(null));
-    child.on("close", (code) => finish(code));
-    child.stdin?.on("error", () => {});
-    child.stdin?.end(input);
+    proc.on("error", () => finish(null));
+    proc.on("close", (code) => finish(code));
+    proc.stdin?.on("error", () => {});
+    proc.stdin?.end(input);
   });
 
 const defaultLookup: LookupFn = (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
@@ -234,9 +276,18 @@ function defaultIsWorkstation(): boolean {
   return value;
 }
 
-async function defaultReadEngine(env: NodeJS.ProcessEnv): Promise<EngineTarget | null> {
+async function defaultReadEngine(env: NodeJS.ProcessEnv): Promise<EngineTarget | null | typeof ENGINE_CHANGING> {
+  // The record and the key file are two reads, and a save writes the new key
+  // before the new record (src/lib/external-engine-ops.ts): a pair read across a
+  // save could send one engine's key to the other's address. Every writer of
+  // either holds the Local AI transition lock, so they are read only while no
+  // transition runs, and used only when none started in between.
+  const before = localAiTransitionMark();
+  if (before.running) return ENGINE_CHANGING;
   const record = await readExternalEngine();
   const key = readExternalEngineKey();
+  const after = localAiTransitionMark();
+  if (after.running || after.generation !== before.generation) return ENGINE_CHANGING;
   const recordKey = key && key !== NO_KEY_PLACEHOLDER ? key : null;
   const override = normalizeExternalBaseUrl(unquote(env[CLUSTER_ENGINE_URL_ENV]));
   if (override) {
@@ -352,7 +403,7 @@ grep -E '^(MemTotal|MemAvailable|MemFree):' /proc/meminfo 2>/dev/null </dev/null
 if command -v nvidia-smi >/dev/null 2>&1; then
   T=""
   command -v timeout >/dev/null 2>&1 && T="timeout 4"
-  $T nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null </dev/null | head -n 1 | while read -r l; do echo "${COLLECTOR_PREFIX} gpu $l"; done
+  $T nvidia-smi --query-gpu=name,utilization.gpu,temperature.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null </dev/null | head -n 1 | while read -r l; do echo "${COLLECTOR_PREFIX} gpu $l"; done
 fi
 for z in /sys/class/thermal/thermal_zone*/temp; do
   [ -r "$z" ] && echo "${COLLECTOR_PREFIX} temp $(cat "$z" 2>/dev/null </dev/null)"
@@ -404,13 +455,24 @@ export function failureOf(result: ScriptResult): SparkFailure {
   return "failed";
 }
 
+/** This box's own name, for its card when its collector did not answer. */
+function localHostname(): string {
+  try {
+    return os.hostname().replace(/[^\x20-\x7e]/g, "").trim().slice(0, 253);
+  } catch {
+    return "";
+  }
+}
+
 async function readSpark(
   d: ClusterDeps,
   id: string,
   local: boolean,
   target: string | null,
 ): Promise<SparkCard> {
-  const fallbackName = target ? targetHost(target) : "";
+  // A card that could not be read is still named: by the configured host for a
+  // peer, by this box's own hostname for this one.
+  const fallbackName = target ? targetHost(target) : localHostname();
   let result: ScriptResult;
   try {
     result = target
@@ -467,7 +529,25 @@ export async function lanRefusal(hostname: string, lookup: LookupFn): Promise<st
   return null;
 }
 
-const engineTokenMemo = new Map<string, { at: number; tokens: number }>();
+/**
+ * The last token read of each metrics page, by its URL: a rate only ever
+ * compares two reads of the SAME page (the counter series are compared inside
+ * it), so a fallback page or another engine starts at n/a. Bounded.
+ */
+const engineTokenMemo = new Map<string, TokenRead>();
+const ENGINE_TOKEN_MEMO_MAX = 8;
+
+function rememberTokens(url: string, read: TokenRead): void {
+  engineTokenMemo.delete(url);
+  engineTokenMemo.set(url, read);
+  while (engineTokenMemo.size > ENGINE_TOKEN_MEMO_MAX) {
+    const oldest = engineTokenMemo.keys().next().value;
+    if (oldest === undefined) break;
+    engineTokenMemo.delete(oldest);
+  }
+}
+
+const NO_METRICS = { available: false, active: null, queued: null, tokensPerSecond: null } as const;
 
 function gateReason(code: string): EngineGateReason {
   switch (code) {
@@ -485,21 +565,24 @@ function gateReason(code: string): EngineGateReason {
 async function readEngineMetrics(
   d: ClusterDeps,
   target: EngineTarget,
+  deadline: AbortSignal,
 ): Promise<NonNullable<EngineView["metrics"]>> {
-  const none = { available: false, active: null, queued: null, tokensPerSecond: null };
   const origin = externalEngineOrigin(target.baseUrl);
   const withoutV1 = target.baseUrl.replace(/\/v1$/, "");
   const bases = [...new Set([withoutV1, origin].filter(Boolean))];
   const headers: Record<string, string> = { Accept: "text/plain" };
   if (target.apiKey) headers.Authorization = `Bearer ${target.apiKey}`;
   for (const base of bases) {
+    // A read the deadline has given up on starts no request.
+    if (deadline.aborted) break;
+    const url = `${base}/metrics`;
     try {
-      const res = await d.fetchImpl(`${base}/metrics`, {
+      const res = await d.fetchImpl(url, {
         method: "GET",
         headers,
         redirect: "manual",
         cache: "no-store",
-        signal: AbortSignal.timeout(ENGINE_TIMEOUT_MS),
+        signal: AbortSignal.any([deadline, AbortSignal.timeout(ENGINE_TIMEOUT_MS)]),
       });
       if (!res.ok) {
         await res.body?.cancel().catch(() => {});
@@ -507,21 +590,23 @@ async function readEngineMetrics(
       }
       const text = await readCapped(res, METRICS_MAX_BYTES);
       if (text === null) continue;
-      const sample = engineSampleFrom(parsePrometheus(text));
+      const sample = engineSampleFrom(parsePrometheusSeries(text));
       if (!engineSampleUsable(sample)) continue;
+      // Its answer reaches nobody, and must not move the baseline a later read compares with.
+      if (deadline.aborted) break;
       const at = d.now();
       let tokensPerSecond = sample.rate !== null ? Math.round(sample.rate * 10) / 10 : null;
       if (sample.tokens !== null) {
-        const previous = engineTokenMemo.get(origin) ?? null;
-        if (tokensPerSecond === null) tokensPerSecond = tokensPerSecondBetween(previous, { at, tokens: sample.tokens });
-        engineTokenMemo.set(origin, { at, tokens: sample.tokens });
+        const read: TokenRead = { at, tokens: sample.tokens };
+        if (tokensPerSecond === null) tokensPerSecond = tokensPerSecondBetween(engineTokenMemo.get(url) ?? null, read);
+        rememberTokens(url, read);
       }
       return { available: true, active: sample.active, queued: sample.queued, tokensPerSecond };
     } catch {
       // This base has no metrics for us; the next one may.
     }
   }
-  return none;
+  return { ...NO_METRICS };
 }
 
 /**
@@ -531,26 +616,29 @@ async function readEngineMetrics(
  */
 export const ENGINE_DEADLINE_MS = 6_000;
 
-async function readEngineUnbounded(d: ClusterDeps): Promise<EngineView> {
-  let target: EngineTarget | null;
+async function readEngineUnbounded(d: ClusterDeps, deadline: AbortSignal): Promise<EngineView> {
+  let target: EngineTarget | null | typeof ENGINE_CHANGING;
   try {
     target = await d.readEngine();
   } catch {
-    target = null;
+    // Not "none is set up": the record is there or not, and could not be told.
+    return { configured: false, unread: "unreadable", checkedAt: d.now() };
   }
+  if (target === ENGINE_CHANGING) return { configured: true, unread: "changing", checkedAt: d.now() };
   if (!target) return { configured: false };
   const view: EngineView = { configured: true, ...(target.modelId ? { model: target.modelId } : {}) };
-  const noMetrics = { available: false, active: null, queued: null, tokensPerSecond: null };
 
   let hostname = "";
   try {
     hostname = new URL(target.baseUrl).hostname;
   } catch {
-    return { ...view, gate: { online: false, reason: "address_refused" }, metrics: noMetrics };
+    return { ...view, checkedAt: d.now(), gate: { online: false, reason: "address_refused" }, metrics: { ...NO_METRICS } };
   }
   if (await lanRefusal(hostname, d.lookup)) {
-    return { ...view, gate: { online: false, reason: "not_lan" }, metrics: noMetrics };
+    return { ...view, checkedAt: d.now(), gate: { online: false, reason: "not_lan" }, metrics: { ...NO_METRICS } };
   }
+  // A lookup that outlived the deadline: its answer reaches nobody, so nothing is asked.
+  if (deadline.aborted) return { ...view, checkedAt: d.now(), gate: { online: false, reason: "unreachable" }, metrics: { ...NO_METRICS } };
 
   const [probe, metrics] = await Promise.all([
     probeExternalEngine({
@@ -560,29 +648,36 @@ async function readEngineUnbounded(d: ClusterDeps): Promise<EngineView> {
       timeoutMs: ENGINE_TIMEOUT_MS,
       fetchImpl: d.fetchImpl,
       lookupImpl: d.lookup,
+      signal: deadline,
     }).catch(() => null),
-    readEngineMetrics(d, target),
+    readEngineMetrics(d, target, deadline),
   ]);
-  if (probe?.ok) return { ...view, gate: { online: true, latencyMs: probe.latencyMs }, metrics };
+  const checkedAt = d.now();
+  if (probe?.ok) return { ...view, checkedAt, gate: { online: true, latencyMs: probe.latencyMs }, metrics };
   // A gate that answered with a model list that lacks the saved model is up.
-  if (probe && probe.code === "model_not_listed") return { ...view, gate: { online: true }, metrics };
-  return { ...view, gate: { online: false, reason: probe ? gateReason(probe.code) : "unreachable" }, metrics };
+  if (probe && probe.code === "model_not_listed") return { ...view, checkedAt, gate: { online: true }, metrics };
+  return { ...view, checkedAt, gate: { online: false, reason: probe ? gateReason(probe.code) : "unreachable" }, metrics };
 }
 
 async function readEngine(d: ClusterDeps): Promise<EngineView> {
+  // Fired at the deadline: the read that lost the race starts no request after
+  // it and leaves the token baseline alone (`Promise.race` cancels nothing).
+  const deadline = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<EngineView>((resolve) => {
     timer = setTimeout(() => {
+      deadline.abort();
       // Something is configured and did not answer in time: a gate that is not up, said so.
       resolve({
         configured: true,
+        checkedAt: d.now(),
         gate: { online: false, reason: "unreachable" },
-        metrics: { available: false, active: null, queued: null, tokensPerSecond: null },
+        metrics: { ...NO_METRICS },
       });
     }, ENGINE_DEADLINE_MS);
   });
   try {
-    return await Promise.race([readEngineUnbounded(d), late]);
+    return await Promise.race([readEngineUnbounded(d, deadline.signal), late]);
   } finally {
     clearTimeout(timer);
   }
@@ -613,10 +708,16 @@ export async function clusterAnswer(): Promise<ClusterAnswer> {
   ]);
   const snapshot: ClusterSnapshot = {
     enabled: true,
-    // The OLDEST card's read, not the moment of the answer: a card served from
-    // memory while a fresh read runs is up to STALE_MS old, and a stamp that
-    // said "now" over it would make its figures look current.
-    generatedAt: Math.min(d.now(), local.checkedAt, ...peers.map((card) => card.checkedAt)),
+    // The OLDEST reading's time, not the moment of the answer: a card — or the
+    // engine's reading — served from memory while a fresh read runs is up to
+    // STALE_MS old, and a stamp that said "now" over it would make its figures
+    // look current.
+    generatedAt: Math.min(
+      d.now(),
+      local.checkedAt,
+      ...peers.map((card) => card.checkedAt),
+      ...(typeof engine.checkedAt === "number" ? [engine.checkedAt] : []),
+    ),
     sparks: [{ ...local, id: "local" }, ...peers.map((card, i) => ({ ...card, id: `peer-${i + 1}` }))],
     engine,
   };

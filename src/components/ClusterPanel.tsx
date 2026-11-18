@@ -30,46 +30,97 @@ const POLL_MS = 5_000;
 /** A request that is still unanswered after this long is given up, so a read that never settles cannot stop the polling for good. */
 const REQUEST_TIMEOUT_MS = 15_000;
 
-/** fetch with a deadline of our own (an AbortController, not `AbortSignal.timeout`, which not every runtime has). */
-async function fetchWithDeadline(url: string): Promise<Response> {
+/**
+ * GET a JSON answer under ONE deadline of our own (an AbortController, not
+ * `AbortSignal.timeout`, which not every runtime has) that covers the body as
+ * well as the headers: a response whose headers came promptly and whose body
+ * then stalls must not hold the caller for good. A non-OK answer is returned by
+ * its status; its body is not read.
+ */
+async function getJson(url: string): Promise<{ ok: boolean; status: number; data: unknown }> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Settles (rejects) only at the deadline, whatever the runtime does with the
+  // aborted body; never left unhandled.
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new DOMException("The request took too long.", "AbortError"));
+    }, REQUEST_TIMEOUT_MS);
+  });
+  expired.catch(() => {});
   try {
-    return await fetch(url, { cache: "no-store", signal: controller.signal });
+    const res = await Promise.race([fetch(url, { cache: "no-store", signal: controller.signal }), expired]);
+    if (!res.ok) return { ok: false, status: res.status, data: null };
+    const data: unknown = await Promise.race([res.json(), expired]);
+    return { ok: true, status: res.status, data };
   } finally {
     clearTimeout(timer);
   }
 }
 
+/** The availability question is asked again after a failure that is not an answer, this long after, doubling. */
+const AVAILABILITY_RETRY_MS = 2_000;
+const AVAILABILITY_RETRY_MAX_MS = 30_000;
+/** …at most this many times while System stays open. */
+const AVAILABILITY_RETRIES = 8;
+
 /**
- * Is there a cluster to show? Asked once when the owner opens System; never by
+ * Is there a cluster to show? Asked when the owner opens System; never by
  * anyone else. Only a DEFINITE answer changes it — the box says there is a
  * cluster, or says there is none or that this person may not ask — so a request
  * that merely failed does not take the tab away from an owner who is on it.
+ * A failure is asked again (2 s, 4 s, … at most 30 s apart, at most
+ * `AVAILABILITY_RETRIES` times) while System stays open and no definite answer
+ * has come, so a route that was briefly down does not hide the tab until the
+ * owner reopens System. A definite answer is asked once.
+ *
+ * The second value is for the panel: the snapshot route itself answered that
+ * there is no cluster (`{ enabled: false }`), which is as definite as the
+ * availability answer, so the tab goes until System is opened again.
  */
-export function useClusterAvailable(active: boolean): boolean {
+export function useClusterAvailable(active: boolean): [boolean, () => void] {
   const [available, setAvailable] = useState(false);
   useEffect(() => {
     if (!active) return;
     let live = true;
-    fetchWithDeadline("/setup-api/system/cluster?availability=1")
-      .then(async (res) => {
-        if (!live) return;
-        if (res.ok) {
-          const data = (await res.json()) as { enabled?: unknown } | null;
-          if (live && typeof data?.enabled === "boolean") setAvailable(data.enabled);
-        } else if (res.status === 401 || res.status === 403 || res.status === 404) {
-          setAvailable(false);
-        }
-      })
-      .catch(() => {
-        // Not an answer: what was known stays.
-      });
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let attempt = 0;
+    const ask = () => {
+      getJson("/setup-api/system/cluster?availability=1")
+        .then((res) => {
+          if (!live) return;
+          if (res.ok) {
+            const enabled = (res.data as { enabled?: unknown } | null)?.enabled;
+            if (typeof enabled === "boolean") {
+              setAvailable(enabled);
+              return;
+            }
+          } else if (res.status === 401 || res.status === 403 || res.status === 404) {
+            setAvailable(false);
+            return;
+          }
+          again();
+        })
+        .catch(() => {
+          // Not an answer: what was known stays, and the question is asked again.
+          if (live) again();
+        });
+    };
+    const again = () => {
+      if (attempt >= AVAILABILITY_RETRIES) return;
+      const delay = Math.min(AVAILABILITY_RETRY_MS * 2 ** attempt, AVAILABILITY_RETRY_MAX_MS);
+      attempt += 1;
+      retry = setTimeout(ask, delay);
+    };
+    ask();
     return () => {
       live = false;
+      clearTimeout(retry);
     };
   }, [active]);
-  return active && available;
+  const gone = useCallback(() => setAvailable(false), []);
+  return [active && available, gone];
 }
 
 function levelColor(percent: number): string {
@@ -258,7 +309,7 @@ function EngineCardView({ engine, locale }: { engine: EngineView; locale: string
       <div className="flex items-center gap-2 mb-3">
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">hub</span>
         <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{tr("cluster.engine", "Engine")}</h3>
-        {engine.configured && engine.gate && (
+        {engine.configured && !engine.unread && engine.gate && (
           <span className="ml-auto">
             <StatusBadge
               online={engine.gate.online}
@@ -269,7 +320,15 @@ function EngineCardView({ engine, locale }: { engine: EngineView; locale: string
         )}
       </div>
 
-      {!engine.configured ? (
+      {engine.unread === "unreadable" ? (
+        <p className="text-xs text-[var(--text-muted)]" data-testid="cluster-engine-unreadable">
+          {tr("cluster.engineUnreadable", "This box could not read its AI engine settings, so the engine is not shown.")}
+        </p>
+      ) : engine.unread === "changing" ? (
+        <p className="text-xs text-[var(--text-muted)]" data-testid="cluster-engine-changing">
+          {tr("cluster.engineChanging", "The AI settings are being changed right now, so the engine was not read. Its load shows again once that is done.")}
+        </p>
+      ) : !engine.configured ? (
         <p className="text-xs text-[var(--text-muted)]" data-testid="cluster-engine-none">
           {tr("cluster.engineNone", "No AI engine is set up. Add one under Settings → Local AI → External engine.")}
         </p>
@@ -329,27 +388,44 @@ function UnreachableBanner({ sparks }: { sparks: SparkCard[] }) {
   );
 }
 
-export default function ClusterPanel() {
+export default function ClusterPanel({ onUnavailable }: {
+  /**
+   * The route answered that this box has no cluster after all (`{ enabled:
+   * false }` — the peers were taken out, or the view turned off). Settings then
+   * takes the tab away and goes back to Device, which unmounts the panel and
+   * its polling. A failure is not that answer: the tab stays.
+   */
+  onUnavailable?: () => void;
+} = {}) {
   const tr = useTr();
   const { locale } = useT();
   const [snapshot, setSnapshot] = useState<ClusterSnapshot | null>(null);
   const [failed, setFailed] = useState(false);
   const [gone, setGone] = useState(false);
   const busy = useRef(false);
+  const goneRef = useRef(false);
+  const onUnavailableRef = useRef(onUnavailable);
+  useEffect(() => {
+    onUnavailableRef.current = onUnavailable;
+  }, [onUnavailable]);
 
   const read = useCallback(async () => {
     // One read at a time: a slow cluster must not stack requests behind itself.
-    if (busy.current) return;
+    // And none at all once the box has said it has no cluster.
+    if (busy.current || goneRef.current) return;
     busy.current = true;
     try {
-      const res = await fetchWithDeadline("/setup-api/system/cluster");
+      const res = await getJson("/setup-api/system/cluster");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = (await res.json()) as ClusterAnswer;
-      if (data.enabled === true) {
+      const data = res.data as ClusterAnswer | null;
+      if (data?.enabled === true) {
         setSnapshot(data);
-        setGone(false);
-      } else {
+      } else if (data?.enabled === false) {
+        goneRef.current = true;
         setGone(true);
+        onUnavailableRef.current?.();
+      } else {
+        throw new Error("not a cluster answer");
       }
       setFailed(false);
     } catch {

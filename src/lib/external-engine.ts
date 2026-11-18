@@ -330,6 +330,11 @@ export async function probeExternalEngine(options: {
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
   lookupImpl?: LookupFn;
+  /**
+   * The caller's own deadline. Once it has fired no request is started (a name
+   * lookup that outlived it ends in `unreachable`), and one under way is cut.
+   */
+  signal?: AbortSignal;
 }): Promise<ProbeResult> {
   const doFetch = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS;
@@ -341,10 +346,14 @@ export async function probeExternalEngine(options: {
       error: `That address is ${refused}, which is never an AI engine.`,
     };
   }
+  if (options.signal?.aborted) {
+    return { ok: false, code: "unreachable", error: `The engine at ${options.baseUrl} was not asked: the caller's deadline passed.` };
+  }
   const url = `${options.baseUrl}/models`;
   const headers: Record<string, string> = { Accept: "application/json" };
   if (options.apiKey && options.apiKey !== NO_KEY_PLACEHOLDER) headers.Authorization = `Bearer ${options.apiKey}`;
   const started = Date.now();
+  const deadline = AbortSignal.timeout(timeoutMs);
   let res: Response;
   try {
     res = await doFetch(url, {
@@ -352,7 +361,7 @@ export async function probeExternalEngine(options: {
       headers,
       redirect: "manual",
       cache: "no-store",
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: options.signal ? AbortSignal.any([options.signal, deadline]) : deadline,
     });
   } catch (err) {
     const code = networkCode(err);

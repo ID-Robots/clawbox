@@ -2269,4 +2269,6 @@ export const fr: Record<string, string> = {
   "cluster.engineReason.unauthorized": "La passerelle a refusé la clé d'API.",
   "cluster.engineReason.badResponse": "La passerelle a répondu autre chose que la réponse d'un moteur.",
   "cluster.engineReason.addressRefused": "L'adresse de la passerelle n'est pas autorisée.",
+  "cluster.engineUnreadable": "Cet appareil n'a pas pu lire les réglages de son moteur d'IA ; le moteur n'est donc pas affiché.",
+  "cluster.engineChanging": "Les réglages d'IA sont en cours de modification, le moteur n'a donc pas été interrogé. Sa charge s'affichera de nouveau une fois l'opération terminée.",
 };

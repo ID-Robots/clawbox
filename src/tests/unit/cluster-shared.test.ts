@@ -3,6 +3,7 @@ import {
   engineSampleFrom,
   engineSampleUsable,
   parsePrometheus,
+  parsePrometheusSeries,
   parseSparkOutput,
   TOKEN_RATE_MAX_GAP_MS,
   tokensPerSecondBetween,
@@ -26,7 +27,7 @@ function collector(overrides: Partial<Record<string, string | null>> = {}): stri
     cpu2: "cpu  1100 0 550 8050 100 0 0 0 0 0",
     up: "86400.55 1000.0",
     mem: "MemTotal:       125829120 kB\nMemAvailable:    25165824 kB",
-    gpu: "37, 51, [N/A], [N/A]",
+    gpu: "NVIDIA GB10, 37, 51, [N/A], [N/A]",
     temp: "47000\n50000\n12000",
     disk: "/dev/nvme0n1p2 976762584 488381292 488381292 50% /",
     ...overrides,
@@ -67,7 +68,7 @@ describe("parseSparkOutput", () => {
   });
 
   it("keeps a discrete GPU's own memory and does not call it unified", () => {
-    const { figures } = parseSparkOutput(collector({ gpu: "12, 61, 2048, 24576" }))!;
+    const { figures } = parseSparkOutput(collector({ gpu: "NVIDIA GeForce RTX 4090, 12, 61, 2048, 24576" }))!;
     expect(figures.unifiedMemory).toBe(false);
     expect(figures.gpu).toEqual({
       utilPercent: 12,
@@ -76,8 +77,32 @@ describe("parseSparkOutput", () => {
     });
   });
 
+  it("knows unified memory by the GPU's name, never from a memory figure that is missing", () => {
+    // A discrete GPU whose memory fields fail to read is not unified: its memory stays n/a.
+    const broken = parseSparkOutput(collector({ gpu: "NVIDIA GeForce RTX 4090, 12, 61, [Unknown Error], [Unknown Error]" }))!.figures;
+    expect(broken.unifiedMemory).toBe(false);
+    expect(broken.gpu).toEqual({ utilPercent: 12, memoryUsedBytes: null, memoryTotalBytes: null });
+    // A part this does not know, answering N/A: not called unified either.
+    expect(parseSparkOutput(collector({ gpu: "Some Future GPU, 5, 40, [N/A], [N/A]" }))!.figures.unifiedMemory).toBe(false);
+    // No name at all (a four-field line): the figures are read, the memory is not called unified.
+    const nameless = parseSparkOutput(collector({ gpu: "37, 51, [N/A], [N/A]" }))!.figures;
+    expect(nameless.unifiedMemory).toBe(false);
+    expect(nameless.gpu.utilPercent).toBe(37);
+    // A Jetson's integrated GPU is unified, and a name with a comma does not shift the figures.
+    const orin = parseSparkOutput(collector({ gpu: "Orin (nvgpu), rev 1, 9, 44, [N/A], [N/A]" }))!.figures;
+    expect(orin.unifiedMemory).toBe(true);
+    expect(orin.gpu.utilPercent).toBe(9);
+    expect(orin.temperatureC).toBe(44);
+  });
+
+  it("gives no uptime — not zero — when /proc/uptime could not be read, and keeps a real zero", () => {
+    expect(parseSparkOutput(collector({ up: "" }))!.figures.uptimeSeconds).toBeNull();
+    expect(parseSparkOutput(collector({ up: null }))!.figures.uptimeSeconds).toBeNull();
+    expect(parseSparkOutput(collector({ up: "0.00 0.00" }))!.figures.uptimeSeconds).toBe(0);
+  });
+
   it("falls back to the hottest thermal zone when the GPU gives no temperature", () => {
-    const { figures } = parseSparkOutput(collector({ gpu: "0, [N/A], [N/A], [N/A]" }))!;
+    const { figures } = parseSparkOutput(collector({ gpu: "NVIDIA GB10, 0, [N/A], [N/A], [N/A]" }))!;
     expect(figures.temperatureC).toBe(50);
   });
 
@@ -91,7 +116,7 @@ describe("parseSparkOutput", () => {
 
   it("treats every spelling nvidia-smi uses for 'no figure' as null", () => {
     for (const na of ["[N/A]", "N/A", "[Not Supported]", "Not Supported", "[Not Available]"]) {
-      const { figures } = parseSparkOutput(collector({ gpu: `${na}, ${na}, ${na}, ${na}` }))!;
+      const { figures } = parseSparkOutput(collector({ gpu: `NVIDIA GB10, ${na}, ${na}, ${na}, ${na}` }))!;
       expect(figures.gpu.utilPercent, na).toBeNull();
       expect(figures.temperatureC, na).toBe(50);
     }
@@ -121,7 +146,7 @@ describe("parseSparkOutput", () => {
   });
 
   it("clamps what cannot be a percentage", () => {
-    const { figures } = parseSparkOutput(collector({ gpu: "250, 51, [N/A], [N/A]" }))!;
+    const { figures } = parseSparkOutput(collector({ gpu: "NVIDIA GB10, 250, 51, [N/A], [N/A]" }))!;
     expect(figures.gpu.utilPercent).toBe(100);
   });
 });
@@ -146,33 +171,85 @@ describe("parsePrometheus", () => {
   });
 });
 
+describe("parsePrometheusSeries", () => {
+  it("keeps every series of a metric apart, by its label set as written", () => {
+    const series = parsePrometheusSeries([
+      'vllm:generation_tokens_total{engine="0",model_name="m"} 1000',
+      'vllm:generation_tokens_total{engine="1",model_name="m"} 100',
+      "vllm:num_requests_running 3",
+      "vllm:broken NaN",
+      "",
+    ].join("\n"));
+    expect([...series.get("vllm:generation_tokens_total")!]).toEqual([
+      ['{engine="0",model_name="m"}', 1000],
+      ['{engine="1",model_name="m"}', 100],
+    ]);
+    expect([...series.get("vllm:num_requests_running")!]).toEqual([["", 3]]);
+    expect(series.has("vllm:broken")).toBe(false);
+  });
+});
+
 describe("engineSampleFrom", () => {
   it("reads vLLM's names", () => {
-    const sample = engineSampleFrom(parsePrometheus(
+    const sample = engineSampleFrom(parsePrometheusSeries(
       "vllm:num_requests_running 4\nvllm:num_requests_waiting 1\nvllm:generation_tokens_total 9000\n",
     ));
-    expect(sample).toEqual({ active: 4, queued: 1, rate: null, tokens: 9000 });
+    expect(sample).toEqual({ active: 4, queued: 1, rate: null, tokens: { "vllm:generation_tokens_total": 9000 } });
     expect(engineSampleUsable(sample)).toBe(true);
   });
 
+  it("sums the gauges across series, and keeps the token counter's series apart", () => {
+    const sample = engineSampleFrom(parsePrometheusSeries([
+      'vllm:num_requests_running{engine="0"} 2',
+      'vllm:num_requests_running{engine="1"} 3',
+      'vllm:generation_tokens_total{engine="0"} 1000',
+      'vllm:generation_tokens_total{engine="1"} 100',
+    ].join("\n")));
+    expect(sample.active).toBe(5);
+    expect(sample.tokens).toEqual({
+      'vllm:generation_tokens_total{engine="0"}': 1000,
+      'vllm:generation_tokens_total{engine="1"}': 100,
+    });
+  });
+
   it("reads SGLang's names, including the rate it publishes itself", () => {
-    const sample = engineSampleFrom(parsePrometheus(
+    const sample = engineSampleFrom(parsePrometheusSeries(
       'sglang:num_running_reqs{tp_rank="0"} 2\nsglang:num_queue_reqs{tp_rank="0"} 0\nsglang:gen_throughput{tp_rank="0"} 31.4\n',
     ));
     expect(sample).toEqual({ active: 2, queued: 0, rate: 31.4, tokens: null });
   });
 
   it("reads llama.cpp's names", () => {
-    const sample = engineSampleFrom(parsePrometheus(
+    const sample = engineSampleFrom(parsePrometheusSeries(
       "llamacpp:requests_processing 1\nllamacpp:requests_deferred 0\nllamacpp:tokens_predicted_total 120\n",
     ));
-    expect(sample).toEqual({ active: 1, queued: 0, rate: null, tokens: 120 });
+    expect(sample).toEqual({ active: 1, queued: 0, rate: null, tokens: { "llamacpp:tokens_predicted_total": 120 } });
   });
 
   it("is not usable for an engine whose metrics have none of those names", () => {
-    const sample = engineSampleFrom(parsePrometheus("process_cpu_seconds_total 12\nhttp_requests_total 9\n"));
+    const sample = engineSampleFrom(parsePrometheusSeries("process_cpu_seconds_total 12\nhttp_requests_total 9\n"));
     expect(sample).toEqual({ active: null, queued: null, rate: null, tokens: null });
     expect(engineSampleUsable(sample)).toBe(false);
+  });
+});
+
+describe("tokensPerSecondBetween: several series", () => {
+  const A = 'vllm:generation_tokens_total{engine="0"}';
+  const B = 'vllm:generation_tokens_total{engine="1"}';
+
+  it("is the sum of each series' own change", () => {
+    expect(tokensPerSecondBetween({ at: 0, tokens: { [A]: 1_000, [B]: 100 } }, { at: 10_000, tokens: { [A]: 1_600, [B]: 600 } })).toBe(110);
+  });
+
+  it("is null when one series was reset, even though the sum went up", () => {
+    // Summed first, 1,100 → 1,205 would read as 10.5 tok/s; the reset makes the real rate unknown.
+    expect(tokensPerSecondBetween({ at: 0, tokens: { [A]: 1_000, [B]: 100 } }, { at: 10_000, tokens: { [A]: 5, [B]: 1_200 } })).toBeNull();
+  });
+
+  it("is null when the reads do not hold the same series", () => {
+    expect(tokensPerSecondBetween({ at: 0, tokens: { [A]: 1_000 } }, { at: 10_000, tokens: { [A]: 1_100, [B]: 50 } })).toBeNull();
+    expect(tokensPerSecondBetween({ at: 0, tokens: { [A]: 1_000, [B]: 50 } }, { at: 10_000, tokens: { [A]: 1_100 } })).toBeNull();
+    expect(tokensPerSecondBetween({ at: 0, tokens: { [A]: 1_000 } }, { at: 10_000, tokens: { [B]: 1_100 } })).toBeNull();
   });
 });
 

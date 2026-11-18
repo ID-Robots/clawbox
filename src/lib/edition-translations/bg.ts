@@ -2255,4 +2255,6 @@ export const bg: Record<string, string> = {
   "cluster.engineReason.unauthorized": "Шлюзът отхвърли API ключа.",
   "cluster.engineReason.badResponse": "Шлюзът отговори с нещо, което не е отговор на двигател.",
   "cluster.engineReason.addressRefused": "Адресът на шлюза не е разрешен.",
+  "cluster.engineUnreadable": "Това устройство не можа да прочете настройките на своя AI двигател, затова двигателят не е показан.",
+  "cluster.engineChanging": "В момента AI настройките се променят, затова двигателят не беше прочетен. Натоварването му ще се покаже отново, щом това приключи.",
 };

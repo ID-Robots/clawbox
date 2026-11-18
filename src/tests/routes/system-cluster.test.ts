@@ -21,7 +21,7 @@ const GOOD = (host: string) => [
   "CBX cpu2 cpu  1100 0 550 8050 100 0 0 0",
   "CBX mem MemTotal: 125829120 kB",
   "CBX mem MemAvailable: 25165824 kB",
-  "CBX gpu 5, 44, [N/A], [N/A]",
+  "CBX gpu NVIDIA GB10, 5, 44, [N/A], [N/A]",
   "CBX disk /dev/nvme0n1p2 976762584 488381292 488381292 50% /",
   "CBX end",
   "",
@@ -52,13 +52,16 @@ describe("GET /setup-api/system/cluster", () => {
     const route = await import("@/app/setup-api/system/cluster/route");
     const view = await import("@/lib/cluster-view");
     view._resetClusterForTest();
+    // Tracked apart from the Sparks' runner, so a request that reads the engine
+    // but no Spark cannot pass for one that reads nothing.
+    const readEngine = vi.fn(async () => null);
     view._setClusterDepsForTest({
       env: { CLAWBOX_CLUSTER_PEERS: "spark-b spark-c spark-d", ...(options.env ?? {}) } as unknown as NodeJS.ProcessEnv,
       isWorkstation: () => options.workstation ?? true,
-      readEngine: async () => null,
+      readEngine,
       run,
     });
-    return route;
+    return { GET: route.GET, readEngine };
   }
 
   beforeEach(() => {
@@ -101,7 +104,7 @@ describe("GET /setup-api/system/cluster", () => {
   describe("who may ask", () => {
     it("answers the owner with the whole cluster", async () => {
       const run = vi.fn(allUp);
-      const { GET } = await load(run);
+      const { GET, readEngine } = await load(run);
       const res = await GET(request(owner()));
       expect(res.status).toBe(200);
       expect(res.headers.get("cache-control")).toBe("no-store");
@@ -110,26 +113,29 @@ describe("GET /setup-api/system/cluster", () => {
       expect(body.sparks.map((s: { hostname: string }) => s.hostname)).toEqual(["spark-a", "spark-b", "spark-c", "spark-d"]);
       expect(body.engine).toEqual({ configured: false });
       expect(run).toHaveBeenCalledTimes(4);
+      expect(readEngine).toHaveBeenCalledTimes(1);
     });
 
     it("answers a staff user 403 owner_only — and reads nothing: no ssh, no engine request", async () => {
       const run = vi.fn(allUp);
-      const { GET } = await load(run);
+      const { GET, readEngine } = await load(run);
       for (const query of ["", "?availability=1"]) {
         const res = await GET(request(staff(), query));
         expect(res.status).toBe(403);
         expect(await res.json()).toMatchObject({ code: "owner_only" });
       }
       expect(run).not.toHaveBeenCalled();
+      expect(readEngine).not.toHaveBeenCalled();
     });
 
     it("answers 401 (not 403, which would read as 'signed in') to a request with no session, and reads nothing", async () => {
       const run = vi.fn(allUp);
-      const { GET } = await load(run);
+      const { GET, readEngine } = await load(run);
       expect((await GET(request())).status).toBe(401);
       expect((await GET(request("not-a-cookie"))).status).toBe(401);
       expect((await GET(request(sign({ exp: 1 })))).status).toBe(401);
       expect(run).not.toHaveBeenCalled();
+      expect(readEngine).not.toHaveBeenCalled();
     });
 
     it("refuses a staff user who was removed since they signed in", async () => {
@@ -147,27 +153,31 @@ describe("GET /setup-api/system/cluster", () => {
   describe("where there is no cluster", () => {
     it("tells the owner `enabled: false` on a box that is not a Workstation — 200, not an error — and reads nothing", async () => {
       const run = vi.fn(allUp);
-      const { GET } = await load(run, { workstation: false });
+      const { GET, readEngine } = await load(run, { workstation: false });
       const res = await GET(request(owner()));
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ enabled: false });
       expect(run).not.toHaveBeenCalled();
+      expect(readEngine).not.toHaveBeenCalled();
     });
 
     it("tells the owner `enabled: false` on a Workstation with no peers configured", async () => {
       const run = vi.fn(allUp);
-      const { GET } = await load(run, { env: { CLAWBOX_CLUSTER_PEERS: "" } });
+      const { GET, readEngine } = await load(run, { env: { CLAWBOX_CLUSTER_PEERS: "" } });
       expect(await (await GET(request(owner()))).json()).toEqual({ enabled: false });
       expect(run).not.toHaveBeenCalled();
+      expect(readEngine).not.toHaveBeenCalled();
     });
 
     it("answers the availability question alone, without reading a thing", async () => {
       const run = vi.fn(allUp);
-      const { GET } = await load(run);
+      const { GET, readEngine } = await load(run);
       expect(await (await GET(request(owner(), "?availability=1"))).json()).toEqual({ enabled: true });
       expect(run).not.toHaveBeenCalled();
+      expect(readEngine).not.toHaveBeenCalled();
       const off = await load(run, { workstation: false });
       expect(await (await off.GET(request(owner(), "?availability=1"))).json()).toEqual({ enabled: false });
+      expect(off.readEngine).not.toHaveBeenCalled();
     });
   });
 

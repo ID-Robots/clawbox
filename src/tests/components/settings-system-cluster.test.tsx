@@ -141,6 +141,28 @@ describe("Settings → System → Cluster", () => {
     expect(screen.queryByRole("heading", { name: "Resources" })).toBeNull();
   });
 
+  it("lets the keyboard move from the selected Cluster tab into its panel", async () => {
+    await openSystem();
+    fireEvent.click(await screen.findByRole("tab", { name: "Cluster" }));
+    const panel = await screen.findByRole("tabpanel", { name: "Cluster" });
+    expect(panel.getAttribute("tabindex")).toBe("0");
+  });
+
+  it("takes the Cluster tab away and opens Device when the cluster read says there is none after all", async () => {
+    await openSystem();
+    const tab = await screen.findByRole("tab", { name: "Cluster" });
+    // The peers were taken out between the tab's check and the first read.
+    clusterEnabled = false;
+    fireEvent.click(tab);
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "Cluster" })).toBeNull());
+    expect(await screen.findByRole("heading", { name: "Resources" })).toBeTruthy();
+    expect(screen.queryByTestId("cluster-panel")).toBeNull();
+    // Nothing keeps polling the cluster route behind the Device view.
+    const asked = clusterCalls().length;
+    await new Promise((r) => setTimeout(r, 200));
+    expect(clusterCalls().length).toBe(asked);
+  });
+
   it("goes back to the device's own figures from the Cluster tab", async () => {
     await openSystem();
     fireEvent.click(await screen.findByRole("tab", { name: "Cluster" }));

@@ -2268,4 +2268,6 @@ export const de: Record<string, string> = {
   "cluster.engineReason.unauthorized": "Das Gateway hat den API-Schlüssel abgelehnt.",
   "cluster.engineReason.badResponse": "Das Gateway hat mit etwas geantwortet, das nicht die Antwort einer Engine ist.",
   "cluster.engineReason.addressRefused": "Die Adresse des Gateways ist nicht zulässig.",
+  "cluster.engineUnreadable": "Diese Box konnte die Einstellungen ihrer KI-Engine nicht lesen; die Engine wird daher nicht angezeigt.",
+  "cluster.engineChanging": "Die KI-Einstellungen werden gerade geändert, daher wurde die Engine nicht abgefragt. Ihre Auslastung erscheint wieder, sobald das abgeschlossen ist.",
 };

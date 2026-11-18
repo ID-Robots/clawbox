@@ -45,4 +45,6 @@ export const clusterEn: Record<string, string> = {
   "cluster.engineReason.unauthorized": "The gate refused the API key.",
   "cluster.engineReason.badResponse": "The gate answered with something that is not an engine's reply.",
   "cluster.engineReason.addressRefused": "The gate's address is not allowed.",
+  "cluster.engineUnreadable": "This box could not read its AI engine settings, so the engine is not shown.",
+  "cluster.engineChanging": "The AI settings are being changed right now, so the engine was not read. Its load shows again once that is done.",
 };

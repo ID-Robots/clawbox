@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
+import { localAiTransitionMark, withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
 
 /**
  * One Local AI transition at a time (TASK-2376): the external engine's save
@@ -40,5 +40,29 @@ describe("withLocalAiTransitionLock", () => {
     const failed = withLocalAiTransitionLock(async () => { throw new Error("boom"); });
     await expect(failed).rejects.toThrow("boom");
     await expect(withLocalAiTransitionLock(async () => "next")).resolves.toBe("next");
+  });
+});
+
+describe("localAiTransitionMark", () => {
+  it("says a transition is running while one is, and moves its stamp when one starts and when it ends — a failed one included", async () => {
+    const idle = localAiTransitionMark();
+    expect(idle.running).toBe(false);
+    const gate = deferred();
+    let during: ReturnType<typeof localAiTransitionMark> | null = null;
+    const run = withLocalAiTransitionLock(async () => {
+      during = localAiTransitionMark();
+      await gate.promise;
+      throw new Error("save failed");
+    });
+    await Promise.resolve();
+    expect(during).not.toBeNull();
+    expect(during!.running).toBe(true);
+    expect(during!.generation).not.toBe(idle.generation);
+    gate.resolve();
+    await expect(run).rejects.toThrow("save failed");
+    const after = localAiTransitionMark();
+    expect(after.running).toBe(false);
+    expect(after.generation).not.toBe(during!.generation);
+    expect(after.generation).not.toBe(idle.generation);
   });
 });

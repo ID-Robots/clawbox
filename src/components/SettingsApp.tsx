@@ -733,7 +733,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // is also true while /users/me has not answered: nobody but a settled owner
   // asks the cluster route, so a staff user's Settings never calls it. The route
   // refuses them 403 whatever is drawn.
-  const clusterAvailable = useClusterAvailable(boxReads && sessionUser?.isOwner === true && section === "system");
+  const [clusterAvailable, clusterGone] = useClusterAvailable(boxReads && sessionUser?.isOwner === true && section === "system");
   const systemShows: SystemView | null = systemView === "device"
     ? "device"
     : usersAllowed === null
@@ -6438,8 +6438,16 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
           </div>
         )}
         {activeSection === "system" && systemShows === "cluster" && (
-          <div className="max-w-xl" {...systemPanelProps("cluster")}>
-            <ClusterPanel />
+          // tabIndex: the tabs pattern's way from the selected tab into the panel,
+          // which can hold nothing focusable yet (the first read is pending).
+          <div className="max-w-xl" {...systemPanelProps("cluster")} tabIndex={0}>
+            <ClusterPanel
+              onUnavailable={() => {
+                // The box says it has no cluster after all: the tab goes, and Device opens.
+                clusterGone();
+                setSystemView("device");
+              }}
+            />
           </div>
         )}
         {activeSection === "system" && systemShows === "device" && (

@@ -2280,4 +2280,6 @@ export const it: Record<string, string> = {
   "cluster.engineReason.unauthorized": "Il gateway ha rifiutato la chiave API.",
   "cluster.engineReason.badResponse": "Il gateway ha risposto con qualcosa che non è la risposta di un motore.",
   "cluster.engineReason.addressRefused": "L'indirizzo del gateway non è consentito.",
+  "cluster.engineUnreadable": "Questo dispositivo non è riuscito a leggere le impostazioni del suo motore AI, quindi il motore non viene mostrato.",
+  "cluster.engineChanging": "Le impostazioni AI sono in corso di modifica, quindi il motore non è stato interrogato. Il suo carico tornerà visibile al termine.",
 };

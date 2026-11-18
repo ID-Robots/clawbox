@@ -20,9 +20,11 @@ export interface SparkFigures {
   /** System memory. On a unified-memory GPU (GB10) this is the GPU's memory too. */
   memory: { usedBytes: number; totalBytes: number; percent: number } | null;
   /**
-   * The GPU shares the system memory: `nvidia-smi` named a GPU and answered N/A
-   * for its memory, which is what a GB10 does. The panel then says "unified"
-   * and shows `memory` as the GPU's.
+   * The GPU shares the system memory: `nvidia-smi` named a part that has no
+   * memory of its own (a GB10, a Jetson's integrated GPU) and reported none for
+   * it. Known by the part's NAME, never inferred from a memory figure that is
+   * missing — a discrete GPU whose memory reads "Unknown Error" is not unified.
+   * The panel then says "unified" and shows `memory` as the GPU's.
    */
   unifiedMemory: boolean;
   gpu: {
@@ -60,11 +62,23 @@ export type EngineGateReason =
   | "bad_response"
   | "address_refused";
 
+/**
+ * Why the engine was not read at all: its saved record could not be read
+ * ("unreadable" — not the same as "none is set up"), or the AI settings were
+ * being changed at that moment ("changing"), when the saved address and the key
+ * file may not belong to the same engine, so the key is sent nowhere.
+ */
+export type EngineUnread = "unreadable" | "changing";
+
 export interface EngineView {
   /** An engine address is known (the external engine, or `CLAWBOX_CLUSTER_ENGINE_URL`). */
   configured: boolean;
+  /** Present when nothing was read; `configured` then says only what could be told. */
+  unread?: EngineUnread;
   /** The model the owner named for it, when there is one. */
   model?: string;
+  /** When this reading was taken (ms since the epoch); absent where nothing was read. */
+  checkedAt?: number;
   gate?: { online: boolean; reason?: EngineGateReason; latencyMs?: number };
   /**
    * The engine's own Prometheus `/metrics`. `available` is false when it has
@@ -85,6 +99,7 @@ export interface ClusterDisabled {
 
 export interface ClusterSnapshot {
   enabled: true;
+  /** The OLDEST reading in the answer — a Spark card's or the engine's — not the moment it was sent. */
   generatedAt: number;
   sparks: SparkCard[];
   engine: EngineView;
@@ -105,6 +120,13 @@ export function unreachableSparks(sparks: readonly SparkCard[]): SparkCard[] {
  * read as a figure.
  */
 export const COLLECTOR_PREFIX = "CBX";
+
+/**
+ * The GPUs that have no memory of their own and use the system's: the GB10 of a
+ * DGX Spark ("NVIDIA GB10"), and the integrated GPU of a Jetson (Orin, Thor,
+ * Xavier — Tegra parts). A part not named here is never called unified.
+ */
+export const UNIFIED_MEMORY_GPU_RE = /\b(?:GB10|Orin|Thor|Xavier|Tegra)\b/i;
 
 /** `[N/A]`, `N/A`, `[Not Supported]`, … as `nvidia-smi` spells "no figure". */
 const NO_FIGURE_RE = /^\[?\s*(?:n\/a|not supported|not available|unknown error)\s*\]?$/i;
@@ -192,15 +214,20 @@ export function parseSparkOutput(stdout: string): ParsedSpark | null {
       }
     : null;
 
-  // GPU: `util %, temp C, mem used MiB, mem total MiB`; N/A where the GPU has no memory of its own.
+  // GPU: `name, util %, temp C, mem used MiB, mem total MiB`. The four figures
+  // are read from the right, so a name with a comma in it cannot shift them.
   const gpuLine = lines.get("gpu")?.[0];
   const gpuFields = gpuLine ? gpuLine.split(",").map((f) => f.trim()) : [];
-  const gpuUtil = gpuLine ? figure(gpuFields[0]) : null;
-  const gpuTemp = gpuLine ? figure(gpuFields[1]) : null;
-  const gpuMemUsedMiB = gpuLine ? figure(gpuFields[2]) : null;
-  const gpuMemTotalMiB = gpuLine ? figure(gpuFields[3]) : null;
-  const gpuNamed = gpuLine !== undefined;
+  const gpuFigures = gpuFields.length >= 4 ? gpuFields.slice(-4) : [];
+  const gpuName = gpuFields.length > 4 ? gpuFields.slice(0, -4).join(",").trim() : "";
+  const gpuUtil = figure(gpuFigures[0]);
+  const gpuTemp = figure(gpuFigures[1]);
+  const gpuMemUsedMiB = figure(gpuFigures[2]);
+  const gpuMemTotalMiB = figure(gpuFigures[3]);
   const ownMemory = gpuMemTotalMiB !== null && gpuMemTotalMiB > 0;
+  // Unified memory is a property of the part, told by its name — not of a figure
+  // that is missing: a discrete GPU can answer "Unknown Error" for its memory too.
+  const unified = !ownMemory && UNIFIED_MEMORY_GPU_RE.test(gpuName);
 
   // Temperature: the GPU's own reading, else the hottest thermal zone (milli-°C).
   let temperatureC: number | null = gpuTemp !== null && gpuTemp > 0 && gpuTemp < 150 ? gpuTemp : null;
@@ -225,14 +252,16 @@ export function parseSparkOutput(stdout: string): ParsedSpark | null {
     }
   }
 
-  const up = Number((lines.get("up")?.[0] ?? "").split(/\s+/)[0]);
+  // `/proc/uptime` unreadable leaves an empty `up` line: no figure, not a zero.
+  const upField = (lines.get("up")?.[0] ?? "").trim().split(/\s+/)[0] ?? "";
+  const up = upField ? Number(upField) : Number.NaN;
 
   return {
     hostname,
     figures: {
       cpuPercent,
       memory,
-      unifiedMemory: gpuNamed && !ownMemory,
+      unifiedMemory: unified,
       gpu: {
         utilPercent: gpuUtil === null ? null : clampPercent(gpuUtil),
         memoryUsedBytes: ownMemory && gpuMemUsedMiB !== null ? gpuMemUsedMiB * 1024 * 1024 : null,
@@ -248,24 +277,46 @@ export function parseSparkOutput(stdout: string): ParsedSpark | null {
 // ── The engine's Prometheus text ────────────────────────────────────────────────
 
 // name{labels} value [timestamp] — a quoted label value may hold `}` or spaces.
-const SAMPLE_RE = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(?:[^}"]|"(?:[^"\\]|\\.)*")*\})?\s+(\S+)(?:\s+-?\d+)?\s*$/;
+const SAMPLE_RE = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{(?:[^}"]|"(?:[^"\\]|\\.)*")*\})?\s+(\S+)(?:\s+-?\d+)?\s*$/;
+
+/** Metric name → its series (the label set as the engine wrote it, `""` for none) → value. */
+export type PrometheusSeries = Map<string, Map<string, number>>;
 
 /**
- * Every sample of a Prometheus text exposition, summed by metric name: an
- * engine that reports one series per rank or per model answers one number.
- * NaN and infinities are not samples.
+ * Every sample of a Prometheus text exposition, one value per series. NaN and
+ * infinities are not samples.
  */
-export function parsePrometheus(text: string): Map<string, number> {
-  const totals = new Map<string, number>();
+export function parsePrometheusSeries(text: string): PrometheusSeries {
+  const out: PrometheusSeries = new Map();
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
     const m = SAMPLE_RE.exec(line);
     if (!m) continue;
-    const value = Number(m[2]);
+    const value = Number(m[3]);
     if (!Number.isFinite(value)) continue;
-    totals.set(m[1], (totals.get(m[1]) ?? 0) + value);
+    const labels = m[2] ?? "";
+    const series = out.get(m[1]) ?? new Map<string, number>();
+    series.set(labels, (series.get(labels) ?? 0) + value);
+    out.set(m[1], series);
   }
+  return out;
+}
+
+function sumOf(series: Map<string, number>): number {
+  let total = 0;
+  for (const value of series.values()) total += value;
+  return total;
+}
+
+/**
+ * Every sample summed by metric name: an engine that reports one series per
+ * rank or per model answers one number. Right for a gauge (requests running
+ * now); a counter's rate is taken per series instead (`tokensPerSecondBetween`).
+ */
+export function parsePrometheus(text: string): Map<string, number> {
+  const totals = new Map<string, number>();
+  for (const [name, series] of parsePrometheusSeries(text)) totals.set(name, sumOf(series));
   return totals;
 }
 
@@ -291,21 +342,41 @@ function firstOf(samples: Map<string, number>, names: readonly string[]): number
   return null;
 }
 
+/**
+ * A token counter's series as one read saw them: `name{labels}` → the running
+ * total. Kept apart, not summed, so a rate is the sum of each series' own change
+ * and a series that was reset is seen as reset.
+ */
+export type TokenCounters = Readonly<Record<string, number>>;
+
 export interface EngineSample {
   active: number | null;
   queued: number | null;
   /** The engine's own rate, when it publishes one. */
   rate: number | null;
-  /** Generated tokens so far, when the engine counts them. */
-  tokens: number | null;
+  /** Generated tokens so far, per series, when the engine counts them. */
+  tokens: TokenCounters | null;
 }
 
-export function engineSampleFrom(samples: Map<string, number>): EngineSample {
+function tokenCountersOf(series: PrometheusSeries): TokenCounters | null {
+  for (const name of ENGINE_METRIC_NAMES.tokens) {
+    const found = series.get(name);
+    if (!found || found.size === 0) continue;
+    const counters: Record<string, number> = {};
+    for (const [labels, value] of found) counters[`${name}${labels}`] = value;
+    return counters;
+  }
+  return null;
+}
+
+export function engineSampleFrom(series: PrometheusSeries): EngineSample {
+  const totals = new Map<string, number>();
+  for (const [name, values] of series) totals.set(name, sumOf(values));
   return {
-    active: firstOf(samples, ENGINE_METRIC_NAMES.active),
-    queued: firstOf(samples, ENGINE_METRIC_NAMES.queued),
-    rate: firstOf(samples, ENGINE_METRIC_NAMES.rate),
-    tokens: firstOf(samples, ENGINE_METRIC_NAMES.tokens),
+    active: firstOf(totals, ENGINE_METRIC_NAMES.active),
+    queued: firstOf(totals, ENGINE_METRIC_NAMES.queued),
+    rate: firstOf(totals, ENGINE_METRIC_NAMES.rate),
+    tokens: tokenCountersOf(series),
   };
 }
 
@@ -321,18 +392,39 @@ export function engineSampleUsable(s: EngineSample): boolean {
  */
 export const TOKEN_RATE_MAX_GAP_MS = 30_000;
 
+/** One read of the token counters: a single running total, or the series of `TokenCounters`. */
+export interface TokenRead {
+  at: number;
+  tokens: number | TokenCounters;
+}
+
+function countersOf(tokens: number | TokenCounters): TokenCounters {
+  return typeof tokens === "number" ? { "": tokens } : tokens;
+}
+
 /**
- * Tokens per second from two reads of a running total. Null for the first read,
- * for reads closer than a second or further apart than `TOKEN_RATE_MAX_GAP_MS`,
- * and for a total that went DOWN (the engine restarted): none of those is a
- * rate, and zero would claim an idle engine.
+ * Tokens per second from two reads of the running totals: each series' own
+ * change, summed. Null for the first read, for reads closer than a second or
+ * further apart than `TOKEN_RATE_MAX_GAP_MS`, for a series that went DOWN (that
+ * rank or the engine restarted, and what it made in the window is unknown), and
+ * for reads that do not hold the same series (one appeared or went away, so the
+ * change is not the whole engine's): none of those is a rate, and zero would
+ * claim an idle engine.
  */
-export function tokensPerSecondBetween(
-  previous: { at: number; tokens: number } | null,
-  current: { at: number; tokens: number },
-): number | null {
+export function tokensPerSecondBetween(previous: TokenRead | null, current: TokenRead): number | null {
   if (!previous) return null;
   const gap = current.at - previous.at;
-  if (gap < 1_000 || gap > TOKEN_RATE_MAX_GAP_MS || current.tokens < previous.tokens) return null;
-  return Math.round(((current.tokens - previous.tokens) / (gap / 1000)) * 10) / 10;
+  if (gap < 1_000 || gap > TOKEN_RATE_MAX_GAP_MS) return null;
+  const before = countersOf(previous.tokens);
+  const now = countersOf(current.tokens);
+  const keys = Object.keys(now);
+  if (keys.length === 0 || keys.length !== Object.keys(before).length) return null;
+  let made = 0;
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(before, key)) return null;
+    const change = now[key] - before[key];
+    if (!Number.isFinite(change) || change < 0) return null;
+    made += change;
+  }
+  return Math.round((made / (gap / 1000)) * 10) / 10;
 }

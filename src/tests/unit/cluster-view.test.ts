@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import { readExternalEngine, readExternalEngineKey, type ExternalEngineRecord } from "@/lib/external-engine";
+import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
 import {
   COLLECTOR_SCRIPT,
+  ENGINE_CHANGING,
   ENGINE_DEADLINE_MS,
   FRESH_MS,
   MAX_PEERS,
@@ -25,6 +30,14 @@ import { parseSparkOutput, type ClusterSnapshot } from "@/lib/cluster-shared";
 // The collector script and `runScript` start real processes (`sh`), which on a loaded runner can take a while.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
+// The saved engine's record and key file, for the one test that reads them the
+// way the route does; every other test hands `readEngine` its answer.
+vi.mock("@/lib/external-engine", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/external-engine")>()),
+  readExternalEngine: vi.fn(async () => null),
+  readExternalEngineKey: vi.fn(() => null),
+}));
+
 /**
  * Settings → System → Cluster (TASK-2670), server half. Nothing here reads a real
  * machine except the two tests that say so: every Spark is a scripted answer,
@@ -37,7 +50,7 @@ const GOOD = (host: string, mem = "MemTotal: 125829120 kB\nMemAvailable: 2516582
   "CBX cpu2 cpu  1100 0 550 8050 100 0 0 0",
   "CBX up 5000.1 100.0",
   ...mem.split("\n").map((l) => `CBX mem ${l}`),
-  "CBX gpu 0, 48, [N/A], [N/A]",
+  "CBX gpu NVIDIA GB10, 0, 48, [N/A], [N/A]",
   "CBX disk /dev/nvme0n1p2 976762584 488381292 488381292 50% /",
   "CBX end",
   "",
@@ -235,6 +248,32 @@ describe("runScript", () => {
     expect(Date.now() - started).toBeLessThan(3_000);
   });
 
+  it.skipIf(process.platform === "win32")("stops what the shell started too — a pipeline it waits on cannot outlive the deadline", async () => {
+    // The shell waits on a pipeline, as the collector does on `df … | tail`; the
+    // first stage prints its own pid so the test can look for it afterwards.
+    const res = await runScript("sh", ["-s"], 'sh -c \'echo "$$"; exec sleep 30\' | cat\n', 500);
+    expect(res.timedOut).toBe(true);
+    const pid = Number(res.stdout.trim().split("\n")[0]);
+    expect(Number.isInteger(pid) && pid > 1).toBe(true);
+    const alive = () => {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return false;
+      }
+      // A killed process answers signal 0 until it is reaped: a zombie (state Z) is gone.
+      try {
+        const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+        return stat.charAt(stat.lastIndexOf(")") + 2) !== "Z";
+      } catch {
+        return false;
+      }
+    };
+    const deadline = Date.now() + 3_000;
+    while (alive() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    expect(alive()).toBe(false);
+  });
+
   it.skipIf(process.platform === "win32")("does not hand the web server's own environment to what it runs", async () => {
     process.env.CLUSTER_TEST_SECRET = "must-not-leak";
     try {
@@ -328,6 +367,14 @@ describe("clusterAnswer: the Sparks", () => {
     expect(byId["peer-5"]).toMatchObject({ online: false, hostname: "spark-f", failure: "host_key" });
     // An offline card carries no figures: nothing is drawn as zero.
     expect(byId["peer-2"].figures).toBeUndefined();
+  });
+
+  it("names this Spark by its own hostname when its collector does not answer", async () => {
+    setup({ run: runnerBy({ local: { code: null, stdout: "", stderr: "", timedOut: true }, "spark-b": ok(GOOD("spark-b")) }) });
+    const answer = (await clusterAnswer()) as ClusterSnapshot;
+    expect(answer.sparks[0]).toMatchObject({ id: "local", local: true, online: false, failure: "timeout" });
+    expect(answer.sparks[0].hostname).toBe(os.hostname().replace(/[^\x20-\x7e]/g, "").trim().slice(0, 253));
+    expect(answer.sparks[0].hostname).not.toBe("");
   });
 
   it("calls a Spark whose answer is not the collector's 'failed', not online", async () => {
@@ -459,15 +506,18 @@ describe("clusterAnswer: the engine", () => {
     "",
   ].join("\n");
 
-  function engineFetch(options: { models?: Response | Error; metrics?: Response | Error | (() => Response) }) {
-    const seen: { url: string; auth: string | null }[] = [];
+  function engineFetch(options: {
+    models?: Response | Error;
+    metrics?: Response | Error | ((url: string) => Response | Promise<Response>);
+  }) {
+    const seen: { url: string; auth: string | null; redirect: RequestRedirect | undefined }[] = [];
     const impl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const headers = new Headers(init?.headers);
-      seen.push({ url, auth: headers.get("authorization") });
+      seen.push({ url, auth: headers.get("authorization"), redirect: init?.redirect });
       const pick = url.endsWith("/models") ? options.models : options.metrics;
       if (pick instanceof Error) throw pick;
-      if (typeof pick === "function") return pick();
+      if (typeof pick === "function") return pick(url);
       return pick ?? new Response("not found", { status: 404 });
     });
     return { impl: impl as unknown as typeof fetch, seen };
@@ -574,6 +624,78 @@ describe("clusterAnswer: the engine", () => {
     const engine = await engineOf();
     expect(engine.metrics?.available).toBe(false);
     expect(seen.every((s) => s.url.startsWith("http://192.168.1.50:8000/"))).toBe(true); // public-hygiene: allow RFC 1918 example address for the LAN rule
+    // Every request — the metrics' and the gate's — tells fetch not to follow one.
+    const metricsRequests = seen.filter((s) => s.url.endsWith("/metrics"));
+    expect(metricsRequests.length).toBeGreaterThan(0);
+    expect(seen.every((s) => s.redirect === "manual")).toBe(true);
+  });
+
+  it("compares token counts only between reads of the same metrics page", async () => {
+    // The engine lives under a path: its own /team/metrics first, the origin's /metrics as the fallback.
+    let teamUp = true;
+    const { impl } = engineFetch({
+      models: modelsOk(),
+      metrics: (url) => url === "http://192.168.1.50:8000/team/metrics" // public-hygiene: allow RFC 1918 example address for the LAN rule
+        ? (teamUp ? new Response(metricsText(1_000), { status: 200 }) : new Response("gone", { status: 503 }))
+        : new Response(metricsText(9_000), { status: 200 }),
+    });
+    setup({
+      fetchImpl: impl,
+      readEngine: async () => ({ ...TARGET, baseUrl: "http://192.168.1.50:8000/team/v1" }), // public-hygiene: allow RFC 1918 example address for the LAN rule
+      lookup: async () => [],
+      run: runnerBy({ local: ok(GOOD("spark-a")) }),
+    });
+    expect((await engineOf()).metrics?.tokensPerSecond).toBeNull();
+    // Ten seconds later only the fallback answers, for another backend: 9,000 vs 1,000 is no rate.
+    teamUp = false;
+    clock += 10_000;
+    await engineOf();
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await engineOf()).metrics).toMatchObject({ available: true, tokensPerSecond: null });
+  });
+
+  it("gives no rate across a counter series that was reset, even when the sum went up", async () => {
+    let lines = ['vllm:generation_tokens_total{engine="0"} 1000', 'vllm:generation_tokens_total{engine="1"} 100'];
+    const { impl } = engineFetch({ models: modelsOk(), metrics: () => new Response(`${lines.join("\n")}\n`, { status: 200 }) });
+    setup({ fetchImpl: impl, readEngine: async () => TARGET, lookup: async () => [], run: runnerBy({ local: ok(GOOD("spark-a")) }) });
+    await engineOf();
+    clock += 10_000;
+    lines = ['vllm:generation_tokens_total{engine="0"} 5', 'vllm:generation_tokens_total{engine="1"} 1200'];
+    await engineOf();
+    await new Promise((r) => setTimeout(r, 20));
+    expect((await engineOf()).metrics?.tokensPerSecond).toBeNull();
+  });
+
+  it("stamps the answer with the engine's reading too, when that is the older one", async () => {
+    const { impl } = engineFetch({ models: modelsOk(), metrics: new Response(metricsText(1), { status: 200 }) });
+    let engineCalls = 0;
+    let release: (target: EngineTarget) => void = () => {};
+    setup({
+      fetchImpl: impl,
+      readEngine: async () => {
+        engineCalls += 1;
+        // The second engine read is held: its old reading is what goes out meanwhile.
+        if (engineCalls > 1) return new Promise<EngineTarget>((resolve) => { release = resolve; });
+        return TARGET;
+      },
+      lookup: async () => [],
+      run: runnerBy({ local: ok(GOOD("spark-a")), "spark-b": ok(GOOD("spark-b")), "spark-c": ok(GOOD("spark-c")), "spark-d": ok(GOOD("spark-d")) }),
+    });
+    const first = (await clusterAnswer()) as ClusterSnapshot;
+    const engineReadAt = first.engine.checkedAt!;
+    expect(engineReadAt).toBe(clock);
+    // Past the fresh window: the Sparks are read again at once, the engine's old reading is served.
+    clock += FRESH_MS + 1_000;
+    await clusterAnswer();
+    await new Promise((r) => setTimeout(r, 20));
+    clock += 1_000;
+    const second = (await clusterAnswer()) as ClusterSnapshot;
+    expect(second.sparks[0].checkedAt).toBeGreaterThan(engineReadAt);
+    expect(second.engine.checkedAt).toBe(engineReadAt);
+    expect(second.generatedAt).toBe(engineReadAt);
+    // Let the held read end inside this test.
+    release(TARGET);
+    await new Promise((r) => setTimeout(r, 20));
   });
 
   it("is bounded when a name lookup never answers: the gate is reported down at the deadline, the Sparks are not held up", async () => {
@@ -597,13 +719,146 @@ describe("clusterAnswer: the engine", () => {
     }
   });
 
-  it("is a gate that is down, not an error, when the engine record cannot be read", async () => {
+  it("says the engine record could not be read — not that none is set up — when reading it fails", async () => {
+    const { impl } = engineFetch({});
     setup({
+      fetchImpl: impl,
       readEngine: async () => {
         throw new Error("store unreadable");
       },
       run: runnerBy({ local: ok(GOOD("spark-a")) }),
     });
-    expect(await engineOf()).toEqual({ configured: false });
+    expect(await engineOf()).toEqual({ configured: false, unread: "unreadable", checkedAt: clock });
+    expect(impl).not.toHaveBeenCalled();
+  });
+
+  it("reads nothing while the AI settings are being changed, and says so", async () => {
+    const { impl } = engineFetch({ models: modelsOk() });
+    setup({ fetchImpl: impl, readEngine: async () => ENGINE_CHANGING, run: runnerBy({ local: ok(GOOD("spark-a")) }) });
+    expect(await engineOf()).toEqual({ configured: true, unread: "changing", checkedAt: clock });
+    expect(impl).not.toHaveBeenCalled();
+  });
+
+  it("a read that lost the deadline starts no request once its slow lookup ends", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerLookup: () => void = () => {};
+      const { impl } = engineFetch({ models: modelsOk(), metrics: new Response(metricsText(1), { status: 200 }) });
+      setup({
+        fetchImpl: impl,
+        readEngine: async () => ({ ...TARGET, baseUrl: "http://engine.lan:8000/v1" }),
+        lookup: () => new Promise((resolve) => {
+          answerLookup = () => resolve([{ address: "192.168.1.50" }]); // public-hygiene: allow RFC 1918 example address for the LAN rule
+        }),
+        run: runnerBy({ local: ok(GOOD("spark-a")) }),
+      });
+      const pending = clusterAnswer();
+      await vi.advanceTimersByTimeAsync(ENGINE_DEADLINE_MS + 100);
+      expect(((await pending) as ClusterSnapshot).engine.gate).toEqual({ online: false, reason: "unreachable" });
+      // The lookup ends after the deadline: nothing is asked for an answer nobody waits for.
+      answerLookup();
+      await vi.advanceTimersByTimeAsync(50);
+      expect(impl).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a metrics answer that arrives after the deadline does not move the token baseline", async () => {
+    vi.useFakeTimers();
+    try {
+      let tokens = 1_000;
+      let slow = false;
+      const { impl } = engineFetch({
+        models: modelsOk(),
+        metrics: () => (slow
+          ? new Promise<Response>((resolve) => {
+            setTimeout(() => resolve(new Response(metricsText(tokens), { status: 200 })), ENGINE_DEADLINE_MS + 1_000);
+          })
+          : new Response(metricsText(tokens), { status: 200 })),
+      });
+      setup({ fetchImpl: impl, readEngine: async () => TARGET, lookup: async () => [], run: runnerBy({ local: ok(GOOD("spark-a")) }) });
+      // The baseline: 1,000 tokens.
+      await engineOf();
+
+      // The next read's metrics answer only after the deadline, with 1,600.
+      slow = true;
+      tokens = 1_600;
+      clock += FRESH_MS + 30_000; // past STALE_MS: the page waits for this read
+      const pending = clusterAnswer();
+      await vi.advanceTimersByTimeAsync(ENGINE_DEADLINE_MS + 100);
+      expect(((await pending) as ClusterSnapshot).engine.gate).toEqual({ online: false, reason: "unreachable" });
+      await vi.advanceTimersByTimeAsync(1_000); // the late answer lands now
+
+      // Five seconds on, 2,100. Had the late 1,600 become the baseline this would
+      // read 100 tok/s; against the real baseline (over 30 s old) it is no rate.
+      slow = false;
+      tokens = 2_100;
+      clock += 5_000;
+      await engineOf();
+      await vi.advanceTimersByTimeAsync(20);
+      expect((await engineOf()).metrics).toMatchObject({ available: true, tokensPerSecond: null });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  describe("the saved engine, read as the route reads it", () => {
+    const RECORD = {
+      baseUrl: "http://192.168.1.50:8000/v1", // public-hygiene: allow RFC 1918 example address for the LAN rule
+      modelId: "deepseek-test",
+    } as unknown as ExternalEngineRecord;
+
+    function useSavedEngine(fetchImpl: typeof fetch) {
+      // Every dependency but `readEngine`: the module's own reads the record and the key.
+      _setClusterDepsForTest({
+        env: { CLAWBOX_CLUSTER_PEERS: PEERS } as unknown as NodeJS.ProcessEnv,
+        now: () => clock,
+        isWorkstation: () => true,
+        fetchImpl,
+        lookup: async () => [],
+        run: runnerBy({ local: ok(GOOD("spark-a")) }),
+      });
+    }
+
+    afterEach(() => {
+      vi.mocked(readExternalEngine).mockReset().mockImplementation(async () => null);
+      vi.mocked(readExternalEngineKey).mockReset().mockImplementation(() => null);
+    });
+
+    it("sends the stored key to the saved engine when nothing is changing", async () => {
+      vi.mocked(readExternalEngine).mockImplementation(async () => RECORD);
+      vi.mocked(readExternalEngineKey).mockImplementation(() => "k-test-placeholder");
+      const { impl, seen } = engineFetch({ models: modelsOk(), metrics: new Response(metricsText(1), { status: 200 }) });
+      useSavedEngine(impl);
+      expect((await engineOf()).gate?.online).toBe(true);
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen.every((s) => s.auth === "Bearer k-test-placeholder")).toBe(true);
+    });
+
+    it("never pairs a record and a key read across a change of the AI settings, and sends the key nowhere", async () => {
+      let finishSave: () => void = () => {};
+      let saving: Promise<void> | null = null;
+      // A save starts between the record read and the key read: the key on file is the NEW engine's.
+      vi.mocked(readExternalEngine).mockImplementation(async () => {
+        saving = withLocalAiTransitionLock(() => new Promise<void>((resolve) => { finishSave = resolve; }));
+        await Promise.resolve();
+        return RECORD;
+      });
+      vi.mocked(readExternalEngineKey).mockImplementation(() => "k-of-the-new-engine");
+      const { impl } = engineFetch({ models: modelsOk() });
+      useSavedEngine(impl);
+      expect(await engineOf()).toMatchObject({ configured: true, unread: "changing" });
+      expect(impl).not.toHaveBeenCalled();
+
+      // While the save still runs, nothing is read either.
+      vi.mocked(readExternalEngine).mockImplementation(async () => RECORD);
+      clock += FRESH_MS + 60_000;
+      expect(await engineOf()).toMatchObject({ unread: "changing" });
+      expect(impl).not.toHaveBeenCalled();
+
+      finishSave();
+      await saving;
+    });
   });
 });
