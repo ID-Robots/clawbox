@@ -57,9 +57,12 @@ export interface UploadGuard {
   refusalFor(bound: UploadBound): { status: number; body: UploadRefusalBody } | null;
   /**
    * The upload ended: `landedBytes` is the size of the file it wrote, or null
-   * when it failed (what it may have replaced is then measured again).
+   * when it failed (the file it would have replaced is untouched then).
+   * `replacedBytes` is the size of the file the commit actually replaced, read
+   * right before its rename: the home's figure moves by the difference, so it
+   * matches the disk even when another upload of the same name landed first.
    */
-  finish(landedBytes: number | null): void;
+  finish(landedBytes: number | null, replacedBytes?: number): void;
 }
 
 /** The size of a regular file the upload would replace, else 0. */
@@ -167,13 +170,12 @@ export async function userUploadGuard(opts: {
       return null;
     },
     refusalFor,
-    finish(landedBytes: number | null) {
+    finish(landedBytes: number | null, replacedBytes?: number) {
       if (writing) endWriting(writing);
       writing = null;
       if (!quota) return;
-      quota.finish(landedBytes === null ? 0 : landedBytes - replaced);
-      // A failed write may have taken the file it was replacing with it.
-      if (landedBytes === null && replaced > 0 && quotaHome) noteHomeChange(quotaHome);
+      const gaveBack = replacedBytes !== undefined && Number.isFinite(replacedBytes) ? Math.max(0, replacedBytes) : replaced;
+      quota.finish(landedBytes === null ? 0 : landedBytes - gaveBack);
     },
   };
 }

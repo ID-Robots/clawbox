@@ -38,9 +38,10 @@ export function uploadTempPath(destPath: string): string {
  * its permission bits on, as writing over it in place used to keep them; a
  * link of that name is replaced, never written through. Throws what the
  * filesystem throws (EISDIR for a folder of that name …) — the caller then
- * removes the temporary file and the destination is untouched.
+ * removes the temporary file and the destination is untouched. Answers
+ * where it landed and the size of the regular file it replaced (0 for none).
  */
-export function commitUploadTemp(tempReal: string, destPath: string): string {
+export function commitUploadTemp(tempReal: string, destPath: string): { target: string; replacedBytes: number } {
   const target = path.join(path.dirname(tempReal), path.basename(destPath));
   let replaced: fs.Stats | null = null;
   try {
@@ -50,5 +51,8 @@ export function commitUploadTemp(tempReal: string, destPath: string): string {
   }
   if (replaced?.isFile()) fs.chmodSync(/* turbopackIgnore: true */ tempReal, replaced.mode & 0o7777);
   fs.renameSync(/* turbopackIgnore: true */ tempReal, target);
-  return target;
+  // What the rename actually replaced, read right before it with nothing
+  // awaited in between: another upload of the same name may have landed
+  // since this one began, so the size seen at its start can be stale.
+  return { target, replacedBytes: replaced?.isFile() ? replaced.size : 0 };
 }

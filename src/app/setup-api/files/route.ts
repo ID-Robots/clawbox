@@ -717,12 +717,14 @@ export async function POST(req: NextRequest) {
       });
       // The whole part was accepted: only now does it replace the destination.
       let landed = 0;
+      let replacedAtCommit = 0;
       if (staged) {
         const committed = commitUploadTemp(staged.temp, staged.dest);
         written.length = 0;
-        landed = landedSize(committed);
+        landed = landedSize(committed.target);
+        replacedAtCommit = committed.replacedBytes;
       }
-      guard.finish(landed);
+      guard.finish(landed, replacedAtCommit);
       return NextResponse.json({ ok: true, name: result.name, path: result.path });
     } catch (err) {
       // A refused upload must not leave a partial file behind: the caller is
@@ -843,6 +845,7 @@ export async function PUT(req: NextRequest) {
   // null once it has been renamed into place, or when nothing was created.
   let created = null as string | null;
   let landed: number | null = null;
+  let replacedAtCommit: number | undefined;
   try {
     const nodeReadable = Readable.fromWeb(bounded.stream as unknown as import("stream/web").ReadableStream);
     let ws: fs.WriteStream;
@@ -861,7 +864,8 @@ export async function PUT(req: NextRequest) {
     // The whole body was accepted: only now does it replace the destination.
     const committed = commitUploadTemp(created ?? temp, destPath);
     created = null;
-    landed = landedSize(committed);
+    landed = landedSize(committed.target);
+    replacedAtCommit = committed.replacedBytes;
   } catch (err) {
     // The temporary file comes off the disk either way and the destination
     // is untouched; only the STATUS differs, and it is decided by the meter's
@@ -873,7 +877,7 @@ export async function PUT(req: NextRequest) {
     const { status, body } = refusal(bounded.overflowed() ? boundRefusal(guard, guard.lastBound()) : err);
     return NextResponse.json(body, { status });
   } finally {
-    guard.finish(landed);
+    guard.finish(landed, replacedAtCommit);
   }
   return NextResponse.json({ ok: true, name });
 }

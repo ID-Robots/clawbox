@@ -251,6 +251,33 @@ describe("a write error", () => {
   });
 });
 
+describe("two overwrites of one file at once", () => {
+  it("leave the home's figure equal to what is on disk, whichever lands first", async () => {
+    const { homeUsage, measureHomeUsage } = await import("@/lib/home-usage");
+    setLimits({ uploadMaxMb: 0, homeQuotaMb: 10 });
+    fs.writeFileSync(path.join(IVAN, "doc.txt"), Buffer.alloc(MB));
+    expect((await homeUsage(IVAN))?.bytes).toBe(MB);
+    let releaseA: () => void = () => {};
+    let releaseB: () => void = () => {};
+    const holdA = new Promise<void>((r) => { releaseA = r; });
+    const holdB = new Promise<void>((r) => { releaseB = r; });
+    // Both begin while doc.txt is 1 MB; A (256 KB) lands first, then B (1 MB)
+    // replaces A's file, not the 1 MB one either of them saw at its start.
+    const a = putStream("Home", "doc.txt", body(256 * KB, { hold: holdA }));
+    await new Promise((r) => setTimeout(r, 100));
+    const b = putStream("Home", "doc.txt", body(MB, { hold: holdB }));
+    await new Promise((r) => setTimeout(r, 100));
+    releaseA();
+    expect((await a).status).toBe(200);
+    releaseB();
+    expect((await b).status).toBe(200);
+    expect(fs.statSync(path.join(IVAN, "doc.txt")).size).toBe(MB);
+    const cached = (await homeUsage(IVAN))?.bytes;
+    const onDisk = (await measureHomeUsage(IVAN))?.bytes;
+    expect(cached).toBe(onDisk);
+  });
+});
+
 describe("a folder an upload is still writing into", () => {
   it("is neither moved nor renamed until the upload has finished, so its temporary file is never stranded", async () => {
     who.current = { username: "owner", isOwner: true };
