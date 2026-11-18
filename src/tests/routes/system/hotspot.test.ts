@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -218,6 +218,17 @@ describe("/setup-api/system/hotspot", () => {
         expect(mockExecFile).not.toHaveBeenCalledWith("iw", expect.anything(), expect.anything(), expect.anything());
       });
 
+      it("a client profile that happens to be called ClawBox-Setup is not the setup AP", async () => {
+        setupExecFileMock({
+          "nmcli": { stdout: "ClawBox-Setup:802-11-wireless:wlP1p1s0\n", stderr: "" },
+          "iw dev wlP1p1s0 info": { stdout: "Interface wlP1p1s0\n\ttype managed\n", stderr: "" },
+        });
+
+        const body = await (await hotspotGet()).json();
+
+        expect(body.active).toBe(false);
+      });
+
       it("the ClawBox-Setup profile on another interface is not this radio's AP", async () => {
         setupExecFileMock({
           "nmcli": { stdout: "ClawBox-Setup:802-11-wireless:wlan9\n", stderr: "" },
@@ -365,6 +376,22 @@ describe("/setup-api/system/hotspot", () => {
       expect(store.hotspot_password).toBe("env-only-key");
     });
 
+    it("an env file that is there but unreadable answers 500 and is not rewritten without its key", async () => {
+      Object.assign(store, { setup_complete: true, hotspot_enabled: true });
+      writeFileSync(envFile(), "HOTSPOT_SSID='ClawBox-Setup'\nHOTSPOT_PASSWORD='env-only-key'\n");
+      chmodSync(envFile(), 0o000);
+      try {
+        const res = await hotspotPost(jsonRequest({ ssid: "ClawBox-Setup", enabled: false }));
+
+        expect(res.status).toBe(500);
+        expect(mockSetMany).not.toHaveBeenCalled();
+        expect(mockExecFile).not.toHaveBeenCalled();
+      } finally {
+        chmodSync(envFile(), 0o600);
+      }
+      expect(readEnv()).toBe("HOTSPOT_SSID='ClawBox-Setup'\nHOTSPOT_PASSWORD='env-only-key'\n");
+    });
+
     it("a new password in the request replaces the env-only key", async () => {
       Object.assign(store, { setup_complete: true, hotspot_enabled: true });
       writeFileSync(envFile(), "HOTSPOT_SSID='ClawBox-Setup'\nHOTSPOT_PASSWORD='env-only-key'\n");
@@ -505,6 +532,18 @@ describe("/setup-api/system/hotspot", () => {
         expect(body.apAction).toBe("failed");
         expect(body.warning).toMatch(/still be broadcasting/i);
         expect((await (await hotspotGet()).json()).active).toBe(true);
+      });
+
+      it("a ClawBox-Setup client left up after the stop is not a failed stop (stop-ap.sh rightly leaves it)", async () => {
+        setupExecFileMock({
+          bash: { stdout: "[AP] Access point stopped.\n", stderr: "" },
+          nmcli: { stdout: "ClawBox-Setup:802-11-wireless:wlP1p1s0\n", stderr: "" },
+          "iw dev wlP1p1s0 info": { stdout: "Interface wlP1p1s0\n\ttype managed\n", stderr: "" },
+        });
+
+        const body = await (await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: false }))).json();
+
+        expect(body.apAction).toBe("stopped");
       });
 
       it("names a clean stop as stopped", async () => {

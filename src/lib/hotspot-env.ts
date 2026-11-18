@@ -84,16 +84,27 @@ export function parseHotspotEnv(text: string): HotspotEnv {
  * "not disabled" to the scripts, the direction that keeps a box reachable.
  */
 export async function readHotspotEnv(): Promise<HotspotEnv | null> {
+  return (await readHotspotEnvKnown()).env;
+}
+
+/**
+ * {@link readHotspotEnv}, telling "the scripts see no file" (`known`: absent,
+ * a symlink, not a regular file) from "it could not be read" (`known: false`:
+ * EACCES, EIO, …). A save that keeps the WPA key from this file must refuse on
+ * the second, or it would write the file again without the key: an open AP.
+ */
+export async function readHotspotEnvKnown(): Promise<{ env: HotspotEnv | null; known: boolean }> {
   let handle: FileHandle | undefined;
   try {
     // One open, O_NOFOLLOW: a symlink fails it (ELOOP), and the type check
     // and the read are on that same descriptor, so nothing can be swapped in
     // between them. O_NONBLOCK: a FIFO planted there cannot hang the read.
     handle = await fs.open(hotspotEnvPath(), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
-    if (!(await handle.stat()).isFile()) return null;
-    return parseHotspotEnv(await handle.readFile("utf8"));
-  } catch {
-    return null;
+    if (!(await handle.stat()).isFile()) return { env: null, known: true };
+    return { env: parseHotspotEnv(await handle.readFile("utf8")), known: true };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return { env: null, known: code === "ENOENT" || code === "ELOOP" };
   } finally {
     await handle?.close().catch(() => {});
   }

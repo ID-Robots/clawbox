@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { getKnown } from "@/lib/config-store";
-import { HAS_CONTROL_CHAR, readHotspotEnv, readHotspotSettings, writeHotspotSettings } from "@/lib/hotspot-env";
+import { HAS_CONTROL_CHAR, readHotspotEnvKnown, readHotspotSettings, writeHotspotSettings } from "@/lib/hotspot-env";
 import { parseNmcliTerseLine, RESTART_AP_TIMEOUT_MS } from "@/lib/network";
 import { startRootStep } from "@/lib/root-step-runner";
 
@@ -48,14 +48,16 @@ export async function GET() {
       "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active",
     ], { timeout: 3_000 });
     rows = stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine);
-    // The AP stop-ap.sh owns (wifi_ap_uuid: the ClawBox-Setup profile on this
-    // interface) and nothing else. Settings offers "Stop it now" when this is
-    // true over a switch that is off; an access point some other profile
-    // raised is not one that stop can take down, so it is not this hotspot.
+    // The AP stop-ap.sh owns (wifi_ap_uuid: the ClawBox-Setup profile, in AP
+    // mode, on this interface) and nothing else. Settings offers "Stop it now"
+    // when this is true over a switch that is off; an access point some other
+    // profile raised is not one that stop can take down, so it is not this
+    // hotspot.
     active = rows.some(isSetupApRow(iface));
   } catch (err) {
     console.warn("[hotspot] nmcli unavailable:", err);
   }
+  if (active) active = !(await radioIsClient(iface));
   if (enabled && !active) {
     const wifiRow = rows.find(r => r[1] === "802-11-wireless" && r[2] === iface && r[0] !== "ClawBox-Setup");
     if (wifiRow) blockedBy = wifiRow[0];
@@ -130,12 +132,23 @@ export async function POST(request: Request) {
       );
     }
     const storedPassword = stored.value;
+    let existingPassword = typeof storedPassword === "string" && storedPassword.length >= 8
+      ? storedPassword
+      : undefined;
     // Config may never have held the key: a box whose key only data/hotspot.env
     // carries (what the AP scripts use, and what GET counts in hasPassword).
-    // Keep that one too, or this save would write the env file without it.
-    const existingPassword = typeof storedPassword === "string" && storedPassword.length >= 8
-      ? storedPassword
-      : (await readHotspotEnv())?.password ?? undefined;
+    // Keep that one too, or this save would write the env file without it,
+    // and read it as strictly: an env file there but unreadable is a refusal.
+    if (!existingPassword && !password) {
+      const envRead = await readHotspotEnvKnown();
+      if (!envRead.known) {
+        return NextResponse.json(
+          { error: "The hotspot settings could not be read, so nothing was changed." },
+          { status: 500 }
+        );
+      }
+      existingPassword = envRead.env?.password ?? undefined;
+    }
     const effectivePassword = password ? password : existingPassword;
 
     // A request without `enabled` (an older client) keeps the switch where the
@@ -237,7 +250,24 @@ async function setupApActive(iface: string): Promise<boolean> {
       ["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"],
       { timeout: 3_000 }
     );
-    return stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine).some(isSetupApRow(iface));
+    if (!stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine).some(isSetupApRow(iface))) return false;
+  } catch {
+    return false;
+  }
+  return !(await radioIsClient(iface));
+}
+
+/**
+ * Does the kernel say the interface is a client (`iw dev <iface> info`:
+ * `type managed`)? A client profile can carry the name ClawBox-Setup too
+ * (start-ap.sh allows for one), and stop-ap.sh, which checks the mode, leaves
+ * it alone: it is not the setup AP. Anything else, iw failing included, does
+ * not contradict nmcli.
+ */
+async function radioIsClient(iface: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync("iw", ["dev", iface, "info"], { timeout: 3_000 });
+    return /^\s*type managed\s*$/m.test(stdout);
   } catch {
     return false;
   }
