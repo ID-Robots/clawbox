@@ -324,8 +324,15 @@ say "{\"localVoice\":${LOCALV:-null}}"
 # Whether Kokoro is INSTALLED: its weights stamp and its user unit, the two facts
 # hasLocalTtsEngine() reads. Not localVoice: that is the "configured" flag of
 # the local engine, which broken wiring can leave false with Kokoro installed.
+# A stamp with no unit found is "not installed" only when the user systemd
+# answered; one that could not be asked leaves it unknown (null), the way
+# probeLocalTtsEngine() tells an unread unit state from an absent engine.
 KOKORO=false
-if [ -f "$HOME/.cache/clawbox/kokoro-installed" ] && { [ -f "$HOME/.config/systemd/user/kokoro-server.service" ] || systemctl --user cat kokoro-server.service >/dev/null 2>&1; }; then KOKORO=true; fi
+if [ -f "$HOME/.cache/clawbox/kokoro-installed" ]; then
+  if [ -f "$HOME/.config/systemd/user/kokoro-server.service" ] || systemctl --user cat kokoro-server.service >/dev/null 2>&1; then KOKORO=true
+  elif ! systemctl --user show-environment >/dev/null 2>&1; then KOKORO=null
+  fi
+fi
 say "{\"kokoroInstalled\":$KOKORO}"
 if [ "$RUNTIME" = hermes ]; then
   say "{\"hermesAfter\":$(hermes_provider)}"
