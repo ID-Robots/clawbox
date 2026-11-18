@@ -86,7 +86,7 @@ if (need(oc.events, "the gateway event list (GATEWAY_EVENTS)")) {
   const events = new Set(oc.events);
   for (const u of uses("openclaw", "event")) if (!events.has(u.name)) fail("openclaw", "event", u.name, "the pinned gateway never sends this event", u.site);
 }
-if (need(oc.hooks, "the plugin hook names (pluginHookNameSet)")) {
+if (need(oc.hooks, "the plugin hook names (pluginHookNameSet, or the PLUGIN_HOOK_METADATA keys)")) {
   const hooks = new Set(oc.hooks);
   for (const u of uses("openclaw", "hook")) if (!hooks.has(u.name)) fail("openclaw", "hook", u.name, "not a plugin hook of the pinned core", u.site);
 }

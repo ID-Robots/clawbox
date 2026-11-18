@@ -164,8 +164,26 @@ if (specFiles.length === 1) {
 const stringsIn = (text) => (text ? [...text.matchAll(/"([^"]+)"/g)].map((m) => m[1]) : null);
 const eventFiles = holding("const GATEWAY_EVENTS = [");
 const events = eventFiles.length === 1 ? stringsIn(literalAfter(eventFiles[0], "const GATEWAY_EVENTS = [", "]")) : null;
-const hookFiles = holding("const pluginHookNameSet = ");
-const hooks = hookFiles.length === 1 ? stringsIn(literalAfter(hookFiles[0], "const pluginHookNameSet = ", "]);")) : null;
+// The plugin hook names. Through 2026.11.3 they are a `pluginHookNameSet`
+// (a `new Set([...])` of strings); from 2026.11.5 they are the KEYS of the
+// `PLUGIN_HOOK_METADATA` table (each value says what the hook may do, never
+// the name). Either form must be found in exactly one file, or the check says
+// it cannot vouch for the hooks.
+let hooks = null;
+const hookSetFiles = holding("const pluginHookNameSet = ");
+const hookTableFiles = holding("const PLUGIN_HOOK_METADATA = ");
+if (hookSetFiles.length === 1 && hookTableFiles.length === 0) {
+  hooks = stringsIn(literalAfter(hookSetFiles[0], "const pluginHookNameSet = ", "]);"));
+} else if (hookTableFiles.length === 1 && hookSetFiles.length === 0) {
+  // Read as text, never evaluated: this is a bundle of a package that was
+  // installed with --ignore-scripts precisely so that nothing in it runs. The
+  // table's own keys are the lines indented by exactly one tab (a hook's
+  // settings sit one level deeper); a bundle that formats it differently yields
+  // no names, and the check then says it cannot vouch for the hooks.
+  const literal = literalAfter(hookTableFiles[0], "const PLUGIN_HOOK_METADATA = ", "\n}");
+  const names = literal ? [...literal.matchAll(/^\t([A-Za-z_][A-Za-z0-9_]*): /gm)].map((m) => m[1]) : [];
+  hooks = names.length > 0 ? names : null;
+}
 
 const version = await cli(["--version"]);
 fs.rmSync(home, { recursive: true, force: true });

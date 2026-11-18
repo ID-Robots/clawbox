@@ -395,6 +395,21 @@ if [ -z "${CLAWBOX_OPENCLAW_2026_10:-}" ]; then
 fi
 export CLAWBOX_OPENCLAW_2026_10
 
+# OpenClaw 2026.11.5 RETIRED the heartbeat config: `agents.defaults.heartbeat`
+# and `agents.entries.*.heartbeat` are no longer keys (a config that still holds
+# one is invalid until `openclaw doctor --fix` has turned the monitor into an
+# ordinary automation job and removed it), and a `config set` or `config unset`
+# of them is refused. Same precedence as the two flags above: an explicit value
+# wins; an unknown core is 0, which keeps the old behaviour.
+if [ -z "${CLAWBOX_OPENCLAW_2026_11_5:-}" ]; then
+  CLAWBOX_OPENCLAW_2026_11_5=0
+  if [ -n "${CLAWBOX_OPENCLAW_EFFECTIVE:-}" ] \
+     && [ "$(printf '%s\n' 2026.11.5 "$CLAWBOX_OPENCLAW_EFFECTIVE" | sort -V | head -1)" = "2026.11.5" ]; then
+    CLAWBOX_OPENCLAW_2026_11_5=1
+  fi
+fi
+export CLAWBOX_OPENCLAW_2026_11_5
+
 "${CLAWBOX_STEP:-:}" "start-loop recovery"
 
 # ── Start-loop recovery: a database the core refuses at every start ─────────
@@ -1300,6 +1315,8 @@ import json, os, re, sys, tempfile, secrets, shutil, time
 CLAWBOX_OPENCLAW_V2 = os.environ.get("CLAWBOX_OPENCLAW_V2") == "1"
 # OpenClaw 2026.10+: the keys the agent-database work writes (see the bash block).
 CLAWBOX_OPENCLAW_2026_10 = os.environ.get("CLAWBOX_OPENCLAW_2026_10") == "1"
+# OpenClaw 2026.11.5+: the retired heartbeat key, the on-device model's tool list.
+CLAWBOX_OPENCLAW_2026_11_5 = os.environ.get("CLAWBOX_OPENCLAW_2026_11_5") == "1"
 
 # Gateway auth token gates LAN access to the agent's privileged tools
 # (run_command / file_write / system_power). Earlier builds wrote the public
@@ -5481,6 +5498,55 @@ if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
         changed = True
 # --- end memory index defaults ---
 
+# The on-device model's six tools, by config (OpenClaw 2026.11.5+).
+#
+# clawbox-local-lean narrows a turn on the llamacpp model to six tools with the
+# `before_prompt_build` hook's `toolsAllow`. Up to 2026.11.3 that took the other
+# tools off the turn. 2026.11.5 keeps every tool of the agent's catalog active,
+# narrows only which ones may be called, and sizes the turn (its pre-prompt
+# context check and the compaction budget) from that whole catalog. With Tool
+# Search off, as the ~2B model needs it (below), that is ~84k estimated tokens
+# against Gemma's 32768-token window: every turn on the on-device model ended
+# "Context overflow: the system prompt, injected context, or tool definitions
+# exceed the model's context window" before the model was asked (measured on a
+# lab board, 68-local-ai-chat). HARNESS FIRST: the core's own per-provider tool
+# policy, `tools.byProvider.<provider>.allow`, applies when the tools are built,
+# before anything is sized; with it the same turn is a ~1.4k-token prompt and
+# answers. It narrows only the llamacpp provider's turns, so it does not follow
+# the primary. ClawBox writes exactly {"allow": [the six]} where the provider has
+# no entry and removes only that exact value (on an older core, which narrows
+# through the hook alone); an owner's own entry is never touched. Keep the list
+# in step with LEAN_TOOLS in scripts/openclaw-plugins/clawbox-local-lean/local-lean.mjs.
+_LOCAL_LEAN_TOOLS = ["read", "write", "clawbox__webapp_create", "web_fetch", "web_search", "clawbox__browser_open"]
+_lt_tools = cfg.get("tools")
+_lt_by = _lt_tools.get("byProvider") if isinstance(_lt_tools, dict) else None
+_lt_value = _lt_by.get("llamacpp") if isinstance(_lt_by, dict) else None
+_lt_ours = (
+    isinstance(_lt_value, dict)
+    and list(_lt_value.keys()) == ["allow"]
+    and _lt_value["allow"] == _LOCAL_LEAN_TOOLS
+)
+if bool(globals().get("CLAWBOX_OPENCLAW_2026_11_5", False)):
+    if (
+        (_lt_tools is None or isinstance(_lt_tools, dict))
+        and (_lt_by is None or (isinstance(_lt_by, dict) and "llamacpp" not in _lt_by))
+    ):
+        if _lt_tools is None:
+            _lt_tools = {}
+            cfg["tools"] = _lt_tools
+        if _lt_by is None:
+            _lt_by = {}
+            _lt_tools["byProvider"] = _lt_by
+        _lt_by["llamacpp"] = {"allow": list(_LOCAL_LEAN_TOOLS)}
+        changed = True
+        print("  Narrowed the on-device model's tools to its six by config (tools.byProvider.llamacpp): OpenClaw 2026.11.5 sizes a turn from every active tool")
+elif _lt_ours:
+    del _lt_by["llamacpp"]
+    if not _lt_by:
+        del _lt_tools["byProvider"]
+    changed = True
+    print("  Removed the on-device model's config tool list: this core narrows its turns through the lean hook alone")
+
 # Reconciliation: OpenClaw's Tool Search vs a primary on the on-device model.
 #
 # Off while the primary is `llamacpp/*`, OpenClaw's default otherwise — the
@@ -7576,7 +7642,26 @@ def at_optout(value, literal):
 batch = []
 unset_heartbeat = False
 flipped = []
+# OpenClaw 2026.11.5 retired the heartbeat key (the exported flag is set by the
+# core's own version, above): there is nothing at the opt-out literal to take
+# back, and a `config unset` of it would be refused. The monitor is an
+# automation job there, and the Settings switch drives that job.
+#
+# WHAT THIS GIVES UP, on purpose: a box still holding a generation-1 record
+# (seeded off by a build from before the 2026-09-15 ruling and never booted
+# since) that reaches a 2026.11.5 core keeps its monitor as Doctor converted it,
+# disabled. By the time this plan runs, Doctor has already turned the monitor
+# into a job and removed the key (the update's own `openclaw doctor --fix`,
+# which install.sh runs right after installing the core, and this script's
+# start-guard for a config the core still refuses at boot; measured on a lab
+# board), so the `0m` this row looks for is gone with or without this skip, and
+# once converted a seeded-off job cannot be told from one the owner switched
+# off: enabling it here would undo a choice that may be theirs. Settings ->
+# Harness switches it on.
+HEARTBEAT_RETIRED = os.environ.get("CLAWBOX_OPENCLAW_2026_11_5") == "1"
 for path, literal, default in WANTED:
+    if default is None and HEARTBEAT_RETIRED:
+        continue
     # A box whose generation 2 is recorded is here only for the single-engine
     # rows: its three keys are the owner's, and a check-in they switched off since
     # must not be switched back on by a pass that came for something else.

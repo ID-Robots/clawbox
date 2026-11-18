@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { findOpenclawBin } from "@/lib/openclaw-config";
-import { installedOpenclawCoreAtLeast, installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
+import { coreVersionAtLeast, installedOpenclawCoreAtLeast, installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
 
 // Only the resolver, so the real module's own reading of the manifest is what
 // is under test here.
@@ -60,8 +60,42 @@ describe("which OpenClaw core generation is installed", () => {
     await expect(installedOpenclawCoreAtLeast(2026, 10)).resolves.toBe(expected);
   });
 
+  // A boundary inside a month: 2026.11.5 retired the heartbeat config that
+  // 2026.11.3 still carried, so the month alone cannot tell them apart.
+  it.each([
+    ["2026.11.5", true],
+    ["2026.11.6", true],
+    ["2026.12.0", true],
+    ["2027.1.0", true],
+    ["2026.11.5-beta.1", true],
+    ["2026.11.4", false],
+    ["2026.11.3", false],
+    ["2026.10.9", false],
+    ["next", false],
+  ])("answers %s as at least 2026.11.5: %s", async (version, expected) => {
+    installCore(version);
+    await expect(installedOpenclawCoreAtLeast(2026, 11, 5)).resolves.toBe(expected);
+  });
+
+  // The pure comparison keeps a third answer, for a guard that must refuse to
+  // guess: a version that says nothing is `null`, not "older".
+  it.each([
+    ["2026.11.5", true],
+    ["2026.11.10", true],
+    ["2026.12.1", true],
+    ["2026.11.4", false],
+    ["2026.9.30", false],
+    [" 2026.11.5 ", true],
+    ["next", null],
+    ["", null],
+    [null, null],
+  ] as const)("compares %s with 2026.11.5 as %s", (version, expected) => {
+    expect(coreVersionAtLeast(version, 2026, 11, 5)).toBe(expected);
+  });
+
   it("answers false when there is no manifest to read", async () => {
     await expect(installedOpenclawCoreAtLeast(2026, 10)).resolves.toBe(false);
+    await expect(installedOpenclawCoreAtLeast(2026, 11, 5)).resolves.toBe(false);
   });
 
   it.each([

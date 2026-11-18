@@ -536,8 +536,16 @@ think_turn() {
   note "thinking ${1:-at the default level}: ${line:-no answer from the board}; answered by ${T_PROVIDER:-?}, ${T_OUT:-?} output tokens; reply: ${reply:-none}"
 }
 
+# The chat model is the box's, not this test's: whatever else picks one (a
+# person, another suite on this board putting its own pick back) moves these
+# turns onto that model. Seen on a lab board (TASK-2633): a second copy of the
+# suite ended this test first, and the thinking turns here ran on the cloud
+# model. Name that instead of blaming the turns.
+THINK_PRIMARY=$(jq -r '.primary // empty' <<<"$(cfg_snapshot)" 2>/dev/null)
 if [ "$SECONDS" -gt "$THINK_START_BY" ]; then
   not_ok "no time left for the thinking check: $SECONDS s spent, its two turns may take $((2 * THINK_TURN_SECONDS)) s"
+elif [ -n "$THINK_PRIMARY" ] && [ "$THINK_PRIMARY" != "$LOCAL_MODEL" ]; then
+  not_ok "the chat model was changed outside this test before the thinking check: openclaw.json names $THINK_PRIMARY, not $LOCAL_MODEL (another suite or a person using this board?)"
 else
   think_turn ""
   OFF_RC=$T_RC OFF_SECS=$T_SECS OFF_PROVIDER=$T_PROVIDER OFF_OUT=$T_OUT
