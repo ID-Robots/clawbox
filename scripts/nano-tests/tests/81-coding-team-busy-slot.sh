@@ -24,7 +24,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 SETTINGS_BEFORE=
 HOLDER_DIR=
 HOLDER=
-# shellcheck disable=SC2317  # run by the EXIT trap
+# shellcheck disable=SC2317,SC2329  # run by the EXIT trap
 cleanup() {
   if [ -n "$HOLDER" ]; then
     board_api POST /setup-api/coding-agent/stop "$(jq -cn --arg id "$HOLDER" '{runId: $id}')"

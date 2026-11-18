@@ -63,7 +63,7 @@ OLLAMA_BEFORE=$(board 'pgrep -x ollama >/dev/null 2>&1 && echo up || echo down' 
 note "ollama before: $OLLAMA_BEFORE"
 
 # SC2016: the board script expands on the board; SC2317: run by the EXIT trap.
-# shellcheck disable=SC2016,SC2317
+# shellcheck disable=SC2016,SC2317,SC2329
 cleanup() {
   if [ "$SAVED" != 1 ]; then
     # A Save whose answer was lost (a timeout) may still have stored the
