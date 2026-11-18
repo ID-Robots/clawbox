@@ -163,8 +163,10 @@ fi
 
 # Put the board's hotspot back from the kept copy: the radio first, through
 # the route (switch_hotspot), to the AP state that was found, then
-# data/hotspot.env and config's hotspot_* keys byte for byte. Prints one line:
-# "restored <found AP up: yes|no>", or why not.
+# data/hotspot.env and config's hotspot_* keys byte for byte. $2 is "drop"
+# once the radio is back as found, or "keep": the copy then stays for the next
+# run to retry. Prints one line: "restored <found AP up: yes|no>" (copy
+# dropped), or why not.
 # shellcheck disable=SC2016  # expanded on the board
 PUT_BACK='
   d="$HOME/.cache/clawbox-nano-tests/$1"
@@ -195,32 +197,60 @@ if changed:
     os.replace(tmp, path)
 PY
   up=$(cat "$d/ap-up" 2>/dev/null)
+  if [ "$2" != drop ]; then
+    echo "settings put back, the radio is not as found (AP up=${up:-unknown}): copy kept for the next run"
+    exit 1
+  fi
   rm -rf -- "$d"
   echo "restored ${up:-unknown}"
 '
+# radio_is WANT_UP — the AP up (yes) or down (no) within 2 min: a start takes
+# the AP unit its time.
+radio_is() {
+  local p=""
+  for _ in $(seq 1 24); do
+    p=$(probe)
+    if [ "$1" = yes ]; then ap_up "$p" && return 0; else ap_down "$p" && return 0; fi
+    sleep 5
+  done
+  note "restore: the AP is not up=$1 after 2 min: $p"
+  return 1
+}
 # put_back WANT_UP — the radio to WANT_UP (yes|no) through the route, then the
-# kept bytes. Sets PUT_BACK_LINE.
+# kept bytes; the copy is dropped only when the radio reads back as WANT_UP.
+# Sets PUT_BACK_LINE.
 PUT_BACK_LINE=""
 put_back() {
-  local p
+  local p copy=drop
   p=$(probe)
   if [ "$1" = yes ] && ! ap_up "$p"; then
     switch_hotspot true || true
     note "restore: switched back on (${AP_ACTION:-no answer})"
+    radio_is yes || copy=keep
   elif [ "$1" = no ] && ! ap_down "$p"; then
     switch_hotspot false || true
     note "restore: switched back off (${AP_ACTION:-no answer})"
+    radio_is no || copy=keep
   fi
-  PUT_BACK_LINE=$(board "$PUT_BACK" "$SAVE_DIR_NAME" | tail -n 1)
+  PUT_BACK_LINE=$(board "$PUT_BACK" "$SAVE_DIR_NAME" "$copy" | tail -n 1)
 }
 
 # An earlier run killed before it put the board back left its copy: that copy,
-# not today's state, is what the board had.
+# not today's state, is what the board had. Its ap-up marker is written last,
+# after which the first toggle runs: a copy without a yes/no marker was cut off
+# while it was being taken, before anything was switched, so the board is
+# still as it was found and the copy is only replaced (below).
 # shellcheck disable=SC2016  # expanded on the board
-LEFT=$(board 'cat "$HOME/.cache/clawbox-nano-tests/$1/ap-up" 2>/dev/null || { [ -d "$HOME/.cache/clawbox-nano-tests/$1" ] && echo unknown; }' "$SAVE_DIR_NAME" | tail -n 1)
-if [ -n "$LEFT" ]; then
+LEFT=$(board '
+  d="$HOME/.cache/clawbox-nano-tests/$1"
+  [ -d "$d" ] || exit 0
+  up=$(cat "$d/ap-up" 2>/dev/null)
+  case "$up" in yes|no) echo "$up" ;; *) echo incomplete ;; esac
+' "$SAVE_DIR_NAME" | tail -n 1)
+if [ "$LEFT" = incomplete ]; then
+  note "an earlier run was stopped while it kept the board's hotspot settings aside, before it switched anything: that partial copy is replaced, nothing is put back"
+elif [ -n "$LEFT" ]; then
   note "an earlier run left the board's hotspot settings kept aside (AP up then: $LEFT): putting them back first"
-  [ "$LEFT" = unknown ] && LEFT=yes
   put_back "$LEFT"
   note "earlier copy: $PUT_BACK_LINE; now $(probe)"
   case "$PUT_BACK_LINE" in restored*) ;; *) not_ok "could not put back what an earlier run kept aside: not touching the hotspot"; finish ;; esac
@@ -273,7 +303,7 @@ restore() {
   note "after restore: $p, stored $(stored)"
   case "$PUT_BACK_LINE" in
     restored*) ok "data/hotspot.env and config's hotspot keys are back as found" ;;
-    *) not_ok "could not put the hotspot settings back (${PUT_BACK_LINE:-no answer}); the next run restores them from the kept copy" ;;
+    *) not_ok "the hotspot is not back as found (${PUT_BACK_LINE:-no answer}); the next run retries from the kept copy" ;;
   esac
   if { [ "$INIT_UP" = yes ] && ap_up "$p"; } || { [ "$INIT_UP" = no ] && ap_down "$p"; }; then
     ok "the hotspot is left as found (AP up=$INIT_UP)"
@@ -399,6 +429,10 @@ if ap_down "$P2"; then ok "reboot: still no AP on $IFACE"; else not_ok "reboot: 
 hotspot_state; S2=$HS
 if [ "$S2" = "false false" ]; then ok "reboot: Settings still reads enabled:false active:false"; else not_ok "reboot: Settings reads '${S2:-no answer}' (enabled active)"; fi
 wired_same "$P2" "reboot" device
+# The address the reboot handed out (same device, accepted above) is the one
+# the "on" step must leave alone.
+W2=$(field "$P2" wired)
+if [ "${W2%%/*}" = "${WIRED0%%/*}" ] && [ "${W2#*/}" != none ]; then WIRED0=$W2; fi
 
 # ---- 3. on ------------------------------------------------------------------------
 switch_hotspot true || { not_ok "switching the hotspot on failed"; finish; }
