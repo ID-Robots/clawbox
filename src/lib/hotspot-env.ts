@@ -29,7 +29,8 @@
  * config. So before setup the switch reads from config, exactly as it did:
  * first-boot setup is unchanged.
  */
-import fs from "fs/promises";
+import fs, { type FileHandle } from "fs/promises";
+import { constants as fsConstants } from "fs";
 import { randomBytes } from "crypto";
 import path, { untraced } from "@/lib/runtime-path";
 import { get, getAll, getKnownMany, setMany } from "@/lib/config-store";
@@ -83,13 +84,18 @@ export function parseHotspotEnv(text: string): HotspotEnv {
  * "not disabled" to the scripts, the direction that keeps a box reachable.
  */
 export async function readHotspotEnv(): Promise<HotspotEnv | null> {
-  const file = hotspotEnvPath();
+  let handle: FileHandle | undefined;
   try {
-    const st = await fs.lstat(file);
-    if (!st.isFile()) return null;
-    return parseHotspotEnv(await fs.readFile(file, "utf8"));
+    // One open, O_NOFOLLOW: a symlink fails it (ELOOP), and the type check
+    // and the read are on that same descriptor, so nothing can be swapped in
+    // between them. O_NONBLOCK: a FIFO planted there cannot hang the read.
+    handle = await fs.open(hotspotEnvPath(), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    if (!(await handle.stat()).isFile()) return null;
+    return parseHotspotEnv(await handle.readFile("utf8"));
   } catch {
     return null;
+  } finally {
+    await handle?.close().catch(() => {});
   }
 }
 
