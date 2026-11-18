@@ -3672,8 +3672,22 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         || !!document.getElementById(`${systemTabsId}-panel-cluster`)?.contains(target)
       );
     };
+    // Focus that leaves for nowhere (a click on the page's background) is not
+    // on Cluster any more. Focus lost because the focused element was REMOVED
+    // is the case this rule is for, so an element no longer in the page keeps it.
+    const onFocusOut = (e: FocusEvent) => {
+      if (e.relatedTarget) return; // focusin on the new element decides
+      const left = e.target instanceof Element ? e.target : null;
+      queueMicrotask(() => {
+        if (left?.isConnected) clusterHadFocus.current = false;
+      });
+    };
     document.addEventListener("focusin", onFocusIn);
-    return () => document.removeEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
+    return () => {
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
+    };
   }, [systemTabsId]);
   const clusterShownBefore = useRef(clusterAvailable);
   useLayoutEffect(() => {

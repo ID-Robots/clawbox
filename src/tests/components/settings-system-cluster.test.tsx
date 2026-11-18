@@ -174,6 +174,20 @@ describe("Settings → System → Cluster", () => {
     }
   });
 
+  it("leaves focus alone when it had already left the Cluster tab before the tab went", async () => {
+    await openSystem();
+    const tab = await screen.findByRole("tab", { name: "Cluster" });
+    clusterEnabled = false;
+    tab.focus();
+    // The owner clicks the page's background: focus leaves for nowhere.
+    act(() => tab.blur());
+    expect(document.activeElement).toBe(document.body);
+    fireEvent.click(tab);
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "Cluster" })).toBeNull());
+    await new Promise((r) => setTimeout(r, 20));
+    expect(document.activeElement).not.toBe(screen.getByRole("tab", { name: "Device" }));
+  });
+
   it("goes back to the device's own figures from the Cluster tab", async () => {
     await openSystem();
     fireEvent.click(await screen.findByRole("tab", { name: "Cluster" }));

@@ -40,6 +40,12 @@
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
+# Every wait is fitted inside the runner's deadline (the 900 s above; after it
+# the test gets TERM and, 15 s later, KILL), so the cleanup always has the
+# time it needs: seconds left before that deadline, less a margin.
+DEADLINE_S=860
+left_s() { echo $(( DEADLINE_S - SECONDS )); }
+
 RUNTIME=$(board_runtime)
 RUN=${NANO_RUN_ID:-$$}
 DIR="/tmp/nano-cluster-$RUN"
@@ -74,7 +80,12 @@ fi
 # called by name.
 # shellcheck disable=SC2016,SC2317,SC2329
 restore() {
-  local out line
+  local out line wait_s
+  # The dashboard wait gets what is left once the restart, the removal and the
+  # final health check have their share; never less than 10 s, never over 180 s.
+  wait_s=$(( $(left_s) - 150 ))
+  [ "$wait_s" -gt 180 ] && wait_s=180
+  [ "$wait_s" -lt 10 ] && wait_s=10
   out=$(board '
     DIR=$1
     ENV_FILE="$REPO/.env"
@@ -121,7 +132,7 @@ restore() {
       # Short probes inside a bounded wait, so the removal (or the note of what
       # is left) always happens well before the deadline of the runner.
       ready=no
-      until_s=$(( $(date +%s) + 240 ))
+      until_s=$(( $(date +%s) + $2 ))
       while [ "$(date +%s)" -lt "$until_s" ]; do
         if [ "$(API_MAX_TIME=10 owner_api GET "/setup-api/system/cluster?availability=1" | head -n1)" = 200 ]; then ready=yes; break; fi
         sleep 5
@@ -146,7 +157,7 @@ restore() {
     else
       echo "KEPT $DIR"
     fi
-  ' "$DIR" 2>&1)
+  ' "$DIR" "$wait_s" 2>&1)
   while IFS= read -r line; do
     case "$line" in
       ENV_FAIL*|RESTART_FAIL*|USER_FAIL*) not_ok "cleanup: ${line#* }" ;;
@@ -158,10 +169,15 @@ restore() {
     *CLEAN*|*KEPT*) ;;
     *) not_ok "cleanup: the board did not answer the cleanup step: $(printf '%s' "$out" | tail -n 3 | head -c 300)" ;;
   esac
-  wait_gateway_health 240 >/dev/null 2>&1 || true
+  local health_s=$(( $(left_s) - 10 ))
+  [ "$health_s" -gt 120 ] && health_s=120
+  [ "$health_s" -gt 0 ] && { wait_gateway_health "$health_s" >/dev/null 2>&1 || true; }
   exit "$NANO_TEST_FAILED"
 }
 trap restore EXIT
+# Stopped early (the runner's deadline, or an operator): exit, so the EXIT trap cleans up.
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 # --- the second account (a real one, as 55-multi-user makes) -----------------
 # shellcheck disable=SC2016
@@ -416,13 +432,17 @@ restart_with() {
   # The dashboard goes down for the restart and comes back: wait for it, with
   # short probes and a bounded wait.
   sleep 5
-  until_s=$(( SECONDS + 240 ))
+  # At most 180 s, and never into the 330 s the cleanup may need.
+  local wait_s=$(( $(left_s) - 330 ))
+  [ "$wait_s" -gt 180 ] && wait_s=180
+  [ "$wait_s" -lt 30 ] && wait_s=30
+  until_s=$(( SECONDS + wait_s ))
   while [ "$SECONDS" -lt "$until_s" ]; do
     call_as owner "/setup-api/system/cluster?availability=1" 15
     [ "$CALL_STATUS" = 200 ] && return 0
     sleep 5
   done
-  RESTART_ERROR="the web server did not come back within 4 minutes of the restart"
+  RESTART_ERROR="the web server did not come back within ${wait_s} s of the restart"
   return 1
 }
 

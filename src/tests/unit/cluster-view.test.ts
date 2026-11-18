@@ -20,6 +20,7 @@ import {
   failureOf,
   isLanAddress,
   lanRefusal,
+  NAME_UNRESOLVED,
   runScript,
   targetHost,
   type EngineTarget,
@@ -501,7 +502,9 @@ describe("isLanAddress and lanRefusal", () => {
   it("judges a name by EVERY address it resolves to, and leaves a name that does not resolve to the request", async () => {
     expect(await lanRefusal("engine.lan", async () => [{ address: "192.168.1.5" }])).toBeNull(); // public-hygiene: allow RFC 1918 example address for the LAN rule
     expect(await lanRefusal("engine.lan", async () => [{ address: "192.168.1.5" }, { address: "93.184.216.34" }])).not.toBeNull(); // public-hygiene: allow RFC 1918 example address for the LAN rule
-    expect(await lanRefusal("nowhere.invalid", async () => { throw new Error("ENOTFOUND"); })).toBeNull();
+    // A name the lookup cannot resolve is not a pass: the request would look it up again, unchecked.
+    expect(await lanRefusal("nowhere.invalid", async () => { throw new Error("ENOTFOUND"); })).toBe(NAME_UNRESOLVED);
+    expect(await lanRefusal("nowhere.invalid", async () => [])).toBe(NAME_UNRESOLVED);
     expect(await lanRefusal("93.184.216.34", async () => [])).not.toBeNull();
     expect(await lanRefusal("[fd00::5]", async () => [])).toBeNull(); // public-hygiene: allow RFC 1918 example address for the LAN rule
   });
@@ -624,6 +627,18 @@ describe("clusterAnswer: the engine", () => {
     const engine = await engineOf();
     expect(engine.gate).toEqual({ online: false, reason: "not_lan" });
     expect(engine.metrics).toEqual({ available: false, active: null, queued: null, tokensPerSecond: null });
+    expect(impl).not.toHaveBeenCalled();
+  });
+
+  it("asks nothing of an engine whose name does not resolve, and reports it unreachable", async () => {
+    const { impl } = engineFetch({ models: modelsOk(), metrics: new Response(metricsText(1), { status: 200 }) });
+    setup({
+      fetchImpl: impl,
+      readEngine: async () => ({ ...TARGET, baseUrl: "http://engine.lan:8000/v1" }),
+      lookup: async () => { throw new Error("ENOTFOUND"); },
+      run: runnerBy({ local: ok(GOOD("spark-a")) }),
+    });
+    expect((await engineOf()).gate).toEqual({ online: false, reason: "unreachable" });
     expect(impl).not.toHaveBeenCalled();
   });
 
@@ -866,6 +881,18 @@ describe("clusterAnswer: the engine", () => {
       vi.mocked(readExternalEngineKeyWrittenAt).mockImplementation(() => Date.parse(SAVED_AT) + 60_000);
       const { impl } = engineFetch({ models: modelsOk() });
       useSavedEngine(impl);
+      expect(await engineOf()).toMatchObject({ configured: true, unread: "unbound" });
+      expect(impl).not.toHaveBeenCalled();
+    });
+
+    it("withholds the key when it cannot be shown to be the record's: no save time, or no readable key time", async () => {
+      const { impl } = engineFetch({ models: modelsOk() });
+      useSavedEngine(impl);
+      vi.mocked(getKnown).mockImplementation(async () => stored({ ...RECORD, savedAt: undefined }));
+      expect(await engineOf()).toMatchObject({ configured: true, unread: "unbound" });
+      vi.mocked(getKnown).mockImplementation(async () => stored(RECORD));
+      vi.mocked(readExternalEngineKeyWrittenAt).mockImplementation(() => null);
+      clock += FRESH_MS + 60_000;
       expect(await engineOf()).toMatchObject({ configured: true, unread: "unbound" });
       expect(impl).not.toHaveBeenCalled();
     });

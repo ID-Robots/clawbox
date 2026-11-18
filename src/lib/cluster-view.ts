@@ -312,9 +312,11 @@ async function defaultReadEngine(
   const same = override === null || (record !== null && externalEngineOrigin(record.baseUrl) === externalEngineOrigin(override));
   if (record && recordKey && same) {
     // ...and only while the key is that save's: a key written after its record
-    // (a save that failed half way, its old key not put back) is not.
+    // (a save that failed half way, its old key not put back) is not. Nor is a
+    // key that cannot be shown to be — a record with no save time, a key file
+    // whose time cannot be read: withheld, never assumed.
     const savedAt = Date.parse(record.savedAt);
-    if (Number.isFinite(savedAt) && keyWrittenAt !== null && keyWrittenAt > savedAt + KEY_BINDING_SLACK_MS) {
+    if (!Number.isFinite(savedAt) || keyWrittenAt === null || keyWrittenAt > savedAt + KEY_BINDING_SLACK_MS) {
       return ENGINE_UNBOUND;
     }
   }
@@ -541,15 +543,20 @@ export function isLanAddress(address: string): boolean {
   return LAN.check(bare, family === 6 ? "ipv6" : "ipv4");
 }
 
+/** `lanRefusal`'s answer for a name the lookup could not resolve (an error, or no address). */
+export const NAME_UNRESOLVED = "does not resolve";
+
 /**
  * Null when `hostname` is on this network — the literal, or EVERY address a name
- * resolves to — else the reason it is not. A name that does not resolve is left
- * to the request, which fails as unreachable.
+ * resolves to — else the reason it is not. A name the lookup cannot resolve is
+ * `NAME_UNRESOLVED`, never a pass: the request would look the name up again,
+ * unchecked, and could reach an address this check never saw.
  */
 export async function lanRefusal(hostname: string, lookup: LookupFn): Promise<string | null> {
   const host = hostname.trim().replace(/^\[|\]$/g, "");
   if (net.isIP(host.split("%")[0])) return isLanAddress(host) ? null : "not a private address";
-  const resolved = await lookup(host).catch(() => []);
+  const resolved = await lookup(host).catch(() => null);
+  if (!resolved || resolved.length === 0) return NAME_UNRESOLVED;
   for (const { address } of resolved) {
     if (!isLanAddress(address)) return "resolves to an address outside the local network";
   }
@@ -678,7 +685,12 @@ async function readEngineUnbounded(d: ClusterDeps, ctx: EngineReadContext): Prom
   } catch {
     return { ...view, checkedAt: d.now(), gate: { online: false, reason: "address_refused" }, metrics: { ...NO_METRICS } };
   }
-  if (await lanRefusal(hostname, d.lookup)) {
+  const refusal = await lanRefusal(hostname, d.lookup);
+  if (refusal === NAME_UNRESOLVED) {
+    // Nothing to check it against, so nothing is asked: a gate that cannot be reached.
+    return { ...view, checkedAt: d.now(), gate: { online: false, reason: "unreachable" }, metrics: { ...NO_METRICS } };
+  }
+  if (refusal) {
     return { ...view, checkedAt: d.now(), gate: { online: false, reason: "not_lan" }, metrics: { ...NO_METRICS } };
   }
   // A lookup that outlived the deadline: its answer reaches nobody, so nothing is asked.
