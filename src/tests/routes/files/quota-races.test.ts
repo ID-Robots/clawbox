@@ -1,7 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
 /**
@@ -121,13 +121,25 @@ function body(bytes: number, { fill = 0x6e, hold, holdAt = bytes / 2 }: { fill?:
   });
 }
 
+/**
+ * Every request-body gate and every upload a test starts. Whatever a test
+ * fails on — a barrier that never happens, an assertion before a gate is
+ * opened — `afterEach` opens every gate and waits for every upload to settle,
+ * so none is still writing when the next test resets the fixture.
+ */
+const inFlight = { gates: [] as Array<() => void>, uploads: [] as Array<Promise<unknown>> };
+function tracked<T>(upload: Promise<T>): Promise<T> {
+  inFlight.uploads.push(upload);
+  return upload;
+}
+
 function putStream(dir: string, name: string, stream: ReadableStream<Uint8Array>) {
-  return put(new NextRequest(url(`/setup-api/files?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}`), {
+  return tracked(put(new NextRequest(url(`/setup-api/files?dir=${encodeURIComponent(dir)}&name=${encodeURIComponent(name)}`), {
     method: "PUT",
     headers: { "Content-Type": "application/octet-stream" },
     body: stream,
     duplex: "half",
-  } as RequestInit as ConstructorParameters<typeof NextRequest>[1]));
+  } as RequestInit as ConstructorParameters<typeof NextRequest>[1])));
 }
 
 /** A multipart upload sent as a stream (no declared length) that waits for `hold` part-way. */
@@ -151,12 +163,12 @@ function multipartStream(dir: string, name: string, bytes: number, { fill = 0x6d
       controller.close();
     },
   });
-  return post(new NextRequest(url(`/setup-api/files?dir=${encodeURIComponent(dir)}`), {
+  return tracked(post(new NextRequest(url(`/setup-api/files?dir=${encodeURIComponent(dir)}`), {
     method: "POST",
     headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
     body: stream,
     duplex: "half",
-  } as RequestInit as ConstructorParameters<typeof NextRequest>[1]));
+  } as RequestInit as ConstructorParameters<typeof NextRequest>[1])));
 }
 
 function moveInto(dir: string, paths: string[]) {
@@ -174,10 +186,11 @@ function renameTo(segments: string[], newName: string) {
   );
 }
 
-/** A gate a held body waits at. */
+/** A gate a held body waits at (opened at the latest after the test, see `inFlight`). */
 function gate() {
   let open: () => void = () => {};
   const shut = new Promise<void>((r) => { open = r; });
+  inFlight.gates.push(open);
   return { shut, open };
 }
 
@@ -216,6 +229,12 @@ beforeEach(() => {
   }
   resetCaches();
   resetUsage();
+});
+
+afterEach(async () => {
+  for (const open of inFlight.gates.splice(0)) open();
+  await Promise.allSettled(inFlight.uploads.splice(0));
+  measureWindow.during = null;
 });
 
 afterAll(() => {
