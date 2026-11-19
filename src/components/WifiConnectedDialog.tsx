@@ -74,7 +74,7 @@ export default function WifiConnectedDialog({
   ];
 
   return (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/65 p-4" onClick={onClose}>
+    <div className="main-screen-scrim fixed inset-0 z-[9999] flex items-center justify-center bg-black/65 p-4" onClick={onClose}>
       <div
         ref={panelRef}
         role="dialog"
