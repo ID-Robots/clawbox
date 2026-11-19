@@ -292,6 +292,13 @@ EOF
     if [ -f "$NM/add-output" ]; then cat "$NM/add-output"
     else echo "Connection '$con' (${HOTSPOT}) successfully added."; fi
     [ ! -f "$NM/add-fails" ] || exit 2 ;;
+  "radio "|"radio wifi")
+    # The WiFi switch: off while $NM/radio-off exists, the device unavailable.
+    if [ "$2" = wifi ] && [ "$3" = on ]; then
+      rm -f "$NM/radio-off"; [ "$state" != 20 ] || printf 30 > "$NM/state"; exit 0
+    fi
+    [ "$fields" = WIFI ] || unsupported "$@"
+    if [ -f "$NM/radio-off" ]; then echo disabled; else echo enabled; fi ;;
   *) unsupported "$@" ;;
 esac
 `;
@@ -324,6 +331,8 @@ function makeBox(opts: {
   flood?: boolean;
   /** The WAN lookup's `nmcli -t -f DEVICE,TYPE,STATE device status` fails. */
   wanLookupFails?: boolean;
+  /** WiFi switched off (`nmcli radio wifi off`): the device sits unavailable. */
+  radioOff?: boolean;
 }) {
   root = mkdtempSync(path.join(tmpdir(), "clawbox-start-ap-"));
   nm = path.join(root, "nm");
@@ -347,7 +356,8 @@ function makeBox(opts: {
   );
   writeFileSync(path.join(nm, "profiles"), rows.join("\n") + "\n");
   writeFileSync(path.join(nm, "active"), opts.active ?? "");
-  writeFileSync(path.join(nm, "state"), opts.active ? "100" : "30");
+  writeFileSync(path.join(nm, "state"), opts.active ? "100" : opts.radioOff ? "20" : "30");
+  if (opts.radioOff) writeFileSync(path.join(nm, "radio-off"), "");
   writeFileSync(path.join(nm, "ethernet"), opts.ethernet ? "connected" : "unavailable");
   if (opts.late) writeFileSync(path.join(nm, "late"), opts.late);
   if (opts.apBusy) writeFileSync(path.join(nm, "ap-busy"), opts.apBusy);
@@ -690,6 +700,27 @@ describe("start-ap.sh keeps the hotspot behaviour it had", () => {
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(r.lines).toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+  });
+
+  it("turns a WiFi radio that was switched off back on before anything needs it, and the hotspot comes up", () => {
+    // NetworkManager keeps `nmcli radio wifi off` across a reboot: the box boots
+    // with the radio unavailable, and only root could switch it back on.
+    makeBox({ setupComplete: false, profiles: [], radioOff: true });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("WiFi radio is off — turning it on");
+    const on = r.lines.indexOf("radio wifi on");
+    expect(on).toBeGreaterThan(-1);
+    expect(on).toBeLessThan(firstIndex(r, isApActivity));
+    expect(r.lines).toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+    expect(existsSync(path.join(root, "data", "ap-runtime.env")), "the hotspot was published").toBe(true);
+  });
+
+  it("leaves a radio that is already on alone", () => {
+    makeBox({ setupComplete: false, profiles: [] });
+    const r = runStartAp();
+    expect(r.status).toBe(0);
+    expect(r.lines).not.toContain("radio wifi on");
   });
 });
 

@@ -344,6 +344,9 @@ EOF
     printf '%s' "$con" > "$d/name"
     printf '%s' "$con" > "$d/esc"
     echo "Connection '$con' (${HOTSPOT}) successfully added." ;;
+  "radio ")
+    [ "$fields" = WIFI ] || unsupported "$@"
+    echo enabled ;;
   *) unsupported "$@" ;;
 esac
 `;

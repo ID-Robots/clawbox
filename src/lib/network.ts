@@ -217,6 +217,78 @@ async function isAPMode(): Promise<boolean> {
   }
 }
 
+/** Thrown when a join cannot start because the WiFi radio is off and stays off. */
+export class WifiRadioOffError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WifiRadioOffError";
+  }
+}
+
+/** Why nmcli failed, in its own words (its last stderr line, "Error: " dropped),
+ *  not execFile's "Command failed: <argv>". */
+function nmcliReason(err: unknown): string {
+  const stderr = (err as { stderr?: unknown } | null)?.stderr;
+  const line = typeof stderr === "string" ? stderr.trim().split("\n").filter(Boolean).pop() : undefined;
+  return (line ?? (err instanceof Error ? err.message : String(err))).replace(/^Error:\s*/, "");
+}
+
+/** NetworkManager's two WiFi switches: hardware (an rfkill hard block) and
+ *  software (`nmcli radio wifi`, which an rfkill soft block reads as off too).
+ *  Null when nmcli cannot say. */
+async function readWifiRadio(): Promise<{ hardware: boolean; software: boolean } | null> {
+  try {
+    const { stdout } = await exec("nmcli", ["-t", "-f", "WIFI-HW,WIFI", "radio"], { timeout: NETWORK_TIMEOUT });
+    const [hardware, software] = parseNmcliTerseLine(stdout.trim());
+    const known = (v: string | undefined) => v === "enabled" || v === "disabled";
+    if (!known(hardware) || !known(software)) return null;
+    return { hardware: hardware === "enabled", software: software === "enabled" };
+  } catch {
+    return null;
+  }
+}
+
+const RADIO_ON_WAIT_MS = 10_000;
+
+/**
+ * A join needs the radio on. NetworkManager keeps WiFi switched off across a
+ * reboot (its state file), the device then sits `unavailable`, and every nmcli
+ * connect fails without saying why. Turn it back on: the web account may, by the
+ * enable-disable-wifi grant in config/49-clawbox-updates.pkla. A hardware switch
+ * is not ours to flip. Throws WifiRadioOffError with the reason it stays off.
+ */
+async function ensureWifiRadioOn(onStep: (step: ConnectStep) => void): Promise<void> {
+  const radio = await readWifiRadio();
+  if (!radio || (radio.hardware && radio.software)) return;
+  if (!radio.hardware) throw new WifiRadioOffError("the WiFi hardware switch is off");
+  onStep("radio-on");
+  console.log("[WiFi] The radio is off; turning it on");
+  let refused = "";
+  await exec("nmcli", ["radio", "wifi", "on"], { timeout: NETWORK_TIMEOUT }).catch((err) => {
+    refused = nmcliReason(err);
+  });
+  const deadline = Date.now() + RADIO_ON_WAIT_MS;
+  for (;;) {
+    const now = await readWifiRadio();
+    if (now?.hardware && now.software) return;
+    if (refused || Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  console.warn("[WiFi] Could not turn the radio on:", refused || "still off");
+  throw new WifiRadioOffError(refused || "it was still off 10 seconds after it was switched on");
+}
+
+/** The IPv4 address the radio holds, without its prefix ("192.0.2.23"). */
+async function wifiIpv4(): Promise<string | null> {
+  try {
+    const { stdout } = await exec("nmcli", ["-g", "IP4.ADDRESS", "device", "show", IFACE], { timeout: NETWORK_TIMEOUT });
+    const ip = (stdout.split(/[|\n]/)[0] ?? "").trim().split("/")[0];
+    return /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : null;
+  } catch {
+    return null;
+  }
+}
+
 async function bringAPUp(): Promise<void> {
   for (let attempt = 1; attempt <= AP_RETRY_COUNT; attempt++) {
     try {
@@ -398,12 +470,19 @@ async function recentWrongKeyFailure(ssid: string): Promise<boolean> {
 // background and record a pollable status; the wizard polls this once the AP
 // comes back (failure) or it reconnects over the home network (success).
 export type ConnectPhase = "idle" | "connecting" | "connected" | "failed";
-export type ConnectFailReason = "wrong-password" | "other";
+export type ConnectFailReason = "wrong-password" | "radio-off" | "other";
+/** What a connect is doing while it is `connecting`: turning the radio on,
+ *  leaving the setup hotspot for the network (or joining it when no hotspot was
+ *  up), and, when the join failed, putting the hotspot back. */
+export type ConnectStep = "radio-on" | "switching" | "joining" | "restoring";
 export interface ConnectStatus {
   phase: ConnectPhase;
   ssid: string | null;
   reason: ConnectFailReason | null;
   message: string;
+  step?: ConnectStep | null;
+  /** The address the box got on the network it joined (when `connected`). */
+  ip?: string | null;
   at: number;
 }
 let connectStatus: ConnectStatus = { phase: "idle", ssid: null, reason: null, message: "", at: 0 };
@@ -430,8 +509,9 @@ function redactSecret(text: string, secret?: string): string {
 
 export async function switchToClient(
   ssid: string,
-  password?: string
-): Promise<{ message: string }> {
+  password?: string,
+  onStep: (step: ConnectStep) => void = () => {}
+): Promise<{ message: string; ip: string | null }> {
   console.log(`[WiFi] Switching to client mode, connecting to: ${ssid}`);
 
   if (TEST_MODE) {
@@ -442,7 +522,7 @@ export async function switchToClient(
       throw new Error(`TEST_MODE: simulated connect failure for '${ssid}'`);
     }
     void password;
-    return { message: `TEST_MODE: fake connect to '${ssid}'` };
+    return { message: `TEST_MODE: fake connect to '${ssid}'`, ip: null };
   }
 
   // Hold the connect lock from the moment we drop the AP until we've either
@@ -450,8 +530,20 @@ export async function switchToClient(
   // doesn't re-raise the AP underneath us mid-handoff.
   writeConnectLock();
   try {
-  // Stop the AP
-  await exec("bash", [AP_STOP_SCRIPT], { timeout: 240_000 });
+  let lastErr: unknown;
+  let wrongKey = false;
+  // The radio on, then the AP down. Either failing is a failed join like any
+  // other: the hotspot comes back below, so nobody is left with neither.
+  let readyToJoin = false;
+  try {
+    await ensureWifiRadioOn(onStep);
+    onStep((await isAPMode()) ? "switching" : "joining");
+    // Stop the AP
+    await exec("bash", [AP_STOP_SCRIPT], { timeout: 240_000 });
+    readyToJoin = true;
+  } catch (err) {
+    lastErr = err;
+  }
 
   // Build args conditionally instead of splicing. `--wait 20` caps each attempt
   // so a doomed connect (e.g. wrong password) fails in ~20s instead of nmcli's
@@ -464,16 +556,14 @@ export async function switchToClient(
   // Retry the connect with rescans in between — the first attempt often fails
   // because the SSID hasn't been discovered yet.
   const CONNECT_RETRIES = 3;
-  let lastErr: unknown;
-  let wrongKey = false;
-  for (let attempt = 1; attempt <= CONNECT_RETRIES; attempt++) {
+  for (let attempt = 1; readyToJoin && attempt <= CONNECT_RETRIES; attempt++) {
     await execWifiNmcli(["device", "wifi", "rescan", "ifname", IFACE], { timeout: NETWORK_TIMEOUT }).catch(() => {});
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
     try {
       const { stdout } = await execWifiNmcli(args, { timeout: NETWORK_TIMEOUT });
       console.log(`[WiFi] Connected on attempt ${attempt}: ${stdout.trim()}`);
-      return { message: stdout.trim() };
+      return { message: stdout.trim(), ip: await wifiIpv4() };
     } catch (err) {
       lastErr = err;
       const msg = redactSecret(err instanceof Error ? err.message : String(err), password);
@@ -493,6 +583,7 @@ export async function switchToClient(
   }
 
   console.error("[WiFi] All connect attempts failed, restoring AP:", redactSecret(lastErr instanceof Error ? lastErr.message : String(lastErr), password));
+  onStep("restoring");
 
     // Delete the just-attempted client profile. `nmcli device wifi connect`
     // leaves behind a saved connection (autoconnect on by default) for the
@@ -500,8 +591,11 @@ export async function switchToClient(
     // retrying that profile in the background, repeatedly pulling the single
     // radio out of AP mode — so the ClawBox-Setup hotspot flaps and disappears
     // ("network could not be found") while the user is still on it. Removing it
-    // lets the radio stay dedicated to the AP until the user retries.
-    await execWifiNmcli(["connection", "delete", ssid], { timeout: NETWORK_TIMEOUT }).catch(() => {});
+    // lets the radio stay dedicated to the AP until the user retries. No
+    // attempt, no profile of ours: one saved before is not ours to delete.
+    if (readyToJoin) {
+      await execWifiNmcli(["connection", "delete", ssid], { timeout: NETWORK_TIMEOUT }).catch(() => {});
+    }
 
     const AP_RESTORE_RETRIES = 3;
     const AP_RESTORE_BACKOFF = 3000;
@@ -544,10 +638,12 @@ export async function switchToClient(
     if (wrongKey) {
       throw new WifiAuthError(`Incorrect password for "${ssid}"`);
     }
+    if (lastErr instanceof WifiRadioOffError) throw lastErr;
     // Re-throw with the PSK scrubbed: the connect route stores err.message into
     // the (pre-auth-readable) connect-status, so the raw execFile message would
-    // otherwise leak the plaintext password to the client.
-    throw new Error(redactSecret(lastErr instanceof Error ? lastErr.message : String(lastErr), password));
+    // otherwise leak the plaintext password to the client. nmcli's own reason,
+    // not execFile's "Command failed: <argv>": the user reads this one.
+    throw new Error(redactSecret(nmcliReason(lastErr), password));
   } finally {
     clearConnectLock();
   }

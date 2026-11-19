@@ -34,6 +34,7 @@ import { emailEnding, endingAsAsked, type EmailEnding } from "@/lib/chat-email-b
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import { installPendingRefresh } from "@/lib/email-pending-refresh";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
+import WifiConnectedDialog, { wifiConnectStatusText, type WifiConnectStatus } from "./WifiConnectedDialog";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { cachedEdition, fetchHarness } from "@/lib/client-harness";
@@ -1068,7 +1069,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const [ssid, setSsid] = useState("");
   const [wifiPass, setWifiPass] = useState("");
   const [wifiConnecting, setWifiConnecting] = useState(false);
-  const [wifiStatus, setWifiStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [wifiStatus, setWifiStatus] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
+  const [wifiJoined, setWifiJoined] = useState<{ ssid: string; ip: string | null } | null>(null);
   const [connectedSSID, setConnectedSSID] = useState<string | null>(null);
   const [wifiQuality, setWifiQuality] = useState<{ signalDbm: number | null; bitrateMbps: number | null; pingMs: number | null }>({ signalDbm: null, bitrateMbps: null, pingMs: null });
   const [ethernet, setEthernet] = useState<{ connected: boolean; iface: string | null }>({ connected: false, iface: null });
@@ -1559,25 +1561,55 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   };
 
   const connectWifi = async () => {
-    if (!ssid.trim()) return;
+    const target = ssid.trim();
+    if (!target) return;
     setWifiConnecting(true);
-    setWifiStatus(null);
+    setWifiStatus({ type: "info", message: `${t("wifi.handoffJoining", { ssid: target })}…` });
     try {
       const res = await fetch("/setup-api/wifi/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ssid: ssid.trim(), password: wifiPass }),
+        body: JSON.stringify({ ssid: target, password: wifiPass }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
-      setWifiStatus({ type: "success", message: t("settings.connectedTo", { ssid }) });
-      setConnectedSSID(ssid.trim());
-      setSsid("");
-      setWifiPass("");
     } catch (err) {
       setWifiStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.connectionFailed") });
-    } finally {
       setWifiConnecting(false);
+      return;
     }
+    // The POST only starts the switch; how it goes (turning the radio on,
+    // leaving the hotspot, the verdict) comes from connect-status. The box may
+    // drop off mid-switch when this page reaches it over that same WiFi.
+    const deadline = Date.now() + 180_000;
+    const poll = async () => {
+      try {
+        const s: WifiConnectStatus = await (await fetch("/setup-api/wifi/connect-status", { cache: "no-store" })).json();
+        if (s.phase === "connected") {
+          setWifiStatus(null);
+          setConnectedSSID(target);
+          setSsid("");
+          setWifiPass("");
+          setWifiConnecting(false);
+          setWifiJoined({ ssid: s.ssid || target, ip: s.ip ?? null });
+          return;
+        }
+        const text = wifiConnectStatusText(t, s, target);
+        if (text) setWifiStatus(text);
+        if (s.phase === "failed") {
+          setWifiConnecting(false);
+          return;
+        }
+      } catch {
+        // Unreachable mid-switch: keep asking until the deadline.
+      }
+      if (Date.now() > deadline) {
+        setWifiStatus({ type: "error", message: t("settings.connectionFailed") });
+        setWifiConnecting(false);
+        return;
+      }
+      setTimeout(() => { void poll(); }, 2000);
+    };
+    setTimeout(() => { void poll(); }, 2000);
   };
 
   /* ── AI Provider ── */
@@ -4428,6 +4460,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 </>
               )}
 
+              {/* Outside the form below: a join clears the form, and with it whatever it holds. */}
+              {wifiJoined && (
+                <WifiConnectedDialog ssid={wifiJoined.ssid} ip={wifiJoined.ip} onClose={() => setWifiJoined(null)} />
+              )}
               {/* Connect form (shown after selecting a network or manual entry) */}
               {(ssid !== "" || showManualWifi) && (
                 <div className="space-y-4">
