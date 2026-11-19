@@ -1327,6 +1327,34 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     }
   };
 
+  // The switch and the radio, read together. `enabled` is the switch the AP
+  // scripts obey; `active` is whether the AP is really up. They can disagree
+  // (a stop that failed), and the card shows both. Re-read after every toggle,
+  // because the radio's answer is the one that counts (#1517).
+  //
+  // Only the newest read is applied. The switch unlocks before the re-read
+  // after a toggle lands, so an owner can switch off and on again while the
+  // first read is still probing the radio; answering last, it would set the
+  // switch back to off. Every read, toggle and save takes a new generation.
+  const hotspotStatusGen = useRef(0);
+  const loadHotspotStatus = useCallback((withSsidInput: boolean) => {
+    const gen = ++hotspotStatusGen.current;
+    // Only a 200 is an answer: an error body has no `enabled`, and reading it
+    // as "on" with the default name would let the next toggle rename the AP.
+    fetch("/setup-api/system/hotspot").then(r => (r.ok ? r.json() : null)).then(d => {
+      if (gen !== hotspotStatusGen.current) return;
+      if (!d || typeof d.enabled !== "boolean") return;
+      setHotspotEnabled(d.enabled);
+      if (d.ssid) {
+        setHotspotSSID(d.ssid);
+        if (withSsidInput) setHotspotSSIDInput(d.ssid);
+      }
+      setHotspotHasPassword(!!d.hasPassword);
+      setHotspotActive(!!d.active);
+      setHotspotBlockedBy(d.blockedBy ?? null);
+    }).catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!boxReads) return;
     fetch("/setup-api/wifi/status").then(r => r.json()).then(d => {
@@ -1336,13 +1364,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     fetch("/setup-api/wifi/ethernet").then(r => r.json()).then(d => {
       setEthernet({ connected: !!d.connected, iface: d.iface ?? null });
     }).catch(() => {});
-    fetch("/setup-api/system/hotspot").then(r => r.json()).then(d => {
-      setHotspotEnabled(d.enabled ?? true);
-      if (d.ssid) { setHotspotSSID(d.ssid); setHotspotSSIDInput(d.ssid); }
-      setHotspotHasPassword(!!d.hasPassword);
-      setHotspotActive(!!d.active);
-      setHotspotBlockedBy(d.blockedBy ?? null);
-    }).catch(() => {});
+    loadHotspotStatus(true);
     fetch("/setup-api/system/hostname").then(r => r.json()).then(d => {
       if (d.hostname) {
         setHostname(d.hostname);
@@ -1350,7 +1372,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       }
       if (typeof d.ipv4 === "string") setIpv4(d.ipv4);
     }).catch(() => {});
-  }, [boxReads]);
+  }, [boxReads, loadHotspotStatus]);
 
   const saveHostname = async () => {
     const name = hostnameInput.trim().toLowerCase().replace(/\.local$/, "");
@@ -1424,6 +1446,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   };
 
   const performHotspotToggle = async (newEnabled: boolean) => {
+    // A read still in flight from before this toggle answers for the old state.
+    hotspotStatusGen.current++;
     setHotspotToggling(true);
     setHotspotApWarning(null);
     try {
@@ -1439,8 +1463,11 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       // control that says it stopped.
       setHotspotEnabled(newEnabled);
       setHotspotApWarning(await readHotspotVerdict(res));
-    } catch { /* leave state unchanged */ } finally {
+    } catch { /* the re-read below shows what is real */ } finally {
       setHotspotToggling(false);
+      // What the switch and the radio did is read back, not assumed: after a
+      // save that failed half-way too.
+      loadHotspotStatus(false);
     }
   };
 
@@ -1466,6 +1493,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       return;
     }
     if (next === hotspotSSID) return;
+    // A read from before this rename would put the old name back.
+    hotspotStatusGen.current++;
     setHotspotSSIDSaving(true);
     setHotspotSSIDStatus(null);
     try {
@@ -1503,6 +1532,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       setHotspotPasswordStatus({ type: "error", message: t("settings.hotspotPasswordTooLong") });
       return;
     }
+    hotspotStatusGen.current++;
     setHotspotPasswordSaving(true);
     setHotspotPasswordStatus(null);
     try {
@@ -4139,6 +4169,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                       {hotspotSSID}
                       {hotspotEnabled && hotspotActive === false && <span className="ml-2 text-amber-300/90">• not broadcasting</span>}
                       {hotspotEnabled && hotspotActive === true && <span className="ml-2 text-emerald-300/80">• broadcasting</span>}
+                      {hotspotEnabled === false && hotspotActive === true && <span className="ml-2 text-amber-300/90">• broadcasting</span>}
                     </div>
                   </div>
                 </div>
@@ -4156,6 +4187,26 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               </div>
               {hotspotApWarning && (
                 <div className="mt-3"><StatusMessage type="info" message={hotspotApWarning} /></div>
+              )}
+              {/* The switch is off but the setup AP (the ClawBox-Setup profile
+                  the stop owns) is still up — a stop that failed, or anything
+                  else that raised it. Say so, and offer the stop again, instead
+                  of a quiet "off" (#1517). */}
+              {hotspotEnabled === false && hotspotActive === true && (
+                <div data-testid="hotspot-off-but-broadcasting" className="mt-3 flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2.5">
+                  <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 18 }}>warning</span>
+                  <div className="text-[11px] text-amber-100/90 leading-relaxed">
+                    {tr("settings.hotspotOffButBroadcasting", "The hotspot is switched off, but this ClawBox is still broadcasting it.")}{" "}
+                    <button
+                      type="button"
+                      onClick={() => { void performHotspotToggle(false); }}
+                      disabled={hotspotToggling}
+                      className="ml-1 underline font-semibold text-amber-100 bg-transparent border-none p-0 cursor-pointer disabled:opacity-50"
+                    >
+                      {tr("settings.hotspotStopNow", "Stop it now")}
+                    </button>
+                  </div>
+                </div>
               )}
               {hotspotEnabled && hotspotActive !== false && (
                 <p className="text-[11px] text-[var(--text-muted)] opacity-50 mt-3 leading-relaxed">

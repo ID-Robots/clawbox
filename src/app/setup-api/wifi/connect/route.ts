@@ -5,7 +5,8 @@ import {
   WifiAuthError,
   type ConnectFailReason,
 } from "@/lib/network";
-import { set, setMany } from "@/lib/config-store";
+import { set } from "@/lib/config-store";
+import { switchHotspotOffAfterWifiJoin } from "@/lib/hotspot-env";
 import { requireSession } from "@/lib/route-auth";
 
 export const dynamic = "force-dynamic";
@@ -53,7 +54,14 @@ export async function POST(request: Request) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     try {
       const { message } = await switchToClient(ssid, password as string | undefined);
-      await setMany({ wifi_configured: true, hotspot_enabled: false }).catch(() => {});
+      await set("wifi_configured", true).catch(() => {});
+      // One radio: joining took the AP down, and the hotspot switch goes off
+      // with it. The switch lives in data/hotspot.env as well as config, and the
+      // AP scripts read only the env file (#1517). Before setup this only
+      // proposes "off" to the wizard's hotspot step (src/lib/hotspot-env.ts).
+      await switchHotspotOffAfterWifiJoin().catch((err) => {
+        console.warn("[wifi/connect] could not record the hotspot as switched off:", err);
+      });
       setConnectStatus({ phase: "connected", ssid, reason: null, message, at: Date.now() });
     } catch (err) {
       await set("wifi_configured", false).catch(() => {});

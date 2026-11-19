@@ -243,13 +243,17 @@ describe("the AP watchdog tells a drop from a decision", () => {
 
   it("reads the disable from the same file the route writes", () => {
     // The route and the watchdog agreeing on one path is the guarantee here;
-    // two spellings of it is how this bug comes back.
-    const route = readFileSync(
-      path.join(REPO, "src", "app", "setup-api", "system", "hotspot", "route.ts"),
-      "utf-8"
-    );
-    expect(route).toContain('"hotspot.env"');
-    expect(route).toContain("HOTSPOT_DISABLED=1");
+    // two spellings of it is how this bug comes back. The one writer is
+    // src/lib/hotspot-env.ts (#1517), and both routes that switch the hotspot
+    // go through it rather than writing the file themselves.
+    const writer = readFileSync(path.join(REPO, "src", "lib", "hotspot-env.ts"), "utf-8");
+    expect(writer).toContain('"data", "hotspot.env"');
+    expect(writer).toContain("HOTSPOT_DISABLED=1");
+    for (const route of [["system", "hotspot"], ["wifi", "connect"]]) {
+      const src = readFileSync(path.join(REPO, "src", "app", "setup-api", ...route, "route.ts"), "utf-8");
+      expect(src).toContain('from "@/lib/hotspot-env"');
+      expect(src).not.toMatch(/writeFile|HOTSPOT_DISABLED=1/);
+    }
     expect(readFileSync(WATCHDOG, "utf-8")).toContain('data/hotspot.env');
   });
 });
