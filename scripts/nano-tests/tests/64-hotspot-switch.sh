@@ -320,9 +320,12 @@ switch_hotspot false || { not_ok "switching the hotspot off failed"; finish; }
 if [ "$AP_ACTION" = stopped ]; then
   ok "off: the route stopped the AP (apAction stopped)"
 elif [ "$LAB_OFF" = yes ]; then
-  # stop-ap.sh (unprivileged) takes the radio lock in /run/clawbox-radio, which
-  # the root AP unit creates; on a lab board that unit never runs.
-  note "off: apAction ${AP_ACTION:-?} (stop-ap.sh has no radio lock directory on a board whose AP unit never ran: lab policy)"
+  # stop-ap.sh (unprivileged) takes the radio lock in /run/clawbox-radio. The
+  # tmpfiles entry (config/clawbox-radio-tmpfiles.conf) creates it at boot, and
+  # with no AP to stop stop-ap.sh needs no lock at all, so a lab board answers
+  # `stopped` now; a board still on an older install, whose AP unit never ran,
+  # has no such directory.
+  note "off: apAction ${AP_ACTION:-?} (stop-ap.sh has no radio lock directory on a board whose AP unit never ran and that lacks the tmpfiles entry: lab policy)"
 else
   not_ok "off: apAction ${AP_ACTION:-?}, not stopped"
 fi

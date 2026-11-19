@@ -16,11 +16,25 @@ wifi_is_uuid() {
   [ "${#hex}" -eq 32 ] && [[ "$hex" =~ ^[0-9A-Fa-f]+$ ]]
 }
 
+# Set by wifi_lock: 1 when it failed because the radio directory or the lock in
+# it does not exist and this caller could not create it (the web account cannot
+# write under root's /run/clawbox-radio). Any other failure leaves it 0. Root
+# creates both at boot (config/clawbox-radio-tmpfiles.conf) or on its first
+# radio script, so for an unprivileged caller "absent" means "no root script has
+# held the radio since boot": a caller with nothing to protect may go on
+# (stop-ap.sh with no access point), one that must mutate the radio may not.
+# A path that EXISTS but is wrong (a file, a symlink) is never "absent".
+WIFI_LOCK_ABSENT=0
+
 wifi_lock() {
+  WIFI_LOCK_ABSENT=0
   # Directory entries are root-owned; readers can lock but cannot replace the
   # inode or write recovery state. flock works on a read-only fd on Linux.
   if [ ! -d "$RADIO_DIR" ]; then
-    mkdir -m 0755 "$RADIO_DIR" 2>/dev/null || [ -d "$RADIO_DIR" ] || return 1
+    mkdir -m 0755 "$RADIO_DIR" 2>/dev/null || [ -d "$RADIO_DIR" ] || {
+      [ -e "$RADIO_DIR" ] || [ -L "$RADIO_DIR" ] || WIFI_LOCK_ABSENT=1
+      return 1
+    }
   fi
   [ ! -L "$RADIO_DIR" ] || return 1
   if [ "$EUID" -eq 0 ]; then
@@ -29,7 +43,10 @@ wifi_lock() {
   fi
   local lock="$RADIO_DIR/$RADIO_IFACE.lock"
   if [ ! -e "$lock" ]; then
-    (umask 022; set -C; : > "$lock") 2>/dev/null || [ -f "$lock" ] || return 1
+    (umask 022; set -C; : > "$lock") 2>/dev/null || [ -f "$lock" ] || {
+      [ -e "$lock" ] || [ -L "$lock" ] || WIFI_LOCK_ABSENT=1
+      return 1
+    }
   fi
   [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
   exec 9< "$lock" || return 1
@@ -117,7 +134,12 @@ wifi_client_uuid() {
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -euo pipefail
-  wifi_lock
+  wifi_lock || {
+    # Say WHY on stderr: the web route shows "Command failed: ..." plus this.
+    [ "$WIFI_LOCK_ABSENT" != 1 ] ||
+      echo "[WiFi] Radio ownership is not set up: $RADIO_DIR is created by root at boot" >&2
+    exit 1
+  }
   case "${1:-}" in
     --recover) wifi_recover ;;
     --nmcli|--iw-scan)

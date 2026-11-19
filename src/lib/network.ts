@@ -217,6 +217,116 @@ async function isAPMode(): Promise<boolean> {
   }
 }
 
+/**
+ * Is the ClawBox-Setup access point stop-ap.sh owns up on {@link IFACE} right
+ * now? `unknown` when nmcli cannot say.
+ *
+ * Mirrors what the hotspot route reads back: the ClawBox-Setup profile active on
+ * this interface AND the radio not in client mode (a client profile can carry the
+ * name too, and stop-ap.sh, which checks the mode, leaves it alone).
+ */
+async function setupApState(): Promise<"active" | "inactive" | "unknown"> {
+  try {
+    const { stdout } = await exec("nmcli", [
+      "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active",
+    ], { timeout: NETWORK_TIMEOUT });
+    const up = stdout
+      .split("\n")
+      .filter(Boolean)
+      .map(parseNmcliTerseLine)
+      .some((r) => r[0] === "ClawBox-Setup" && r[2] === IFACE);
+    if (!up) return "inactive";
+  } catch {
+    return "unknown";
+  }
+  try {
+    const { stdout } = await exec("iw", ["dev", IFACE, "info"], { timeout: NETWORK_TIMEOUT });
+    if (/^\s*type managed\s*$/m.test(stdout)) return "inactive";
+  } catch {
+    // iw failing does not contradict nmcli.
+  }
+  return "active";
+}
+
+/**
+ * Take the setup AP down so the radio can join a network — but only when there
+ * is one. stop-ap.sh needs the radio lock under /run/clawbox-radio, which only
+ * root can create; on a box whose AP never ran (Ethernet, hotspot switched off)
+ * calling it for nothing made every WiFi connect die on "Command failed: bash
+ * .../stop-ap.sh". When nmcli cannot say, it still runs: stop-ap.sh is the
+ * authority, and running it for no AP is harmless.
+ */
+async function stopSetupApIfActive(): Promise<void> {
+  const state = await setupApState();
+  if (state === "inactive") {
+    console.log("[WiFi] No setup access point running; not stopping one");
+    return;
+  }
+  if (state === "unknown") {
+    console.warn("[WiFi] Could not tell whether the setup access point is up; running stop-ap.sh");
+  }
+  await exec("bash", [AP_STOP_SCRIPT], { timeout: 240_000 });
+}
+
+/** Thrown when a connect cannot start because the WiFi radio is switched off. */
+export class WifiRadioOffError extends Error {
+  constructor(message = "WiFi radio is turned off") {
+    super(message);
+    this.name = "WifiRadioOffError";
+  }
+}
+
+/**
+ * The radio's two switches as NetworkManager reports them (`nmcli radio`, which
+ * also reflects an rfkill soft block): the hardware one and the software one.
+ * Null when nmcli cannot say — then the connect itself reports what is wrong.
+ */
+async function readWifiRadio(): Promise<{ hardware: boolean; software: boolean } | null> {
+  try {
+    const { stdout } = await exec("nmcli", ["-t", "-f", "WIFI-HW,WIFI", "radio"], { timeout: NETWORK_TIMEOUT });
+    const [hardware, software] = parseNmcliTerseLine(stdout.trim().split("\n")[0] ?? "");
+    const known = (v: string | undefined) => v === "enabled" || v === "disabled";
+    if (!known(hardware) || !known(software)) return null;
+    return { hardware: hardware === "enabled", software: software === "enabled" };
+  } catch {
+    return null;
+  }
+}
+
+const RADIO_ON_POLLS = 5;
+const RADIO_ON_POLL_DELAY = 1000;
+
+/**
+ * A connect needs a radio that is on. With it off (`nmcli radio wifi` says
+ * disabled, the device is `unavailable`, rfkill soft-blocks it) every nmcli
+ * connect fails in a way that names nothing, three times over, after the AP
+ * was torn down for it. Nothing in this app switches the radio off, but a box
+ * can come that way (airplane mode, a prior owner, a provisioning script).
+ *
+ * Switching it on again is NetworkManager's to allow: no root step turns the
+ * radio on, and the web account is usually not authorized for it, so ask once
+ * through the radio-lock helper and, if it stays off, fail with a sentence the
+ * Settings page can show. A hardware switch is never asked.
+ */
+async function ensureWifiRadioOn(): Promise<void> {
+  const radio = await readWifiRadio();
+  if (!radio || (radio.hardware && radio.software)) return;
+  // Only the software switch is off (an rfkill soft block included): that one
+  // NetworkManager may be willing to flip. A hardware switch is not ours to ask.
+  if (radio.hardware) {
+    console.warn("[WiFi] The radio is turned off; asking NetworkManager to turn it on");
+    await execWifiNmcli(["radio", "wifi", "on"], { timeout: NETWORK_TIMEOUT }).catch((err) => {
+      console.warn("[WiFi] Could not turn the radio on:", err instanceof Error ? err.message : err);
+    });
+    for (let i = 0; i < RADIO_ON_POLLS; i++) {
+      const now = await readWifiRadio();
+      if (!now || (now.hardware && now.software)) return;
+      if (i < RADIO_ON_POLLS - 1) await new Promise((resolve) => setTimeout(resolve, RADIO_ON_POLL_DELAY));
+    }
+  }
+  throw new WifiRadioOffError();
+}
+
 async function bringAPUp(): Promise<void> {
   for (let attempt = 1; attempt <= AP_RETRY_COUNT; attempt++) {
     try {
@@ -450,8 +560,12 @@ export async function switchToClient(
   // doesn't re-raise the AP underneath us mid-handoff.
   writeConnectLock();
   try {
-  // Stop the AP
-  await exec("bash", [AP_STOP_SCRIPT], { timeout: 240_000 });
+  // A radio that is off cannot host or join anything: say so before tearing
+  // anything down for a connect that cannot happen.
+  await ensureWifiRadioOn();
+
+  // Stop the AP — if there is one.
+  await stopSetupApIfActive();
 
   // Build args conditionally instead of splicing. `--wait 20` caps each attempt
   // so a doomed connect (e.g. wrong password) fails in ~20s instead of nmcli's

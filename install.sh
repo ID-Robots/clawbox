@@ -11063,6 +11063,35 @@ install_root_file() {
   fi
 }
 
+# The root-owned /run/clawbox-radio the web account's stop-ap.sh and
+# `wifi-radio.sh --nmcli` take their lock in (config/clawbox-radio-tmpfiles.conf
+# says why). A tmpfiles.d entry, not a mkdir here: /run is a tmpfs, so a
+# directory made now is gone at the next boot, and the entry is what puts it
+# back before anything can ask. Created right away as well, so the box does not
+# need a reboot first.
+#
+# A tree that predates the file is not a failure (nothing to install). A copy
+# that does not land is, recorded as the root_libexec verdict like every other
+# root-owned copy; provision_repair_step names step_systemd_services, the step
+# that calls this, as its repair. Failing to APPLY it now is only a warning:
+# the entry is installed and the next boot creates the directory.
+install_radio_tmpfiles() {
+  local src="$SRC_DIR/config/clawbox-radio-tmpfiles.conf"
+  local dir="${ROOT_TMPFILES_DIR:-/etc/tmpfiles.d}"
+  local dst="$dir/clawbox-radio.conf"
+  [ -f "$src" ] || return 0
+  if ! install -d -o root -g root -m 0755 "$dir" ||
+     ! install_root_file "$src" "$dst" 0644; then
+    echo "  Error: could not install $dst (the copy already there, if any, is untouched)" >&2
+    record_provision_failure "root_libexec"
+    return 1
+  fi
+  if command -v systemd-tmpfiles >/dev/null 2>&1; then
+    systemd-tmpfiles --create "$dst" >/dev/null 2>&1 ||
+      echo "  Warning: could not create /run/clawbox-radio now; it appears at the next boot" >&2
+  fi
+}
+
 # Returns non-zero when ANY root-owned copy did not land, and records
 # `root_libexec` in the run's verdict. Every copy is still attempted — the
 # failures are COLLECTED rather than returned at the first one — because
@@ -11517,6 +11546,10 @@ step_systemd_services() {
     echo "  Error: the root-owned copies under $ROOT_LIBEXEC_DIR are not all current; not installing the units and grants that point at them" >&2
     return 1
   }
+  # The radio lock directory the web account's WiFi calls need (see the
+  # function). Its failure is recorded there and does not hold the units back:
+  # none of them names it.
+  install_radio_tmpfiles || true
 
   local svc
   for svc in "${ALL_SERVICES[@]}"; do
