@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 import { translations } from "@/lib/translations";
+import { LINKED_BOXES_FLAG_EVENT } from "@/lib/box-switcher";
 
 vi.mock("@/lib/i18n", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/i18n")>()),
@@ -102,11 +103,15 @@ describe("Settings → System Update", () => {
       expect.anything(),
     );
 
-    it("has no page in the sidebar while the switch is off", async () => {
+    it("has no page in the sidebar while the switch is off, and gets it the moment it is switched on", async () => {
       render(<SettingsApp ui={defaultUi} />);
       const nav = await screen.findByRole("navigation");
       await waitFor(flagAsked);
+      // The answer (off) is read once the fetch's promises have settled: one task.
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
       expect(navEntries(nav).some((e) => e.includes(label))).toBe(false);
+      act(() => { window.dispatchEvent(new CustomEvent(LINKED_BOXES_FLAG_EVENT, { detail: true })); });
+      await waitFor(() => expect(navEntries(nav).some((e) => e.includes(label))).toBe(true));
     });
 
     it("has its page in the sidebar once the switch is on, and opens it", async () => {

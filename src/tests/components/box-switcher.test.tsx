@@ -2,13 +2,14 @@ import { type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import BoxSwitcherIndicator from "@/components/BoxSwitcherIndicator";
-import { useBoxSwitcher } from "@/lib/use-box-switcher";
+import { useBoxSwitcher, useLinkedBoxesFlag } from "@/lib/use-box-switcher";
 import {
   ARRIVAL_STORAGE_KEY,
   CARRIED_STORAGE_KEY,
   CARRY_PREFIX,
   KIOSK_SWITCHER_ATTR,
   LINKED_BOXES_CHANGED_EVENT,
+  LINKED_BOXES_FLAG_EVENT,
   LINKED_BOXES_URL,
   encodeCarried,
   readCarriedHash,
@@ -312,5 +313,57 @@ describe("on the box a switch arrived at", () => {
     at(LAPTOP, "#section");
     render(<Harness />);
     expect(replaceState).not.toHaveBeenCalled();
+  });
+});
+
+describe("the experiment's switch (pref ui_linked_boxes)", () => {
+  const FLAG_URL = "/setup-api/preferences?keys=ui_linked_boxes";
+
+  function Flag({ ask = true }: { ask?: boolean }) {
+    return <p data-testid="flag">{String(useLinkedBoxesFlag(ask))}</p>;
+  }
+
+  function answering(answer: () => Promise<Response>) {
+    fetchMock = vi.fn(async (url: string) => (url === FLAG_URL ? answer() : new Response("{}", { status: 404 })));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  }
+  const said = (body: unknown, status = 200) => async () => new Response(JSON.stringify(body), { status });
+
+  it("is on only when the box says true: off for anything else, a refusal or no answer", async () => {
+    for (const [answer, expected] of [
+      [said({ ui_linked_boxes: true }), "true"],
+      [said({ ui_linked_boxes: false }), "false"],
+      [said({}), "false"],
+      [said({ ui_linked_boxes: true }, 403), "false"],
+      [async () => { throw new TypeError("Failed to fetch"); }, "false"],
+    ] as const) {
+      answering(answer);
+      const { unmount } = render(<Flag />);
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(FLAG_URL, expect.anything()));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+      expect(screen.getByTestId("flag")).toHaveTextContent(expected);
+      unmount();
+    }
+  });
+
+  it("asks nothing, and is off, until it is asked to", async () => {
+    answering(said({ ui_linked_boxes: true }));
+    render(<Flag ask={false} />);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByTestId("flag")).toHaveTextContent("false");
+  });
+
+  it("follows a switch saved on this page, which beats an older answer still on its way", async () => {
+    let answer: (r: Response) => void = () => {};
+    answering(() => new Promise<Response>((resolve) => { answer = resolve; }));
+    render(<Flag />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    act(() => { window.dispatchEvent(new CustomEvent(LINKED_BOXES_FLAG_EVENT, { detail: true })); });
+    expect(screen.getByTestId("flag")).toHaveTextContent("true");
+    await act(async () => { answer(new Response(JSON.stringify({ ui_linked_boxes: false }), { status: 200 })); });
+    expect(screen.getByTestId("flag")).toHaveTextContent("true");
+    act(() => { window.dispatchEvent(new CustomEvent(LINKED_BOXES_FLAG_EVENT, { detail: false })); });
+    expect(screen.getByTestId("flag")).toHaveTextContent("false");
   });
 });

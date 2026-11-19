@@ -106,6 +106,8 @@ const RELEASES: readonly { version: string; files: string }[] = [
   { version: "1.6.8", files: "e57e1294e0b35c6a4b920c1fcb72a2c94752c7bf8c9f54c91c6d69592429b526" },
   // …and one whose send was still out when the list was forgotten is not kept at all.
   { version: "1.6.9", files: "877dfd45df8b313ba0db1f93754d1c7e6ed679144859fd8c9c1502222d8b9542" },
+  // The switcher is the experiment's: keys left to the page and the owner's list forgotten while pref ui_linked_boxes is off.
+  { version: "1.7.0", files: "8beb31bd59ef5a658a6ef2b001abe70a38e06c38d85eeddee2ba38b50a5c8ab0" },
 ];
 
 /**
@@ -620,13 +622,18 @@ describe("kiosk extension", () => {
     expect(stringConst(ws, "SWITCHER_ATTR")).toBe(exported("KIOSK_SWITCHER_ATTR"));
     expect(stringConst(ws, "LINKED_BOXES_EVENT")).toBe(exported("LINKED_BOXES_CHANGED_EVENT"));
     expect(stringConst(ws, "LINKED_BOXES_PATH")).toBe(exported("LINKED_BOXES_URL"));
+    // …and the experiment's switch: the event Settings fires when it is saved
+    // and the preference it is read from.
+    expect(stringConst(ws, "FLAG_EVENT")).toBe(exported("LINKED_BOXES_FLAG_EVENT"));
+    expect(stringConst(ws, "FLAG_PATH")).toBe(`/setup-api/preferences?keys=${exported("LINKED_BOXES_FLAG_PREF")}`);
     // The kiosk's own desktop, by the worker's list of its origins.
     const origins = (src: string) => [...(/const DESKTOP_ORIGINS = \[([\s\S]*?)\];/.exec(src)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((x) => x[1]);
     expect(origins(ws)).toEqual(origins(bg));
     expect(origins(ws).length).toBeGreaterThan(0);
-    // By code (any layout), only a key the owner pressed, ahead of the page.
+    // By code (any layout), only a key the owner pressed, only while the
+    // experiment is switched on, ahead of the page.
     expect(ws).toContain('const m = /^Digit([1-9])$/.exec(e.code || "");');
-    expect(ws).toContain("if (slot === null || !e.isTrusted) return;");
+    expect(ws).toContain("if (slot === null || !e.isTrusted || !on) return;");
     expect(ws).toMatch(/window\.addEventListener\("keydown", \(e\) => \{[\s\S]*?\}, true\);/);
     // The worker activates a tab per box, never navigates one, and takes the
     // list only from the kiosk's own desktop.

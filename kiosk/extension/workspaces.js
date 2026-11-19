@@ -23,6 +23,13 @@
 // whenever the desktop is shown again. The worker asks for it here too
 // ({ type: "readBoxes" }) when it has none stored yet.
 //
+// Linked ClawBoxes is an experiment, off until the owner switches it on in
+// Settings → System update → Advanced options (the box preference
+// ui_linked_boxes). That same read starts with the switch: it is kept in
+// chrome.storage.local, where every page's copy of this script sees it change.
+// Off — or refused, or never read — the keys are left to the page and the
+// owner's list is forgotten, as if it were not there.
+//
 // The worker answers a switch by sending the tab it activated a
 // { type: "boxIndicator", slot, kind, name, names, text? }, drawn here in a
 // shadow root: a row of numbered dots, the slot lit, and the box's name (or,
@@ -43,9 +50,18 @@
   const SWITCHER_ATTR = "data-clawbox-box-switcher";
   const LINKED_BOXES_EVENT = "clawbox:linked-boxes-changed";
   const LINKED_BOXES_PATH = "/setup-api/linked-boxes";
+  const FLAG_EVENT = "clawbox:linked-boxes-flag";
+  const FLAG_PATH = "/setup-api/preferences?keys=ui_linked_boxes";
+  const FLAG_KEY = "linkedBoxesOn";
   const INDICATOR_MS = 1800;
 
   const send = (msg) => chrome.runtime.sendMessage(msg).catch(() => null);
+
+  let on = false;
+  chrome.storage.local.get(FLAG_KEY).then((got) => { on = got[FLAG_KEY] === true; }, () => {});
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes[FLAG_KEY]) on = changes[FLAG_KEY].newValue === true;
+  });
 
   function slotOf(e) {
     if (!e || !e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey || e.isComposing) return null;
@@ -63,7 +79,7 @@
 
   window.addEventListener("keydown", (e) => {
     const slot = slotOf(e);
-    if (slot === null || !e.isTrusted) return;
+    if (slot === null || !e.isTrusted || !on) return;
     e.preventDefault();
     e.stopImmediatePropagation();
     if (e.repeat) return;
@@ -145,11 +161,28 @@
   // A read that hangs is given up (an answer of nothing) before the worker's
   // own deadline for an ask (background.js ASK_DESKTOP_MS) runs out.
   const READ_MS = 2000;
+  // The switch is kept from the newest read's answer only: an older one that
+  // comes back last cannot turn the keys back on.
+  let flagRead = 0;
+  let flagKept = 0;
   async function readBoxes() {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), READ_MS);
+    const mine = ++flagRead;
     try {
-      const res = await fetch(LINKED_BOXES_PATH, { cache: "no-store", credentials: "same-origin", signal: abort.signal });
+      const init = { cache: "no-store", credentials: "same-origin", signal: abort.signal };
+      // The experiment's switch first. Off — or refused — is answered like a
+      // refused list: the worker forgets it, and no key is taken.
+      const flag = await fetch(FLAG_PATH, init);
+      const refused = flag.status === 401 || flag.status === 403;
+      if (!refused && !flag.ok) return null;
+      const enabled = !refused && (await flag.json()).ui_linked_boxes === true;
+      if (mine > flagKept) {
+        flagKept = mine;
+        chrome.storage.local.set({ [FLAG_KEY]: enabled });
+      }
+      if (!enabled) return { revoked: true };
+      const res = await fetch(LINKED_BOXES_PATH, init);
       // Refused (signed out, or not the owner) is not "could not ask": the
       // worker must forget the owner's list, not keep the last one.
       if (res.status === 401 || res.status === 403) return { revoked: true };
@@ -218,6 +251,7 @@
   if (isDesktop) {
     pushBoxes();
     window.addEventListener(LINKED_BOXES_EVENT, pushBoxes);
+    window.addEventListener(FLAG_EVENT, pushBoxes);
     document.addEventListener("visibilitychange", () => { if (!document.hidden) pushBoxes(); });
   }
 

@@ -126,16 +126,21 @@ export function useLinkedBoxesFlag(ask: boolean): boolean {
   useEffect(() => {
     if (!ask) return;
     let live = true;
+    // A switch saved while the first read was still out is newer than its answer.
+    let saved = false;
     void (async () => {
       try {
         const res = await fetch(`/setup-api/preferences?keys=${LINKED_BOXES_FLAG_PREF}`, { cache: "no-store" });
         const body: Record<string, unknown> | null = res.ok ? await res.json() : null;
-        if (live) setOn(body?.[LINKED_BOXES_FLAG_PREF] === true);
+        if (live && !saved) setOn(body?.[LINKED_BOXES_FLAG_PREF] === true);
       } catch {
         /* No answer is off: the experiment stays hidden. */
       }
     })();
-    const onSaved = (e: Event) => setOn((e as CustomEvent<unknown>).detail === true);
+    const onSaved = (e: Event) => {
+      saved = true;
+      setOn((e as CustomEvent<unknown>).detail === true);
+    };
     window.addEventListener(LINKED_BOXES_FLAG_EVENT, onSaved);
     return () => {
       live = false;

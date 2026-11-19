@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChromeDesktop from "@/app/page";
+import { LINKED_BOXES_FLAG_EVENT } from "@/lib/box-switcher";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { _resetSessionUserForTest } from "@/lib/use-session-user";
 
@@ -88,6 +89,11 @@ describe("the desktop's linked-box switcher", () => {
     expect(asked(LIST_URL)).toBe(false);
     expect(press(2)).toBe(true);
     expect(screen.queryByTestId("box-switcher-indicator")).toBeNull();
+
+    // The switch is live: saved in Settings, the switcher is on at once.
+    window.dispatchEvent(new CustomEvent(LINKED_BOXES_FLAG_EVENT, { detail: true }));
+    await waitFor(() => expect(asked(LIST_URL)).toBe(true));
+    await waitFor(() => expect(press(2)).toBe(false));
   });
 
   it("stays off when the switch is stored off", async () => {
