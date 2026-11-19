@@ -181,8 +181,8 @@
       // switch's state: it neither turns the keys off nor has the list revoked.
       // A refusal is the one answer that always goes through.
       if (!refused && mine < flagKept) return null;
-      if (mine > flagKept) {
-        flagKept = mine;
+      if (refused || mine > flagKept) {
+        flagKept = Math.max(flagKept, mine);
         chrome.storage.local.set({ [FLAG_KEY]: enabled });
       }
       if (!enabled) return { revoked: true };

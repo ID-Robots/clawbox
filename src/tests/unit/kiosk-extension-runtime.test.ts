@@ -756,6 +756,8 @@ describe("workspaces.js", () => {
     held[0](new Response("{}", { status: 403 }));
     await flushMicrotasks();
     expect(sent(w)).toContainEqual({ type: "boxesRevoked" });
+    expect(w.kept.linkedBoxesOn).toBe(false);
+    expect(w.key("Digit2").preventDefault).not.toHaveBeenCalled();
   });
 
   it("hands the worker only the newest read: an older answer that comes back last is dropped", async () => {

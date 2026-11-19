@@ -109,7 +109,7 @@ const RELEASES: readonly { version: string; files: string }[] = [
   // The switcher is the experiment's: keys left to the page and the owner's list forgotten while pref ui_linked_boxes is off.
   { version: "1.7.0", files: "8beb31bd59ef5a658a6ef2b001abe70a38e06c38d85eeddee2ba38b50a5c8ab0" },
   // A switch answer that comes back after a newer one was kept is ignored: it no longer has the list revoked.
-  { version: "1.7.1", files: "ba128a48f48698eb6ffcc5b120c9a75d78a417e6b331fff5087cc6a28b883cb5" },
+  { version: "1.7.1", files: "f74920a9b3c8761a3e215e4a6741905dbb6c732c2ee77f4066beb82de1da27ca" },
 ];
 
 /**
