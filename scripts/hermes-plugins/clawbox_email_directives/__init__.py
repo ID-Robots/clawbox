@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 
 from .approvals import pre_gateway_dispatch as approvals_pre_gateway_dispatch
-from .email_directives import strip_email_directives
+from .email_directives import strip_draft_directives, strip_email_directives
 from .update_commands import pre_gateway_dispatch as update_pre_gateway_dispatch
 from .update_commands import register_telegram_handlers
 
@@ -101,7 +101,8 @@ def transform_llm_output(response_text=None, platform=None, **kwargs):
             return None
         if (platform or "").strip().lower() in KEEP_PLATFORMS:
             return None
-        stripped = strip_email_directives(response_text)
+        # `EMAIL:` lines first, then `EMAIL_DRAFT:` lines: the order the chat applies them in.
+        stripped = strip_draft_directives(strip_email_directives(response_text))
         if stripped == response_text:
             return None
         return stripped or EMPTY_REPLY_PLACEHOLDER

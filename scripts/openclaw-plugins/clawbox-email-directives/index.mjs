@@ -36,7 +36,7 @@
 // covered instead at its own entry point, `scripts/openclaw/clawbox-tts.sh`;
 // a cloud voice on this edition is out of reach of both.
 
-import { stripEmailDirectives } from "./email-directives.mjs";
+import { stripDraftDirectives, stripEmailDirectives } from "./email-directives.mjs";
 import { onBeforeDispatch } from "./email-approvals.mjs";
 import { onUpdateCommand } from "./update-commands.mjs";
 
@@ -73,7 +73,8 @@ function strippedPayload(payload) {
 
   const replace = (value) => {
     if (typeof value !== "string" || !value) return null;
-    const stripped = stripEmailDirectives(value);
+    // `EMAIL:` lines first, then `EMAIL_DRAFT:` lines: the order the chat applies them in.
+    const stripped = stripDraftDirectives(stripEmailDirectives(value));
     return stripped === value ? null : stripped;
   };
 

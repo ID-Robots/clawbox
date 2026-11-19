@@ -575,6 +575,26 @@ Discord). The spoken reply is covered at its own entry point,
 before any outbound hook runs — a cloud voice there is out of reach of both
 halves.
 
+**`email_draft_card` — a draft the person sends, never the agent.** When an
+owner-granted mail MCP server can only create drafts (a Microsoft 365 server, for
+example), this tool is how a draft reaches the person. It reads one route the
+bearer may read, `GET /setup-api/email/draft-approval/status?draft=<id>`, which
+says whether approval cards are on and whether the mailbox has that draft. It
+answers with the line to end the reply with, `EMAIL_DRAFT:<id>`, under the same
+"ClawBox chat yes, Telegram/WhatsApp/Discord/Slack/email no" rule as `EMAIL:`.
+The chat turns that line into a card with Send, Keep as draft and "Tell me what
+to change". The card reads the draft from the mail send backend, never from the
+reply. Its Send goes through a route that answers to a signed-in person's session
+cookie and refuses this server's bearer. No tool here names that route, and
+`src/tests/unit/mcp-email-draft-card-tool.test.ts` fails if one ever does. So
+the tool is `readOnly` in the literal sense. The whole design, the one-time
+token and the backend's contract are in `docs/email-draft-approval.md`. The
+channel-stripping plugins above strip an `EMAIL_DRAFT:` line too, after the
+`EMAIL:` lines and by the same rules, so a channel never shows a bare draft id
+(`src/tests/unit/email-draft-directive-parity.test.ts` holds the three copies
+of that grammar to one answer). The spoken reply and the gateway's own Control
+UI do not strip it yet.
+
 **The same two plugins now carry an INBOUND hook, and it is what lets the owner
 approve a queued email from his own Telegram conversation.** The harness is the
 single consumer of the main bot's `getUpdates` long poll, so ClawBox cannot read

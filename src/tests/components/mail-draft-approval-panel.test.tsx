@@ -1,0 +1,172 @@
+// Settings → Email → Send approved drafts, as the owner's browser draws it.
+//
+// What is pinned here is the difference between "not your panel" and "the read
+// failed": a staff browser or a box without the route gets nothing, and any
+// other failure says so and offers a Retry that reads again — the setting is
+// not silently missing on a box whose web server answered 503 once.
+
+import type { ReactNode } from "react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { deferred } from "@/tests/helpers/deferred";
+import MailDraftApprovalPanel from "@/components/MailDraftApprovalPanel";
+
+vi.mock("@/lib/i18n", () => ({
+  useT: () => ({ t: (key: string) => key }),
+  I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+}));
+
+const SNAPSHOT = {
+  enabled: true,
+  endpoint: "http://127.0.0.1:8790",
+  authHeader: "Authorization",
+  hasAuth: true,
+  active: true,
+};
+
+function stubReads(answers: (Response | Error)[]) {
+  const fetchMock = vi.fn(async () => {
+    const next = answers.length > 1 ? answers.shift()! : answers[0];
+    if (next instanceof Error) throw next;
+    return next.clone();
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+/** Answers a read with the setting and records every write's body. */
+function stubWrites(after: (body: Record<string, unknown>) => Record<string, unknown> = () => ({})) {
+  const writes: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (_url: unknown, init?: RequestInit) => {
+    if (init?.method !== "POST") return Response.json(SNAPSHOT);
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    writes.push(body);
+    return Response.json({ success: true, ...SNAPSHOT, ...after(body) });
+  }));
+  return writes;
+}
+
+const ok = (body: unknown) => Response.json(body);
+const code = (status: number) => new Response("{}", { status });
+
+beforeEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("MailDraftApprovalPanel", () => {
+  it("shows the setting the box holds", async () => {
+    stubReads([ok(SNAPSHOT)]);
+    render(<MailDraftApprovalPanel />);
+    const endpoint = await screen.findByTestId("settings-email-draft-approval-endpoint");
+    expect((endpoint as HTMLInputElement).value).toBe("http://127.0.0.1:8790");
+    expect(screen.queryByTestId("settings-email-draft-approval-retry")).toBeNull();
+  });
+
+  it("draws nothing at all when the route refuses the person asking", async () => {
+    // The panel is absent while the read is pending too, so "absent" proves
+    // nothing until the answer has been handled: each answer is released from
+    // a deferred inside an awaited act, which runs the read to its end. The
+    // 503 beside the refusals is the control — the same flow DOES draw the
+    // failed-read note and its Retry, so the empty space after a refusal is
+    // the refusal's doing, not a read that never finished.
+    for (const status of [401, 403, 404, 503]) {
+      const answer = deferred<Response>();
+      const fetchMock = vi.fn(() => answer.promise);
+      vi.stubGlobal("fetch", fetchMock);
+      const { container, unmount } = render(<MailDraftApprovalPanel />);
+      expect(fetchMock, String(status)).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        answer.resolve(code(status));
+      });
+      const panel = container.querySelector("[data-testid='settings-email-draft-approval']");
+      const retry = container.querySelector("[data-testid='settings-email-draft-approval-retry']");
+      if (status === 503) {
+        expect(panel, String(status)).not.toBeNull();
+        expect(retry, String(status)).not.toBeNull();
+      } else {
+        expect(panel, String(status)).toBeNull();
+        expect(retry, String(status)).toBeNull();
+      }
+      unmount();
+    }
+  });
+
+  it("says a failed read failed, and the Retry reads again and shows the setting", async () => {
+    const fetchMock = stubReads([code(503), ok(SNAPSHOT)]);
+    render(<MailDraftApprovalPanel />);
+    expect((await screen.findByTestId("settings-email-draft-approval-note")).textContent)
+      .toBe("settings.email.draftApproval.readFailed");
+    fireEvent.click(screen.getByTestId("settings-email-draft-approval-retry"));
+    const endpoint = await screen.findByTestId("settings-email-draft-approval-endpoint");
+    expect((endpoint as HTMLInputElement).value).toBe("http://127.0.0.1:8790");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("settings-email-draft-approval-retry")).toBeNull();
+  });
+
+  it("reads a snapshot the route says it could not read as a failed read, not as what is saved", async () => {
+    // `unknown: true`: the route's fields are fallbacks, not the setting.
+    const fetchMock = stubReads([
+      ok({ enabled: false, endpoint: null, authHeader: "Authorization", hasAuth: false, active: false, unknown: true }),
+      ok({ ...SNAPSHOT, unknown: false }),
+    ]);
+    render(<MailDraftApprovalPanel />);
+    expect((await screen.findByTestId("settings-email-draft-approval-note")).textContent)
+      .toBe("settings.email.draftApproval.readFailed");
+    expect(screen.queryByTestId("settings-email-draft-approval-endpoint")).toBeNull();
+    fireEvent.click(screen.getByTestId("settings-email-draft-approval-retry"));
+    // A known snapshot is adopted as before.
+    const endpoint = await screen.findByTestId("settings-email-draft-approval-endpoint");
+    expect((endpoint as HTMLInputElement).value).toBe("http://127.0.0.1:8790");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("settings-email-draft-approval-retry")).toBeNull();
+  });
+
+  it("switching sending off sends only that, and keeps what is typed and not yet saved", async () => {
+    const writes = stubWrites((body) => ({ enabled: body.enabled }));
+    render(<MailDraftApprovalPanel />);
+    const endpoint = (await screen.findByTestId("settings-email-draft-approval-endpoint")) as HTMLInputElement;
+    const authValue = screen.getByTestId("settings-email-draft-approval-auth-value") as HTMLInputElement;
+    const toggle = screen.getByTestId("settings-email-draft-approval-toggle") as HTMLInputElement;
+    // An address the route would refuse, and a credential not saved yet.
+    fireEvent.change(endpoint, { target: { value: "not an address" } });
+    fireEvent.change(authValue, { target: { value: "Bearer typed-placeholder" } });
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle.checked).toBe(false));
+    expect(writes).toEqual([{ enabled: false }]);
+    expect(endpoint.value).toBe("not an address");
+    expect(authValue.value).toBe("Bearer typed-placeholder");
+    expect(screen.getByTestId("settings-email-draft-approval-note").textContent).toBe("settings.email.draftApproval.saved");
+    // Switching it on again carries what is typed, as Save does: the first address may be in the field.
+    await waitFor(() => expect(toggle.disabled).toBe(false));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(writes).toHaveLength(2));
+    expect(writes[1]).toEqual({
+      endpoint: "not an address",
+      authHeader: "Authorization",
+      authValue: "Bearer typed-placeholder",
+      enabled: true,
+    });
+  });
+
+  it("keeps the status region in the page before a save answers, and writes the result into it", async () => {
+    stubWrites();
+    render(<MailDraftApprovalPanel />);
+    const region = await screen.findByTestId("settings-email-draft-approval-note");
+    // Present, announced as a status, and empty: nothing said yet.
+    expect(region.getAttribute("role")).toBe("status");
+    expect(region.textContent).toBe("");
+    fireEvent.click(screen.getByTestId("settings-email-draft-approval-save"));
+    await waitFor(() => expect(region.textContent).toBe("settings.email.draftApproval.saved"));
+    // The same element, not one inserted with its words already inside.
+    expect(screen.getByTestId("settings-email-draft-approval-note")).toBe(region);
+  });
+
+  it("offers the same Retry when the connection drops or the answer is not the setting", async () => {
+    for (const answer of [new TypeError("Failed to fetch"), ok({ not: "a snapshot" })]) {
+      stubReads([answer]);
+      const { unmount } = render(<MailDraftApprovalPanel />);
+      await screen.findByTestId("settings-email-draft-approval-retry");
+      unmount();
+    }
+  });
+});

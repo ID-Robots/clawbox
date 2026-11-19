@@ -129,6 +129,12 @@ const ORG_USER_API_PATHS: ReadonlySet<string> = new Set([
   "/setup-api/tts/warm",
   // The Hermes chat's own commands: compress this conversation, its size.
   "/setup-api/hermes/compress",
+  // The send-approval card under an e-mail draft their assistant prepared:
+  // made for, and answerable by, the signed-in member alone — each token is
+  // bound to its user (src/lib/mail-draft-approval.ts). Not the settings
+  // route beside them, which is the owner's.
+  "/setup-api/email/draft-approval/card",
+  "/setup-api/email/draft-approval/decide",
 ]);
 
 /**

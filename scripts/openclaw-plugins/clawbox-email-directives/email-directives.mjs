@@ -137,3 +137,91 @@ function unwrapQuoted(value) {
   }
   return value;
 }
+
+// ── `EMAIL_DRAFT:<id>` — a draft waiting for the person's Send ──────────────
+//
+// THE SECOND OF THREE COPIES of the draft grammar. The original is
+// `src/lib/chat-email-draft-refs.ts` (`splitDraftRefs`), which the ClawBox chat
+// turns into a send-approval card; the Python copy is
+// `scripts/hermes-plugins/clawbox_email_directives/email_directives.py`.
+// `src/tests/unit/email-draft-directive-parity.test.ts` holds the three to one
+// answer. A channel has no card, so the line is stripped there — after the
+// `EMAIL:` lines, in the same order the chat applies them.
+
+const DRAFT_LINE_RE = /^email_draft:([\s\S]*)$/i;
+const DRAFT_ID_RE = /^(?!\.+$)[A-Za-z0-9._~+/=:@-]{1,512}$/;
+const MAX_DRAFT_REFS = 5;
+
+/**
+ * A line of fence markers and the rest of the line after them. A fence is
+ * closed only by its OWN marker character, in a run at least as long and alone
+ * on its line, so `~~~` inside a backtick fence is content and not a closer.
+ * `FENCE_RE` above stays as the `EMAIL:` grammar's, which is pinned to its own
+ * case table.
+ */
+const DRAFT_FENCE_RE = /^(`{3,}|~{3,})([\s\S]*)$/;
+
+/** The fence `trimmed` opens, as `{marker, length}`, or null. */
+function opensFence(trimmed) {
+  const match = DRAFT_FENCE_RE.exec(trimmed);
+  if (!match) return null;
+  const marker = match[1][0];
+  // A backtick fence's info string may not hold a backtick (CommonMark).
+  if (marker === "`" && match[2].includes("`")) return null;
+  return { marker, length: match[1].length };
+}
+
+/** Whether `trimmed` closes `fence`. */
+function closesFence(trimmed, fence) {
+  const match = DRAFT_FENCE_RE.exec(trimmed);
+  if (!match) return false;
+  return match[1][0] === fence.marker && match[1].length >= fence.length && match[2].trim() === "";
+}
+
+/** `raw` without the `EMAIL_DRAFT:` lines a ClawBox chat would have turned into cards. */
+export function stripDraftDirectives(raw) {
+  return splitDraftRefs(raw).text;
+}
+
+/** Splits `EMAIL_DRAFT:` directives out of assistant text (see the TypeScript original). */
+export function splitDraftRefs(raw) {
+  if (typeof raw !== "string") return { text: "", draftIds: [] };
+  if (!/email_draft:/i.test(raw)) return { text: raw, draftIds: [] };
+  const draftIds = [];
+  const kept = [];
+  let fence = null;
+  const lines = raw.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (fence !== null) {
+      if (closesFence(trimmed, fence)) fence = null;
+      kept.push(line);
+      continue;
+    }
+    const opened = opensFence(trimmed);
+    if (opened !== null) {
+      fence = opened;
+      kept.push(line);
+      continue;
+    }
+    const match = DRAFT_LINE_RE.exec(unwrapQuoted(trimmed));
+    const id = match ? parseDraftId(match[1]) : null;
+    if (id === null) {
+      kept.push(line);
+      continue;
+    }
+    if (draftIds.includes(id)) continue;
+    if (draftIds.length >= MAX_DRAFT_REFS) {
+      kept.push(line);
+      continue;
+    }
+    draftIds.push(id);
+  }
+  if (kept.length === lines.length) return { text: raw, draftIds };
+  return { text: kept.join("\n").replace(/\n{3,}/g, "\n\n").trim(), draftIds };
+}
+
+function parseDraftId(payload) {
+  const value = unwrapQuoted(payload.trim());
+  return DRAFT_ID_RE.test(value) ? value : null;
+}

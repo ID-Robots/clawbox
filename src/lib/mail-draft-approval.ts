@@ -1,0 +1,881 @@
+// "Send this e-mail draft?" — the person's approval, and the only way a draft
+// the assistant prepared ever leaves the box.
+//
+// THE THREAT. The assistant writes drafts with an owner-granted mail tool that
+// cannot send. Text it reads (a web page, an inbound mail, a file) may be an
+// attacker's, so the assistant must not be able to turn a draft into a sent
+// mail by itself — not with a tool, not with its MCP bearer, not by replaying
+// something it saw. Only a signed-in PERSON pressing Send may.
+//
+// HOW. A card in the chat asks this module for an approval (`mintCard`). The
+// draft is read from the mail send backend — never from the assistant's words
+// — and the card gets a ONE-TIME TOKEN bound to:
+//
+//   - the signed-in user the card was made for (owner or member of staff),
+//   - the draft id,
+//   - a hash of the draft's content as the backend holds it,
+//   - an expiry.
+//
+// The token is HMAC-signed with a key derived from the session-signing secret,
+// so it cannot be made up, and its card is recorded in a ledger on disk
+// (data/mail-draft-approvals.json, 0600) so it can be used once. Pressing Send
+// (`decideCard`) checks, in order: the signature, that the person pressing is
+// the person it was made for, that it has not been used, that it has not
+// expired, that no other card of theirs has sent the draft, is sending it or
+// lost the answer to sending it — one Send per draft, not per card — then
+// re-reads the draft from the backend and refuses if a single
+// byte that decides what is sent has changed. Only then is the backend asked
+// to send it.
+//
+// WHO MAY CALL. Both entry points are reached through
+// /setup-api/email/draft-approval/{card,decide}, which accept a person's
+// session cookie and nothing else: the MCP bearer middleware admits on every
+// other /setup-api route is refused there (src/lib/owner-session.ts), and so
+// is a cross-site page riding the cookie (src/lib/same-origin.ts). No MCP tool
+// reaches them; the assistant's only tool here (`email_draft_card`) reads
+// whether cards are on and returns the line the chat turns into a card.
+//
+// WHAT THIS DOES NOT COVER, said plainly: an agent that can run shell commands
+// as the box's user can read data/config.json and the session secret like any
+// other process of that user — the same boundary every other approval on this
+// box has. Keep the send backend under its own OS user, and the agent's shell
+// behind the operator approvals, and that boundary holds.
+
+import fs from "fs";
+import path, { untraced } from "@/lib/runtime-path";
+import { createHmac, randomBytes, timingSafeEqual } from "crypto";
+import { DATA_DIR } from "@/lib/config-store";
+import { getSessionSigningSecret } from "@/lib/auth";
+import type { SessionIdentity } from "@/lib/session-identity";
+import {
+  draftApprovalActive,
+  readDraftApprovalConfig,
+  type DraftApprovalConfig,
+} from "@/lib/mail-draft-approval-config";
+import {
+  draftView,
+  fetchDraft,
+  isDraftId,
+  sendDraft,
+  type DraftView,
+} from "@/lib/mail-draft-backend";
+
+const LEDGER_PATH = path.join(DATA_DIR, "mail-draft-approvals.json");
+
+/** How long a card's approval lasts. */
+export const DEFAULT_TOKEN_TTL_MS = 30 * 60_000;
+const MIN_TTL_S = 10;
+const MAX_TTL_S = 24 * 3600;
+
+/**
+ * The approval lifetime: 30 minutes, or `CLAWBOX_MAIL_DRAFT_TOKEN_TTL_S`
+ * (10 s – 24 h) for a box whose owner wants it shorter or longer. Read per
+ * call, so a test can set it.
+ */
+export function tokenTtlMs(): number {
+  const raw = Number(process.env.CLAWBOX_MAIL_DRAFT_TOKEN_TTL_S);
+  if (!Number.isFinite(raw) || raw <= 0) return DEFAULT_TOKEN_TTL_MS;
+  return Math.round(Math.min(MAX_TTL_S, Math.max(MIN_TTL_S, raw)) * 1000);
+}
+
+const TOKEN_PREFIX = "cbd1";
+const KEY_LABEL = "clawbox/mail-draft-approval/v1";
+const HASH_RE = /^[0-9a-f]{64}$/;
+const CARD_ID_RE = /^[A-Za-z0-9_-]{22}$/;
+const MAX_TOKEN_LEN = 4096;
+
+/** How many cards the ledger keeps, newest first (bar the ones `writeLedger` pins). */
+const MAX_CARDS = 2000;
+const OPEN_KEEP_MS = 24 * 3600_000;
+const SETTLED_KEEP_MS = 30 * 24 * 3600_000;
+/** A Send that never came back (the server died mid-call) is settled as uncertain after this. */
+const SENDING_STALE_MS = 2 * 60_000;
+
+/**
+ * `uncertain`: a Send reached the backend and its answer was lost — the mail
+ * may have gone. A plain reload never offers that draft's Send again; only the
+ * person's explicit "Review again", after being told to check the Sent folder,
+ * naming the warning it was shown (`unansweredLoss`).
+ */
+export type CardState = "open" | "sending" | "sent" | "kept" | "revised" | "changed" | "failed" | "uncertain";
+export type DecisionAction = "send" | "keep" | "revise";
+
+interface CardEntry {
+  /** Card id: 16 random bytes, base64url. */
+  c: string;
+  /** The username the card was made for. */
+  u: string;
+  /** The draft id. */
+  d: string;
+  /** The draft's content hash when the card was made. */
+  h: string;
+  iat: number;
+  exp: number;
+  state: CardState;
+  /** When the state last changed. */
+  at: number;
+}
+
+interface TokenClaims {
+  v: 1;
+  c: string;
+  u: string;
+  d: string;
+  h: string;
+  e: number;
+}
+
+/** What a route answers. */
+export interface ApprovalAnswer {
+  status: number;
+  body: Record<string, unknown>;
+}
+
+function refusal(status: number, kind: string, error: string, extra: Record<string, unknown> = {}): ApprovalAnswer {
+  return { status, body: { error, kind, ...extra } };
+}
+
+const DISABLED = () =>
+  refusal(409, "disabled", "Sending approved e-mail drafts is switched off on this ClawBox (Settings → Email).");
+const UNAVAILABLE = () =>
+  refusal(503, "unavailable", "ClawBox could not check this approval right now. Nothing was sent.");
+const FORGED = () => refusal(403, "forged", "This approval is not one ClawBox issued. Nothing was sent.");
+/** No room on record for another approval: see `mintCard`. Nothing is sendable without one. */
+const NO_ROOM = () =>
+  refusal(503, "no_room", "ClawBox has too many e-mail approvals on record to add another one. Nothing was sent; try again later.");
+
+// ── the signing key and the token ──────────────────────────────────────────
+
+async function approvalKey(): Promise<Buffer | null> {
+  let secret: string | null | undefined;
+  try {
+    secret = await getSessionSigningSecret();
+  } catch {
+    return null;
+  }
+  if (!secret) return null;
+  // A key of its own, derived rather than reused: a token is never a valid
+  // session cookie, and a cookie is never a valid token.
+  return createHmac("sha256", secret).update(KEY_LABEL).digest();
+}
+
+function signature(key: Buffer, payload: string): Buffer {
+  return createHmac("sha256", key).update(`${TOKEN_PREFIX}.${payload}`).digest();
+}
+
+function issueToken(key: Buffer, entry: CardEntry): string {
+  const claims: TokenClaims = { v: 1, c: entry.c, u: entry.u, d: entry.d, h: entry.h, e: entry.exp };
+  const payload = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
+  return `${TOKEN_PREFIX}.${payload}.${signature(key, payload).toString("base64url")}`;
+}
+
+/** The token's claims when ClawBox signed it, else null. Never throws. */
+function readToken(key: Buffer, token: unknown): TokenClaims | null {
+  if (typeof token !== "string" || token.length > MAX_TOKEN_LEN) return null;
+  const parts = token.split(".");
+  if (parts.length !== 3 || parts[0] !== TOKEN_PREFIX) return null;
+  const [, payload, sig] = parts;
+  if (!/^[A-Za-z0-9_-]+$/.test(payload) || !/^[A-Za-z0-9_-]+$/.test(sig)) return null;
+  const expected = signature(key, payload);
+  const given = Buffer.from(sig, "base64url");
+  if (given.length !== expected.length || !timingSafeEqual(given, expected)) return null;
+  let claims: unknown;
+  try {
+    claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  const c = claims as Partial<TokenClaims> | null;
+  if (
+    !c
+    || c.v !== 1
+    || typeof c.c !== "string" || !CARD_ID_RE.test(c.c)
+    || typeof c.u !== "string" || !c.u
+    || !isDraftId(c.d)
+    || typeof c.h !== "string" || !HASH_RE.test(c.h)
+    || typeof c.e !== "number" || !Number.isFinite(c.e)
+  ) {
+    return null;
+  }
+  return c as TokenClaims;
+}
+
+// ── the ledger ─────────────────────────────────────────────────────────────
+
+function isEntry(value: unknown): value is CardEntry {
+  const v = value as Partial<CardEntry> | null;
+  return (
+    typeof v === "object" && v !== null
+    && typeof v.c === "string" && typeof v.u === "string" && typeof v.d === "string" && typeof v.h === "string"
+    // Finite, not merely a number: NaN and Infinity compare false against every
+    // deadline below, so an entry carrying one is an entry no check can judge.
+    && Number.isFinite(v.iat) && Number.isFinite(v.exp) && Number.isFinite(v.at)
+    && ["open", "sending", "sent", "kept", "revised", "changed", "failed", "uncertain"].includes(v.state as string)
+  );
+}
+
+/**
+ * Every card on record. A missing file is an empty ledger — the first use of a
+ * box — and an unreadable or corrupt one THROWS, so a decision is refused
+ * rather than taken against a ledger that may have forgotten a token was used.
+ *
+ * ONE UNREADABLE ENTRY REFUSES THE WHOLE FILE, rather than being filtered out.
+ * A ledger that holds a malformed `sent` record beside a readable `open` one
+ * for the same draft would otherwise let the Send claim through on the strength
+ * of what was left: the record that must block it is exactly the one that was
+ * dropped. Fail closed, as the file's purpose demands.
+ */
+function readLedger(): CardEntry[] {
+  let text: string;
+  try {
+    text = fs.readFileSync(LEDGER_PATH, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+  const parsed = JSON.parse(text) as { v?: unknown; cards?: unknown };
+  if (parsed?.v !== 1 || !Array.isArray(parsed.cards)) throw new Error("mail-draft-approvals.json is not a ledger");
+  if (!parsed.cards.every(isEntry)) throw new Error("mail-draft-approvals.json holds an entry ClawBox cannot read");
+  return parsed.cards as CardEntry[];
+}
+
+/**
+ * The cards `writeLedger` kept: the list on disk after aging and the count cap.
+ *
+ * `require` is a card the write EXISTS FOR (the one being minted). When the
+ * count cap cannot keep it, nothing is written and the list that would have
+ * been is returned: a request about to be refused must not cost the ledger the
+ * open and answered records it still holds.
+ */
+function writeLedger(cards: CardEntry[], now: number, require?: string): CardEntry[] {
+  // A claim no answer ever came back for is settled as uncertain AS OF THE
+  // MOMENT IT WAS LOST (`lostAt`), not of this write: the card that write may
+  // be minting — the person's "Review again" — is then strictly newer, and
+  // nothing reads the two the wrong way round.
+  const live = cards
+    .map((card) => (card.state === "sending" && now - card.at > SENDING_STALE_MS ? { ...card, state: "uncertain" as const, at: card.at + SENDING_STALE_MS } : card))
+    .filter((card) => (card.state === "open" ? card.exp > now - OPEN_KEEP_MS : card.at > now - SETTLED_KEEP_MS))
+    .sort((a, b) => b.at - a.at);
+  // The count cap never drops a card that says a draft went, is going, or may
+  // have gone: forgetting one would offer that draft's Send again without the
+  // person's "Review again". Those leave by age alone (SETTLED_KEEP_MS).
+  const pinned = (card: CardEntry) => card.state === "sending" || card.state === "uncertain" || card.state === "sent";
+  let room = MAX_CARDS - live.filter(pinned).length;
+  const kept = live.filter((card) => pinned(card) || room-- > 0);
+  if (require !== undefined && !kept.some((card) => card.c === require)) return kept;
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  // config-store's discipline: a fresh temp at 0600, chmod for a stale one,
+  // then an atomic rename — a crash leaves the old ledger or the new one.
+  const tmp = untraced(`${LEDGER_PATH}.tmp`);
+  fs.writeFileSync(tmp, JSON.stringify({ v: 1, cards: kept }), { mode: 0o600 });
+  try {
+    fs.chmodSync(tmp, 0o600);
+  } catch {
+    // best-effort
+  }
+  fs.renameSync(tmp, LEDGER_PATH);
+  return kept;
+}
+
+/**
+ * The time to record for a ledger event (a card made, claimed or settled):
+ * now, but always after every time already in the ledger. "Made before that
+ * Send was lost" is then a strict order, even when two events fall in one
+ * millisecond (or a test's clock stands still) — `sendBlocker` and the plain
+ * look's "lost and not asked again" read it.
+ */
+function stamp(cards: CardEntry[], now: number): number {
+  let latest = -Infinity;
+  for (const card of cards) latest = Math.max(latest, card.at, card.iat);
+  return Math.max(now, latest + 1);
+}
+
+/**
+ * When a card's Send was lost: settled `uncertain`, or claimed and never
+ * answered for longer than a Send can take (its server went away mid-call).
+ * Null for any other card.
+ */
+function lostAt(card: CardEntry, now: number): number | null {
+  if (card.state === "uncertain") return card.at;
+  if (card.state === "sending" && now - card.at > SENDING_STALE_MS) return card.at + SENDING_STALE_MS;
+  return null;
+}
+
+/** A Send claim that may still be running: claimed, and not yet old enough to be called lost. */
+function sendingNow(card: CardEntry, now: number): boolean {
+  return card.state === "sending" && now - card.at <= SENDING_STALE_MS;
+}
+
+/**
+ * What stops `card` from sending its draft, judged across EVERY card of the
+ * same person for the same draft — one Send per draft, not one per card. Two
+ * cards for one draft exist when the first was close to expiry as the second
+ * was made, or in two tabs:
+ *
+ *   sent       another card's Send went through;
+ *   sending    another card's Send is running now;
+ *   uncertain  another card's Send lost its answer AFTER this card was made.
+ *              Only a card asked for afterwards — the person's "Review again",
+ *              once told to check the Sent folder — may send that draft, so a
+ *              crashed Send blocks the older cards and never the draft for good.
+ *
+ * Null: nothing does.
+ */
+function sendBlocker(cards: CardEntry[], card: CardEntry, now: number): "sent" | "sending" | "uncertain" | null {
+  let blocker: "sending" | "uncertain" | null = null;
+  for (const other of cards) {
+    if (other.c === card.c || other.u !== card.u || other.d !== card.d) continue;
+    if (other.state === "sent") return "sent";
+    if (sendingNow(other, now)) {
+      blocker = "sending";
+      continue;
+    }
+    const lost = lostAt(other, now);
+    if (lost !== null && card.iat < lost && blocker === null) blocker = "uncertain";
+  }
+  return blocker;
+}
+
+/**
+ * Moves one card from `from` to `to`, or does nothing and says what it found.
+ * Synchronous read-modify-write: within this server process no other request
+ * runs between the read and the rename, so two presses of one card cannot both
+ * see it open. `blocked`, judged on that same read, can refuse the move for a
+ * reason outside the card itself (another card for the same draft); its answer
+ * is reported as the state found, and nothing is written.
+ */
+function transition(
+  cardId: string,
+  from: CardState,
+  to: CardState,
+  now: number,
+  blocked?: (cards: CardEntry[], card: CardEntry) => CardState | null,
+  /**
+   * Other cards the same move closes — the approvals for the draft VERSION this
+   * answer declines, not only the card it was pressed on. Moved in the same
+   * read-modify-write, so no press lands between.
+   */
+  alsoClose?: (cards: CardEntry[], card: CardEntry) => CardEntry[],
+): { ok: true } | { ok: false; state: CardState | null; blocked?: true } {
+  const cards = readLedger();
+  const card = cards.find((entry) => entry.c === cardId);
+  if (!card) return { ok: false, state: null };
+  if (card.state !== from) return { ok: false, state: card.state };
+  const blocker = blocked?.(cards, card) ?? null;
+  if (blocker !== null) return { ok: false, state: blocker, blocked: true };
+  const at = stamp(cards, now);
+  const closing = alsoClose?.(cards, card) ?? [];
+  card.state = to;
+  card.at = at;
+  for (const other of closing) {
+    if (other.c === card.c) continue;
+    other.state = to;
+    other.at = at;
+  }
+  writeLedger(cards, now);
+  return { ok: true };
+}
+
+/**
+ * Records a state with no precondition. Used only after a claim succeeded.
+ * False when the ledger no longer holds the card — the state is then recorded
+ * NOWHERE, which the caller must not mistake for a write that worked.
+ */
+function settle(cardId: string, to: CardState, now: number): boolean {
+  const cards = readLedger();
+  const card = cards.find((entry) => entry.c === cardId);
+  if (!card) return false;
+  card.state = to;
+  card.at = stamp(cards, now);
+  writeLedger(cards, now);
+  return true;
+}
+
+/** How many times a known outcome is written before the ledger is given up on. */
+const RECORD_ATTEMPTS = 3;
+
+/**
+ * Records an outcome that is already DECIDED — a Send the backend confirmed, a
+ * card to reopen because nothing was sent — and says whether the ledger took
+ * it.
+ *
+ * Retried, and the retry is of the WRITE alone: the backend is never asked
+ * again, so a ledger that cannot be written can never turn one confirmed Send
+ * into two. `false` means the ledger still says `sending`; the caller says so
+ * rather than reporting the outcome as if it had been recorded.
+ */
+function record(cardId: string, state: CardState): boolean {
+  for (let attempt = 0; attempt < RECORD_ATTEMPTS; attempt += 1) {
+    try {
+      // A card the ledger no longer holds is a card this outcome did not reach:
+      // retrying cannot bring it back, and reporting it as recorded would hide
+      // that a later look may offer the draft again.
+      return settle(cardId, state, Date.now());
+    } catch {
+      // The same write again, never another Send.
+    }
+  }
+  return false;
+}
+
+// ── making a card ──────────────────────────────────────────────────────────
+
+async function activeConfig(): Promise<{ config: DraftApprovalConfig } | { answer: ApprovalAnswer }> {
+  const { config, known } = await readDraftApprovalConfig();
+  if (!known) return { answer: UNAVAILABLE() };
+  if (!draftApprovalActive(config)) return { answer: DISABLED() };
+  return { config };
+}
+
+function backendRefusal(reason: "unreachable" | "auth" | "bad_response"): ApprovalAnswer {
+  if (reason === "auth") {
+    return refusal(502, "backend_auth", "The mail service refused ClawBox's credentials. Check Settings → Email → Send approved drafts.");
+  }
+  if (reason === "bad_response") {
+    return refusal(502, "backend_bad", "The mail service gave an answer ClawBox could not read.");
+  }
+  return refusal(502, "backend_unreachable", "ClawBox could not reach the mail service.");
+}
+
+const GONE = () =>
+  refusal(404, "gone", "This draft is no longer in the mailbox: it was sent or deleted.");
+
+/**
+ * The lost Send of this person's draft that a card must warn about before it
+ * may offer Send again: the newest loss NO CARD HAS BEEN MADE SINCE — the same
+ * line `sendBlocker` draws, a card made at or after the loss is past it. Null
+ * when there is none.
+ *
+ * Its moment is the warning's identifier (`uncertainty` in every answer that
+ * says `uncertain`). "Review again" hands out a card that can send only when
+ * it names that very identifier back (`acknowledged`), so it is bound to the
+ * warning the person was SHOWN: a card still saying "Kept" or "Revised", or
+ * one warned about an earlier loss, asks about a newer loss first. Every card
+ * made after a loss is made that way, so a card made since a loss means the
+ * person was warned about it.
+ */
+function unansweredLoss(cards: CardEntry[], user: string, draftId: string, now: number): number | null {
+  const mine = cards.filter((card) => card.u === user && card.d === draftId);
+  let newest: number | null = null;
+  for (const card of mine) {
+    const at = lostAt(card, now);
+    if (at === null || mine.some((other) => other !== card && other.iat >= at)) continue;
+    if (newest === null || at > newest) newest = at;
+  }
+  return newest;
+}
+
+/**
+ * The newest lost Send of this person's draft, whether or not a card has been
+ * made since it. `unansweredLoss` asks whether ANYONE was warned; this is what
+ * `mintCard` compares across its own backend read, to tell whether a loss
+ * happened while THIS request was waiting — warned in another tab or not.
+ */
+function newestLoss(cards: CardEntry[], user: string, draftId: string, now: number): number | null {
+  let newest: number | null = null;
+  for (const card of cards) {
+    if (card.u !== user || card.d !== draftId) continue;
+    const at = lostAt(card, now);
+    if (at !== null && (newest === null || at > newest)) newest = at;
+  }
+  return newest;
+}
+
+/** The fields an `uncertain` answer carries: the warning's identifier, when the ledger has one. */
+function uncertainty(loss: number | null): Record<string, unknown> {
+  return loss === null ? {} : { uncertainty: loss };
+}
+
+/**
+ * What the ledger alone says about a draft, when that settles it: sent; a
+ * Send in flight; a Send whose answer was lost, unless `acknowledged` is that
+ * very loss — the person's "Review again" after the card warned them about it
+ * and told them to check the Sent folder.
+ */
+function settledAnswerIn(cards: CardEntry[], user: string, draftId: string, acknowledged: number | null, now: number): ApprovalAnswer | null {
+  const mine = cards.filter((card) => card.u === user && card.d === draftId);
+  const sent = mine.find((card) => card.state === "sent");
+  if (sent) return { status: 200, body: { state: "sent", decidedAt: sent.at } };
+  // A claim older than a Send can take is one whose server went away mid-call.
+  const lost = (card: CardEntry) => lostAt(card, now) !== null;
+  const sending = mine.find((card) => card.state === "sending" && !lost(card));
+  if (sending) return { status: 200, body: { state: "sending", decidedAt: sending.at } };
+  const loss = unansweredLoss(cards, user, draftId, now);
+  if (loss !== null && loss !== acknowledged) {
+    return { status: 200, body: { state: "uncertain", decidedAt: loss, ...uncertainty(loss) } };
+  }
+  return null;
+}
+
+/** What a card route's `acknowledged` names: a warning's identifier, or nothing. */
+function acknowledgedLoss(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * The card for one draft, made for the signed-in person asking.
+ *
+ * `reopen` asks again about a draft the person already kept or sent back for
+ * changes — the card's "Review again". A draft already SENT is never offered
+ * again: the card says so. After a lost Send, "Review again" must also name
+ * the warning it answers (`acknowledged`, the `uncertainty` the card was
+ * shown): a reopen that names none, or an older one, is answered `uncertain`
+ * with the current identifier instead of a card. A loss that appears while
+ * this request reads the draft is answered the same way, even when another
+ * tab has already been warned about it and opened a card since.
+ */
+export async function mintCard(
+  identity: SessionIdentity,
+  draftId: unknown,
+  opts: { reopen?: boolean; acknowledged?: unknown; now?: number } = {},
+): Promise<ApprovalAnswer> {
+  const now = opts.now ?? Date.now();
+  if (!isDraftId(draftId)) return refusal(400, "invalid_draft", "That is not a draft id.");
+  const active = await activeConfig();
+  if ("answer" in active) return active.answer;
+  const key = await approvalKey();
+  if (!key) return UNAVAILABLE();
+  const reopen = opts.reopen === true;
+  // Only an explicit Review again answers a warning; a plain look never does.
+  const acknowledged = reopen ? acknowledgedLoss(opts.acknowledged) : null;
+
+  // Answered from the ledger before the backend is asked: a draft already sent
+  // is not fetched again, and one whose Send is in flight, or lost and not
+  // acknowledged, is not offered.
+  let before: CardEntry[];
+  try {
+    before = readLedger();
+  } catch {
+    return UNAVAILABLE();
+  }
+  const early = settledAnswerIn(before, identity.username, draftId, acknowledged, now);
+  if (early) return early;
+  const lossBefore = newestLoss(before, identity.username, draftId, now);
+
+  const fetched = await fetchDraft(active.config, identity.username, draftId);
+  if (!fetched.ok) return fetched.reason === "not_found" ? GONE() : backendRefusal(fetched.reason);
+  const hash = fetched.draft.hash;
+  const view: DraftView = draftView(fetched.draft);
+
+  // EVERYTHING FROM HERE IS SYNCHRONOUS, and reads the ledger afresh. The
+  // await above let other requests run — another card minted, a Send claimed
+  // — and writing back a list read before it would undo them: a card just
+  // sent would be written back open.
+  let cards: CardEntry[];
+  try {
+    cards = readLedger();
+  } catch {
+    return UNAVAILABLE();
+  }
+  // Judged again on the fresh read: a Send of this draft whose answer was lost
+  // WHILE this card was loading is a newer loss than the one `acknowledged`
+  // names, so the card says uncertain — with that loss's identifier — and only
+  // a Review again after that warning may send. Newer is by the moment of the
+  // loss, the order `stamp` keeps strict.
+  const again = settledAnswerIn(cards, identity.username, draftId, acknowledged, now);
+  if (again) return again;
+  // A loss newer than any this request saw before its read was not shown to
+  // the person here, EVEN WHEN another tab has since been warned and made a
+  // card past it (which `settledAnswerIn` reads as answered): that tab's card
+  // would otherwise be handed out below, a Send this person was never warned
+  // about. Asked separately from who was warned, by the moment of the loss.
+  const lossAfter = newestLoss(cards, identity.username, draftId, now);
+  if (lossAfter !== null && (lossBefore === null || lossAfter > lossBefore) && lossAfter !== acknowledged) {
+    return { status: 200, body: { state: "uncertain", decidedAt: lossAfter, ...uncertainty(lossAfter) } };
+  }
+  const mine = cards.filter((card) => card.u === identity.username && card.d === draftId);
+
+  // The same open card when one is still good for a while, so reopening a
+  // chat does not grow the ledger by one card per draft per visit. Same
+  // claims, same key: the very same token. Not one made before another card's
+  // Send of this draft was lost: that card can no longer send (`sendBlocker`),
+  // and "Review again" must hand out one that can.
+  const ttl = tokenTtlMs();
+  const reuseMargin = Math.min(2 * 60_000, ttl / 2);
+  let card = mine.find(
+    (entry) => entry.state === "open" && entry.h === hash && entry.exp - now > reuseMargin && sendBlocker(cards, entry, now) === null,
+  );
+
+  // Already answered, and nothing has changed since: show the answer, not the
+  // question again. A draft the assistant has revised has a new hash and is
+  // asked about afresh. An open card still waiting comes first: after "Review
+  // again" on a kept draft, a reload shows the new question, not the old answer.
+  if (!card && !opts.reopen) {
+    const settled = mine
+      .filter((entry) => entry.h === hash && (entry.state === "kept" || entry.state === "revised"))
+      .sort((a, b) => b.at - a.at)[0];
+    if (settled) return { status: 200, body: { state: settled.state, decidedAt: settled.at, draft: view } };
+  }
+
+  if (!card) {
+    const made = stamp(cards, now);
+    const minted: CardEntry = {
+      c: randomBytes(16).toString("base64url"),
+      u: identity.username,
+      d: draftId,
+      h: hash,
+      iat: made,
+      exp: now + ttl,
+      state: "open",
+      at: made,
+    };
+    let kept: CardEntry[];
+    try {
+      kept = writeLedger([...cards, minted], now, minted.c);
+    } catch {
+      return UNAVAILABLE();
+    }
+    // The count cap never drops a card that says a draft went, is going or may
+    // have gone, so a ledger full of those has no room for an open one. A token
+    // for a card the ledger does not hold would be refused as `reused` by every
+    // press — a Send that cannot work and a message that misstates why. Refused
+    // here instead, and said plainly (nothing was written either). It clears as
+    // those records age out.
+    if (!kept.some((entry) => entry.c === minted.c)) return NO_ROOM();
+    card = minted;
+  }
+  return {
+    status: 200,
+    body: { state: "open", token: issueToken(key, card), expiresAt: card.exp, draft: view },
+  };
+}
+
+// ── answering a card ───────────────────────────────────────────────────────
+
+export function isDecisionAction(value: unknown): value is DecisionAction {
+  return value === "send" || value === "keep" || value === "revise";
+}
+
+/**
+ * The person's answer to a card: send the draft, keep it as a draft, or send
+ * it back for changes. Every refusal names its kind; nothing is sent unless
+ * every check below passed.
+ */
+export async function decideCard(
+  identity: SessionIdentity,
+  token: unknown,
+  action: unknown,
+  opts: { now?: number } = {},
+): Promise<ApprovalAnswer> {
+  if (!isDecisionAction(action)) return refusal(400, "invalid", "action must be send, keep or revise");
+  if (typeof token !== "string" || !token) {
+    return refusal(403, "no_approval", "Sending a draft needs the approval from its card. Nothing was sent.");
+  }
+  const active = await activeConfig();
+  if ("answer" in active) return active.answer;
+  const key = await approvalKey();
+  if (!key) return UNAVAILABLE();
+
+  // 1. Signed by this box.
+  const claims = readToken(key, token);
+  if (!claims) return FORGED();
+
+  // 2. For the person pressing. Checked before the ledger is read, so another
+  //    user learns nothing about the card's state.
+  if (claims.u !== identity.username) {
+    return refusal(403, "other_user", "This card belongs to another ClawBox user. Nothing was sent.");
+  }
+
+  // 3. Issued and still unused. A signed token the ledger has no matching card
+  //    for is refused the same way: it cannot be used.
+  const now = opts.now ?? Date.now();
+  let ledger: CardEntry[];
+  try {
+    ledger = readLedger();
+  } catch {
+    return UNAVAILABLE();
+  }
+  const card = ledger.find((entry) => entry.c === claims.c);
+  if (!card || card.u !== claims.u || card.d !== claims.d || card.h !== claims.h || card.exp !== claims.e) {
+    return refusal(409, "reused", "This approval can no longer be used. Nothing was sent.", { state: null });
+  }
+  if (card.state !== "open") {
+    // A claim no answer ever came back for is reported as what it is by now:
+    // lost — with the identifier a Review again must name.
+    if (lostAt(card, now) !== null) {
+      return refusal(409, "reused", "This approval was already used.", {
+        state: "uncertain",
+        ...uncertainty(unansweredLoss(ledger, card.u, card.d, now)),
+      });
+    }
+    return refusal(409, "reused", "This approval was already used.", { state: card.state });
+  }
+
+  // 4. Not expired.
+  if (now >= claims.e) {
+    return refusal(410, "expired", "This approval expired. Reload the draft to approve it again. Nothing was sent.");
+  }
+
+  if (action === "keep" || action === "revise") {
+    const to = action === "keep" ? "kept" : "revised";
+    let moved: ReturnType<typeof transition>;
+    try {
+      // Declining a draft VERSION closes every approval outstanding for it —
+      // this person, this draft, this hash — not only the card pressed. Two
+      // cards for one version exist in two tabs, or across an expiry; the
+      // second would otherwise still send the very version the person has just
+      // asked to change (`sendBlocker` has no reason to stop it: nothing was
+      // sent). Other versions keep their cards, and a Review again opens a new
+      // one as before.
+      //
+      // Not while a Send of that very version is running from another card: it
+      // may yet send the draft (or, if its read fails, put its card back to
+      // open), so "kept" or "revised" would confirm a decline the Send is about
+      // to make untrue. Judged in the same read-modify-write as the move, and
+      // answered as `sending` — nothing was changed.
+      //
+      // Nor once another card's Send of this draft WENT, whatever version it
+      // sent: a Send closes only the card it was pressed on, so this card is
+      // still open, and "kept" (or a change request to the assistant) would be
+      // confirmed over mail that has already left. Answered as `sent`, the
+      // outcome the ledger holds — nothing was changed.
+      moved = transition(
+        card.c,
+        "open",
+        to,
+        now,
+        (cards, entry) => {
+          const others = cards.filter((other) => other.c !== entry.c && other.u === entry.u && other.d === entry.d);
+          if (others.some((other) => other.state === "sent")) return "sent";
+          return others.some((other) => other.h === entry.h && sendingNow(other, now)) ? "sending" : null;
+        },
+        (cards, entry) =>
+          cards.filter((other) => other.state === "open" && other.u === entry.u && other.d === entry.d && other.h === entry.h),
+      );
+    } catch {
+      return UNAVAILABLE();
+    }
+    if (!moved.ok) {
+      if (moved.blocked && moved.state === "sent") {
+        return refusal(409, "reused", "This draft was already sent from another card, so it cannot be kept or changed. Nothing was changed.", { state: "sent" });
+      }
+      if (moved.blocked) {
+        return refusal(409, "reused", "This draft is being sent from another card, so it cannot be kept or changed now. Nothing was changed.", { state: "sending" });
+      }
+      return refusal(409, "reused", "This approval was already used.", { state: moved.state });
+    }
+    return { status: 200, body: { state: to } };
+  }
+
+  // SEND. Claimed first, so a second press — or a second tab — finds it taken.
+  // The claim is per DRAFT: in the same read-modify-write it refuses while any
+  // other card of this person for this draft has sent it, is sending it, or
+  // lost the answer to sending it after this card was made.
+  try {
+    // The list the claim was judged on: an `uncertain` refusal names its loss from it.
+    let judged: CardEntry[] = [];
+    const claimed = transition(card.c, "open", "sending", now, (cards, entry) => {
+      judged = cards;
+      return sendBlocker(cards, entry, now);
+    });
+    if (!claimed.ok) {
+      if (!claimed.blocked) return refusal(409, "reused", "This approval was already used.", { state: claimed.state });
+      if (claimed.state === "sent") return refusal(409, "reused", "This draft was already sent.", { state: "sent" });
+      if (claimed.state === "sending") {
+        return refusal(409, "reused", "This draft is being sent from another card. Nothing more was sent.", { state: "sending" });
+      }
+      return refusal(
+        409,
+        "reused",
+        "Another Send of this draft lost the mail service's answer, so it may or may not have been sent. Check the Sent folder, then review it again.",
+        { state: "uncertain", ...uncertainty(unansweredLoss(judged, card.u, card.d, now)) },
+      );
+    }
+  } catch {
+    return UNAVAILABLE();
+  }
+
+  // Nothing was sent: the card goes back to open so the same press can be made
+  // again. If even that cannot be written the card stays "sending" and is
+  // settled as uncertain later: refused, never sent twice.
+  const unclaim = () => record(card.c, "open");
+  /** Records a decided outcome. False: the ledger still says "sending". */
+  const close = (state: CardState) => record(card.c, state);
+
+  // 5. The draft as it is NOW, from the backend, against the hash the person approved.
+  const fetched = await fetchDraft(active.config, identity.username, claims.d);
+  if (!fetched.ok) {
+    if (fetched.reason === "not_found") {
+      close("failed");
+      return GONE();
+    }
+    // Nothing was sent; the same card may be pressed again.
+    unclaim();
+    return backendRefusal(fetched.reason);
+  }
+  const hash = fetched.draft.hash;
+  if (hash !== claims.h) {
+    close("changed");
+    return refusal(409, "changed", "The draft changed after this card was shown, so it was not sent. Review the current version.");
+  }
+
+  // 5b. A draft whose card could not show it whole is not sent from here, even
+  //     when a caller skips the card's own refusal to offer Send: the person
+  //     would be approving words, recipients or a file name they never saw.
+  //     The card stays open, so Keep and Revise still work. The hash matched,
+  //     so this is the very preview the card drew.
+  const preview = draftView(fetched.draft);
+  if (preview.bodyTruncated || preview.headerTruncated) {
+    unclaim();
+    return refusal(
+      409,
+      "too_long",
+      "This draft is too long for ClawBox to show whole, so it cannot be sent from the chat. Nothing was sent. Send it from your mail app.",
+    );
+  }
+
+  // 6. Send — with the hash, so a backend that checks can refuse a draft
+  //    edited between the read above and its own send.
+  const sent = await sendDraft(active.config, identity.username, claims.d, hash);
+  if (sent.ok) {
+    // CONFIRMED. The result is recorded with retries and the backend is never
+    // asked a second time. If the ledger still refuses it, the answer says
+    // both halves: the draft went, and the record of it did not. Otherwise a
+    // reload would read the stale claim and offer "Review again" over a mail
+    // that is already in the Sent folder.
+    if (close("sent")) return { status: 200, body: { state: "sent" } };
+    return {
+      status: 200,
+      body: {
+        state: "sent",
+        recorded: false,
+        warning: "This draft was sent. ClawBox could not record that on disk, so this card may ask about the draft again until it does.",
+      },
+    };
+  }
+  switch (sent.reason) {
+    case "changed":
+      close("changed");
+      return refusal(409, "changed", "The draft changed after this card was shown, so it was not sent. Review the current version.");
+    case "not_found":
+      close("failed");
+      return GONE();
+    case "auth":
+      unclaim();
+      return backendRefusal("auth");
+    case "refused":
+      close("failed");
+      return refusal(502, "send_refused", "The mail service refused to send this draft. It is still in the Drafts folder.");
+    default: {
+      close("uncertain");
+      // The warning's identifier, as the ledger now holds it: this loss when
+      // it was recorded. When it was not (the card still says `sending`), there
+      // is none yet, and a Review again is answered with one before any card.
+      let loss: number | null = null;
+      try {
+        loss = unansweredLoss(readLedger(), card.u, card.d, Date.now());
+      } catch {
+        loss = null;
+      }
+      return refusal(
+        502,
+        "send_uncertain",
+        "ClawBox lost the mail service's answer, so this draft may or may not have been sent. Check the Sent folder before trying again.",
+        uncertainty(loss),
+      );
+    }
+  }
+}
+
+/** For tests: where the ledger lives. */
+export const MAIL_DRAFT_LEDGER_PATH = LEDGER_PATH;
