@@ -4548,6 +4548,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
     // owner's conversation back on disk and the picture billed against a
     // conversation that no longer exists.
     drawingRef.current.get(key)?.abort()
+    // Likewise a send of THIS tab still waiting for a starting gateway: it
+    // must not reach the conversation this close is about to delete.
+    startingWaitsRef.current.get(key)?.abort()
     const dispose = async () => {
       // switchSession marks the key busy on the way out when its run is
       // live; the tab is gone now, so the mark must go too.

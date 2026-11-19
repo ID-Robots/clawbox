@@ -176,4 +176,25 @@ describe("a message sent while the gateway is still starting", () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 3500)); });
     expect(sends()).toHaveLength(1);
   });
+
+  it("closing the tab during that wait drops its message instead of sending it to a deleted conversation", async () => {
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(socket()).not.toBeNull());
+    await screen.findByText(SEED_TEXT);
+    const plus = await screen.findByTestId("chat-new-tab");
+    await waitFor(() => expect(plus).not.toBeDisabled());
+    fireEvent.click(plus);
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    refuseSends = 99;
+
+    act(() => { dispatchChatMessage("hello from the second tab"); });
+    expect(await screen.findByText("chat.startingUp")).toBeInTheDocument();
+    expect(sends()).toHaveLength(1);
+    const tabKey = (sends()[0].params as { sessionKey?: string }).sessionKey;
+    expect(tabKey).not.toBe(SESSION);
+
+    fireEvent.click(screen.getAllByTestId("chat-tab-close")[0]);
+    await act(async () => { await new Promise((r) => setTimeout(r, 3500)); });
+    expect(sends()).toHaveLength(1);
+  });
 });
