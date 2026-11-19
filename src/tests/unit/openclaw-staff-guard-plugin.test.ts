@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import plugin, { onBeforeToolCall } from "../../../scripts/openclaw-plugins/clawbox-staff-guard/index.mjs";
-import { staffDenyMessage, staffMemberOf, staffToolCallDenyReason } from "../../../scripts/openclaw-plugins/clawbox-staff-guard/staff-guard.mjs";
+import { staffDenyMessage, staffMemberOf, staffOfficeReadParams, staffToolCallDenyReason } from "../../../scripts/openclaw-plugins/clawbox-staff-guard/staff-guard.mjs";
 import { STAFF_OPENCLAW_TOOLS } from "@/lib/org-staff-policy";
 import { staffWorkspaceDir } from "@/lib/org-staff-agents";
 
@@ -176,6 +176,34 @@ describe("a member of staff's files", () => {
     expect(staffToolCallDenyReason(call("read", { path: staged() }), MARIA, opts)).toMatch(/not theirs/);
     // The owner is not judged at all.
     expect(staffToolCallDenyReason(call("read", { path: staged("batch2", "payroll.txt") }), OWNER, opts)).toBeNull();
+  });
+
+  it("reads a member's own office upload as the text staged beside it (TASK-2713), and nobody else's", () => {
+    const staged = (...p: string[]) => path.join(openclawHome, "media", "chat-attachments", ...p);
+    fs.writeFileSync(staged("batch1", "q3.xlsx"), "PK\x03\x04");
+    fs.writeFileSync(staged("batch2", "memo.docx"), "PK\x03\x04");
+    fs.writeFileSync(staged("batch2", "memo.docx.txt"), "ivan's memo\n");
+    const owners = path.join(root, "owners-office.json");
+    fs.writeFileSync(owners, JSON.stringify({
+      [staged("batch1")]: "maria",
+      [staged("batch2", "memo.docx")]: "ivan",
+      [staged("batch2", "memo.docx.txt")]: "ivan",
+    }));
+    const o = { ...opts, mediaOwners: owners };
+    const read = (p: string, extra: Record<string, unknown> = {}) => call("read", { path: p, ...extra });
+    expect(staffOfficeReadParams(read(staged("batch1", "q3.xlsx"), { offset: 1 }), MARIA, o)).toEqual({ path: staged("batch1", "q3.xlsx.txt"), offset: 1 });
+    expect(staffOfficeReadParams(read(staged("batch2", "memo.docx")), IVAN, o)).toEqual({ path: staged("batch2", "memo.docx.txt") });
+    // Another member's upload stays refused, and is never rewritten.
+    expect(staffToolCallDenyReason(read(staged("batch2", "memo.docx")), MARIA, o)).toMatch(/not theirs/);
+    expect(staffOfficeReadParams(read(staged("batch2", "memo.docx")), MARIA, o)).toBeNull();
+    // The owner, other tools, other files and a document with no staged text are left alone.
+    expect(staffOfficeReadParams(read(staged("batch2", "memo.docx")), OWNER, o)).toBeNull();
+    expect(staffOfficeReadParams(call("pdf", { pdf: staged("batch2", "memo.docx") }), IVAN, o)).toBeNull();
+    expect(staffOfficeReadParams(read(staged("batch1", "q3.xlsx.txt")), MARIA, o)).toBeNull();
+    fs.writeFileSync(path.join(staffWorkspaceDir(openclawHome, "maria"), "own.docx"), "PK\x03\x04");
+    expect(staffOfficeReadParams(read("own.docx"), MARIA, o)).toBeNull();
+    // Through the plugin, the owner's read is still not its business.
+    expect(onBeforeToolCall(read(staged("batch2", "memo.docx")), OWNER)).toBeUndefined();
   });
 
   it("refuses a read that names no file, and lets an inline picture through", () => {

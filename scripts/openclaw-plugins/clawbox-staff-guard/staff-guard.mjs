@@ -29,7 +29,7 @@
 // with one exception: a call to a member's relay entry (which carries THAT
 // member's token) is refused to anyone but that member's agent.
 
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
@@ -407,6 +407,42 @@ export function staffToolCallDenyReason(event, ctx, opts = {}) {
     return `\`${toolName}\` on ${raw.slice(0, 200)}, outside their own folder (${folder})`;
   }
   return null;
+}
+
+/** The office documents the chat stages with their text beside them (src/lib/office-documents.ts). */
+const OFFICE_EXTENSIONS = new Set([".docx", ".xlsx", ".pptx", ".odt", ".ods"]);
+
+/**
+ * A member's `read` of an office document THEY attached in chat, pointed at
+ * the text ClawBox took out of it when it was staged (`<file>.txt`, written by
+ * src/app/setup-api/chat/attachments/route.ts and recorded as theirs). The
+ * core's `read` refuses a .docx or .xlsx as a binary document and asks for a
+ * converter; the owner's agent has its shell for that, a member's has none.
+ * The new params, or null to leave the call as it is. Only for a call
+ * `staffToolCallDenyReason` let through, and only when the document and its
+ * text are both recorded as this member's own upload.
+ */
+export function staffOfficeReadParams(event, ctx, opts = {}) {
+  const username = staffMemberOf(ctx);
+  const params = event?.params;
+  if (!username || event?.toolName !== "read" || !params || typeof params !== "object") return null;
+  const key = ["path", "file_path", "filePath", "file"].find((k) => typeof params[k] === "string" && params[k].trim());
+  if (!key) return null;
+  const home = opts.home ?? os.homedir();
+  const openclawHome = opts.openclawHome ?? path.join(home, ".openclaw");
+  const resolved = resolveCandidate(params[key], path.join(openclawHome, "staff", username), home);
+  if (!resolved.path || !OFFICE_EXTENSIONS.has(path.extname(resolved.path).toLowerCase())) return null;
+  const real = realish(resolved.path);
+  const text = `${real}.txt`;
+  const attachmentsReal = realish(path.join(openclawHome, "media", "chat-attachments"));
+  const ownersFile = "mediaOwners" in opts ? opts.mediaOwners : mediaOwnersFile();
+  try {
+    if (!lstatSync(text).isFile()) return null;
+  } catch {
+    return null;
+  }
+  if (!stagedFileOwnedBy(username, real, attachmentsReal, ownersFile) || !stagedFileOwnedBy(username, text, attachmentsReal, ownersFile)) return null;
+  return { ...params, [key]: text };
 }
 
 /** The refusal the agent is handed: what to tell the member of staff. */
