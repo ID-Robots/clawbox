@@ -1068,7 +1068,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const [ssid, setSsid] = useState("");
   const [wifiPass, setWifiPass] = useState("");
   const [wifiConnecting, setWifiConnecting] = useState(false);
-  const [wifiStatus, setWifiStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [wifiStatus, setWifiStatus] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
   const [connectedSSID, setConnectedSSID] = useState<string | null>(null);
   const [wifiQuality, setWifiQuality] = useState<{ signalDbm: number | null; bitrateMbps: number | null; pingMs: number | null }>({ signalDbm: null, bitrateMbps: null, pingMs: null });
   const [ethernet, setEthernet] = useState<{ connected: boolean; iface: string | null }>({ connected: false, iface: null });
@@ -1559,25 +1559,64 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   };
 
   const connectWifi = async () => {
-    if (!ssid.trim()) return;
+    const target = ssid.trim();
+    if (!target) return;
     setWifiConnecting(true);
-    setWifiStatus(null);
+    // /wifi/connect only STARTS the switch and answers at once; the outcome
+    // comes from /wifi/connect-status. Show that it is underway, then poll —
+    // reporting "connected" on the POST alone told the owner nothing (and was
+    // wrong on a bad password).
+    setWifiStatus({ type: "info", message: t("wifi.switching", { ssid: target }) });
     try {
       const res = await fetch("/setup-api/wifi/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ssid: ssid.trim(), password: wifiPass }),
+        body: JSON.stringify({ ssid: target, password: wifiPass }),
       });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
-      setWifiStatus({ type: "success", message: t("settings.connectedTo", { ssid }) });
-      setConnectedSSID(ssid.trim());
-      setSsid("");
-      setWifiPass("");
+      if (res.status >= 400 && res.status < 500) {
+        throw new Error((await res.json().catch(() => ({}))).error || t("settings.connectionFailed"));
+      }
     } catch (err) {
-      setWifiStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.connectionFailed") });
-    } finally {
-      setWifiConnecting(false);
+      // A 4xx is a real refusal; a network error means the radio is already
+      // switching under us, which is expected — keep polling.
+      if (err instanceof Error && !(err instanceof TypeError)) {
+        setWifiStatus({ type: "error", message: err.message });
+        setWifiConnecting(false);
+        return;
+      }
     }
+    const deadline = Date.now() + 120_000;
+    const poll = async (): Promise<void> => {
+      if (Date.now() > deadline) {
+        setWifiStatus({ type: "error", message: t("settings.connectionFailed") });
+        setWifiConnecting(false);
+        return;
+      }
+      try {
+        const r = await fetch("/setup-api/wifi/connect-status", { cache: "no-store" });
+        const st = await r.json();
+        if (st.phase === "connected") {
+          setWifiStatus({ type: "success", message: t("settings.connectedTo", { ssid: target }) });
+          setConnectedSSID(target);
+          setSsid("");
+          setWifiPass("");
+          setWifiConnecting(false);
+          return;
+        }
+        if (st.phase === "failed") {
+          setWifiStatus({
+            type: "error",
+            message: st.reason === "wrong-password" ? t("wifi.wrongPassword") : (st.message || t("settings.connectionFailed")),
+          });
+          setWifiConnecting(false);
+          return;
+        }
+      } catch {
+        // Box unreachable mid-switch — keep trying until the deadline.
+      }
+      setTimeout(() => { void poll(); }, 2000);
+    };
+    setTimeout(() => { void poll(); }, 2500);
   };
 
   /* ── AI Provider ── */
