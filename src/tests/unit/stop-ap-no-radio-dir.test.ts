@@ -96,8 +96,8 @@ describe.skipIf(isRoot)("stop-ap.sh without /run/clawbox-radio (unprivileged)", 
     stubNmcli("ap");
     const r = run(STOP_AP, [], missing);
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain("is not set up");
-    expect(r.stderr).toContain(missing);
+    expect(r.stderr).toContain("only root can create it");
+    expect(r.stderr).toContain(path.join(missing, "wlP1p1s0.lock"));
     // Never a half-stop: no AP deleted without the lock.
     expect(nmcliCalls()).not.toMatch(/connection (down|delete)/);
   });
@@ -107,6 +107,19 @@ describe.skipIf(isRoot)("stop-ap.sh without /run/clawbox-radio (unprivileged)", 
     const r = run(STOP_AP, [], missing);
     expect(r.status).toBe(1);
     expect(r.stdout).not.toContain("No access point running");
+    // The words name nmcli, not the directory, as what is unknown.
+    expect(r.stderr).toContain("nmcli could not say");
+  });
+
+  it("says why when a root recovery is pending, instead of exiting silently", () => {
+    stubNmcli("no-ap");
+    const dir = path.join(tmp, "radio");
+    fs.mkdirSync(dir, { mode: 0o755 });
+    fs.writeFileSync(path.join(dir, "wlP1p1s0.policy"), "yes\n");
+    const r = run(STOP_AP, [], dir);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("radio recovery is pending");
+    expect(nmcliCalls()).not.toMatch(/connection (down|delete)/);
   });
 
   it("does not call a path that exists but is not a directory 'absent'", () => {
@@ -153,6 +166,7 @@ describe.skipIf(isRoot)("stop-ap.sh without /run/clawbox-radio (unprivileged)", 
     const r = run(WIFI_RADIO, ["--nmcli", "device", "wifi", "connect", "Example-Home"], missing);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain("Radio ownership is not set up");
+    expect(r.stderr).toContain(path.join(missing, "wlP1p1s0.lock"));
     expect(nmcliCalls()).not.toContain("connect");
   });
 

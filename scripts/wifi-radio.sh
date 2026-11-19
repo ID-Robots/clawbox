@@ -137,7 +137,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   wifi_lock || {
     # Say WHY on stderr: the web route shows "Command failed: ..." plus this.
     [ "$WIFI_LOCK_ABSENT" != 1 ] ||
-      echo "[WiFi] Radio ownership is not set up: $RADIO_DIR is created by root at boot" >&2
+      echo "[WiFi] Radio ownership is not set up: the lock $RADIO_DIR/$RADIO_IFACE.lock does not exist and only root can create it" >&2
     exit 1
   }
   case "${1:-}" in

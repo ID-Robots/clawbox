@@ -298,9 +298,11 @@ const RADIO_ON_POLL_DELAY = 1000;
 
 /**
  * A connect needs a radio that is on. With it off (`nmcli radio wifi` says
- * disabled, the device is `unavailable`, rfkill soft-blocks it) every nmcli
- * connect fails in a way that names nothing, three times over, after the AP
- * was torn down for it. Nothing in this app switches the radio off, but a box
+ * disabled — which is also how an rfkill soft block reads — and the device
+ * sits `unavailable` because of it) every nmcli connect fails in a way that
+ * names nothing, three times over, after the AP was torn down for it. A radio
+ * that reads on but whose device is unavailable for another reason (driver,
+ * firmware) is not this check's: the connect reports what nmcli says. Nothing in this app switches the radio off, but a box
  * can come that way (airplane mode, a prior owner, a provisioning script).
  *
  * Switching it on again is NetworkManager's to allow: no root step turns the
