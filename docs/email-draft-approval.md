@@ -219,8 +219,19 @@ in **Settings → Email → Send approved drafts**:
   (`127.0.0.0/8`, `::1` or `localhost`). It may carry a path. It may not carry
   credentials, a query or a fragment.
 - **Auth header name** (default `Authorization`) and **value**. ClawBox sends
-  this header on every call. The value is stored in `data/config.json` and is
-  never returned to any caller once saved.
+  this header on every call. The value is never returned to any caller once
+  saved, and it is not stored in `data/config.json`, which the assistant's
+  shell can read. It is kept in `/etc/clawbox/mail-send-auth` (root-only, or
+  `root:ms365send` 0640 when the backend runs as an `ms365send` account), as
+  two lines: the endpoint it was saved for, then the value. Only the root-owned
+  helper (`clawbox-user-helper.sh mail_send_auth`) reads it, and only for the
+  running web server's own process: a `cat` from the box's user gets
+  "permission denied" and the helper refuses its shell. The value is sent only
+  while `config.json` still names the endpoint it was saved for, so an endpoint
+  rewritten in `config.json` to another listener on the box gets no value; a
+  new endpoint saved in Settings takes the value along. A value an older
+  ClawBox saved in `config.json` is moved there when the web server starts and
+  then removed from `config.json`.
 - **Show send approval cards in the chat**: off by default.
 
 Only the owner's signed-in browser can read or change this setting
@@ -442,6 +453,10 @@ decision, and this change does not make it.
 
 An assistant that may run shell commands as the box's user can read
 `data/config.json` and the session secret, like any other process of that user.
-This is the same boundary every other approval on the box has. Run the send
-backend under an OS user of its own, and keep the assistant's shell behind the
-operator approvals, and the boundary holds.
+The backend's auth value is kept out of a plain read (see above), but the web
+server runs as that same user, so an unrestricted shell could still sign in as
+a person with the session secret, or change the web server's own code or
+environment and restart it, and then be the process the helper answers. This
+is the same boundary every other approval on the box has. Run the send backend
+under an OS user of its own, and keep the assistant's shell behind the operator
+approvals, and the boundary holds.

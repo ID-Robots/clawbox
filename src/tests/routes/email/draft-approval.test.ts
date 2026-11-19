@@ -18,6 +18,23 @@ import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { saveEnv } from "../../helpers/env";
 
+// The root-owned helper that keeps the backend's auth value out of
+// config.json (TASK-2714, `mail_send_auth`), played by a file under the temp
+// CLAWBOX_ROOT; `down` is a helper that refuses or is not there yet.
+const helper = vi.hoisted(() => ({ down: false }));
+vi.mock("child_process", async (importOriginal) => {
+  const real = await importOriginal<typeof import("child_process")>();
+  const spawn = ((cmd: string, args: string[] = [], opts?: object) => {
+    if (cmd !== "/usr/bin/sudo" || args[2] !== "mail_send_auth") return real.spawn(cmd, args, opts as never);
+    const file = `${process.env.CLAWBOX_ROOT}/mail-send-auth`;
+    const script = helper.down ? "exit 77"
+      : args[3] === "get" ? 'cat "$0" 2>/dev/null; exit 0'
+      : 'IFS= read -r e; IFS= read -r v; if [ -z "$v" ]; then rm -f "$0"; else printf "%s\\n%s" "$e" "$v" > "$0"; fi';
+    return real.spawn("/bin/sh", ["-c", script, file], opts as never);
+  }) as typeof real.spawn;
+  return { ...real, spawn, default: { ...real, spawn } };
+});
+
 const SESSION_SECRET = "s".repeat(64);
 const MCP_TOKEN = "m".repeat(64);
 const OWNER = "clawbox";
@@ -147,6 +164,7 @@ beforeEach(async () => {
   process.env.CLAWBOX_USER = OWNER;
   process.env.CLAWBOX_MCP_TOKEN = MCP_TOKEN;
   delete process.env.CLAWBOX_MAIL_DRAFT_TOKEN_TTL_S;
+  helper.down = false;
   writeConfig();
   mailbox = {
     [OWNER]: {
@@ -1112,5 +1130,44 @@ describe("the settings route", () => {
     expect(config.mail_draft_approval_enabled).toBe(false);
     expect(config.mail_draft_approval_endpoint).toBeUndefined();
     expect(config.mail_draft_approval_auth_value).toBeUndefined();
+    expect(fs.existsSync(path.join(root, "mail-send-auth"))).toBe(false);
+  });
+
+  it("moves an older box's auth value out of config.json, and saves a new one only through the helper (TASK-2714)", async () => {
+    // The helper cannot take it yet (an update still installing it): used where it is, kept.
+    helper.down = true;
+    expect((await mint(ownerCookie())).status).toBe(200);
+    expect(backendCalls.at(-1)?.auth).toBe(BACKEND_AUTH);
+    expect(readConfig().mail_draft_approval_auth_value).toBe(BACKEND_AUTH);
+    // The next read moves it, then it is gone from config.json and still sent.
+    helper.down = false;
+    const { json } = await mint(ownerCookie());
+    expect(readConfig().mail_draft_approval_auth_value).toBeUndefined();
+    expect(fs.readFileSync(path.join(root, "mail-send-auth"), "utf8")).toBe(`${ENDPOINT}\n${BACKEND_AUTH}`);
+    expect((await answer(ownerCookie(), json.token, "send")).status).toBe(200);
+    expect(sends).toHaveLength(1);
+    expect(sends[0].auth).toBe(BACKEND_AUTH);
+    // A new value from the panel never reaches config.json; one the helper refuses is not saved.
+    const saved = await settings.POST(req("/setup-api/email/draft-approval", { cookie: ownerCookie(), origin: "http://clawbox.local", body: { authValue: "Bearer next-placeholder" } }));
+    expect(saved.status).toBe(200);
+    expect(JSON.stringify(readConfig())).not.toContain("next-placeholder");
+    expect(fs.readFileSync(path.join(root, "mail-send-auth"), "utf8")).toBe(`${ENDPOINT}\nBearer next-placeholder`);
+    // The value is bound to that endpoint: config.json pointed at another
+    // listener on this box (the assistant can write it) gets no value; the
+    // owner moving the endpoint in Settings takes the value along.
+    const lib = await import("@/lib/mail-draft-approval-config");
+    fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({ ...readConfig(), mail_draft_approval_endpoint: "http://127.0.0.1:9999" }));
+    expect((await lib.readDraftApprovalConfig()).config.authValue).toBeNull();
+    await lib.saveDraftApprovalConfig({ endpoint: "http://127.0.0.1:9998" });
+    expect((await lib.readDraftApprovalConfig()).config).toMatchObject({ endpoint: "http://127.0.0.1:9998", authValue: "Bearer next-placeholder" });
+    helper.down = true;
+    const refused = await settings.POST(req("/setup-api/email/draft-approval", { cookie: ownerCookie(), origin: "http://clawbox.local", body: { authValue: "Bearer lost-placeholder" } }));
+    expect(refused.status).toBeGreaterThanOrEqual(500);
+    expect(JSON.stringify(readConfig())).not.toContain("lost-placeholder");
+    // A new endpoint while an older box's value could not be moved yet keeps that value in config.json.
+    fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({ ...readConfig(), mail_draft_approval_auth_value: BACKEND_AUTH }));
+    await lib.saveDraftApprovalConfig({ endpoint: "http://127.0.0.1:9997" });
+    expect(readConfig().mail_draft_approval_auth_value).toBe(BACKEND_AUTH);
+    helper.down = false;
   });
 });

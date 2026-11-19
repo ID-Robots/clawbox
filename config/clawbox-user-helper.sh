@@ -48,7 +48,25 @@
 #                 environment. scripts/terminal-server.mjs runs this inside the
 #                 PTY instead of spawning the owner's shell.
 #
-# Both answer ONLY for a ClawBox user: an ordinary account (uid >= 1000, not
+#   mail_send_auth get|set
+#                 The auth header value ClawBox sends to the mail send backend
+#                 (docs/email-draft-approval.md, TASK-2714), kept in
+#                 /etc/clawbox/mail-send-auth: root-only, or root:ms365send 0640
+#                 where that backend's account exists, so the backend can read
+#                 it too. Never in data/config.json, which the assistant's shell
+#                 reads as the same user as the web server. The record is two
+#                 lines: the backend endpoint the value was saved for (the web
+#                 server sends it only while config.json still names that
+#                 endpoint) and the value. `get` prints it (nothing when none is
+#                 saved); `set` reads it as two lines on STDIN, and an empty
+#                 value removes it. Answers ONLY the web
+#                 server itself — the process clawbox-setup.service started —
+#                 never another process of the same account that runs sudo
+#                 (the agent's shell): exit 77 for any other caller, 65 for an
+#                 endpoint or value that is not visible ASCII (up to 300 and
+#                 4096 characters).
+#
+# verify, passwd, setpasswd, home_access and shell answer ONLY for a ClawBox user: an ordinary account (uid >= 1000, not
 # nobody) that is a member of `clawbox-users` — the group step_user_add puts
 # every account it creates in, and nothing else does — and is not in an
 # administrator group. So this is neither an oracle for root's or the owner's
@@ -64,6 +82,8 @@
 #   clawbox-user-helper.sh setpasswd     < "user\nnew\n"
 #   clawbox-user-helper.sh home_access   < "user\n"
 #   clawbox-user-helper.sh shell <user>
+#   clawbox-user-helper.sh mail_send_auth get
+#   clawbox-user-helper.sh mail_send_auth set < "endpoint\nvalue\n"
 #
 # Installed by install.sh::install_root_libexec to
 # /usr/local/libexec/clawbox/clawbox-user-helper.sh, root:root 0755.
@@ -84,6 +104,9 @@ readonly SETFACL=/usr/bin/setfacl
 # (USER_PASSWORD_MIN / USER_PASSWORD_MAX).
 readonly NEW_PASSWORD_MIN=8
 readonly NEW_PASSWORD_MAX=256
+readonly MAIL_SEND_AUTH_FILE=/etc/clawbox/mail-send-auth
+readonly MAIL_SEND_GROUP=ms365send
+readonly NOT_THE_WEB_SERVER=77
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "clawbox-user-helper: must run as root" >&2
@@ -259,6 +282,59 @@ do_shell() {
     "$login_shell" -l
 }
 
+# 0 when sudo was run by clawbox-setup.service's main process — the web
+# server — and not by any other process of its account. Walks up from this
+# helper through sudo itself (one process, or two under `use_pty`): only a
+# process named sudo whose EFFECTIVE uid is root counts as sudo, which no
+# process of the account can fake. The first process above them must be the
+# unit's MainPID.
+web_server_caller() {
+  local main pid euid
+  main="$(systemctl show -p MainPID --value clawbox-setup.service 2>/dev/null)" || return 1
+  [[ "$main" =~ ^[0-9]+$ ]] && [ "$main" -gt 1 ] || return 1
+  pid=$PPID
+  for _ in 1 2 3; do
+    [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = sudo ] || break
+    euid="$(awk '/^Uid:/ { print $3 }' "/proc/$pid/status" 2>/dev/null)"
+    [ "$euid" = 0 ] || break
+    pid="$(awk '/^PPid:/ { print $2 }' "/proc/$pid/status" 2>/dev/null)"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  done
+  [ "$pid" = "$main" ]
+}
+
+do_mail_send_auth() {
+  local endpoint="" value="" tmp
+  if ! web_server_caller; then
+    echo "clawbox-user-helper: mail_send_auth answers the ClawBox web server only" >&2
+    exit "$NOT_THE_WEB_SERVER"
+  fi
+  if [ "$1" = get ]; then
+    [ ! -f "$MAIL_SEND_AUTH_FILE" ] || cat -- "$MAIL_SEND_AUTH_FILE"
+    exit 0
+  fi
+  IFS= read -r endpoint || true
+  IFS= read -r value || true
+  if [ -z "$value" ]; then
+    rm -f -- "$MAIL_SEND_AUTH_FILE"
+    exit 0
+  fi
+  # The rule src/lib/mail-draft-approval-config.ts holds the value to.
+  if [ "${#endpoint}" -gt 300 ] || [ "${#value}" -gt 4096 ] \
+     || ! LC_ALL=C grep -qx '[ -~]*' <<<"$endpoint" || ! LC_ALL=C grep -qx '[ -~]*' <<<"$value"; then
+    exit "$BAD_NEW_PASSWORD"
+  fi
+  install -d -o root -g root -m 0755 /etc/clawbox
+  tmp="$(mktemp /etc/clawbox/.mail-send-auth.XXXXXX)"
+  printf '%s\n%s' "$endpoint" "$value" > "$tmp"
+  if getent group "$MAIL_SEND_GROUP" >/dev/null; then
+    chgrp "$MAIL_SEND_GROUP" "$tmp"
+    chmod 0640 "$tmp"
+  fi
+  mv -f -- "$tmp" "$MAIL_SEND_AUTH_FILE"
+  exit 0
+}
+
 verb="${1:-}"
 if [ "$#" -gt 0 ]; then shift; fi
 case "$verb" in
@@ -293,8 +369,15 @@ case "$verb" in
   shell)
     do_shell "$@"
     ;;
+  mail_send_auth)
+    if [ "$#" -ne 1 ] || { [ "$1" != get ] && [ "$1" != set ]; }; then
+      echo "usage: $0 mail_send_auth get|set" >&2
+      exit 64
+    fi
+    do_mail_send_auth "$1"
+    ;;
   *)
-    echo "usage: $0 verify | passwd | setpasswd | home_access | shell <user>" >&2
+    echo "usage: $0 verify | passwd | setpasswd | home_access | shell <user> | mail_send_auth get|set" >&2
     exit 64
     ;;
 esac
