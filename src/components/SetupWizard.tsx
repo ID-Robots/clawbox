@@ -468,15 +468,18 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
     window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
     let alive = true;
     let tries = 0;
+    // A box just back on a new network can answer a request or two badly: ask
+    // again, within the same budget, rather than lose the dialog.
+    const again = () => { if (alive && ++tries < 30) setTimeout(read, 2000); };
     const read = () => {
       fetch("/setup-api/wifi/connect-status", { cache: "no-store" })
         .then((r) => (r.ok ? r.json() : null))
         .then((s: WifiConnectStatus | null) => {
-          if (!alive || !s) return;
-          if (s.phase === "connected" && s.ssid) setWifiJoined({ ssid: s.ssid, ip: s.ip ?? null });
-          else if (s.phase === "connecting" && ++tries < 30) setTimeout(read, 2000);
+          if (!alive) return;
+          if (s?.phase === "connected" && s.ssid) setWifiJoined({ ssid: s.ssid, ip: s.ip ?? null });
+          else if (!s || s.phase === "connecting") again();
         })
-        .catch(() => {});
+        .catch(again);
     };
     read();
     return () => { alive = false; };

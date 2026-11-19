@@ -236,9 +236,9 @@ function nmcliReason(err: unknown): string {
 /** NetworkManager's two WiFi switches: hardware (an rfkill hard block) and
  *  software (`nmcli radio wifi`, which an rfkill soft block reads as off too).
  *  Null when nmcli cannot say. */
-async function readWifiRadio(): Promise<{ hardware: boolean; software: boolean } | null> {
+async function readWifiRadio(timeout = NETWORK_TIMEOUT): Promise<{ hardware: boolean; software: boolean } | null> {
   try {
-    const { stdout } = await exec("nmcli", ["-t", "-f", "WIFI-HW,WIFI", "radio"], { timeout: NETWORK_TIMEOUT });
+    const { stdout } = await exec("nmcli", ["-t", "-f", "WIFI-HW,WIFI", "radio"], { timeout });
     const [hardware, software] = parseNmcliTerseLine(stdout.trim());
     const known = (v: string | undefined) => v === "enabled" || v === "disabled";
     if (!known(hardware) || !known(software)) return null;
@@ -251,9 +251,9 @@ async function readWifiRadio(): Promise<{ hardware: boolean; software: boolean }
 const RADIO_ON_WAIT_MS = 10_000;
 
 /** NetworkManager still reports the WiFi device `unavailable` (its radio was off a moment ago). */
-async function wifiDeviceUnavailable(): Promise<boolean> {
+async function wifiDeviceUnavailable(timeout: number): Promise<boolean> {
   try {
-    const { stdout } = await exec("nmcli", ["-t", "-f", "DEVICE,STATE", "device"], { timeout: NETWORK_TIMEOUT });
+    const { stdout } = await exec("nmcli", ["-t", "-f", "DEVICE,STATE", "device"], { timeout });
     return stdout.split("\n").map(parseNmcliTerseLine).some(([device, state]) => device === IFACE && state === "unavailable");
   } catch {
     return false;
@@ -278,12 +278,14 @@ async function ensureWifiRadioOn(onStep: (step: ConnectStep) => void): Promise<v
     refused = nmcliReason(err);
   });
   const deadline = Date.now() + RADIO_ON_WAIT_MS;
+  // Each look gets what is left of the wait, so a stalled nmcli cannot hold it a minute past.
+  const left = () => Math.max(1000, deadline - Date.now());
   for (;;) {
-    const now = await readWifiRadio();
+    const now = await readWifiRadio(left());
     const on = Boolean(now?.hardware && now.software);
     // On, and its device out of `unavailable` (a second or two later): ready
     // to join. A device that stays unavailable is the join's to report.
-    if (on && (Date.now() >= deadline || !(await wifiDeviceUnavailable()))) return;
+    if (on && (Date.now() >= deadline || !(await wifiDeviceUnavailable(left())))) return;
     if (!on && (refused || Date.now() >= deadline)) break;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }

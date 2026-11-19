@@ -28,6 +28,8 @@ interface Box {
   join: "ok" | "wrong-key" | "fail";
   /** Reads of the device state that still say `unavailable` once the radio is on. */
   unavailableReads: number;
+  /** What the root `restart_ap` step achieves: the hotspot back up (start-ap.sh, as root, switches the radio on). */
+  restoreBringsAp: boolean;
 }
 
 let box: Box;
@@ -104,10 +106,13 @@ describe("switchToClient turns a switched-off WiFi radio on before it joins (TAS
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
-    box = { hardware: true, software: true, mayEnable: true, ap: true, stopApFails: false, join: "ok", unavailableReads: 0 };
+    box = { hardware: true, software: true, mayEnable: true, ap: true, stopApFails: false, join: "ok", unavailableReads: 0, restoreBringsAp: true };
     calls = [];
     steps = [];
     installExecFile();
+    mockStartRootStep.mockImplementation(async () => {
+      if (box.restoreBringsAp) { box.software = true; box.ap = true; }
+    });
     network = await import("@/lib/network");
   });
 
@@ -158,9 +163,24 @@ describe("switchToClient turns a switched-off WiFi radio on before it joins (TAS
     expect(calls.some(stopAp)).toBe(false);
     // Never stranded: the root service owns the hotspot, and it may switch the radio on.
     expect(mockStartRootStep).toHaveBeenCalledWith("restart_ap", expect.anything());
+    expect(box.ap).toBe(true);
+    expect(vi.mocked(console.error).mock.calls.flat().join(" ")).not.toContain("Device may be unreachable");
     // No join was tried, so no profile of ours to delete (one saved earlier is the owner's).
     expect(calls.some((l) => l.includes("connection delete"))).toBe(false);
     expect(steps).toEqual(["radio-on", "restoring"]);
+  });
+
+  it("a restore that brings no hotspot back is tried three times and then said out loud", async () => {
+    box.software = false;
+    box.ap = false;
+    box.mayEnable = false;
+    box.restoreBringsAp = false;
+    const pending = run(network.switchToClient("HomeNet", "home-pass-1", onStep));
+
+    await expect(pending).rejects.toMatchObject({ name: "WifiRadioOffError" });
+    expect(mockStartRootStep).toHaveBeenCalledTimes(3);
+    expect(box.ap).toBe(false);
+    expect(vi.mocked(console.error).mock.calls.flat().join(" ")).toContain("Device may be unreachable");
   });
 
   it("never asks to override a hardware switch", async () => {

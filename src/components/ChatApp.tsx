@@ -514,6 +514,10 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // The same key as state, for what renders from it: the progress card.
   const [boundSessionKey, setBoundSessionKey] = useState('')
   const runIdRef = useRef<string | null>(null)
+  // The wait for a starting gateway a send is in (dispatchSend); Stop ends it.
+  const startingWaitRef = useRef<AbortController | null>(null)
+  // Nor does a send outlive the chat that made it.
+  useEffect(() => () => { startingWaitRef.current?.abort() }, [])
   // Timer for the ack-only `chat.history` refetch — see ChatPopup.tsx for
   // the deferred-reply rationale. Single-flight + cleared on unmount so
   // a burst of acked turns doesn't pile up overlapping fetches.
@@ -1637,6 +1641,8 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       // included) refuses `chat.send` with its retryable startup refusal: wait
       // it out under "Starting up, one moment…" and send again, under the same
       // idempotency key, rather than show the owner that refusal.
+      const startingWait = new AbortController()
+      startingWaitRef.current = startingWait
       result = await retryWhileAgentStarting(() => transport.sendTurn({
         // The owner's words, verbatim. The adapter owns the empty-text case —
         // the gateway's is "(file attached)" — and an English sentence invented
@@ -1660,8 +1666,16 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase, detail: event.detail })
           if (isCodingAgentTool(event.name)) nudgeCodingCards()
         }
-      }), { onWaiting: () => { if (runIdRef.current === idempotencyKey) setStartingUp(true) } })
-        .finally(() => setStartingUp(false))
+      }), {
+        signal: startingWait.signal,
+        onWaiting: () => { if (runIdRef.current === idempotencyKey) setStartingUp(true) },
+      }).catch((err: unknown) => {
+        // Stop during the wait: the turn was never taken, and must not be sent later.
+        throw err instanceof Error && err.name === 'AbortError' ? new HarnessError('aborted', 'Stopped.') : err
+      }).finally(() => {
+        setStartingUp(false)
+        if (startingWaitRef.current === startingWait) startingWaitRef.current = null
+      })
     } catch (err) {
       // A Stop is not a failure and must never become a red bubble. Never render
       // a harness's own error text either: it is written for an operator reading
@@ -1834,6 +1848,8 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     // the run to finish on its own. Through the adapter so Stop reaches the turn
     // whichever harness is running it — on the gateway a `chat.abort`, on a
     // harness that answers on a promise the fetch that carries it.
+    // A send still waiting for the gateway to finish starting is not sent at all.
+    startingWaitRef.current?.abort()
     if (!adapterRef.current.capabilities.canAbortTurn) return
     await adapterRef.current.abortTurn()
   }, [])

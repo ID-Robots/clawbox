@@ -11,7 +11,7 @@
  * `unavailableDuringStartup` in its request authorization).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { dispatchChatMessage } from "@/lib/ui-events";
@@ -138,6 +138,26 @@ describe("a message sent while the gateway is still starting", () => {
     expect(keys[0]).toBeTruthy();
     expect(keys[1]).toBe(keys[0]);
     await waitFor(() => expect(screen.queryByText("chat.startingUp")).toBeNull());
+    expect(screen.queryByText(/unavailable during gateway startup/)).toBeNull();
+  });
+
+  it("Stop during that wait ends it: the turn is never sent again", async () => {
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(socket()).not.toBeNull());
+    await screen.findByText(SEED_TEXT);
+    refuseSends = 99;
+
+    act(() => { dispatchChatMessage("hello after the switch"); });
+    expect(await screen.findByText("chat.startingUp")).toBeInTheDocument();
+    expect(sends()).toHaveLength(1);
+
+    fireEvent.click(screen.getByTestId("chat-stop"));
+    // The run ends at once (a Stop, not a failure): no status line, no error.
+    await waitFor(() => expect(screen.queryByText("chat.startingUp")).toBeNull());
+    // Past the first two waits (1 s, then 2 s): nothing more goes out.
+    await act(async () => { await new Promise((r) => setTimeout(r, 3500)); });
+    expect(sends()).toHaveLength(1);
+    expect(screen.queryByText("chat.startingUp")).toBeNull();
     expect(screen.queryByText(/unavailable during gateway startup/)).toBeNull();
   });
 });

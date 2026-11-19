@@ -271,6 +271,12 @@ export interface TurnRequest {
   readonly model?: string;
   readonly reasoning?: string;
   readonly signal?: AbortSignal;
+  /**
+   * The conversation the turn goes to; the link's current one when absent. A
+   * send retried after the owner moved to another conversation (a gateway
+   * still starting refuses it) must still reach the one it was typed in.
+   */
+  readonly sessionKey?: string;
 }
 
 /**

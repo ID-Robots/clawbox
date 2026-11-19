@@ -547,7 +547,7 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     if (req.signal?.aborted) throw new HarnessError("aborted", "Stopped.");
     try {
       await this.link.request("chat.send", {
-        sessionKey: this.link.sessionKey(),
+        sessionKey: req.sessionKey ?? this.link.sessionKey(),
         message: messageText || "(file attached)",
         deliver: false,
         idempotencyKey: req.idempotencyKey,

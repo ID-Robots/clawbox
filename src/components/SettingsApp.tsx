@@ -1071,6 +1071,12 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const [wifiConnecting, setWifiConnecting] = useState(false);
   const [wifiStatus, setWifiStatus] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
   const [wifiJoined, setWifiJoined] = useState<{ ssid: string; ip: string | null } | null>(null);
+  // Settings still on screen: a connect's status poll stops once it is not.
+  const wifiPollAliveRef = useRef(true);
+  useEffect(() => {
+    wifiPollAliveRef.current = true;
+    return () => { wifiPollAliveRef.current = false; };
+  }, []);
   const [connectedSSID, setConnectedSSID] = useState<string | null>(null);
   const [wifiQuality, setWifiQuality] = useState<{ signalDbm: number | null; bitrateMbps: number | null; pingMs: number | null }>({ signalDbm: null, bitrateMbps: null, pingMs: null });
   const [ethernet, setEthernet] = useState<{ connected: boolean; iface: string | null }>({ connected: false, iface: null });
@@ -1562,7 +1568,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
   const connectWifi = async () => {
     const target = ssid.trim();
-    if (!target) return;
+    // Enter in the password field reaches here too: one switch at a time.
+    if (!target || wifiConnecting) return;
     setWifiConnecting(true);
     setWifiStatus({ type: "info", message: `${t("wifi.handoffJoining", { ssid: target })}…` });
     try {
@@ -1582,8 +1589,13 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     // drop off mid-switch when this page reaches it over that same WiFi.
     const deadline = Date.now() + 180_000;
     const poll = async () => {
+      if (!wifiPollAliveRef.current) return;
       try {
-        const s: WifiConnectStatus = await (await fetch("/setup-api/wifi/connect-status", { cache: "no-store" })).json();
+        // A box dropping off mid-switch can leave a request hanging rather than failing.
+        const s: WifiConnectStatus = await Promise.race([
+          fetch("/setup-api/wifi/connect-status", { cache: "no-store" }).then((r) => r.json()),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
+        ]);
         if (s.phase === "connected") {
           setWifiStatus(null);
           setConnectedSSID(target);
