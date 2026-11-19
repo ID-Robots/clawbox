@@ -160,4 +160,20 @@ describe("a message sent while the gateway is still starting", () => {
     expect(screen.queryByText("chat.startingUp")).toBeNull();
     expect(screen.queryByText(/unavailable during gateway startup/)).toBeNull();
   });
+
+  it("a new chat during that wait drops the old message instead of sending it into the fresh one", async () => {
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(socket()).not.toBeNull());
+    await screen.findByText(SEED_TEXT);
+    refuseSends = 99;
+
+    act(() => { dispatchChatMessage("hello after the switch"); });
+    expect(await screen.findByText("chat.startingUp")).toBeInTheDocument();
+    expect(sends()).toHaveLength(1);
+
+    fireEvent.click(screen.getByTestId("chat-tab-restart"));
+    await waitFor(() => expect(sent.some((f) => f.method === "sessions.reset")).toBe(true));
+    await act(async () => { await new Promise((r) => setTimeout(r, 3500)); });
+    expect(sends()).toHaveLength(1);
+  });
 });

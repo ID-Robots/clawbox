@@ -1591,11 +1591,13 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     const poll = async () => {
       if (!wifiPollAliveRef.current) return;
       try {
-        // A box dropping off mid-switch can leave a request hanging rather than failing.
-        const s: WifiConnectStatus = await Promise.race([
-          fetch("/setup-api/wifi/connect-status", { cache: "no-store" }).then((r) => r.json()),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
-        ]);
+        // A box dropping off mid-switch can leave a request hanging rather than
+        // failing: give each one 5 s, then call it off.
+        const request = new AbortController();
+        const timer = setTimeout(() => request.abort(), 5000);
+        const s: WifiConnectStatus = await fetch("/setup-api/wifi/connect-status", { cache: "no-store", signal: request.signal })
+          .then((r) => r.json())
+          .finally(() => clearTimeout(timer));
         if (s.phase === "connected") {
           setWifiStatus(null);
           setConnectedSSID(target);

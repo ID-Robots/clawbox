@@ -230,11 +230,15 @@ export default function WifiStep({ onNext }: WifiStepProps) {
         return;
       }
       try {
-        // A dropped hotspot can leave a request hanging rather than failing.
-        const s: WifiConnectStatus = await Promise.race([
-          fetch("/setup-api/wifi/connect-status", { cache: "no-store", signal: controller.signal }).then((r) => r.json()),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
-        ]);
+        // A dropped hotspot can leave a request hanging rather than failing:
+        // give each one 5 s, then call it off (as the step's own abort does).
+        const request = new AbortController();
+        const timer = setTimeout(() => request.abort(), 5000);
+        const stop = () => request.abort();
+        controller.signal.addEventListener("abort", stop, { once: true });
+        const s: WifiConnectStatus = await fetch("/setup-api/wifi/connect-status", { cache: "no-store", signal: request.signal })
+          .then((r) => r.json())
+          .finally(() => { clearTimeout(timer); controller.signal.removeEventListener("abort", stop); });
         if (s.phase === "failed") {
           setHandoffSsid(null);
           setConnecting(false);
