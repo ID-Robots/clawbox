@@ -569,6 +569,7 @@ const table: Record<string, string> = {
   "chat.speakFailed.refused": "この返答を読み上げられませんでした。",
   "chat.speakingReply": "返答を読み上げています… {seconds} 秒",
   "chat.spokenByCloud": "クラウドの声で読み上げました",
+  "chat.startingUp": "起動中です。少々お待ちください…",
   "chat.step.action.backup": "バックアップ",
   "chat.step.action.check": "確認",
   "chat.step.action.checks": "チェック",

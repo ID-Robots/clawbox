@@ -135,6 +135,7 @@ import { ChatDropOverlay, ChatUploadChips } from './ChatDropUploads'
 import {
   gatewayFrameError,
   isGatewayStartingRefusal,
+  retryWhileAgentStarting,
   STARTING_MAX_RETRIES,
   STARTING_RETRY_DELAY_MS,
 } from '@/lib/chat-gateway-starting'
@@ -468,6 +469,8 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // frame of a run it sends only the characters added (lib/chat-stream-message).
   const liveStreamRef = useRef(createChatStreamCursor())
   const [sending, setSending] = useState(false)
+  // The send is waiting out a gateway that is still starting (dispatchSend).
+  const [startingUp, setStartingUp] = useState(false)
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   // The coding cards — one per run of its own, one per team, live then
   // settled — and the Create card over the composer, the SAME host the mascot
@@ -1630,7 +1633,11 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     }).catch(() => { /* an older box, or offline: nothing changes here */ })
     let result: TurnResult
     try {
-      result = await transport.sendTurn({
+      // A gateway that is still starting (every restart, a network switch's
+      // included) refuses `chat.send` with its retryable startup refusal: wait
+      // it out under "Starting up, one moment…" and send again, under the same
+      // idempotency key, rather than show the owner that refusal.
+      result = await retryWhileAgentStarting(() => transport.sendTurn({
         // The owner's words, verbatim. The adapter owns the empty-text case —
         // the gateway's is "(file attached)" — and an English sentence invented
         // here would be stored as the owner's own message on both editions, read
@@ -1653,7 +1660,8 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase, detail: event.detail })
           if (isCodingAgentTool(event.name)) nudgeCodingCards()
         }
-      })
+      }), { onWaiting: () => { if (runIdRef.current === idempotencyKey) setStartingUp(true) } })
+        .finally(() => setStartingUp(false))
     } catch (err) {
       // A Stop is not a failure and must never become a red bubble. Never render
       // a harness's own error text either: it is written for an operator reading
@@ -2297,6 +2305,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
                   animation: `chatapp-bounce-dot 1s ${delay}s ease-in-out infinite`,
                 }} />
               ))}
+              {startingUp && (
+                <span role="status" style={{ marginLeft: 6, fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>{t('chat.startingUp')}</span>
+              )}
             </div>
           </div>
         )}

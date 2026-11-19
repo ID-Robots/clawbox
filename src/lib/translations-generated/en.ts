@@ -569,6 +569,7 @@ const table: Record<string, string> = {
   "chat.speakFailed.refused": "The voice could not speak this reply.",
   "chat.speakingReply": "Speaking the reply… {seconds}s",
   "chat.spokenByCloud": "Spoken by the cloud voice",
+  "chat.startingUp": "Starting up, one moment…",
   "chat.step.action.backup": "Backup",
   "chat.step.action.check": "Check",
   "chat.step.action.checks": "Checks",

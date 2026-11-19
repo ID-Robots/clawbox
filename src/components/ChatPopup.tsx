@@ -6400,9 +6400,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
           setClarifies(prev => expireClarifyCard(prev, event.requestId))
         }
       }
+      // A gateway that is still starting (every restart, a network switch's
+      // included) refuses `chat.send` with its retryable startup refusal: wait
+      // it out under "Starting up, one moment…" and send again, under the same
+      // idempotency key, rather than show the owner that refusal.
+      const startingUp = failureWordsRef.current.t('chat.startingUp')
       result = attach
         ? await (adapter.attachLiveTurn?.(onEvent) ?? Promise.resolve(null))
-        : await adapter.sendTurn({
+        : await retryWhileAgentStarting(() => adapter.sendTurn({
           text,
           attachments: sendAttachments,
           idempotencyKey,
@@ -6416,7 +6421,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
           // none at all, so a failed seeding fetch cannot silently override the
           // device's own reasoning effort with "medium".
           reasoning: hermesReasoningKnownRef.current ? hermesReasoningRef.current : '',
-        }, onEvent)
+        }, onEvent), {
+          onWaiting: () => { if (runIdRef.current === idempotencyKey) setTurnStatus(startingUp) },
+        }).then((sent) => {
+          setTurnStatus(prev => (prev === startingUp ? null : prev))
+          return sent
+        })
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line. Never render a
       // harness's own error text: it is written for an operator reading a log

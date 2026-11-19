@@ -569,6 +569,7 @@ const table: Record<string, string> = {
   "chat.speakFailed.refused": "语音无法朗读这条回复。",
   "chat.speakingReply": "正在朗读回复… {seconds} 秒",
   "chat.spokenByCloud": "由云端声音朗读",
+  "chat.startingUp": "正在启动，请稍候…",
   "chat.step.action.backup": "备份",
   "chat.step.action.check": "检查",
   "chat.step.action.checks": "检查项",

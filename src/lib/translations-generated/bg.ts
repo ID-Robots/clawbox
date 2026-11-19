@@ -569,6 +569,7 @@ const table: Record<string, string> = {
   "chat.speakFailed.refused": "Гласът не успя да изговори този отговор.",
   "chat.speakingReply": "Изговаря отговора… {seconds} с",
   "chat.spokenByCloud": "Изговорено от облачния глас",
+  "chat.startingUp": "Стартиране, един момент…",
   "chat.step.action.backup": "резервно копие",
   "chat.step.action.check": "проверка",
   "chat.step.action.checks": "проверки",
