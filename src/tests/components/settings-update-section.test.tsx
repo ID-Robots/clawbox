@@ -47,12 +47,20 @@ function jsonResponse(data: unknown) {
 describe("Settings → System Update", () => {
   // The box's preferences, as GET/POST /setup-api/preferences keep them.
   let prefs: Record<string, unknown>;
+  // The answers to the switch's read, held by hand when a case needs /users/me to be first.
+  let holdSwitch: boolean;
+  let heldSwitch: Array<() => void>;
   beforeEach(() => {
     prefs = {};
+    holdSwitch = false;
+    heldSwitch = [];
     vi.stubGlobal("fetch", vi.fn((input: string | URL | undefined, init?: RequestInit) => {
       const url = String(input ?? "");
       if (url.startsWith("/setup-api/preferences")) {
         if (init?.method === "POST") Object.assign(prefs, JSON.parse(String(init.body)));
+        else if (holdSwitch && url.includes("ui_linked_boxes")) {
+          return new Promise((resolve) => { heldSwitch.push(() => resolve(jsonResponse(prefs))); });
+        }
         return jsonResponse(prefs);
       }
       if (url.startsWith("/setup-api/update/versions")) {
@@ -71,7 +79,10 @@ describe("Settings → System Update", () => {
       return jsonResponse({});
     }));
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    delete (window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection;
+    vi.unstubAllGlobals();
+  });
 
   it("has its own entry in the sidebar, and About's tile switches to it", async () => {
     render(<SettingsApp ui={defaultUi} />);
@@ -119,6 +130,34 @@ describe("Settings → System Update", () => {
       render(<SettingsApp ui={defaultUi} />);
       fireEvent.click(await screen.findByRole("button", { name: new RegExp(label) }));
       expect(await screen.findByTestId("linked-boxes-panel")).toBeInTheDocument();
+    });
+
+    describe("a deep link to the page, when /users/me answers before the switch does", () => {
+      async function openLinkedBoxes() {
+        holdSwitch = true;
+        (window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection = "linkedBoxes";
+        render(<SettingsApp ui={defaultUi} />);
+        await waitFor(() => expect(fetch).toHaveBeenCalledWith("/setup-api/users/me", expect.anything()));
+        await waitFor(() => expect(heldSwitch).toHaveLength(1));
+        // /users/me has settled by now; the switch's answer is still out.
+        await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+        expect(screen.queryByTestId("linked-boxes-panel")).toBeNull();
+      }
+
+      it("is kept while the switch is unanswered, and opens once it is on", async () => {
+        prefs = { ui_linked_boxes: true };
+        await openLinkedBoxes();
+        await act(async () => { heldSwitch[0](); });
+        expect(await screen.findByTestId("linked-boxes-panel")).toBeInTheDocument();
+      });
+
+      it("is dropped once the switch is answered off: switching it on later does not bring the link back", async () => {
+        await openLinkedBoxes();
+        await act(async () => { heldSwitch[0](); });
+        act(() => { window.dispatchEvent(new CustomEvent(LINKED_BOXES_FLAG_EVENT, { detail: true })); });
+        await screen.findByRole("button", { name: new RegExp(label) });
+        expect(screen.queryByTestId("linked-boxes-panel")).toBeNull();
+      });
     });
 
     it("is switched on and off in Advanced options, and the sidebar follows", async () => {

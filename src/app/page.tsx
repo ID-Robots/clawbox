@@ -762,7 +762,7 @@ function ChromeDesktopInner() {
   // An experiment, off until the owner switches it on (System update → Advanced
   // options): off, the keys are left alone and the list is never asked for.
   const linkedBoxes = useLinkedBoxesFlag(boxApis && settledSessionUser?.isOwner !== false);
-  const boxSwitcher = useBoxSwitcher(linkedBoxes);
+  const boxSwitcher = useBoxSwitcher(linkedBoxes === true);
   // The ClawBox Desktop session's own screen: the Google Chrome icon
   // (src/lib/desktop-chrome-client.ts) — `missing` when the box has no Chrome
   // to start, and a click then says how to install it. Hidden elsewhere.

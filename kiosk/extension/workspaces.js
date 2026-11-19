@@ -177,6 +177,10 @@
       const refused = flag.status === 401 || flag.status === 403;
       if (!refused && !flag.ok) return null;
       const enabled = !refused && (await flag.json()).ui_linked_boxes === true;
+      // An answer that comes back after a newer read's was kept is no longer the
+      // switch's state: it neither turns the keys off nor has the list revoked.
+      // A refusal is the one answer that always goes through.
+      if (!refused && mine < flagKept) return null;
       if (mine > flagKept) {
         flagKept = mine;
         chrome.storage.local.set({ [FLAG_KEY]: enabled });

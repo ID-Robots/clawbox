@@ -359,6 +359,8 @@ describe("the experiment's switch (pref ui_linked_boxes)", () => {
     answering(() => new Promise<Response>((resolve) => { answer = resolve; }));
     render(<Flag />);
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    // Not answered yet is `null`, which is not the same as off.
+    expect(screen.getByTestId("flag")).toHaveTextContent("null");
     act(() => { window.dispatchEvent(new CustomEvent(LINKED_BOXES_FLAG_EVENT, { detail: true })); });
     expect(screen.getByTestId("flag")).toHaveTextContent("true");
     await act(async () => { answer(new Response(JSON.stringify({ ui_linked_boxes: false }), { status: 200 })); });

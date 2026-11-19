@@ -731,7 +731,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const sectionShown = useCallback((id: Section): boolean => {
     if (id === "account") return nonOwner;
     if (id === "update" && nonOwner) return false;
-    if (id === "linkedBoxes" && (nonOwner || !linkedBoxesOn)) return false;
+    if (id === "linkedBoxes" && (nonOwner || linkedBoxesOn !== true)) return false;
     if (orgMember) return ORG_USER_SETTINGS_SECTIONS.includes(id === "localModels" ? "localAi" : id);
     return true;
   }, [nonOwner, orgMember, linkedBoxesOn]);
@@ -740,10 +740,15 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // System figures' poll, a channel's status) then stops asking for it.
   useEffect(() => {
     if (sessionUser === undefined) return;
-    const shown = (id: Section) => (isChannelSection(id) ? sectionShown("channels") : sectionShown(id));
+    // A deep link to Linked ClawBoxes waits for the switch's answer (`null`):
+    // only an answered "off" sends it to Appearance. Until then the pane is not
+    // drawn either — `sectionShown` is false — so nothing of it is reachable.
+    const shown = (id: Section) => (isChannelSection(id)
+      ? sectionShown("channels")
+      : sectionShown(id) || (id === "linkedBoxes" && linkedBoxesOn === null));
     if (!shown(section)) setSection(DEFAULT_SECTION);
     if (mobileSection !== null && !shown(mobileSection)) setMobileSection(DEFAULT_SECTION);
-  }, [sessionUser, section, mobileSection, sectionShown]);
+  }, [sessionUser, section, mobileSection, sectionShown, linkedBoxesOn]);
   // The Cluster tab is the OWNER's alone and only on a box with a cluster to show
   // (a Workstation with its other Sparks configured). Not `usersAllowed`, which
   // is also true while /users/me has not answered: nobody but a settled owner

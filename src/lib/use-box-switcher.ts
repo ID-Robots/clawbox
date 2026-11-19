@@ -118,24 +118,28 @@ async function fetchList(): Promise<ListAnswer | null> {
  * Linked ClawBoxes is an experiment: off until the owner switches it on in
  * Settings → System update → Advanced options (the `ui_linked_boxes`
  * preference). Off — and while the box has not answered, or `ask` is false —
- * neither Settings' page nor the switcher is drawn. The switch tells every
- * reader on the page the moment it is saved (LINKED_BOXES_FLAG_EVENT).
+ * neither Settings' page nor the switcher is drawn: callers draw it only for
+ * `true`. `null` is "not answered yet" (an answer that failed is `false`), so
+ * a caller can tell a switch still on its way from one that is off. The switch
+ * tells every reader on the page the moment it is saved (LINKED_BOXES_FLAG_EVENT).
  */
-export function useLinkedBoxesFlag(ask: boolean): boolean {
-  const [on, setOn] = useState(false);
+export function useLinkedBoxesFlag(ask: boolean): boolean | null {
+  const [on, setOn] = useState<boolean | null>(null);
   useEffect(() => {
     if (!ask) return;
     let live = true;
     // A switch saved while the first read was still out is newer than its answer.
     let saved = false;
     void (async () => {
+      let answer = false;
       try {
         const res = await fetch(`/setup-api/preferences?keys=${LINKED_BOXES_FLAG_PREF}`, { cache: "no-store" });
         const body: Record<string, unknown> | null = res.ok ? await res.json() : null;
-        if (live && !saved) setOn(body?.[LINKED_BOXES_FLAG_PREF] === true);
+        answer = body?.[LINKED_BOXES_FLAG_PREF] === true;
       } catch {
         /* No answer is off: the experiment stays hidden. */
       }
+      if (live && !saved) setOn(answer);
     })();
     const onSaved = (e: Event) => {
       saved = true;
@@ -147,7 +151,7 @@ export function useLinkedBoxesFlag(ask: boolean): boolean {
       window.removeEventListener(LINKED_BOXES_FLAG_EVENT, onSaved);
     };
   }, [ask]);
-  return ask && on;
+  return ask ? on : false;
 }
 
 /**

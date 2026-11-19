@@ -696,7 +696,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                       {tr("update.linkedBoxesExperimental", "Linked ClawBoxes (experimental)")}
                     </div>
                     <BetaToggle
-                      enabled={linkedBoxesOn}
+                      enabled={linkedBoxesOn === true}
                       saving={linkedBoxesSaving}
                       labelledBy={linkedBoxesLabelId}
                       onEnable={() => void saveLinkedBoxes(true)}

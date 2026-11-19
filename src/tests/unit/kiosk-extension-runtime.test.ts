@@ -727,6 +727,37 @@ describe("workspaces.js", () => {
     expect(w.key("Digit2").preventDefault).not.toHaveBeenCalled();
   });
 
+  it("an older 'off' that comes back after a newer 'on' and its list is ignored: the list is not revoked and the keys stay taken", async () => {
+    const held: Array<(r: Response) => void> = [];
+    const w = load("http://localhost:3005/", { heldFlags: held, on: false });
+    for (const fn of w.winEvents["clawbox:linked-boxes-flag"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    expect(held).toHaveLength(2);
+    // The newer read says on and its list is handed over before the older one answers.
+    held[1](new Response(JSON.stringify({ ui_linked_boxes: true }), { status: 200 }));
+    await flushMicrotasks();
+    expect(sent(w)).toContainEqual(expect.objectContaining({ type: "boxes" }));
+    const fetched = w.fetchMock.mock.calls.length;
+    held[0](new Response("{}", { status: 200 }));
+    await flushMicrotasks();
+    expect(sent(w).filter((m) => m.type === "boxesRevoked")).toEqual([]);
+    expect(w.fetchMock).toHaveBeenCalledTimes(fetched);
+    expect(w.kept.linkedBoxesOn).toBe(true);
+    expect(w.key("Digit2").preventDefault).toHaveBeenCalled();
+  });
+
+  it("a refusal of the switch is never too old: it has the list revoked even after a newer 'on'", async () => {
+    const held: Array<(r: Response) => void> = [];
+    const w = load("http://localhost:3005/", { heldFlags: held, on: false });
+    for (const fn of w.winEvents["clawbox:linked-boxes-flag"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    held[1](new Response(JSON.stringify({ ui_linked_boxes: true }), { status: 200 }));
+    await flushMicrotasks();
+    held[0](new Response("{}", { status: 403 }));
+    await flushMicrotasks();
+    expect(sent(w)).toContainEqual({ type: "boxesRevoked" });
+  });
+
   it("hands the worker only the newest read: an older answer that comes back last is dropped", async () => {
     const answers: Array<(r: Response) => void> = [];
     const reply = (boxes: unknown[]) => new Response(JSON.stringify({ self: { name: "laptop" }, boxes, sessionExpiresAt: 1_900_000_000_000 }), { status: 200 });
