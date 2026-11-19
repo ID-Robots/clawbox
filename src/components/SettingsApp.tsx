@@ -1607,9 +1607,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         setWifiConnecting(false);
         return;
       }
-      setTimeout(() => { void poll(); }, 2000);
+      setTimeout(() => { void poll(); }, 1500);
     };
-    setTimeout(() => { void poll(); }, 2000);
+    setTimeout(() => { void poll(); }, 1000);
   };
 
   /* ── AI Provider ── */

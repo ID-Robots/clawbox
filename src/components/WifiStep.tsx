@@ -257,9 +257,10 @@ export default function WifiStep({ onNext }: WifiStepProps) {
         // polling goes on until the box answers again.
         setHandoffSsid(activeSsid);
       }
-      if (!controller.signal.aborted) setTimeout(poll, 2500);
+      // Often enough to show a step that takes a second or two (turning the radio on).
+      if (!controller.signal.aborted) setTimeout(poll, 1500);
     };
-    setTimeout(poll, 3000);
+    setTimeout(poll, 1000);
   };
 
   const skipEthernet = () => {

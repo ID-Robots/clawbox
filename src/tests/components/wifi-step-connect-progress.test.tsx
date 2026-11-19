@@ -84,11 +84,11 @@ describe("WifiStep while the box switches to the owner's WiFi", () => {
     render(<WifiStep onNext={onNext} />);
     await joinHomeNet();
 
-    await flush(3000);
+    await flush(1000);
     expect(screen.getByText("wifi.stepRadioOn")).toBeInTheDocument();
-    await flush(2500);
+    await flush(1500);
     expect(screen.getByText("wifi.handoffJoining:HomeNet…")).toBeInTheDocument();
-    await flush(2500);
+    await flush(1500);
 
     const dialog = screen.getByTestId("wifi-connected-dialog");
     expect(dialog).toHaveTextContent("wifi.connectedTitle");
@@ -109,7 +109,7 @@ describe("WifiStep while the box switches to the owner's WiFi", () => {
     ]);
     render(<WifiStep onNext={vi.fn()} />);
     await joinHomeNet();
-    await flush(3000);
+    await flush(1000);
 
     expect(screen.getByText("wifi.radioOff:Not authorized to perform this operation")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "wifi.connect" })).toBeEnabled();
@@ -121,7 +121,7 @@ describe("WifiStep while the box switches to the owner's WiFi", () => {
     ]);
     render(<WifiStep onNext={vi.fn()} />);
     await joinHomeNet();
-    await flush(3000);
+    await flush(1000);
 
     expect(screen.getByText("wifi.connectionFailed:No network with SSID 'HomeNet' found.")).toBeInTheDocument();
   });
@@ -131,9 +131,9 @@ describe("WifiStep while the box switches to the owner's WiFi", () => {
     render(<WifiStep onNext={vi.fn()} />);
     await joinHomeNet();
 
-    await flush(3000);
+    await flush(1000);
     expect(screen.getByText("wifi.handoffTitle")).toBeInTheDocument();
-    await flush(2500);
+    await flush(1500);
     expect(screen.queryByText("wifi.handoffTitle")).toBeNull();
     expect(screen.getByText("wifi.wrongPassword")).toBeInTheDocument();
   });

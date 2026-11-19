@@ -26,6 +26,8 @@ interface Box {
   ap: boolean;
   stopApFails: boolean;
   join: "ok" | "wrong-key" | "fail";
+  /** Reads of the device state that still say `unavailable` once the radio is on. */
+  unavailableReads: number;
 }
 
 let box: Box;
@@ -41,6 +43,10 @@ function answer(cmd: string, args: string[]): { stdout?: string; stderr?: string
     if (!box.mayEnable) return { fail: true, stderr: NOT_AUTHORIZED };
     box.software = true;
     return {};
+  }
+  if (line === "nmcli -t -f DEVICE,STATE device") {
+    const unavailable = !box.software || box.unavailableReads-- > 0;
+    return { stdout: `enP8p1s0:connected\n${IFACE}:${unavailable ? "unavailable" : "disconnected"}\n` };
   }
   if (line === `iw dev ${IFACE} info`) return { stdout: `Interface ${IFACE}\n\ttype ${box.ap ? "AP" : "managed"}\n` };
   if (line.endsWith("/stop-ap.sh")) {
@@ -98,7 +104,7 @@ describe("switchToClient turns a switched-off WiFi radio on before it joins (TAS
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
-    box = { hardware: true, software: true, mayEnable: true, ap: true, stopApFails: false, join: "ok" };
+    box = { hardware: true, software: true, mayEnable: true, ap: true, stopApFails: false, join: "ok", unavailableReads: 0 };
     calls = [];
     steps = [];
     installExecFile();
@@ -111,14 +117,19 @@ describe("switchToClient turns a switched-off WiFi radio on before it joins (TAS
     vi.restoreAllMocks();
   });
 
-  it("switches the radio on first, then joins, and reports the address it got", async () => {
+  it("switches the radio on first, waits for its device, then joins, and reports the address it got", async () => {
     box.software = false;
     box.ap = false;
+    box.unavailableReads = 2;
     const result = await run(network.switchToClient("HomeNet", "home-pass-1", onStep));
 
     expect(result.ip).toBe("192.0.2.23");
     expect(index(radioOn)).toBeGreaterThan(-1);
     expect(index(radioOn)).toBeLessThan(index(stopAp));
+    // The device reads `unavailable` for a moment after the switch; the join waits it out.
+    const deviceReads = calls.flatMap((l, i) => (l === "nmcli -t -f DEVICE,STATE device" ? [i] : []));
+    expect(deviceReads).toHaveLength(3);
+    expect(deviceReads[2]).toBeLessThan(index(stopAp));
     expect(index(stopAp)).toBeLessThan(calls.findIndex((l) => l.includes(" device wifi connect ")));
     // No hotspot was up (the radio was off): the step says "joining".
     expect(steps).toEqual(["radio-on", "joining"]);

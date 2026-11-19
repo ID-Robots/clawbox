@@ -250,6 +250,16 @@ async function readWifiRadio(): Promise<{ hardware: boolean; software: boolean }
 
 const RADIO_ON_WAIT_MS = 10_000;
 
+/** NetworkManager still reports the WiFi device `unavailable` (its radio was off a moment ago). */
+async function wifiDeviceUnavailable(): Promise<boolean> {
+  try {
+    const { stdout } = await exec("nmcli", ["-t", "-f", "DEVICE,STATE", "device"], { timeout: NETWORK_TIMEOUT });
+    return stdout.split("\n").map(parseNmcliTerseLine).some(([device, state]) => device === IFACE && state === "unavailable");
+  } catch {
+    return false;
+  }
+}
+
 /**
  * A join needs the radio on. NetworkManager keeps WiFi switched off across a
  * reboot (its state file), the device then sits `unavailable`, and every nmcli
@@ -270,8 +280,11 @@ async function ensureWifiRadioOn(onStep: (step: ConnectStep) => void): Promise<v
   const deadline = Date.now() + RADIO_ON_WAIT_MS;
   for (;;) {
     const now = await readWifiRadio();
-    if (now?.hardware && now.software) return;
-    if (refused || Date.now() >= deadline) break;
+    const on = Boolean(now?.hardware && now.software);
+    // On, and its device out of `unavailable` (a second or two later): ready
+    // to join. A device that stays unavailable is the join's to report.
+    if (on && (Date.now() >= deadline || !(await wifiDeviceUnavailable()))) return;
+    if (!on && (refused || Date.now() >= deadline)) break;
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   console.warn("[WiFi] Could not turn the radio on:", refused || "still off");
