@@ -18,6 +18,8 @@ import {
 import UpdateHandover from "@/components/UpdateHandover";
 import WeeklyUpdateCheckCard from "@/components/WeeklyUpdateCheckCard";
 import { cleanVersion, shipsOpenclaw } from "@/lib/version-utils";
+import { LINKED_BOXES_FLAG_EVENT, LINKED_BOXES_FLAG_PREF } from "@/lib/box-switcher";
+import { useLinkedBoxesFlag } from "@/lib/use-box-switcher";
 import {
   HARNESS_DOWNGRADE_CODE,
   HARNESS_DOWNGRADE_OVERRIDE_FLAG,
@@ -172,6 +174,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   // toggle would borrow the first one's name.
   const betaLabelId = useId();
   const branchInputId = useId();
+  const linkedBoxesLabelId = useId();
   const [versions, setVersions] = useState<VersionInfo | null>(null);
   const [versionsError, setVersionsError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -186,6 +189,8 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   const [branchDowngrade, setBranchDowngrade] = useState<{ branch: string | null; detail: HarnessDowngradeDetail } | null>(null);
   const [betaConfirm, setBetaConfirm] = useState(false);
   const [forceConfirm, setForceConfirm] = useState(false);
+  const linkedBoxesOn = useLinkedBoxesFlag(true);
+  const [linkedBoxesSaving, setLinkedBoxesSaving] = useState(false);
 
   // Fetched once on mount, from the same endpoint the About screen uses, so
   // the two surfaces cannot disagree about whether this box is running its own
@@ -283,6 +288,24 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       setBranchError((e as Error).message);
     } finally {
       setBranchSaving(false);
+    }
+  }, []);
+
+  // The experiment's switch is a box preference; Settings and the desktop hear
+  // it from the event once the box has stored it.
+  const saveLinkedBoxes = useCallback(async (on: boolean) => {
+    setLinkedBoxesSaving(true);
+    try {
+      const res = await fetch("/setup-api/preferences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [LINKED_BOXES_FLAG_PREF]: on }),
+      });
+      if (res.ok) window.dispatchEvent(new CustomEvent(LINKED_BOXES_FLAG_EVENT, { detail: on }));
+    } catch {
+      /* The switch stays where it was. */
+    } finally {
+      setLinkedBoxesSaving(false);
     }
   }, []);
 
@@ -664,6 +687,21 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                         onOverride={() => void saveBranch(branchDowngrade.branch, true)}
                       />
                     )}
+                  </div>
+
+                  {/* Linked ClawBoxes — an experiment, off until switched on here */}
+                  <div className="border-t border-[var(--border-subtle)] pt-4 flex items-start justify-between gap-4">
+                    <div id={linkedBoxesLabelId} className="text-sm text-gray-100 inline-flex items-center gap-2">
+                      <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">workspaces</span>
+                      {tr("update.linkedBoxesExperimental", "Linked ClawBoxes (experimental)")}
+                    </div>
+                    <BetaToggle
+                      enabled={linkedBoxesOn === true}
+                      saving={linkedBoxesSaving}
+                      labelledBy={linkedBoxesLabelId}
+                      onEnable={() => void saveLinkedBoxes(true)}
+                      onDisable={() => void saveLinkedBoxes(false)}
+                    />
                   </div>
 
                   {/* Force full update — recovery for a device left with a stale

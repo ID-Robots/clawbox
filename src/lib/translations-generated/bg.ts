@@ -4879,6 +4879,7 @@ const table: Record<string, string> = {
   "update.installed": "Инсталирана",
   "update.latest": "Последна",
   "update.latestVersion": "Вашият ClawBox работи с последната версия.",
+  "update.linkedBoxesExperimental": "Свързани ClawBox (експериментално)",
   "update.noFailureReason": "Устройството не съобщи защо актуализацията спря. Пуснете я отново; ако спре на същата стъпка, свържете се с поддръжката на ClawBox.",
   "update.notAnswering": "Рестартира се — още не отговаря",
   "update.offlineHint": "ClawBox се рестартира и още не отговаря. Този екран ще се върне към работния плот сам.",

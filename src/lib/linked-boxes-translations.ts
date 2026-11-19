@@ -11,6 +11,7 @@ import type { Locale } from "./i18n";
 
 const en = {
   "settings.linkedBoxes": "Linked ClawBoxes",
+  "update.linkedBoxesExperimental": "Linked ClawBoxes (experimental)",
   "settings.linkedBoxes.title": "Linked ClawBoxes",
   "settings.linkedBoxes.intro": "Switch between your ClawBoxes like workspaces. Ctrl+Shift+1 is always this ClawBox; Ctrl+Shift+2 to Ctrl+Shift+9 open the ones below, in this order.",
   "settings.linkedBoxes.thisBox": "This ClawBox",
@@ -53,6 +54,7 @@ type Table = Record<keyof typeof en, string>;
 
 const bg: Table = {
   "settings.linkedBoxes": "Свързани ClawBox",
+  "update.linkedBoxesExperimental": "Свързани ClawBox (експериментално)",
   "settings.linkedBoxes.title": "Свързани ClawBox",
   "settings.linkedBoxes.intro": "Превключвайте между своите ClawBox като между работни пространства. Ctrl+Shift+1 винаги е този ClawBox; Ctrl+Shift+2 до Ctrl+Shift+9 отварят тези по-долу, в този ред.",
   "settings.linkedBoxes.thisBox": "Този ClawBox",
@@ -93,6 +95,7 @@ const bg: Table = {
 
 const de: Table = {
   "settings.linkedBoxes": "Verknüpfte ClawBoxen",
+  "update.linkedBoxesExperimental": "Verknüpfte ClawBoxen (experimentell)",
   "settings.linkedBoxes.title": "Verknüpfte ClawBoxen",
   "settings.linkedBoxes.intro": "Wechseln Sie zwischen Ihren ClawBoxen wie zwischen Arbeitsflächen. Ctrl+Shift+1 ist immer diese ClawBox; Ctrl+Shift+2 bis Ctrl+Shift+9 öffnen die unten aufgeführten, in dieser Reihenfolge.",
   "settings.linkedBoxes.thisBox": "Diese ClawBox",
@@ -133,6 +136,7 @@ const de: Table = {
 
 const es: Table = {
   "settings.linkedBoxes": "ClawBox vinculadas",
+  "update.linkedBoxesExperimental": "ClawBox vinculadas (experimental)",
   "settings.linkedBoxes.title": "ClawBox vinculadas",
   "settings.linkedBoxes.intro": "Cambia entre tus ClawBox como entre espacios de trabajo. Ctrl+Shift+1 es siempre esta ClawBox; de Ctrl+Shift+2 a Ctrl+Shift+9 abren las de abajo, en este orden.",
   "settings.linkedBoxes.thisBox": "Esta ClawBox",
@@ -173,6 +177,7 @@ const es: Table = {
 
 const fr: Table = {
   "settings.linkedBoxes": "ClawBox liées",
+  "update.linkedBoxesExperimental": "ClawBox liées (expérimental)",
   "settings.linkedBoxes.title": "ClawBox liées",
   "settings.linkedBoxes.intro": "Passez d'une ClawBox à l'autre comme entre des espaces de travail. Ctrl+Shift+1 est toujours cette ClawBox ; Ctrl+Shift+2 à Ctrl+Shift+9 ouvrent celles ci-dessous, dans cet ordre.",
   "settings.linkedBoxes.thisBox": "Cette ClawBox",
@@ -213,6 +218,7 @@ const fr: Table = {
 
 const it: Table = {
   "settings.linkedBoxes": "ClawBox collegate",
+  "update.linkedBoxesExperimental": "ClawBox collegate (sperimentale)",
   "settings.linkedBoxes.title": "ClawBox collegate",
   "settings.linkedBoxes.intro": "Passa da una ClawBox all'altra come tra aree di lavoro. Ctrl+Shift+1 è sempre questa ClawBox; da Ctrl+Shift+2 a Ctrl+Shift+9 aprono quelle qui sotto, in questo ordine.",
   "settings.linkedBoxes.thisBox": "Questa ClawBox",
@@ -253,6 +259,7 @@ const it: Table = {
 
 const ja: Table = {
   "settings.linkedBoxes": "リンクした ClawBox",
+  "update.linkedBoxesExperimental": "リンクした ClawBox（実験的）",
   "settings.linkedBoxes.title": "リンクした ClawBox",
   "settings.linkedBoxes.intro": "ワークスペースのように ClawBox を切り替えます。Ctrl+Shift+1 は常にこの ClawBox、Ctrl+Shift+2〜Ctrl+Shift+9 は下の ClawBox をこの順に開きます。",
   "settings.linkedBoxes.thisBox": "この ClawBox",
@@ -293,6 +300,7 @@ const ja: Table = {
 
 const nl: Table = {
   "settings.linkedBoxes": "Gekoppelde ClawBoxen",
+  "update.linkedBoxesExperimental": "Gekoppelde ClawBoxen (experimenteel)",
   "settings.linkedBoxes.title": "Gekoppelde ClawBoxen",
   "settings.linkedBoxes.intro": "Wissel tussen je ClawBoxen zoals tussen werkruimten. Ctrl+Shift+1 is altijd deze ClawBox; Ctrl+Shift+2 tot en met Ctrl+Shift+9 openen de ClawBoxen hieronder, in deze volgorde.",
   "settings.linkedBoxes.thisBox": "Deze ClawBox",
@@ -333,6 +341,7 @@ const nl: Table = {
 
 const sv: Table = {
   "settings.linkedBoxes": "Länkade ClawBoxar",
+  "update.linkedBoxesExperimental": "Länkade ClawBoxar (experimentellt)",
   "settings.linkedBoxes.title": "Länkade ClawBoxar",
   "settings.linkedBoxes.intro": "Växla mellan dina ClawBoxar som mellan arbetsytor. Ctrl+Shift+1 är alltid den här ClawBoxen; Ctrl+Shift+2 till Ctrl+Shift+9 öppnar dem nedan, i den här ordningen.",
   "settings.linkedBoxes.thisBox": "Den här ClawBoxen",
@@ -373,6 +382,7 @@ const sv: Table = {
 
 const zh: Table = {
   "settings.linkedBoxes": "已关联的 ClawBox",
+  "update.linkedBoxesExperimental": "已关联的 ClawBox（实验性）",
   "settings.linkedBoxes.title": "已关联的 ClawBox",
   "settings.linkedBoxes.intro": "像切换工作区一样在你的 ClawBox 之间切换。Ctrl+Shift+1 始终是这台 ClawBox；Ctrl+Shift+2 到 Ctrl+Shift+9 按顺序打开下面的 ClawBox。",
   "settings.linkedBoxes.thisBox": "这台 ClawBox",

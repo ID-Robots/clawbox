@@ -32,7 +32,7 @@ const g = globalThis as Globals;
 
 // Promise callbacks and MutationObserver deliveries (both microtasks).
 async function flushMicrotasks() {
-  for (let i = 0; i < 10; i++) await Promise.resolve();
+  for (let i = 0; i < 30; i++) await Promise.resolve();
 }
 
 describe("offset.js", () => {
@@ -470,7 +470,10 @@ describe("workspaces.js", () => {
   // the indicator, and on the kiosk's own desktop the list it hands the worker.
   type Listener = (e: unknown) => void;
 
-  function load(href: string, opts: { pending?: unknown; list?: unknown; listStatus?: number; fetch?: (url: string, init: RequestInit) => Promise<Response> } = {}) {
+  // `flag`: what the box says of the experiment's switch (pref ui_linked_boxes),
+  // or `heldFlags` to answer each ask of it by hand; `on`: the switch as the
+  // page's copy of the script has it kept.
+  function load(href: string, opts: { pending?: unknown; list?: unknown; listStatus?: number; flag?: boolean; heldFlags?: Array<(r: Response) => void>; on?: boolean; fetch?: (url: string, init: RequestInit) => Promise<Response> } = {}) {
     const url = new URL(href);
     const keydown: Listener[] = [];
     const winEvents: Record<string, Listener[]> = {};
@@ -486,8 +489,27 @@ describe("workspaces.js", () => {
     win.top = win;
     const onMessage: Array<(msg: unknown, sender: unknown, respond: (r: unknown) => void) => unknown> = [];
     const sendMessage = vi.fn(async (msg: { type: string }) => (msg.type === "pendingIndicator" ? opts.pending ?? null : { ok: true }));
-    const chrome = { runtime: { sendMessage, onMessage: { addListener: (fn: (typeof onMessage)[number]) => onMessage.push(fn) } } };
-    const fetchMock = vi.fn(opts.fetch ?? (async () => new Response(JSON.stringify(opts.list ?? { self: { name: "laptop" }, boxes: [] }), { status: opts.listStatus ?? 200 })));
+    const kept: Record<string, unknown> = opts.on === false ? {} : { linkedBoxesOn: true };
+    const changed: Array<(changes: Record<string, { newValue: unknown }>, area: string) => void> = [];
+    const local = {
+      get: vi.fn(async (name: string) => ({ [name]: kept[name] })),
+      set: vi.fn(async (items: Record<string, unknown>) => {
+        for (const [name, value] of Object.entries(items)) {
+          kept[name] = value;
+          for (const fn of changed) fn({ [name]: { newValue: value } }, "local");
+        }
+      }),
+    };
+    const chrome = {
+      runtime: { sendMessage, onMessage: { addListener: (fn: (typeof onMessage)[number]) => onMessage.push(fn) } },
+      storage: { local, onChanged: { addListener: (fn: (typeof changed)[number]) => changed.push(fn) } },
+    };
+    const listFetch = opts.fetch ?? (async () => new Response(JSON.stringify(opts.list ?? { self: { name: "laptop" }, boxes: [] }), { status: opts.listStatus ?? 200 }));
+    const fetchMock = vi.fn(async (path: string, init: RequestInit) => {
+      if (path !== "/setup-api/preferences?keys=ui_linked_boxes") return listFetch(path, init);
+      if (opts.heldFlags) return new Promise<Response>((resolve) => { opts.heldFlags!.push(resolve); });
+      return new Response(JSON.stringify(opts.flag === false ? {} : { ui_linked_boxes: true }), { status: opts.listStatus ?? 200 });
+    });
     const scope: Record<string, unknown> = {};
     new Function("chrome", "window", "location", "fetch", "globalThis", source("workspaces.js"))(
       chrome, win, { origin: url.origin, pathname: url.pathname }, fetchMock, scope,
@@ -506,7 +528,7 @@ describe("workspaces.js", () => {
       for (const fn of onMessage) if (fn(msg, {}, (r) => { answer = r; }) === true) async = true;
       return { answer: () => answer, async };
     };
-    return { key, message, sendMessage, fetchMock, winEvents, scope };
+    return { key, message, sendMessage, fetchMock, winEvents, scope, local, kept };
   }
 
   const sent = (m: ReturnType<typeof load>) => m.sendMessage.mock.calls.map((c) => c[0] as { type: string });
@@ -521,8 +543,9 @@ describe("workspaces.js", () => {
     expect(document.documentElement.getAttribute("data-clawbox-box-switcher")).toBe("kiosk");
   });
 
-  it("Ctrl+Shift+<digit> asks the worker for that box, ahead of the page, by code whatever the layout", () => {
+  it("Ctrl+Shift+<digit> asks the worker for that box, ahead of the page, by code whatever the layout", async () => {
     const w = load("https://main.example.com/");
+    await flushMicrotasks();
     for (const [code, slot] of [["Digit1", 1], ["Digit2", 2], ["Digit9", 9]] as const) {
       const ev = w.key(code, { key: slot === 2 ? "ě" : "!" });
       expect(ev.preventDefault).toHaveBeenCalled();
@@ -531,8 +554,9 @@ describe("workspaces.js", () => {
     }
   });
 
-  it("leaves every other key, a key the page made up and a held key's repeats alone", () => {
+  it("leaves every other key, a key the page made up and a held key's repeats alone", async () => {
     const w = load("https://main.example.com/");
+    await flushMicrotasks();
     const before = sent(w).length;
     for (const [code, extra] of [
       ["Digit0", {}], ["Numpad2", {}], ["KeyS", {}], ["Digit2", { shiftKey: false }], ["Digit2", { ctrlKey: false }],
@@ -612,7 +636,7 @@ describe("workspaces.js", () => {
     expect(sent(w)).toContainEqual({ type: "boxes", selfName: "laptop", boxes: list.boxes, emptyText: "Leer auf Ctrl+Shift+{n}.", validUntil: 1_900_000_000_000 });
     for (const fn of w.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
     await flushMicrotasks();
-    expect(w.fetchMock).toHaveBeenCalledTimes(2);
+    expect(w.fetchMock).toHaveBeenCalledTimes(4);
     // …and answers the worker's own ask.
     const ask = w.message({ type: "readBoxes" });
     expect(ask.async).toBe(true);
@@ -637,6 +661,105 @@ describe("workspaces.js", () => {
     expect(sent(down).filter((m) => m.type === "boxes" || m.type === "boxesRevoked")).toEqual([]);
   });
 
+  it("takes no key while the experiment's switch is off, and takes it the moment it is switched on", async () => {
+    const w = load("https://main.example.com/", { on: false });
+    await flushMicrotasks();
+    const off = w.key("Digit2");
+    expect(off.preventDefault).not.toHaveBeenCalled();
+    expect(off.stopImmediatePropagation).not.toHaveBeenCalled();
+    expect(sent(w).filter((m) => m.type === "switchBox")).toEqual([]);
+    // The kiosk's desktop keeps the switch where every page's copy sees it change.
+    await w.local.set({ linkedBoxesOn: true });
+    expect(w.key("Digit2").preventDefault).toHaveBeenCalled();
+    expect(sent(w)).toContainEqual({ type: "switchBox", slot: 2 });
+    await w.local.set({ linkedBoxesOn: false });
+    expect(w.key("Digit3").preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("on the kiosk's own desktop, asks for the switch before the list: off, the list is never read and the worker forgets it", async () => {
+    const w = load("http://localhost:3005/", { flag: false, on: false });
+    await flushMicrotasks();
+    expect(w.fetchMock).toHaveBeenCalledWith("/setup-api/preferences?keys=ui_linked_boxes", expect.objectContaining({ credentials: "same-origin" }));
+    expect(w.fetchMock).not.toHaveBeenCalledWith("/setup-api/linked-boxes", expect.anything());
+    expect(sent(w).filter((m) => m.type === "boxes")).toEqual([]);
+    expect(sent(w)).toContainEqual({ type: "boxesRevoked" });
+    expect(w.kept.linkedBoxesOn).toBe(false);
+    // The worker's own ask is answered the same way.
+    const ask = w.message({ type: "readBoxes" });
+    await flushMicrotasks();
+    expect(ask.answer()).toEqual({ revoked: true });
+    expect(w.fetchMock).not.toHaveBeenCalledWith("/setup-api/linked-boxes", expect.anything());
+  });
+
+  it("reads the switch again when Settings changes it: switched on, the list goes to the worker and the keys are taken", async () => {
+    const opts = { flag: false, on: false };
+    const w = load("http://localhost:3005/", opts);
+    await flushMicrotasks();
+    expect(w.key("Digit2").preventDefault).not.toHaveBeenCalled();
+    opts.flag = true;
+    for (const fn of w.winEvents["clawbox:linked-boxes-flag"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    expect(w.kept.linkedBoxesOn).toBe(true);
+    expect(sent(w)).toContainEqual(expect.objectContaining({ type: "boxes" }));
+    expect(w.key("Digit2").preventDefault).toHaveBeenCalled();
+  });
+
+  it("a refused read of the switch is off, and one that got no answer leaves it where it was", async () => {
+    const refused = load("http://localhost:3005/", { listStatus: 403 });
+    await flushMicrotasks();
+    expect(refused.kept.linkedBoxesOn).toBe(false);
+    const down = load("http://localhost:3005/", { listStatus: 502 });
+    await flushMicrotasks();
+    expect(down.kept.linkedBoxesOn).toBe(true);
+  });
+
+  it("keeps the switch from the newest read only: an older answer that comes back last cannot turn the keys back on", async () => {
+    const held: Array<(r: Response) => void> = [];
+    const w = load("http://localhost:3005/", { heldFlags: held, on: false });
+    for (const fn of w.winEvents["clawbox:linked-boxes-flag"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    expect(held).toHaveLength(2);
+    held[1](new Response("{}", { status: 200 }));
+    await flushMicrotasks();
+    held[0](new Response(JSON.stringify({ ui_linked_boxes: true }), { status: 200 }));
+    await flushMicrotasks();
+    expect(w.kept.linkedBoxesOn).toBe(false);
+    expect(w.key("Digit2").preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("an older 'off' that comes back after a newer 'on' and its list is ignored: the list is not revoked and the keys stay taken", async () => {
+    const held: Array<(r: Response) => void> = [];
+    const w = load("http://localhost:3005/", { heldFlags: held, on: false });
+    for (const fn of w.winEvents["clawbox:linked-boxes-flag"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    expect(held).toHaveLength(2);
+    // The newer read says on and its list is handed over before the older one answers.
+    held[1](new Response(JSON.stringify({ ui_linked_boxes: true }), { status: 200 }));
+    await flushMicrotasks();
+    expect(sent(w)).toContainEqual(expect.objectContaining({ type: "boxes" }));
+    const fetched = w.fetchMock.mock.calls.length;
+    held[0](new Response("{}", { status: 200 }));
+    await flushMicrotasks();
+    expect(sent(w).filter((m) => m.type === "boxesRevoked")).toEqual([]);
+    expect(w.fetchMock).toHaveBeenCalledTimes(fetched);
+    expect(w.kept.linkedBoxesOn).toBe(true);
+    expect(w.key("Digit2").preventDefault).toHaveBeenCalled();
+  });
+
+  it("a refusal of the switch is never too old: it has the list revoked even after a newer 'on'", async () => {
+    const held: Array<(r: Response) => void> = [];
+    const w = load("http://localhost:3005/", { heldFlags: held, on: false });
+    for (const fn of w.winEvents["clawbox:linked-boxes-flag"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    held[1](new Response(JSON.stringify({ ui_linked_boxes: true }), { status: 200 }));
+    await flushMicrotasks();
+    held[0](new Response("{}", { status: 403 }));
+    await flushMicrotasks();
+    expect(sent(w)).toContainEqual({ type: "boxesRevoked" });
+    expect(w.kept.linkedBoxesOn).toBe(false);
+    expect(w.key("Digit2").preventDefault).not.toHaveBeenCalled();
+  });
+
   it("hands the worker only the newest read: an older answer that comes back last is dropped", async () => {
     const answers: Array<(r: Response) => void> = [];
     const reply = (boxes: unknown[]) => new Response(JSON.stringify({ self: { name: "laptop" }, boxes, sessionExpiresAt: 1_900_000_000_000 }), { status: 200 });
@@ -647,6 +770,7 @@ describe("workspaces.js", () => {
     // The page opened (read 1), then Settings saved (read 2); read 2 answers first.
     const w = load("http://localhost:3005/", { fetch: () => new Promise((resolve) => { answers.push(resolve); }) });
     for (const fn of w.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
     expect(answers).toHaveLength(2);
     answers[1](reply([NEW]));
     await flushMicrotasks();
@@ -658,6 +782,7 @@ describe("workspaces.js", () => {
     answers.length = 0;
     const r = load("http://localhost:3005/", { fetch: () => new Promise((resolve) => { answers.push(resolve); }) });
     for (const fn of r.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
     answers[1](new Response("{}", { status: 401 }));
     await flushMicrotasks();
     answers[0](reply([OLD]));
@@ -670,6 +795,7 @@ describe("workspaces.js", () => {
       answers.length = 0;
       const o = load("http://localhost:3005/", { fetch: () => new Promise((resolve) => { answers.push(resolve); }) });
       for (const fn of o.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
+      await flushMicrotasks();
       answers[1](newer());
       await flushMicrotasks();
       answers[0](new Response("{}", { status: 403 }));
@@ -681,6 +807,7 @@ describe("workspaces.js", () => {
     answers.length = 0;
     const a = load("http://localhost:3005/", { fetch: () => new Promise((resolve) => { answers.push(resolve); }) });
     const ask = a.message({ type: "readBoxes" });
+    await flushMicrotasks();
     answers[1](reply([NEW]));
     await flushMicrotasks();
     expect(ask.answer()).toMatchObject({ boxes: [NEW] });

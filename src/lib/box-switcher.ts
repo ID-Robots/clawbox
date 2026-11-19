@@ -40,6 +40,15 @@ export const LINKED_BOXES_CHANGED_EVENT = "clawbox:linked-boxes-changed";
 
 export const LINKED_BOXES_URL = "/setup-api/linked-boxes";
 
+/**
+ * The box preference (`pref:ui_linked_boxes`) that switches Linked ClawBoxes on
+ * — Settings → System update → Advanced options. Off until it is `true`.
+ */
+export const LINKED_BOXES_FLAG_PREF = "ui_linked_boxes";
+
+/** Fired on `window`, with the new value as `detail`, after that switch is saved. */
+export const LINKED_BOXES_FLAG_EVENT = "clawbox:linked-boxes-flag";
+
 /** The fragment that carries the numbering to the next box. */
 export const CARRY_PREFIX = "#clawbox-boxes=";
 /** sessionStorage: the numbering this tab arrived with (this origin's copy). */

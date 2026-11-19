@@ -4879,6 +4879,7 @@ const table: Record<string, string> = {
   "update.installed": "インストール済み",
   "update.latest": "最新版",
   "update.latestVersion": "ClawBoxは最新バージョンで動作しています。",
+  "update.linkedBoxesExperimental": "リンクした ClawBox（実験的）",
   "update.noFailureReason": "アップデートが停止した理由を端末が報告しませんでした。もう一度アップデートを実行し、同じステップで止まる場合は ClawBox サポートにお問い合わせください。",
   "update.notAnswering": "再起動中 — まだ応答がありません",
   "update.offlineHint": "ClawBox は再起動中で、まだ応答していません。この画面は自動でデスクトップに戻ります。",
