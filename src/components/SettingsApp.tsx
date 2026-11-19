@@ -55,6 +55,7 @@ import ComputerUsePanel from "./ComputerUsePanel";
 import UsersPanel from "./UsersPanel";
 import { useSettledSessionUser } from "@/lib/use-session-user";
 import { isOrgMember, ORG_USER_SETTINGS_SECTIONS } from "@/lib/org-mode";
+import { useLinkedBoxesFlag } from "@/lib/use-box-switcher";
 import OwnPasswordCard from "./OwnPasswordCard";
 import MonitorsPanel from "./MonitorsPanel";
 import LinkedBoxesPanel from "./LinkedBoxesPanel";
@@ -724,13 +725,16 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // its jobs) are the owner's on an organisation box (src/lib/org-mode.ts).
   // They wait for /users/me, so nobody is asked before it is known who is looking.
   const boxReads = sessionUser !== undefined && !orgMember;
+  // Linked ClawBoxes is an experiment: its page is drawn only once the owner
+  // has switched it on (System update → Advanced options).
+  const linkedBoxesOn = useLinkedBoxesFlag(!nonOwner && !orgMember);
   const sectionShown = useCallback((id: Section): boolean => {
     if (id === "account") return nonOwner;
     if (id === "update" && nonOwner) return false;
-    if (id === "linkedBoxes" && nonOwner) return false;
+    if (id === "linkedBoxes" && (nonOwner || !linkedBoxesOn)) return false;
     if (orgMember) return ORG_USER_SETTINGS_SECTIONS.includes(id === "localModels" ? "localAi" : id);
     return true;
-  }, [nonOwner, orgMember]);
+  }, [nonOwner, orgMember, linkedBoxesOn]);
   // Once it is known who is looking, a section they are not drawn is not kept
   // either — not only not rendered: every effect keyed on the section (the
   // System figures' poll, a channel's status) then stops asking for it.

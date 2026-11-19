@@ -4878,6 +4878,7 @@ const table: Record<string, string> = {
   "update.installed": "已安装",
   "update.latest": "最新版本",
   "update.latestVersion": "你的 ClawBox 已在运行最新版本。",
+  "update.linkedBoxesExperimental": "已关联的 ClawBox（实验性）",
   "update.noFailureReason": "设备没有说明更新停止的原因。请重新运行更新；如果仍停在同一步，请联系 ClawBox 支持。",
   "update.notAnswering": "正在重启 — 暂无响应",
   "update.offlineHint": "ClawBox 正在重启，尚未响应。此界面会自行回到桌面。",

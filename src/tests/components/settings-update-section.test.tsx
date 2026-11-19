@@ -44,9 +44,16 @@ function jsonResponse(data: unknown) {
  * beta channel, branch pin, force — and About's tile only points there.
  */
 describe("Settings → System Update", () => {
+  // The box's preferences, as GET/POST /setup-api/preferences keep them.
+  let prefs: Record<string, unknown>;
   beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn((input: string | URL | undefined) => {
+    prefs = {};
+    vi.stubGlobal("fetch", vi.fn((input: string | URL | undefined, init?: RequestInit) => {
       const url = String(input ?? "");
+      if (url.startsWith("/setup-api/preferences")) {
+        if (init?.method === "POST") Object.assign(prefs, JSON.parse(String(init.body)));
+        return jsonResponse(prefs);
+      }
       if (url.startsWith("/setup-api/update/versions")) {
         return jsonResponse({ clawbox: { current: "v4.0.0", target: "v4.1.0", updateAvailable: true }, openclaw: { current: "2.0.0", target: null } });
       }
@@ -85,5 +92,47 @@ describe("Settings → System Update", () => {
     render(<SettingsApp ui={defaultUi} />);
     const nav = await screen.findByRole("navigation");
     await waitFor(() => expect(nav.textContent).toContain("v4.0.0 → v4.1.0"));
+  });
+
+  describe("Linked ClawBoxes (experimental)", () => {
+    const label = translations.en["settings.linkedBoxes"];
+    const navEntries = (nav: HTMLElement) => Array.from(nav.querySelectorAll("button")).map((b) => b.textContent ?? "");
+    const flagAsked = () => expect(fetch).toHaveBeenCalledWith(
+      "/setup-api/preferences?keys=ui_linked_boxes",
+      expect.anything(),
+    );
+
+    it("has no page in the sidebar while the switch is off", async () => {
+      render(<SettingsApp ui={defaultUi} />);
+      const nav = await screen.findByRole("navigation");
+      await waitFor(flagAsked);
+      expect(navEntries(nav).some((e) => e.includes(label))).toBe(false);
+    });
+
+    it("has its page in the sidebar once the switch is on, and opens it", async () => {
+      prefs = { ui_linked_boxes: true };
+      render(<SettingsApp ui={defaultUi} />);
+      fireEvent.click(await screen.findByRole("button", { name: new RegExp(label) }));
+      expect(await screen.findByTestId("linked-boxes-panel")).toBeInTheDocument();
+    });
+
+    it("is switched on and off in Advanced options, and the sidebar follows", async () => {
+      render(<SettingsApp ui={defaultUi} />);
+      const nav = await screen.findByRole("navigation");
+      fireEvent.click(screen.getByRole("button", { name: new RegExp(translations.en["settings.systemUpdate"]) }));
+      fireEvent.click(await screen.findByRole("button", { name: translations.en["update.advancedOptions"] }));
+      const toggle = await screen.findByRole("switch", { name: translations.en["update.linkedBoxesExperimental"] });
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+
+      fireEvent.click(toggle);
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+      expect(prefs).toEqual({ ui_linked_boxes: true });
+      expect(navEntries(nav).some((e) => e.includes(label))).toBe(true);
+
+      fireEvent.click(toggle);
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
+      expect(prefs).toEqual({ ui_linked_boxes: false });
+      expect(navEntries(nav).some((e) => e.includes(label))).toBe(false);
+    });
   });
 });

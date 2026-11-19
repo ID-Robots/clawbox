@@ -82,7 +82,7 @@ import { samePairingRequests, sameSelection, type PairingRequestCard } from "@/l
 import { mergeDesktopApps, knownSetChanged } from "@/lib/desktop-app-merge";
 import { PublicLinkBadge, PublicLinkDialog, PublicLinkMenuItems, usePublicAppLinks } from "@/components/PublicAppLink";
 import BoxSwitcherIndicator from "@/components/BoxSwitcherIndicator";
-import { useBoxSwitcher } from "@/lib/use-box-switcher";
+import { useBoxSwitcher, useLinkedBoxesFlag } from "@/lib/use-box-switcher";
 import {
   layoutIcons,
   layoutsEqual,
@@ -759,7 +759,10 @@ function ChromeDesktopInner() {
   // first, like workspaces (src/lib/box-switcher.ts). The owner's alone — the
   // list is — and only once it is known who is signed in. In the kiosk Chrome
   // the extension takes the keys instead and keeps each box in its own tab.
-  const boxSwitcher = useBoxSwitcher(boxApis && settledSessionUser?.isOwner !== false);
+  // An experiment, off until the owner switches it on (System update → Advanced
+  // options): off, the keys are left alone and the list is never asked for.
+  const linkedBoxes = useLinkedBoxesFlag(boxApis && settledSessionUser?.isOwner !== false);
+  const boxSwitcher = useBoxSwitcher(linkedBoxes);
   // The ClawBox Desktop session's own screen: the Google Chrome icon
   // (src/lib/desktop-chrome-client.ts) — `missing` when the box has no Chrome
   // to start, and a click then says how to install it. Hidden elsewhere.

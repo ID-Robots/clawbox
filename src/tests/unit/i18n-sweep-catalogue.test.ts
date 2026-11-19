@@ -37,6 +37,7 @@ const UPDATE_KEYS = [
   "update.upToDateShort", "update.agent", "update.agentSub", "update.pinnedByClawbox",
   "update.advancedOptions", "update.betaChannel", "update.betaChannelHelp",
   "update.branchOverride", "update.branchOverrideHelp", "update.save", "update.saving",
+  "update.linkedBoxesExperimental",
   "update.forceFullUpdate", "update.forceFullUpdateHelp", "update.betaConfirmTitle",
   "update.betaConfirmAction", "update.betaConfirmBody", "update.forceConfirmTitle",
   "update.forceConfirmAction", "update.forceConfirmBody", "update.forceConfirmReboot",

@@ -18,6 +18,8 @@ import {
   CARRIED_STORAGE_KEY,
   KIOSK_SWITCHER_ATTR,
   LINKED_BOXES_CHANGED_EVENT,
+  LINKED_BOXES_FLAG_EVENT,
+  LINKED_BOXES_FLAG_PREF,
   LINKED_BOXES_URL,
   MAX_WORKSPACES,
   boxSwitchSlot,
@@ -110,6 +112,37 @@ async function fetchList(): Promise<ListAnswer | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Linked ClawBoxes is an experiment: off until the owner switches it on in
+ * Settings → System update → Advanced options (the `ui_linked_boxes`
+ * preference). Off — and while the box has not answered, or `ask` is false —
+ * neither Settings' page nor the switcher is drawn. The switch tells every
+ * reader on the page the moment it is saved (LINKED_BOXES_FLAG_EVENT).
+ */
+export function useLinkedBoxesFlag(ask: boolean): boolean {
+  const [on, setOn] = useState(false);
+  useEffect(() => {
+    if (!ask) return;
+    let live = true;
+    void (async () => {
+      try {
+        const res = await fetch(`/setup-api/preferences?keys=${LINKED_BOXES_FLAG_PREF}`, { cache: "no-store" });
+        const body: Record<string, unknown> | null = res.ok ? await res.json() : null;
+        if (live) setOn(body?.[LINKED_BOXES_FLAG_PREF] === true);
+      } catch {
+        /* No answer is off: the experiment stays hidden. */
+      }
+    })();
+    const onSaved = (e: Event) => setOn((e as CustomEvent<unknown>).detail === true);
+    window.addEventListener(LINKED_BOXES_FLAG_EVENT, onSaved);
+    return () => {
+      live = false;
+      window.removeEventListener(LINKED_BOXES_FLAG_EVENT, onSaved);
+    };
+  }, [ask]);
+  return ask && on;
 }
 
 /**

@@ -4878,6 +4878,7 @@ const table: Record<string, string> = {
   "update.installed": "Installée",
   "update.latest": "Dernière",
   "update.latestVersion": "Votre ClawBox fonctionne avec la dernière version.",
+  "update.linkedBoxesExperimental": "ClawBox liées (expérimental)",
   "update.noFailureReason": "L'appareil n'a pas indiqué pourquoi la mise à jour s'est arrêtée. Relancez-la ; si elle s'arrête à la même étape, contactez l'assistance ClawBox.",
   "update.notAnswering": "Redémarrage — ne répond pas encore",
   "update.offlineHint": "ClawBox redémarre et ne répond pas encore. Cet écran reviendra au bureau tout seul.",
