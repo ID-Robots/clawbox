@@ -2361,6 +2361,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
     if (error) tabErrorsRef.current.set(key, error)
   }, [])
   const runIdRef = useRef<string | null>(null)
+  // The waits for a starting gateway sends are in (dispatchTurn), one per
+  // conversation: Stop ends the one on screen, a reset its own conversation's.
+  const startingWaitsRef = useRef(new Map<string, AbortController>())
+  // Nor does a send outlive the chat that made it.
+  useEffect(() => () => { for (const wait of startingWaitsRef.current.values()) wait.abort() }, [])
   // What the gateway said about a run before it declared the turn dead — the
   // provider's own refusal rides on the lifecycle frames, never on the `chat`
   // error itself. See lib/chat-run-failure.ts.
@@ -4280,6 +4285,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
     // switch tabs while the transcript delete is in flight, and the record to
     // clear is the reset conversation's, not the one on screen by then.
     const key = sessionKeyRef.current
+    // A send still waiting for a starting gateway belongs to the conversation
+    // being cleared: it must not land in the fresh one.
+    startingWaitsRef.current.get(key)?.abort()
     await adapter.resetSession()
     // The next turn opens a fresh session on whatever the header names.
     noteConversationModel(key)
@@ -4540,6 +4548,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
     // owner's conversation back on disk and the picture billed against a
     // conversation that no longer exists.
     drawingRef.current.get(key)?.abort()
+    // Likewise a send of THIS tab still waiting for a starting gateway: it
+    // must not reach the conversation this close is about to delete.
+    startingWaitsRef.current.get(key)?.abort()
     const dispose = async () => {
       // switchSession marks the key busy on the way out when its run is
       // live; the tab is gone now, so the mark must go too.
@@ -6400,12 +6411,21 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
           setClarifies(prev => expireClarifyCard(prev, event.requestId))
         }
       }
+      // A gateway that is still starting (every restart, a network switch's
+      // included) refuses `chat.send` with its retryable startup refusal: wait
+      // it out under "Starting up, one moment…" and send again, under the same
+      // idempotency key, rather than show the owner that refusal.
+      const startingUp = failureWordsRef.current.t('chat.startingUp')
+      const startingWait = new AbortController()
+      startingWaitsRef.current.set(keyAtSend, startingWait)
       result = attach
         ? await (adapter.attachLiveTurn?.(onEvent) ?? Promise.resolve(null))
-        : await adapter.sendTurn({
+        : await retryWhileAgentStarting(() => adapter.sendTurn({
           text,
           attachments: sendAttachments,
           idempotencyKey,
+          // Every try to the conversation it was typed in, a tab switch during the wait included.
+          sessionKey: keyAtSend,
           // Ignored by a harness with no such dial. Read here, at send time, so a
           // pill changed mid-run applies to the NEXT turn rather than
           // retroactively to this one.
@@ -6416,7 +6436,18 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
           // none at all, so a failed seeding fetch cannot silently override the
           // device's own reasoning effort with "medium".
           reasoning: hermesReasoningKnownRef.current ? hermesReasoningRef.current : '',
-        }, onEvent)
+        }, onEvent), {
+          signal: startingWait.signal,
+          onWaiting: () => { if (runIdRef.current === idempotencyKey) setTurnStatus(startingUp) },
+        }).then((sent) => {
+          setTurnStatus(prev => (prev === startingUp ? null : prev))
+          return sent
+        }, (err: unknown) => {
+          // Stop during the wait: the turn was never taken, and must not be sent later.
+          throw err instanceof Error && err.name === 'AbortError' ? new HarnessError('aborted', 'Stopped.') : err
+        }).finally(() => {
+          if (startingWaitsRef.current.get(keyAtSend) === startingWait) startingWaitsRef.current.delete(keyAtSend)
+        })
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line. Never render a
       // harness's own error text: it is written for an operator reading a log
@@ -6945,6 +6976,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
     // part of what the owner is stopping, whether it is sounding yet or still
     // being made (an unnamed stop also keeps a queued one from starting).
     if (runIdRef.current && streamedSpeechRef.current?.runKey === runIdRef.current) stopSpokenReply()
+    // A send still waiting for the gateway to finish starting is not sent at all.
+    startingWaitsRef.current.get(sessionKeyRef.current)?.abort()
     try {
       await adapter.abortTurn()
     } catch (err) {

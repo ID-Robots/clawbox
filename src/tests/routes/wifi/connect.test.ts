@@ -7,20 +7,27 @@ import { installSessionFixture, type SessionFixture } from "@/tests/helpers/sess
 
 // vi.mock is hoisted above this file's top-level code, so the auth-error class
 // the factory returns must be built inside vi.hoisted() to exist when it runs.
-const { FakeWifiAuthError } = vi.hoisted(() => {
+const { FakeWifiAuthError, FakeWifiRadioOffError } = vi.hoisted(() => {
   class FakeWifiAuthError extends Error {
     constructor(message?: string) {
       super(message);
       this.name = "WifiAuthError";
     }
   }
-  return { FakeWifiAuthError };
+  class FakeWifiRadioOffError extends Error {
+    constructor(message?: string) {
+      super(message);
+      this.name = "WifiRadioOffError";
+    }
+  }
+  return { FakeWifiAuthError, FakeWifiRadioOffError };
 });
 
 vi.mock("@/lib/network", () => ({
   switchToClient: vi.fn(),
   setConnectStatus: vi.fn(),
   WifiAuthError: FakeWifiAuthError,
+  WifiRadioOffError: FakeWifiRadioOffError,
 }));
 
 // config.json in memory; data/hotspot.env for real, under a temp CLAWBOX_ROOT,
@@ -46,7 +53,7 @@ vi.mock("@/lib/config-store", () => ({
   })),
 }));
 
-import { switchToClient, setConnectStatus, WifiAuthError } from "@/lib/network";
+import { switchToClient, setConnectStatus, WifiAuthError, WifiRadioOffError } from "@/lib/network";
 import { set } from "@/lib/config-store";
 
 const mockSwitchToClient = vi.mocked(switchToClient);
@@ -76,7 +83,7 @@ describe("POST /setup-api/wifi/connect", () => {
     vi.clearAllMocks();
     session = installSessionFixture();
 
-    mockSwitchToClient.mockResolvedValue({ message: "connected" });
+    mockSwitchToClient.mockResolvedValue({ message: "connected", ip: null });
     for (const k of Object.keys(store)) delete store[k];
     root = mkdtempSync(path.join(tmpdir(), "clawbox-wifi-connect-"));
     mkdirSync(path.join(root, "data"), { recursive: true });
@@ -126,15 +133,49 @@ describe("POST /setup-api/wifi/connect", () => {
 
   it("records connected and marks configured after a successful background switch", async () => {
     vi.useFakeTimers();
-    mockSwitchToClient.mockResolvedValue({ message: "ok" });
+    mockSwitchToClient.mockResolvedValue({ message: "ok", ip: "192.0.2.23" });
 
     await wifiConnectPost(jsonRequest({ ssid: "MyNetwork", password: "secret123" }));
     await vi.advanceTimersByTimeAsync(1600);
 
-    expect(mockSwitchToClient).toHaveBeenCalledWith("MyNetwork", "secret123");
+    expect(mockSwitchToClient).toHaveBeenCalledWith("MyNetwork", "secret123", expect.any(Function));
     expect(store).toMatchObject({ wifi_configured: true, hotspot_enabled: false });
+    // The address the box got on that network: the "Connected" dialog shows it.
     expect(mockSetConnectStatus).toHaveBeenLastCalledWith(
-      expect.objectContaining({ phase: "connected", ssid: "MyNetwork" }),
+      expect.objectContaining({ phase: "connected", ssid: "MyNetwork", ip: "192.0.2.23" }),
+    );
+  });
+
+  it("records each step of the switch while it is connecting", async () => {
+    vi.useFakeTimers();
+    let finish!: () => void;
+    mockSwitchToClient.mockImplementation(async (_ssid, _password, onStep) => {
+      onStep?.("radio-on");
+      onStep?.("switching");
+      await new Promise<void>((resolve) => { finish = resolve; });
+      return { message: "ok", ip: null };
+    });
+
+    await wifiConnectPost(jsonRequest({ ssid: "MyNetwork", password: "secret123" }));
+    await vi.advanceTimersByTimeAsync(1600);
+
+    const steps = mockSetConnectStatus.mock.calls.map(([s]) => s).filter((s) => s.phase === "connecting");
+    expect(steps.map((s) => s.step ?? null)).toEqual([null, "radio-on", "switching"]);
+    expect(steps.every((s) => s.ssid === "MyNetwork" && s.reason === null)).toBe(true);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("records reason=radio-off, with why, when the radio could not be turned on", async () => {
+    vi.useFakeTimers();
+    mockSwitchToClient.mockRejectedValue(new WifiRadioOffError("Not authorized to perform this operation"));
+
+    await wifiConnectPost(jsonRequest({ ssid: "Network", password: "pass" }));
+    await vi.advanceTimersByTimeAsync(1600);
+
+    expect(mockSet).toHaveBeenCalledWith("wifi_configured", false);
+    expect(mockSetConnectStatus).toHaveBeenLastCalledWith(
+      expect.objectContaining({ phase: "failed", reason: "radio-off", message: "Not authorized to perform this operation" }),
     );
   });
 

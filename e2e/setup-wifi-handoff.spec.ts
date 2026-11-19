@@ -6,7 +6,7 @@ import { installClawboxMocks, wizardStepAfterWifi } from "./helpers/clawbox";
  * single-radio box tears down the setup hotspot, so WifiStep raises the
  * full-screen WifiHandoffOverlay, which probes the box's home-network address
  * (an <img> load — fetch is CORS-blocked cross-origin) and redirects there
- * once the box answers.
+ * once the box answers. The wizard there shows the "Connected" dialog (TASK-2702).
  *
  * There's no second box in e2e, so the home-network origin
  * (http://clawbox.local — useDeviceAddress's fallback, since the mocks answer
@@ -40,13 +40,30 @@ test("wifi connect hands off through the overlay and resumes the wizard", async 
     }),
   );
 
+  // The switch takes the box out of this page's reach (the hotspot goes) until
+  // the browser follows it to its new address; there it reports the join.
+  let hotspotGone = false;
+  let landed = false;
+  page.on("request", (req) => {
+    if (req.method() === "POST" && new URL(req.url()).pathname === "/setup-api/wifi/connect") hotspotGone = true;
+  });
+  await page.route("**/setup-api/wifi/connect-status", (route) =>
+    hotspotGone && !landed
+      ? route.abort("internetdisconnected")
+      : route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ phase: "connected", ssid: "Clawbox Lab", reason: null, message: "", ip: "192.0.2.23" }),
+      }),
+  );
+
   // The box's "new address" on the home network.
   await page.route("http://clawbox.local/clawbox-icon.png*", (route) =>
     route.fulfill({ contentType: "image/png", body: PROBE_PNG }),
   );
-  await page.route("http://clawbox.local/setup", (route) =>
-    route.fulfill({ status: 302, headers: { location: `${baseURL}/setup` } }),
-  );
+  await page.route("http://clawbox.local/setup*", (route) => {
+    landed = true;
+    return route.fulfill({ status: 302, headers: { location: `${baseURL}/setup?wifi=connected` } });
+  });
 
   await page.goto("/setup");
   await expect(page.getByTestId("setup-step-wifi")).toBeVisible();
@@ -66,6 +83,14 @@ test("wifi connect hands off through the overlay and resumes the wizard", async 
 
   // Probe answers → overlay redirects to the box's new address → bounced back
   // to the test origin → the wizard reloads and resumes PAST the WiFi step
-  // (the connect mock set wifi_configured).
+  // (the connect mock set wifi_configured), and says where the box is now.
   await expect(wizardStepAfterWifi(page)).toBeVisible({ timeout: 15_000 });
+  const connected = page.getByTestId("wifi-connected-dialog");
+  await expect(connected).toBeVisible({ timeout: 10_000 });
+  await expect(connected).toContainText("Clawbox Lab");
+  await expect(connected).toContainText("192.0.2.23");
+  await expect(connected).toContainText("clawbox.local");
+  await connected.getByRole("button", { name: "OK" }).click();
+  await expect(connected).toBeHidden();
+  await expect(page).not.toHaveURL(/wifi=connected/);
 });

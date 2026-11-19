@@ -275,6 +275,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     // === ChatApp ===
     "chat.title": "Chat",
     "chat.connectingGateway": "Connecting to gateway...",
+    "chat.startingUp": "Starting up, one moment…",
     "chat.switchingProvider": "Switching AI provider...",
     "chat.restartingChat": "Restarting chat...",
     "chat.reloadMayTake": "This may take up to 30 seconds",
