@@ -18,6 +18,40 @@ import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { saveEnv } from "../../helpers/env";
 
+// The root-owned helper that keeps the backend's auth value out of
+// config.json (TASK-2714, `mail_send_auth`), played by a file under the temp
+// CLAWBOX_ROOT; `down` is a helper that refuses or is not there yet.
+const helper = vi.hoisted(() => ({ down: false }));
+vi.mock("child_process", async (importOriginal) => {
+  const real = await importOriginal<typeof import("child_process")>();
+  const spawn = ((cmd: string, args: string[] = [], opts?: object) => {
+    if (cmd !== "/usr/bin/sudo" || args[2] !== "mail_send_auth") return real.spawn(cmd, args, opts as never);
+    const file = `${process.env.CLAWBOX_ROOT}/mail-send-auth`;
+    const script = helper.down ? "exit 77"
+      : args[3] === "get" ? 'cat "$0" 2>/dev/null; exit 0'
+      : 'IFS= read -r e; IFS= read -r v; if [ -z "$v" ]; then rm -f "$0"; else printf "%s\\n%s" "$e" "$v" > "$0"; fi';
+    return real.spawn("/bin/sh", ["-c", script, file], opts as never);
+  }) as typeof real.spawn;
+  return { ...real, spawn, default: { ...real, spawn } };
+});
+
+// A config.json write that fails; `helperDown` also takes the helper away at
+// that moment, so the record cannot be put back either.
+// Registered again after each vi.resetModules, so the real store reads that
+// test's CLAWBOX_ROOT.
+const store = vi.hoisted(() => ({ failSetMany: false, helperDown: false }));
+function mockConfigStore(): void {
+  vi.doMock("@/lib/config-store", async (importOriginal) => {
+    const real = await importOriginal<typeof import("@/lib/config-store")>();
+    const setMany = async (entries: Record<string, unknown>) => {
+      if (!store.failSetMany) return real.setMany(entries);
+      if (store.helperDown) helper.down = true;
+      throw new Error("config.json could not be written");
+    };
+    return { ...real, setMany };
+  });
+}
+
 const SESSION_SECRET = "s".repeat(64);
 const MCP_TOKEN = "m".repeat(64);
 const OWNER = "clawbox";
@@ -147,6 +181,9 @@ beforeEach(async () => {
   process.env.CLAWBOX_USER = OWNER;
   process.env.CLAWBOX_MCP_TOKEN = MCP_TOKEN;
   delete process.env.CLAWBOX_MAIL_DRAFT_TOKEN_TTL_S;
+  helper.down = false;
+  store.failSetMany = false;
+  store.helperDown = false;
   writeConfig();
   mailbox = {
     [OWNER]: {
@@ -162,6 +199,7 @@ beforeEach(async () => {
   gate = null;
   vi.stubGlobal("fetch", vi.fn(fakeBackend));
   vi.resetModules();
+  mockConfigStore();
   auth = await import("@/lib/auth");
   card = await import("@/app/setup-api/email/draft-approval/card/route");
   decide = await import("@/app/setup-api/email/draft-approval/decide/route");
@@ -1112,5 +1150,103 @@ describe("the settings route", () => {
     expect(config.mail_draft_approval_enabled).toBe(false);
     expect(config.mail_draft_approval_endpoint).toBeUndefined();
     expect(config.mail_draft_approval_auth_value).toBeUndefined();
+    expect(fs.existsSync(path.join(root, "mail-send-auth"))).toBe(false);
+  });
+
+  it("moves an older box's auth value out of config.json, and saves a new one only through the helper (TASK-2714)", async () => {
+    // The helper cannot take it yet (an update still installing it): used where it is, kept.
+    helper.down = true;
+    expect((await mint(ownerCookie())).status).toBe(200);
+    expect(backendCalls.at(-1)?.auth).toBe(BACKEND_AUTH);
+    expect(readConfig().mail_draft_approval_auth_value).toBe(BACKEND_AUTH);
+    // The next read moves it, then it is gone from config.json and still sent.
+    helper.down = false;
+    const { json } = await mint(ownerCookie());
+    expect(readConfig().mail_draft_approval_auth_value).toBeUndefined();
+    expect(fs.readFileSync(path.join(root, "mail-send-auth"), "utf8")).toBe(`${ENDPOINT}\n${BACKEND_AUTH}`);
+    expect((await answer(ownerCookie(), json.token, "send")).status).toBe(200);
+    expect(sends).toHaveLength(1);
+    expect(sends[0].auth).toBe(BACKEND_AUTH);
+    // A new value from the panel never reaches config.json; one the helper refuses is not saved.
+    const saved = await settings.POST(req("/setup-api/email/draft-approval", { cookie: ownerCookie(), origin: "http://clawbox.local", body: { authValue: "Bearer next-placeholder" } }));
+    expect(saved.status).toBe(200);
+    expect(JSON.stringify(readConfig())).not.toContain("next-placeholder");
+    expect(fs.readFileSync(path.join(root, "mail-send-auth"), "utf8")).toBe(`${ENDPOINT}\nBearer next-placeholder`);
+    // The value is bound to that endpoint: config.json pointed at another
+    // listener on this box (the assistant can write it) gets no value; the
+    // owner moving the endpoint in Settings takes the value along.
+    const lib = await import("@/lib/mail-draft-approval-config");
+    fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({ ...readConfig(), mail_draft_approval_endpoint: "http://127.0.0.1:9999" }));
+    expect((await lib.readDraftApprovalConfig()).config.authValue).toBeNull();
+    await lib.saveDraftApprovalConfig({ endpoint: "http://127.0.0.1:9998" });
+    expect((await lib.readDraftApprovalConfig()).config).toMatchObject({ endpoint: "http://127.0.0.1:9998", authValue: "Bearer next-placeholder" });
+    helper.down = true;
+    const refused = await settings.POST(req("/setup-api/email/draft-approval", { cookie: ownerCookie(), origin: "http://clawbox.local", body: { authValue: "Bearer lost-placeholder" } }));
+    expect(refused.status).toBeGreaterThanOrEqual(500);
+    expect(JSON.stringify(readConfig())).not.toContain("lost-placeholder");
+    // A new endpoint while an older box's value could not be moved yet is refused, and that value stays in config.json.
+    fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({ ...readConfig(), mail_draft_approval_auth_value: BACKEND_AUTH }));
+    await expect(lib.saveDraftApprovalConfig({ endpoint: "http://127.0.0.1:9997" })).rejects.toThrow();
+    expect(readConfig()).toMatchObject({ mail_draft_approval_endpoint: "http://127.0.0.1:9998", mail_draft_approval_auth_value: BACKEND_AUTH });
+    helper.down = false;
+  });
+
+  const SETTINGS = "/setup-api/email/draft-approval";
+  const save = (body: Record<string, unknown>) =>
+    settings.POST(req(SETTINGS, { cookie: ownerCookie(), origin: "http://clawbox.local", body }));
+  const authFile = () => path.join(root, "mail-send-auth");
+
+  it("refuses a new endpoint while the helper does not answer, and changes nothing", async () => {
+    writeConfig({ mail_draft_approval_auth_value: undefined });
+    fs.writeFileSync(authFile(), `${ENDPOINT}\n${BACKEND_AUTH}`);
+    helper.down = true;
+    const res = await save({ endpoint: "http://127.0.0.1:9999" });
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Could not save the setting.", kind: "save_failed" });
+    expect(readConfig().mail_draft_approval_endpoint).toBe(ENDPOINT);
+    helper.down = false;
+    expect(fs.readFileSync(authFile(), "utf8")).toBe(`${ENDPOINT}\n${BACKEND_AUTH}`);
+    const lib = await import("@/lib/mail-draft-approval-config");
+    expect((await lib.readDraftApprovalConfig()).config).toMatchObject({ endpoint: ENDPOINT, authValue: BACKEND_AUTH });
+  });
+
+  it("saves a new endpoint when the helper answers that no value is saved", async () => {
+    writeConfig({ mail_draft_approval_auth_value: undefined });
+    const res = await save({ endpoint: "http://127.0.0.1:9999" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ endpoint: "http://127.0.0.1:9999", hasAuth: false });
+    expect(fs.existsSync(authFile())).toBe(false);
+  });
+
+  it("puts the helper's record back when config.json cannot be written", async () => {
+    writeConfig({ mail_draft_approval_auth_value: undefined });
+    fs.writeFileSync(authFile(), `${ENDPOINT}\n${BACKEND_AUTH}`);
+    store.failSetMany = true;
+    for (const body of [{ endpoint: "http://127.0.0.1:9999" }, { authValue: "Bearer new-placeholder" }]) {
+      const res = await save(body);
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: "Could not save the setting.", kind: "save_failed" });
+      expect(fs.readFileSync(authFile(), "utf8")).toBe(`${ENDPOINT}\n${BACKEND_AUTH}`);
+    }
+    // None saved before: the helper is cleared again.
+    fs.rmSync(authFile());
+    const res = await save({ endpoint: "http://127.0.0.1:9999", authValue: "Bearer new-placeholder" });
+    expect(res.status).toBe(500);
+    expect(fs.existsSync(authFile())).toBe(false);
+    store.failSetMany = false;
+    expect(readConfig().mail_draft_approval_endpoint).toBe(ENDPOINT);
+  });
+
+  it("says so when the helper's record could not be put back either", async () => {
+    writeConfig({ mail_draft_approval_auth_value: undefined });
+    fs.writeFileSync(authFile(), `${ENDPOINT}\n${BACKEND_AUTH}`);
+    store.failSetMany = true;
+    store.helperDown = true;
+    const res = await save({ endpoint: "http://127.0.0.1:9999" });
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body).toMatchObject({ kind: "save_failed", restore_failed: true });
+    expect(body.error).toContain("could not be put back");
+    expect(JSON.stringify(body)).not.toContain("backend-placeholder-credential");
   });
 });

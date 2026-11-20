@@ -20,7 +20,7 @@
 
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { staffDenyMessage, staffToolCallDenyReason } from "./staff-guard.mjs";
+import { staffDenyMessage, staffOfficeReadParams, staffToolCallDenyReason } from "./staff-guard.mjs";
 
 const PLUGIN_ID = "clawbox-staff-guard";
 
@@ -51,8 +51,14 @@ export function onBeforeToolCall(event, ctx) {
     const agent = typeof ctx?.agentId === "string" ? ctx.agentId : String(ctx?.sessionKey ?? "");
     if (!agent.toLowerCase().includes("clawbox-staff-")) return undefined;
   }
-  if (!reason) return undefined;
-  return { block: true, blockReason: staffDenyMessage(reason) };
+  if (reason) return { block: true, blockReason: staffDenyMessage(reason) };
+  // A member's own office upload is read as the text ClawBox took out of it.
+  try {
+    const params = staffOfficeReadParams(event, ctx, OPENCLAW_HOME ? { openclawHome: OPENCLAW_HOME } : {});
+    return params ? { params } : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 const clawboxStaffGuardPlugin = {

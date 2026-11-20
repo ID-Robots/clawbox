@@ -8,10 +8,16 @@
 // presses Send on the draft's card (src/lib/mail-draft-approval.ts).
 //
 // What is configured here: the backend's base URL and the one header ClawBox
-// authenticates to it with. Both live in data/config.json beside the mailbox
-// password and the bot tokens (0600, src/lib/config-store.ts), are written only
-// by the owner's browser (src/app/setup-api/email/draft-approval/route.ts) and
-// are never handed to the harness. The header VALUE is never sent back to any
+// authenticates to it with. Both are written only by the owner's browser
+// (src/app/setup-api/email/draft-approval/route.ts) and are never handed to the
+// harness. The URL and the header NAME live in data/config.json. The header
+// VALUE does not (TASK-2714): the assistant's shell runs as the same user as
+// this web server and reads config.json, and with the value it could call the
+// backend and send without anyone pressing Send. It lives in a root-owned file
+// only the root-owned helper reads, and only for this web server's own process
+// (`mail_send_auth`, config/clawbox-user-helper.sh); the backend's own account
+// may read it too. A value an older ClawBox left in config.json is moved there
+// on the first read and then removed. The value is never sent back to any
 // caller once saved; the panel only learns that one is set.
 //
 // DEFAULT OFF. No endpoint, no cards: the draft tool keeps working and the
@@ -22,6 +28,7 @@
 // could be pointed at any host would also be a box that posts the owner's
 // approvals (and the auth header) wherever the configuration says.
 
+import { spawn } from "child_process";
 import { getKnownMany, setMany as configSetMany } from "@/lib/config-store";
 
 export const DRAFT_APPROVAL_ENABLED_KEY = "mail_draft_approval_enabled";
@@ -129,10 +136,56 @@ export function parseBackendEndpoint(raw: unknown): EndpointVerdict {
   return { ok: true, endpoint: `${url.protocol}//${url.host}${pathname}` };
 }
 
-function configFrom(values: Record<string, unknown>): DraftApprovalConfig {
+/**
+ * The helper's `mail_send_auth get|set` (config/clawbox-user-helper.sh): the
+ * record on stdin, never in argv. What it printed when it exited 0, else null —
+ * no helper, no sudo, or a caller it refused.
+ *
+ * The record is two lines, the endpoint the value was saved for and the value,
+ * and the value is used only while config.json still names that endpoint: the
+ * assistant can rewrite config.json, and an endpoint it points at a listener
+ * of its own on this box must not be handed the value.
+ */
+function authHelper(action: "get" | "set", input = ""): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = action === "get"
+      ? spawn("/usr/bin/sudo", ["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "mail_send_auth", "get"], { stdio: ["pipe", "pipe", "ignore"] })
+      : spawn("/usr/bin/sudo", ["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "mail_send_auth", "set"], { stdio: ["pipe", "pipe", "ignore"] });
+    let out = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (out.length <= MAX_ENDPOINT_LEN + 1 + MAX_AUTH_VALUE_LEN) out += chunk.toString("utf8");
+    });
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolve(null);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve(code === 0 ? out : null);
+    });
+    child.stdin?.on("error", () => {});
+    child.stdin?.end(input ? `${input}\n` : "\n");
+  });
+}
+
+/** The saved record; null when none is saved, undefined when the helper did not answer. */
+async function readAuthRecord(): Promise<{ endpoint: string; value: string } | null | undefined> {
+  const out = await authHelper("get");
+  if (out === null) return undefined;
+  const cut = out.indexOf("\n");
+  return cut >= 0 ? { endpoint: out.slice(0, cut), value: out.slice(cut + 1) } : null;
+}
+
+/** Saves the value for `endpoint` (`null` removes it) where only the helper reads it; throws when that failed. */
+async function writeAuthValue(endpoint: string | null, value: string | null): Promise<void> {
+  const record = value === null ? "" : `${endpoint ?? ""}\n${value}`;
+  if ((await authHelper("set", record)) === null) throw new Error("the mail send backend's auth value could not be stored");
+}
+
+function configFrom(values: Record<string, unknown>, value: unknown): DraftApprovalConfig {
   const endpoint = parseBackendEndpoint(values[DRAFT_APPROVAL_ENDPOINT_KEY]);
   const header = values[DRAFT_APPROVAL_AUTH_HEADER_KEY];
-  const value = values[DRAFT_APPROVAL_AUTH_VALUE_KEY];
   return {
     enabled: values[DRAFT_APPROVAL_ENABLED_KEY] === true,
     // A stored value that no longer passes is treated as absent, never used:
@@ -149,7 +202,22 @@ function configFrom(values: Record<string, unknown>): DraftApprovalConfig {
  */
 export async function readDraftApprovalConfig(): Promise<{ config: DraftApprovalConfig; known: boolean }> {
   const { values, known } = await getKnownMany(KEYS);
-  return { config: configFrom(values), known };
+  const endpoint = configFrom(values, null).endpoint ?? "";
+  const record = await readAuthRecord();
+  let value: string | null = record && record.endpoint === endpoint ? record.value : null;
+  // A value an older ClawBox kept in config.json: moved (unless one is saved
+  // already), then removed. While the helper cannot take it (an update still
+  // installing it) it stays and is used where it is; the next read tries again.
+  const legacy = values[DRAFT_APPROVAL_AUTH_VALUE_KEY];
+  if (legacy !== undefined) {
+    let moved = !isValidAuthHeaderValue(legacy) || !!record;
+    if (!moved && isValidAuthHeaderValue(legacy)) {
+      moved = await writeAuthValue(endpoint, legacy).then(() => true, () => false);
+      value = legacy;
+    }
+    if (moved) await configSetMany({ [DRAFT_APPROVAL_AUTH_VALUE_KEY]: undefined });
+  }
+  return { config: configFrom(values, value), known };
 }
 
 /** Switched on and pointing somewhere. */
@@ -222,8 +290,38 @@ export async function saveDraftApprovalConfig(update: DraftApprovalUpdate): Prom
   if (update.enabled !== undefined) entries[DRAFT_APPROVAL_ENABLED_KEY] = update.enabled;
   if (update.endpoint !== undefined) entries[DRAFT_APPROVAL_ENDPOINT_KEY] = update.endpoint ?? undefined;
   if (update.authHeader !== undefined) entries[DRAFT_APPROVAL_AUTH_HEADER_KEY] = update.authHeader;
-  if (update.authValue !== undefined) entries[DRAFT_APPROVAL_AUTH_VALUE_KEY] = update.authValue ?? undefined;
-  if (Object.keys(entries).length > 0) await configSetMany(entries);
+  let previous: { endpoint: string; value: string } | null | undefined;
+  let wroteAuth = false;
+  if (update.authValue !== undefined || update.endpoint !== undefined) {
+    // The saved value goes with the endpoint it is for: a new value, or the
+    // one already saved re-bound to a new endpoint.
+    const { values } = await getKnownMany([DRAFT_APPROVAL_ENDPOINT_KEY]);
+    const endpoint = update.endpoint !== undefined ? update.endpoint : configFrom(values, null).endpoint;
+    previous = await readAuthRecord();
+    // A new endpoint saved while the helper does not answer would leave the
+    // value bound to the old one once it does: change nothing instead.
+    if (update.authValue === undefined && previous === undefined) throw new Error("the mail send backend's auth value could not be read");
+    const value = update.authValue !== undefined ? update.authValue : previous?.value ?? null;
+    if (update.authValue !== undefined || value !== null) {
+      await writeAuthValue(endpoint, value);
+      wroteAuth = true;
+      entries[DRAFT_APPROVAL_AUTH_VALUE_KEY] = undefined;
+    }
+  }
+  if (Object.keys(entries).length > 0) {
+    try {
+      await configSetMany(entries);
+    } catch (err) {
+      // config.json kept the old endpoint: put the helper's record back with it
+      // (none saved before: clear it). Flag the error when that failed too.
+      if (wroteAuth) {
+        const restored = previous !== undefined
+          && await writeAuthValue(previous?.endpoint ?? null, previous?.value ?? null).then(() => true, () => false);
+        if (!restored) throw Object.assign(err instanceof Error ? err : new Error(String(err)), { restoreFailed: true });
+      }
+      throw err;
+    }
+  }
 }
 
 /** Forgets the backend entirely and switches the cards off. */
@@ -234,4 +332,5 @@ export async function clearDraftApprovalConfig(): Promise<void> {
     [DRAFT_APPROVAL_AUTH_HEADER_KEY]: undefined,
     [DRAFT_APPROVAL_AUTH_VALUE_KEY]: undefined,
   });
+  await writeAuthValue(null, null);
 }

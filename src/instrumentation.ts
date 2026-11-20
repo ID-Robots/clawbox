@@ -659,6 +659,19 @@ export async function register() {
     console.error('[instrumentation] Could not resume email chat approvals:', err instanceof Error ? err.message : err)
   }
   try {
+    // A mail send backend auth value an older ClawBox kept in config.json,
+    // where the assistant's shell can read it, leaves it on the first read
+    // (TASK-2714, src/lib/mail-draft-approval-config.ts) — read once now, so
+    // an update moves it without anyone opening Settings.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { readDraftApprovalConfig } = require('./lib/mail-draft-approval-config')
+    void readDraftApprovalConfig().catch((err: unknown) => {
+      console.error('[instrumentation] Could not move the mail send auth value:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not move the mail send auth value:', err instanceof Error ? err.message : err)
+  }
+  try {
     // A Hermes plugin the owner installs after boot never reaches the chat on
     // its own: Hermes scans for plugins once per process, and the process
     // serving chat is a long-lived service. Nothing else on the box notices, so

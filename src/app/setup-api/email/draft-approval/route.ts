@@ -88,7 +88,15 @@ export async function POST(request: Request) {
 
   try {
     await saveDraftApprovalConfig(update.update);
-  } catch {
+  } catch (err) {
+    if ((err as { restoreFailed?: unknown } | null)?.restoreFailed === true) {
+      return refusal(
+        "Could not save the setting, and the saved auth value could not be put back: the send backend's settings are inconsistent until you save them again.",
+        "save_failed",
+        500,
+        { restore_failed: true },
+      );
+    }
     return refusal("Could not save the setting.", "save_failed", 500);
   }
   return NextResponse.json({ success: true, ...(await snapshot()) }, { headers: { "cache-control": "no-store" } });
