@@ -8,11 +8,20 @@ from __future__ import annotations
 
 import argparse
 import logging
+import signal
 import sys
+import threading
 from pathlib import Path
 
 from . import config as cfg_mod
 from . import runner, token
+
+
+def _exit_on_sigterm(signum: int, _frame: object) -> None:
+    # SIGTERM's default ends the process where it stands, so a stopped run
+    # never reached `run_once`'s cleanup and left its staging archive behind.
+    # Raised, it unwinds through every `finally` on the way out.
+    raise SystemExit(128 + signum)
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -77,7 +86,15 @@ def main(argv: list[str] | None = None) -> int:
         return runner.run_idle(cfg, bearer)
 
     label = args.label.strip() if isinstance(args.label, str) and args.label.strip() else None
-    return runner.run_once(cfg, bearer, label=label)
+    # Only the main thread may set a handler; a run driven from another thread
+    # (the test suite does) keeps the process's own.
+    on_main = threading.current_thread() is threading.main_thread()
+    previous = signal.signal(signal.SIGTERM, _exit_on_sigterm) if on_main else None
+    try:
+        return runner.run_once(cfg, bearer, label=label)
+    finally:
+        if on_main:
+            signal.signal(signal.SIGTERM, previous or signal.SIG_DFL)
 
 
 if __name__ == "__main__":
