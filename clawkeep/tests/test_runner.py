@@ -2258,6 +2258,17 @@ def test_a_staging_dir_that_cannot_be_removed_stays_recorded(
     assert not runner._staging_record().exists()
 
 
+def test_a_record_write_cut_short_keeps_the_dirs_recorded(isolate_state: Path) -> None:
+    """The record is replaced whole: a write that fails leaves the old one."""
+    runner._record_staging(["/tmp/clawkeep-aaaaaaaa"])
+
+    with patch("clawkeep.runner.os.replace", side_effect=OSError(28, "No space left on device")):
+        with pytest.raises(OSError):
+            runner._record_staging(["/tmp/clawkeep-aaaaaaaa", "/tmp/clawkeep-bbbbbbbb"])
+
+    assert runner._recorded_staging() == ["/tmp/clawkeep-aaaaaaaa"]
+
+
 @pytest.mark.parametrize("recorded", ["link", "relative", "not-a-staging-name"])
 def test_a_record_naming_no_staging_dir_removes_nothing(
     isolate_state: Path, tmp_path: Path, temp_dir: Path, monkeypatch: pytest.MonkeyPatch,

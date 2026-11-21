@@ -512,10 +512,14 @@ def _recorded_staging() -> list[str]:
 
 
 def _record_staging(paths: list[str]) -> None:
+    record = _staging_record()
     if paths:
-        _staging_record().write_text("".join(f"{p}\n" for p in paths), encoding="utf-8")
+        # Whole or not at all: a write cut short must not lose the dirs recorded.
+        tmp = record.with_name(record.name + ".tmp")
+        tmp.write_text("".join(f"{p}\n" for p in paths), encoding="utf-8")
+        os.replace(tmp, record)
     else:
-        _staging_record().unlink(missing_ok=True)
+        record.unlink(missing_ok=True)
 
 
 def _sweep_stale_staging() -> None:
