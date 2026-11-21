@@ -2220,6 +2220,44 @@ def test_a_run_leaves_another_data_dirs_staging_alone(
     assert not (data_b / runner.STAGING_RECORD_NAME).exists()
 
 
+def test_a_staging_dir_that_cannot_be_removed_stays_recorded(
+    isolate_state: Path, tmp_path: Path, temp_dir: Path,
+) -> None:
+    """A dead run's staging dir whose removal fails is not forgotten when the
+    run that found it records and removes its own: it is still recorded
+    afterwards, and a later run removes it."""
+    import contextlib
+    import shutil
+
+    dead = _killed_run_left(temp_dir)
+    rmtree = shutil.rmtree
+
+    def refuses_the_dead_one(path, *a, **kw):
+        if Path(path) == dead:
+            raise PermissionError(13, "Permission denied", str(path))
+        return rmtree(path, *a, **kw)
+
+    with contextlib.ExitStack() as stack:
+        _backs_up(stack)
+        stack.enter_context(patch(
+            "clawkeep.runner.agent.create_archive",
+            side_effect=lambda cfg, output_dir: _archive_into(output_dir),
+        ))
+        stack.enter_context(patch(
+            "clawkeep.runner.shutil.rmtree", side_effect=refuses_the_dead_one,
+        ))
+        assert runner.run_once(_cfg(tmp_path), "claw_x") == runner.EXIT_OK
+
+    assert dead.exists()
+    assert runner._staging_record().read_text(encoding="utf-8") == f"{dead}\n"
+    assert [p.name for p in temp_dir.iterdir()] == [dead.name]
+
+    runner._sweep_stale_staging()
+
+    assert not dead.exists()
+    assert not runner._staging_record().exists()
+
+
 @pytest.mark.parametrize("recorded", ["link", "relative", "not-a-staging-name"])
 def test_a_record_naming_no_staging_dir_removes_nothing(
     isolate_state: Path, tmp_path: Path, temp_dir: Path, monkeypatch: pytest.MonkeyPatch,

@@ -503,34 +503,53 @@ def _staging_record() -> Path:
     return token.data_dir() / STAGING_RECORD_NAME
 
 
-def _sweep_stale_staging() -> None:
-    """Remove the staging dir an earlier run of this data dir recorded and never
-    removed — its archive can be as big as the box's whole state.
-
-    Called with the run lock held, so the run that recorded it is not alive.
-    Only the recorded dir is ever touched, and only while it is a directory of
-    this user's with the staging name: never a configured output_dir, a restore
-    or encryption temp dir, another data dir's staging, or a link.
-    """
-    record = _staging_record()
+def _recorded_staging() -> list[str]:
     try:
-        try:
-            path = Path(record.read_text(encoding="utf-8").strip())
-            st = path.lstat()
-        except FileNotFoundError:
-            pass  # no record, or its dir is already gone
-        else:
-            if (
-                stat.S_ISDIR(st.st_mode)
-                and st.st_uid == os.getuid()
-                and path.is_absolute()
-                and _STAGING_NAME.fullmatch(path.name)
-            ):
-                shutil.rmtree(path)
-                log.warning("removed the staging dir an earlier backup left behind: %s", path)
-        record.unlink(missing_ok=True)
+        text = _staging_record().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _record_staging(paths: list[str]) -> None:
+    if paths:
+        _staging_record().write_text("".join(f"{p}\n" for p in paths), encoding="utf-8")
+    else:
+        _staging_record().unlink(missing_ok=True)
+
+
+def _sweep_stale_staging() -> None:
+    """Remove the staging dirs earlier runs of this data dir recorded and never
+    removed — an archive can be as big as the box's whole state.
+
+    Called with the run lock held, so the runs that recorded them are not alive.
+    Only a recorded dir is ever touched, and only while it is a directory of
+    this user's with the staging name: never a configured output_dir, a restore
+    or encryption temp dir, another data dir's staging, or a link. One that
+    could not be removed stays recorded for the next run.
+    """
+    try:
+        kept: list[str] = []
+        for name in _recorded_staging():
+            path = Path(name)
+            try:
+                st = path.lstat()
+                if (
+                    stat.S_ISDIR(st.st_mode)
+                    and st.st_uid == os.getuid()
+                    and path.is_absolute()
+                    and _STAGING_NAME.fullmatch(path.name)
+                ):
+                    shutil.rmtree(path)
+                    log.warning("removed the staging dir an earlier backup left behind: %s", path)
+            except FileNotFoundError:
+                pass  # its dir is already gone
+            except OSError as e:
+                kept.append(name)
+                log.warning("could not remove the staging dir an earlier backup left behind: %s", e)
+        _record_staging(kept)
     except OSError as e:
-        log.warning("could not remove the staging dir an earlier backup left behind: %s", e)
+        log.warning("could not read or update the staging record: %s", e)
 
 
 def _retention_keep_last() -> int:
@@ -736,7 +755,7 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
     try:
         if ephemeral:
             try:
-                _staging_record().write_text(f"{staging}\n", encoding="utf-8")
+                _record_staging([*_recorded_staging(), str(staging)])
             except OSError as e:
                 log.warning("could not record the staging dir %s: %s", staging, e)
         _stamp_step(st, STEP_ARCHIVING)
@@ -1050,7 +1069,7 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
             # (`archive` is None then) or a partial one is still on disk.
             try:
                 shutil.rmtree(staging)
-                _staging_record().unlink(missing_ok=True)
+                _record_staging([p for p in _recorded_staging() if p != str(staging)])
             except OSError as e:
                 log.warning("failed to remove staging dir %s: %s", staging, e)
 
