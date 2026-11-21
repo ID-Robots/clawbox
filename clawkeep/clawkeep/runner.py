@@ -9,8 +9,11 @@ schedule the next run.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import logging
+import os
+import re
 import shutil
 import tempfile
 import threading
@@ -485,6 +488,53 @@ def _resolve_staging(cfg: Config) -> tuple[Path, bool]:
     return Path(tempfile.mkdtemp(prefix="clawkeep-")), True
 
 
+#: The name `_resolve_staging` gives an ephemeral staging dir: mkdtemp's eight
+#: characters after the prefix. Restore's `clawkeep-restore-*` and encryption's
+#: `clawkeep-seal-*` temp dirs never match it.
+_STAGING_NAME = re.compile(r"clawkeep-[a-z0-9_]{8}")
+
+
+def _sweep_stale_staging(cfg: Config) -> None:
+    """Remove the ephemeral staging dirs that dead earlier runs left in the
+    temp dir — a killed run never reaches its own cleanup, and its archive can
+    be as big as the box's whole state.
+
+    Called with the run lock held, so no other run of this data dir is alive.
+    A live run of another data dir holds a flock on its own staging dir (see
+    `_run_once_locked`) and is skipped. Only this user's directories with the
+    staging name are candidates, and never the configured output_dir.
+    """
+    keep = Path(cfg.openclaw.output_dir).resolve() if cfg.openclaw.output_dir else None
+    try:
+        tmp = Path(tempfile.gettempdir()).resolve()
+        entries = list(os.scandir(tmp))
+    except OSError as e:
+        log.warning("could not look for stale staging dirs: %s", e)
+        return
+    for entry in entries:
+        path = tmp / entry.name
+        try:
+            if (
+                not _STAGING_NAME.fullmatch(entry.name)
+                or not entry.is_dir(follow_symlinks=False)
+                or entry.stat(follow_symlinks=False).st_uid != os.getuid()
+                or (keep is not None and (keep == path or path in keep.parents))
+            ):
+                continue
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue  # a live run's
+                shutil.rmtree(path)
+            finally:
+                os.close(fd)
+            log.warning("removed the staging dir an earlier backup left behind: %s", path)
+        except OSError as e:
+            log.warning("could not remove the stale staging dir %s: %s", path, e)
+
+
 def _retention_keep_last() -> int:
     """Read `retentionKeepLast` from schedule.json in the data dir.
 
@@ -597,6 +647,7 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
     sidecar manifest after a successful upload. The TS bridge passes it
     through from the UI's "Name this backup" field.
     """
+    _sweep_stale_staging(cfg)
     st = state.load()
     # Whatever the last run was refused for, this run answers for itself: every
     # branch below that saves `st` saves it without the old refusal, and the
@@ -684,7 +735,13 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
 
     staging, ephemeral = _resolve_staging(cfg)
     archive: openclaw.Archive | None = None
+    staging_lock: int | None = None
     try:
+        if ephemeral:
+            # Held for as long as this run lives — the kernel drops it when the
+            # run dies — so another run's `_sweep_stale_staging` leaves it alone.
+            staging_lock = os.open(staging, os.O_RDONLY | os.O_DIRECTORY)
+            fcntl.flock(staging_lock, fcntl.LOCK_EX)
         _stamp_step(st, STEP_ARCHIVING)
         try:
             # WHICH backend builds the archive is the device's edition's
@@ -992,13 +1049,14 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
             except OSError as e:
                 log.warning("failed to remove encrypted archive %s: %s", enc_candidate, e)
         if ephemeral:
+            # With everything in it: an archive that failed its verification
+            # (`archive` is None then) or a partial one is still on disk.
             try:
-                staging.rmdir()
-            except OSError:
-                # Non-empty (e.g. verify left a temp dir, or the user pointed
-                # output_dir at a shared location even though we treated it as
-                # ephemeral) — best-effort, leave it for the OS to reap.
-                pass
+                shutil.rmtree(staging)
+            except OSError as e:
+                log.warning("failed to remove staging dir %s: %s", staging, e)
+        if staging_lock is not None:
+            os.close(staging_lock)
 
 
 def run_idle(cfg: Config, token: str) -> int:

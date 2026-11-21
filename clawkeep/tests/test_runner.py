@@ -1995,3 +1995,185 @@ def test_room_for_the_ciphertext_is_room_for_the_archive_plus_the_reserve(tmp_pa
         assert runner._encryption_room(tmp_path / "a.tar.gz", size) == (enough, enough - 1)
     with patch.object(shutil_mod, "disk_usage", side_effect=OSError("gone")):
         assert runner._encryption_room(tmp_path / "a.tar.gz", size) is None
+
+
+# ── ephemeral staging leaves nothing in the temp dir ─────────────────────────
+
+@pytest.fixture
+def temp_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The temp dir ephemeral staging goes to: empty, and this test's own."""
+    import tempfile
+
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    return scratch
+
+
+def _with_output_dir(tmp_path: Path, output_dir: str = "") -> Config:
+    from dataclasses import replace
+
+    cfg = _cfg(tmp_path)
+    return replace(cfg, openclaw=replace(cfg.openclaw, output_dir=output_dir))
+
+
+def _backs_up(stack) -> object:
+    """Everything past the archive build succeeds; the upload mock is returned."""
+    stack.enter_context(patch("clawkeep.runner.api.mint_credentials", return_value=CREDS))
+    stack.enter_context(patch("clawkeep.runner.api.heartbeat"))
+    stack.enter_context(patch("clawkeep.runner.crypto.encrypt_file", side_effect=_encrypt_to(20)))
+    return stack.enter_context(patch("clawkeep.runner.s3.upload"))
+
+
+@pytest.mark.parametrize("error", [
+    OpenclawError("openclaw backup create failed (rc=1): archive verification failed"),
+    "hermes",
+])
+def test_an_archive_that_fails_after_it_is_written_leaves_no_staging_dir(
+    isolate_state: Path, tmp_path: Path, temp_dir: Path, error,
+) -> None:
+    """`openclaw backup create --verify` writes the tarball, then fails its
+    verification: the run has no archive to unlink, and the staging dir it
+    could not rmdir stayed in the temp dir — 100 GB of it on one box."""
+    from clawkeep.hermes import HermesError
+
+    if error == "hermes":
+        error = HermesError("hermes archive failed its verification")
+    built: list[Path] = []
+
+    def create(cfg, output_dir):
+        built.append(output_dir)
+        (output_dir / "snap.tar.gz").write_bytes(b"x" * 4096)
+        (output_dir / "verify").mkdir()
+        (output_dir / "verify" / "manifest.json").write_text("{}")
+        raise error
+
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat"),
+        patch("clawkeep.runner.agent.create_archive", side_effect=create),
+    ):
+        assert runner.run_once(_with_output_dir(tmp_path), "claw_x") == runner.EXIT_OPENCLAW
+
+    (where,) = built
+    assert where.parent == temp_dir
+    assert list(temp_dir.iterdir()) == []
+
+
+def test_a_run_stopped_by_sigterm_unwinds_and_leaves_no_staging_dir(
+    isolate_state: Path, tmp_path: Path, temp_dir: Path,
+) -> None:
+    """A service stop or an app restart sends SIGTERM, whose default ended the
+    run where it stood: no `finally`, and a 37 GB partial archive stayed. The
+    daemon makes it unwind the run, then puts the old handler back."""
+    import os
+    import signal
+    import time
+
+    from clawkeep import daemon
+    from clawkeep import token as token_mod
+
+    config = tmp_path / "config.toml"
+    config.write_text('server = "https://server"\n[openclaw]\noutput_dir = ""\n')
+    token_file = tmp_path / "token"
+    token_mod.write_token("claw_x", token_file)
+    built: list[Path] = []
+
+    def create(cfg, output_dir):
+        built.append(output_dir)
+        (output_dir / "snap.tar.gz.partial").write_bytes(b"x" * 4096)
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(5)  # the handler runs by here at the latest
+        raise AssertionError("SIGTERM did not stop the run")
+
+    def unhandled(signum, frame):
+        raise AssertionError("the daemon left SIGTERM to its default")
+
+    previous = signal.signal(signal.SIGTERM, unhandled)
+    try:
+        with (
+            patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+            patch("clawkeep.runner.api.heartbeat"),
+            patch("clawkeep.runner.agent.create_archive", side_effect=create),
+            pytest.raises(SystemExit) as stopped,
+        ):
+            daemon.main(["--config", str(config), "--token-path", str(token_file)])
+        assert signal.getsignal(signal.SIGTERM) is unhandled
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+    assert stopped.value.code == 128 + signal.SIGTERM
+    (where,) = built
+    assert where.parent == temp_dir
+    assert list(temp_dir.iterdir()) == []
+
+
+def test_a_run_first_removes_the_staging_dirs_dead_runs_left(
+    isolate_state: Path, tmp_path: Path, temp_dir: Path,
+) -> None:
+    """A run killed outright (SIGKILL, a power cut) reaches no cleanup at all;
+    the next run removes what it left. Nothing else: not restore's or
+    encryption's temp dirs, not a link, and not the configured output_dir, even
+    one named like a staging dir — which behaves as it always did."""
+    import contextlib
+
+    dead = temp_dir / "clawkeep-k1lled_0"
+    (dead / "clawkeep-hermes-abcd1234").mkdir(parents=True)
+    (dead / "2026-11-20-openclaw-backup.tar.gz").write_bytes(b"x" * 4096)
+    restoring = temp_dir / "clawkeep-restore-abcd1234"
+    restoring.mkdir()
+    sealing = temp_dir / "clawkeep-seal-abcd1234"
+    sealing.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep.txt").write_text("not ClawKeep's")
+    link = temp_dir / "clawkeep-l1nk0000"
+    link.symlink_to(elsewhere, target_is_directory=True)
+    configured = temp_dir / "clawkeep-0wnd1r00"
+    configured.mkdir()
+    (configured / "the-owners.txt").write_text("kept")
+
+    with contextlib.ExitStack() as stack:
+        upload = _backs_up(stack)
+        stack.enter_context(patch(
+            "clawkeep.runner.agent.create_archive",
+            side_effect=lambda cfg, output_dir: _archive_into(output_dir),
+        ))
+        cfg = _with_output_dir(tmp_path, str(configured))
+        assert runner.run_once(cfg, "claw_x") == runner.EXIT_OK
+
+    upload.assert_called_once()
+    assert sorted(p.name for p in temp_dir.iterdir()) == [
+        "clawkeep-0wnd1r00", "clawkeep-l1nk0000", "clawkeep-restore-abcd1234",
+        "clawkeep-seal-abcd1234",
+    ]
+    assert [p.name for p in configured.iterdir()] == ["the-owners.txt"]
+    assert (elsewhere / "keep.txt").read_text() == "not ClawKeep's"
+
+
+def test_the_sweep_leaves_a_live_runs_staging_dir_alone(
+    isolate_state: Path, tmp_path: Path, temp_dir: Path,
+) -> None:
+    """The run lock is one data dir's: a run of another data dir on this user
+    sweeps the same temp dir while this run builds. This run's lock on its own
+    staging dir keeps it there; the backup then completes and takes it along."""
+    import contextlib
+
+    swept: list[Path] = []
+
+    def create(cfg, output_dir):
+        archive = _archive_into(output_dir)
+        runner._sweep_stale_staging(cfg)  # what another run does as it starts
+        swept.append(output_dir)
+        assert archive.path.read_bytes() == b"fake archive"
+        return archive
+
+    with contextlib.ExitStack() as stack:
+        upload = _backs_up(stack)
+        stack.enter_context(patch("clawkeep.runner.agent.create_archive", side_effect=create))
+        assert runner.run_once(_with_output_dir(tmp_path), "claw_x") == runner.EXIT_OK
+
+    upload.assert_called_once()
+    (where,) = swept
+    assert where.parent == temp_dir
+    assert list(temp_dir.iterdir()) == []

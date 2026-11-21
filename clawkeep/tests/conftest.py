@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 
 import pytest
 
@@ -34,9 +35,13 @@ def no_live_backup_plan(
     guard's suites hand it a plan built from a fixture tree instead. The data
     dir (the guard's lock and link journal live there) defaults to a fresh
     temporary one; a suite that wants its own sets it after this runs.
+
+    The temp dir too: a run starts by removing the staging dirs dead runs left
+    there, and the machine's own ClawKeep may be mid-backup in the real one.
     """
     monkeypatch.setattr(backup_guard, "_plan", lambda cfg: None)
     monkeypatch.setenv("CLAWKEEP_DATA_DIR", str(tmp_path_factory.mktemp("clawkeep-data")))
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path_factory.mktemp("tmp")))
 
 
 def cli_failure(message: str, *, envelope: bool = True) -> subprocess.CompletedProcess[str]:
