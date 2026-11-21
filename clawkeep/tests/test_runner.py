@@ -2246,7 +2246,7 @@ def test_a_staging_dir_that_cannot_be_removed_stays_recorded(
         stack.enter_context(patch(
             "clawkeep.runner.shutil.rmtree", side_effect=refuses_the_dead_one,
         ))
-        assert runner.run_once(_cfg(tmp_path), "claw_x") == runner.EXIT_OK
+        assert runner.run_once(_with_output_dir(tmp_path), "claw_x") == runner.EXIT_OK
 
     assert dead.exists()
     assert runner._staging_record().read_text(encoding="utf-8") == f"{dead}\n"
