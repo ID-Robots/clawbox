@@ -2058,6 +2058,7 @@ def test_an_archive_that_fails_after_it_is_written_leaves_no_staging_dir(
     (where,) = built
     assert where.parent == temp_dir
     assert list(temp_dir.iterdir()) == []
+    assert not runner._staging_record().exists()
 
 
 def test_a_run_stopped_by_sigterm_unwinds_and_leaves_no_staging_dir(
@@ -2106,51 +2107,55 @@ def test_a_run_stopped_by_sigterm_unwinds_and_leaves_no_staging_dir(
     (where,) = built
     assert where.parent == temp_dir
     assert list(temp_dir.iterdir()) == []
+    assert not runner._staging_record().exists()
 
 
-def _left_an_hour_ago(*dirs: Path, mode: int = 0o700) -> None:
-    """With mkdtemp's mode (unless told otherwise), last changed an hour ago."""
+def _left_an_hour_ago(*dirs: Path) -> None:
+    """With mkdtemp's mode, last changed an hour ago — as a dead run's would be."""
     import os
     import time
 
     for d in dirs:
-        d.chmod(mode)
+        d.chmod(0o700)
         os.utime(d, (time.time() - 3600, time.time() - 3600))
 
 
-def test_a_run_first_removes_the_staging_dirs_dead_runs_left(
+def _killed_run_left(temp_dir: Path) -> Path:
+    """What a run killed outright (SIGKILL, a power cut) leaves: its staging
+    dir with the archive in it, and the record of that dir in its data dir."""
+    import tempfile
+
+    dead = Path(tempfile.mkdtemp(prefix="clawkeep-", dir=temp_dir))
+    (dead / "clawkeep-hermes-abcd1234").mkdir()
+    (dead / "2026-11-20-openclaw-backup.tar.gz").write_bytes(b"x" * 4096)
+    runner._staging_record().write_text(f"{dead}\n", encoding="utf-8")
+    _left_an_hour_ago(dead)
+    return dead
+
+
+def test_a_run_first_removes_the_staging_dir_a_killed_run_left(
     isolate_state: Path, tmp_path: Path, temp_dir: Path,
 ) -> None:
-    """A run killed outright (SIGKILL, a power cut) reaches no cleanup at all;
-    the next run removes what it left. Nothing else: not restore's or
-    encryption's temp dirs, not a link, not a directory someone made by hand
-    with a staging name, not one changed in the last minute (its run may not
-    hold its lock yet), and not the configured output_dir, even one named and
-    made like a staging dir — which behaves as it always did."""
+    """A run killed outright reaches no cleanup at all; the next run of the
+    same data dir removes the staging dir it recorded. Nothing else, however
+    much it looks like one: not restore's or encryption's temp dirs, not a
+    link, and not a configured output_dir — this run's, or another
+    configuration's named and made like a staging dir."""
     import contextlib
 
-    dead = temp_dir / "clawkeep-k1lled_0"
-    (dead / "clawkeep-hermes-abcd1234").mkdir(parents=True)
-    (dead / "2026-11-20-openclaw-backup.tar.gz").write_bytes(b"x" * 4096)
+    dead = _killed_run_left(temp_dir)
     restoring = temp_dir / "clawkeep-restore-abcd1234"
-    restoring.mkdir()
     sealing = temp_dir / "clawkeep-seal-abcd1234"
-    sealing.mkdir()
+    others = temp_dir / "clawkeep-archives"  # another configuration's output_dir
+    configured = temp_dir / "clawkeep-0wnd1r00"  # this run's
+    for d in (restoring, sealing, others, configured):
+        d.mkdir()
+        (d / "keep.txt").write_text("not a dead run's")
+    _left_an_hour_ago(restoring, sealing, others, configured)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     (elsewhere / "keep.txt").write_text("not ClawKeep's")
-    link = temp_dir / "clawkeep-l1nk0000"
-    link.symlink_to(elsewhere, target_is_directory=True)
-    by_hand = temp_dir / "clawkeep-archives"
-    by_hand.mkdir()
-    (by_hand / "kept.tar.gz").write_text("someone's")
-    young = temp_dir / "clawkeep-y0ung000"
-    young.mkdir(mode=0o700)
-    configured = temp_dir / "clawkeep-0wnd1r00"
-    configured.mkdir()
-    (configured / "the-owners.txt").write_text("kept")
-    _left_an_hour_ago(dead, restoring, sealing, configured)
-    _left_an_hour_ago(by_hand, mode=0o755)
+    (temp_dir / "clawkeep-l1nk0000").symlink_to(elsewhere, target_is_directory=True)
 
     with contextlib.ExitStack() as stack:
         upload = _backs_up(stack)
@@ -2162,31 +2167,43 @@ def test_a_run_first_removes_the_staging_dirs_dead_runs_left(
         assert runner.run_once(cfg, "claw_x") == runner.EXIT_OK
 
     upload.assert_called_once()
+    assert not dead.exists()
+    assert not runner._staging_record().exists()
     assert sorted(p.name for p in temp_dir.iterdir()) == [
         "clawkeep-0wnd1r00", "clawkeep-archives", "clawkeep-l1nk0000",
-        "clawkeep-restore-abcd1234", "clawkeep-seal-abcd1234", "clawkeep-y0ung000",
+        "clawkeep-restore-abcd1234", "clawkeep-seal-abcd1234",
     ]
-    assert [p.name for p in configured.iterdir()] == ["the-owners.txt"]
-    assert [p.name for p in by_hand.iterdir()] == ["kept.tar.gz"]
-    assert (elsewhere / "keep.txt").read_text() == "not ClawKeep's"
+    for d in (restoring, sealing, others, configured, elsewhere):
+        assert [p.name for p in d.iterdir()] == ["keep.txt"]
 
 
-def test_the_sweep_leaves_a_live_runs_staging_dir_alone(
-    isolate_state: Path, tmp_path: Path, temp_dir: Path,
+def test_a_run_leaves_another_data_dirs_staging_alone(
+    isolate_state: Path, tmp_path: Path, temp_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The run lock is one data dir's: a run of another data dir on this user
-    sweeps the same temp dir while this run builds — hours into it, say. This
-    run's lock on its own staging dir keeps it there; the backup then completes
-    and takes it along."""
+    """The temp dir is shared by every data dir of the user, the run lock is
+    one data dir's. A run of data dir B starts while a run of data dir A is
+    building, an hour in: it removes only what B's own killed run left, and A
+    backs up as before and takes its staging dir along."""
     import contextlib
+    import os
 
-    swept: list[Path] = []
+    data_a = Path(os.environ["CLAWKEEP_DATA_DIR"])
+    data_b = tmp_path / "data-b"
+    data_b.mkdir()
+    monkeypatch.setenv("CLAWKEEP_DATA_DIR", str(data_b))
+    dead_b = _killed_run_left(temp_dir)
+    monkeypatch.setenv("CLAWKEEP_DATA_DIR", str(data_a))
+    building: list[Path] = []
 
     def create(cfg, output_dir):
         archive = _archive_into(output_dir)
         _left_an_hour_ago(output_dir)
-        runner._sweep_stale_staging(cfg)  # what another run does as it starts
-        swept.append(output_dir)
+        monkeypatch.setenv("CLAWKEEP_DATA_DIR", str(data_b))
+        runner._sweep_stale_staging()  # B's run, starting
+        monkeypatch.setenv("CLAWKEEP_DATA_DIR", str(data_a))
+        building.append(output_dir)
+        assert not dead_b.exists()
+        assert (data_a / runner.STAGING_RECORD_NAME).read_text().strip() == str(output_dir)
         assert archive.path.read_bytes() == b"fake archive"
         return archive
 
@@ -2196,6 +2213,36 @@ def test_the_sweep_leaves_a_live_runs_staging_dir_alone(
         assert runner.run_once(_with_output_dir(tmp_path), "claw_x") == runner.EXIT_OK
 
     upload.assert_called_once()
-    (where,) = swept
+    (where,) = building
     assert where.parent == temp_dir
     assert list(temp_dir.iterdir()) == []
+    assert not (data_a / runner.STAGING_RECORD_NAME).exists()
+    assert not (data_b / runner.STAGING_RECORD_NAME).exists()
+
+
+@pytest.mark.parametrize("recorded", ["link", "relative", "not-a-staging-name"])
+def test_a_record_naming_no_staging_dir_removes_nothing(
+    isolate_state: Path, tmp_path: Path, temp_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    recorded: str,
+) -> None:
+    """Only ever an absolute directory with the staging name: a record that
+    names anything else — edited by hand, say — is dropped, and what it names
+    stays."""
+    if recorded == "relative":
+        target = temp_dir / "clawkeep-r3lat1ve"
+        named = Path(target.name)
+        monkeypatch.chdir(temp_dir)
+    else:
+        target = tmp_path / "owners"
+        named = target
+    target.mkdir()
+    (target / "keep.txt").write_text("kept")
+    if recorded == "link":
+        named = temp_dir / "clawkeep-l1nk0000"
+        named.symlink_to(target, target_is_directory=True)
+    runner._staging_record().write_text(f"{named}\n", encoding="utf-8")
+
+    runner._sweep_stale_staging()
+
+    assert [p.name for p in target.iterdir()] == ["keep.txt"]
+    assert not runner._staging_record().exists()
