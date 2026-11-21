@@ -2108,13 +2108,25 @@ def test_a_run_stopped_by_sigterm_unwinds_and_leaves_no_staging_dir(
     assert list(temp_dir.iterdir()) == []
 
 
+def _left_an_hour_ago(*dirs: Path, mode: int = 0o700) -> None:
+    """With mkdtemp's mode (unless told otherwise), last changed an hour ago."""
+    import os
+    import time
+
+    for d in dirs:
+        d.chmod(mode)
+        os.utime(d, (time.time() - 3600, time.time() - 3600))
+
+
 def test_a_run_first_removes_the_staging_dirs_dead_runs_left(
     isolate_state: Path, tmp_path: Path, temp_dir: Path,
 ) -> None:
     """A run killed outright (SIGKILL, a power cut) reaches no cleanup at all;
     the next run removes what it left. Nothing else: not restore's or
-    encryption's temp dirs, not a link, and not the configured output_dir, even
-    one named like a staging dir — which behaves as it always did."""
+    encryption's temp dirs, not a link, not a directory someone made by hand
+    with a staging name, not one changed in the last minute (its run may not
+    hold its lock yet), and not the configured output_dir, even one named and
+    made like a staging dir — which behaves as it always did."""
     import contextlib
 
     dead = temp_dir / "clawkeep-k1lled_0"
@@ -2129,9 +2141,16 @@ def test_a_run_first_removes_the_staging_dirs_dead_runs_left(
     (elsewhere / "keep.txt").write_text("not ClawKeep's")
     link = temp_dir / "clawkeep-l1nk0000"
     link.symlink_to(elsewhere, target_is_directory=True)
+    by_hand = temp_dir / "clawkeep-archives"
+    by_hand.mkdir()
+    (by_hand / "kept.tar.gz").write_text("someone's")
+    young = temp_dir / "clawkeep-y0ung000"
+    young.mkdir(mode=0o700)
     configured = temp_dir / "clawkeep-0wnd1r00"
     configured.mkdir()
     (configured / "the-owners.txt").write_text("kept")
+    _left_an_hour_ago(dead, restoring, sealing, configured)
+    _left_an_hour_ago(by_hand, mode=0o755)
 
     with contextlib.ExitStack() as stack:
         upload = _backs_up(stack)
@@ -2144,10 +2163,11 @@ def test_a_run_first_removes_the_staging_dirs_dead_runs_left(
 
     upload.assert_called_once()
     assert sorted(p.name for p in temp_dir.iterdir()) == [
-        "clawkeep-0wnd1r00", "clawkeep-l1nk0000", "clawkeep-restore-abcd1234",
-        "clawkeep-seal-abcd1234",
+        "clawkeep-0wnd1r00", "clawkeep-archives", "clawkeep-l1nk0000",
+        "clawkeep-restore-abcd1234", "clawkeep-seal-abcd1234", "clawkeep-y0ung000",
     ]
     assert [p.name for p in configured.iterdir()] == ["the-owners.txt"]
+    assert [p.name for p in by_hand.iterdir()] == ["kept.tar.gz"]
     assert (elsewhere / "keep.txt").read_text() == "not ClawKeep's"
 
 
@@ -2155,14 +2175,16 @@ def test_the_sweep_leaves_a_live_runs_staging_dir_alone(
     isolate_state: Path, tmp_path: Path, temp_dir: Path,
 ) -> None:
     """The run lock is one data dir's: a run of another data dir on this user
-    sweeps the same temp dir while this run builds. This run's lock on its own
-    staging dir keeps it there; the backup then completes and takes it along."""
+    sweeps the same temp dir while this run builds — hours into it, say. This
+    run's lock on its own staging dir keeps it there; the backup then completes
+    and takes it along."""
     import contextlib
 
     swept: list[Path] = []
 
     def create(cfg, output_dir):
         archive = _archive_into(output_dir)
+        _left_an_hour_ago(output_dir)
         runner._sweep_stale_staging(cfg)  # what another run does as it starts
         swept.append(output_dir)
         assert archive.path.read_bytes() == b"fake archive"

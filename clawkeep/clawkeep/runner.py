@@ -492,6 +492,9 @@ def _resolve_staging(cfg: Config) -> tuple[Path, bool]:
 #: characters after the prefix. Restore's `clawkeep-restore-*` and encryption's
 #: `clawkeep-seal-*` temp dirs never match it.
 _STAGING_NAME = re.compile(r"clawkeep-[a-z0-9_]{8}")
+#: A staging dir changed this recently is left alone: the run that made it
+#: takes its lock just after mkdtemp, and may not hold it yet.
+_STALE_AFTER_S = 60.0
 
 
 def _sweep_stale_staging(cfg: Config) -> None:
@@ -501,23 +504,29 @@ def _sweep_stale_staging(cfg: Config) -> None:
 
     Called with the run lock held, so no other run of this data dir is alive.
     A live run of another data dir holds a flock on its own staging dir (see
-    `_run_once_locked`) and is skipped. Only this user's directories with the
-    staging name are candidates, and never the configured output_dir.
+    `_run_once_locked`) and is skipped. Only what mkdtemp made is a candidate —
+    this user's directory, the staging name, mode 0700 (a directory someone
+    made with mkdir is not) — once a minute old, and never the configured
+    output_dir.
     """
-    keep = Path(cfg.openclaw.output_dir).resolve() if cfg.openclaw.output_dir else None
     try:
+        keep = Path(cfg.openclaw.output_dir).resolve() if cfg.openclaw.output_dir else None
         tmp = Path(tempfile.gettempdir()).resolve()
         entries = list(os.scandir(tmp))
-    except OSError as e:
+    except (OSError, RuntimeError) as e:
         log.warning("could not look for stale staging dirs: %s", e)
         return
+    now = time.time()
     for entry in entries:
         path = tmp / entry.name
         try:
+            if not _STAGING_NAME.fullmatch(entry.name) or not entry.is_dir(follow_symlinks=False):
+                continue
+            st = entry.stat(follow_symlinks=False)
             if (
-                not _STAGING_NAME.fullmatch(entry.name)
-                or not entry.is_dir(follow_symlinks=False)
-                or entry.stat(follow_symlinks=False).st_uid != os.getuid()
+                st.st_uid != os.getuid()
+                or st.st_mode & 0o7777 != 0o700
+                or now - st.st_mtime < _STALE_AFTER_S
                 or (keep is not None and (keep == path or path in keep.parents))
             ):
                 continue
