@@ -41,6 +41,8 @@ export default function CodingProjectFoldersCard({ project, candidates }: {
       const res = await fetch(`/setup-api/coding-agent/project-folders?project=${encodeURIComponent(project)}`, { cache: "no-store" });
       if (mine !== scope.current) return;
       const data = await res.json().catch(() => null) as { folders?: Folder[]; error?: unknown } | null;
+      // Asked again after the body: a later read (Retry) may have answered first.
+      if (mine !== scope.current) return;
       if (!res.ok || !data) {
         setError(tr("codingAgent.folders.loadFailed", "Could not read this project's folders."));
         return;
