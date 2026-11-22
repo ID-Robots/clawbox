@@ -624,6 +624,21 @@ describe("liveRunsInProject", () => {
     expect(lib.liveRunsInProject(target()).map((r) => r.id)).toEqual(["run-a", "run-b", "run-c"]);
   });
 
+  it("finds a multi-folder run whose copies include this project, though it works in another project's folder (TASK-2757)", () => {
+    listRuns.mockReturnValue([
+      {
+        id: "run-multi",
+        task: "t",
+        status: "running",
+        projectId: null,
+        directory: path.join(owner, "skyhub", ".clawbox", "worktrees", "run-multi"),
+        worktree: null,
+        multiFolder: { project: path.join(owner, "skyhub"), folders: [{ project: path.join(owner, "api") }, { project: path.join(owner, "shop") }] },
+      },
+    ]);
+    expect(lib.liveRunsInProject(target()).map((r) => r.id)).toEqual(["run-multi"]);
+  });
+
   it("ignores a settled run, and a live one in a project whose name merely starts the same", () => {
     listRuns.mockReturnValue([
       { id: "run-done", task: "t", status: "completed", projectId: null, directory: path.join(owner, "shop") },

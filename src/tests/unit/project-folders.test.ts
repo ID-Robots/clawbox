@@ -105,4 +105,12 @@ describe("adding and removing a folder on a project's page", () => {
     await lib.deleteProjectFolders("skyhub");
     expect(await lib.readProjectFolders("skyhub")).toBeNull();
   });
+
+  it("takes a deleted folder off every other project's list, and drops a list left with its own folder alone", async () => {
+    await lib.createFolderProject(projects, "skyhub", ["gateway", "dashboard", "docs"]);
+    await lib.addProjectFolder(projects, "gateway", "dashboard");
+    await lib.deleteProjectFolders("dashboard");
+    expect(await lib.readProjectFolders("skyhub")).toEqual([{ folder: "gateway" }, { folder: "docs" }]);
+    expect(await lib.readProjectFolders("gateway")).toBeNull();
+  });
 });

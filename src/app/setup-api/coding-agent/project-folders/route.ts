@@ -91,9 +91,7 @@ export async function POST(request: Request) {
   const { project, action } = body;
   try {
     if (action === "create") {
-      const folders = await createFolderProject(await getDefaultDirectory(), project, body.folders);
-      console.error(`[coding-agent] multi-folder project ${String(project)} created: ${folders.map((f) => f.folder).join(", ")}`);
-      return answer(String(project), folders);
+      return answer(String(project), await createFolderProject(await getDefaultDirectory(), project, body.folders));
     }
     if (action === "add") return answer(String(project), await addProjectFolder(await getDefaultDirectory(), project, body.folder, body.base));
     if (action === "remove") return answer(String(project), await removeProjectFolder(project, body.folder));

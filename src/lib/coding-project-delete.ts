@@ -398,7 +398,9 @@ export function liveRunsInProject(target: Pick<ProjectTarget, "folder" | "kind" 
     .filter((run) => {
       if (!isLive(run.status)) return false;
       if (target.kind === "codeProject" && run.projectId === target.folder) return true;
-      const worked = [run.directory, projectDirectoryOf(run)].filter((d): d is string => typeof d === "string" && !!d);
+      // A multi-folder run (TASK-2757) works in a copy of each of its repositories: every one of them is in use.
+      const worked = [run.directory, projectDirectoryOf(run), ...(run.multiFolder?.folders.map((f) => f.project) ?? [])]
+        .filter((d): d is string => typeof d === "string" && !!d);
       return worked.some((dir) => roots.some((root) => {
         const resolved = path.resolve(dir);
         return resolved === root || resolved.startsWith(root + path.sep);
@@ -1154,7 +1156,8 @@ export async function deleteProject(input: {
     // project that shares the scope still has its runs' tools.
     if (!sharedWith) await deleteProjectMcpAllowlist(target.folder);
     // …and its folder list, when it was a multi-folder project (TASK-2757).
-    if (!sharedWith && target.kind === "folder") await deleteProjectFolders(target.folder);
+    // Not held back by a code project of the same name: only a folder project has a list.
+    if (target.kind === "folder") await deleteProjectFolders(target.folder);
     const pruned = await pruneProjectTrash(roots, deletedAt)
       .catch(() => ({ removed: [] as string[], expired: [] as string[], early: [] as string[] }));
 

@@ -19,11 +19,13 @@ function json(body: unknown, status = 200) {
 let stored: { folder: string; base?: string }[];
 let calls: Array<{ method: string; url: string; body?: Record<string, unknown> }>;
 let refuse: string | null;
+let failGets: number;
 
 beforeEach(() => {
   stored = [];
   calls = [];
   refuse = null;
+  failGets = 0;
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     const method = init?.method ?? "GET";
@@ -31,6 +33,10 @@ beforeEach(() => {
     calls.push({ method, url, ...(body ? { body } : {}) });
     if (!url.startsWith("/setup-api/coding-agent/project-folders")) return json({ error: "unexpected" }, 404);
     if (method === "POST" && refuse) return json({ error: refuse, kind: "not_a_repository" }, 400);
+    if (method === "GET" && failGets > 0) {
+      failGets -= 1;
+      return json({ error: "store_unreadable" }, 500);
+    }
     if (method === "POST" && body?.action === "add") {
       if (stored.length === 0) stored = [{ folder: "gateway" }];
       stored = [...stored, { folder: String(body.folder) }];
@@ -53,7 +59,8 @@ describe("the Folders card", () => {
 
   it("adds a picked project folder, and removes it again", async () => {
     render(<CodingProjectFoldersCard project="gateway" candidates={["dashboard", "docs"]} />);
-    fireEvent.click(await screen.findByTestId("coding-project-folders-add"));
+    await waitFor(() => expect(screen.getByTestId("coding-project-folders-add")).not.toBeDisabled());
+    fireEvent.click(screen.getByTestId("coding-project-folders-add"));
     fireEvent.click(screen.getByTestId("coding-project-folders-pick-dashboard"));
     expect(await screen.findByTestId("coding-project-folder-dashboard")).toBeInTheDocument();
     expect(calls.find((c) => c.method === "POST")?.body).toEqual({ project: "gateway", action: "add", folder: "dashboard" });
@@ -67,6 +74,16 @@ describe("the Folders card", () => {
     await waitFor(() => expect(screen.queryByTestId("coding-project-folder-dashboard")).toBeNull());
     expect(calls.filter((c) => c.method === "POST").at(-1)?.body).toEqual({ project: "gateway", action: "remove", folder: "dashboard" });
     expect(screen.queryByTestId("coding-project-folder-remove-gateway")).toBeNull();
+  });
+
+  it("offers a retry when the list cannot be read, and nothing to change until it is", async () => {
+    failGets = 1;
+    render(<CodingProjectFoldersCard project="gateway" candidates={["dashboard"]} />);
+    await screen.findByTestId("coding-project-folders-retry");
+    expect(screen.getByTestId("coding-project-folders-add")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("coding-project-folders-retry"));
+    await waitFor(() => expect(screen.getByTestId("coding-project-folders-add")).not.toBeDisabled());
+    expect(screen.queryByTestId("coding-project-folders-retry")).toBeNull();
   });
 
   it("says the route's own refusal", async () => {

@@ -223,11 +223,23 @@ export async function removeProjectFolder(project: unknown, folder: unknown): Pr
   return Object.hasOwn(map, name) ? map[name].map((f) => ({ ...f })) : [];
 }
 
-/** A deleted project's list goes with it, the way its MCP servers do. Never throws. */
+/**
+ * A deleted project's list goes with it, the way its MCP servers do — and so
+ * does its folder from every OTHER project's list, which would otherwise name
+ * a folder now in the trash and refuse every run's start. A list left with
+ * nothing, or with its own folder alone, goes too (`removeProjectFolder`'s
+ * rule). Never throws.
+ */
 export async function deleteProjectFolders(project: string): Promise<void> {
   if (!isFolderName(project)) return;
   await mutate((current) => {
     delete current[project];
+    for (const name of Object.keys(current)) {
+      const left = current[name].filter((f) => f.folder !== project);
+      if (left.length === current[name].length) continue;
+      if (left.length === 0 || (left.length === 1 && left[0].folder === name && !left[0].base)) delete current[name];
+      else current[name] = left;
+    }
   }).catch((err) => {
     console.error("[project-folders] a deleted project's folder list could not be removed:", err instanceof Error ? err.message : err);
   });

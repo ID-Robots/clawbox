@@ -31,7 +31,7 @@ vi.mock("@/lib/coding-pr", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-pr")>()),
   ...github,
 }));
-const review = vi.hoisted(() => ({ findOpenPullRequestForBranch: vi.fn(async () => null) }));
+const review = vi.hoisted(() => ({ findOpenPullRequestForBranch: vi.fn(async () => null), pushBranch: vi.fn() }));
 vi.mock("@/lib/coding-review", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-review")>()),
   ...review,
@@ -119,6 +119,7 @@ beforeEach(async () => {
   installWrapper([]);
   github.openPullRequest.mockReset();
   github.updatePullRequestBody.mockReset();
+  review.pushBranch.mockReset();
   vi.resetModules();
   lib = await import("@/lib/coding-agent");
 });
@@ -168,6 +169,8 @@ describe("a run on a multi-folder project", () => {
     expect(db.branchRemoved).toBe(true);
     expect(git(dashboard, "branch", "--list", `clawbox/${started.id}`)).toBe("");
     expect(run.progress.join("\n")).toMatch(/gateway: committed as/);
+    // Written through its shell alone, the file is still the run's: the branch's diff names it.
+    expect(run.filesTouched).toContain("gateway/api.txt");
     // The run's own folder is gone once its copies are.
     expect(fs.existsSync(started.directory)).toBe(false);
   });
@@ -211,6 +214,63 @@ describe("a run on a multi-folder project", () => {
     expect(fs.existsSync(path.join(gateway, "api.txt"))).toBe(false);
     expect(git(gateway, "branch", "--list", `clawbox/${started.id}`)).toContain(`clawbox/${started.id}`);
     expect(run.progress.join("\n")).toMatch(/gateway: pull request https:\/\/github\.com\/acme\/gateway\/pull\/11/);
+  });
+
+  it("meets a pr deliverable with the repositories' pull requests, and pushes a follow-up's commits to the request already open", async () => {
+    writeConfig({ coding_agent_auto_pr: true });
+    installWrapper([`echo api >> "$PWD/gateway/api.txt"`]);
+    github.openPullRequest.mockResolvedValue({ ok: true, number: 11, url: "https://github.com/acme/gateway/pull/11" });
+    review.pushBranch.mockResolvedValue({ ok: true });
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    const started = await lib.startRun({ task: "add the api", projectId: "skyhub", source: "owner", deliverable: { kind: "pr" } });
+    const run = await settled(started.id);
+    expect(run.status).toBe("completed");
+    expect(run.deliverableCheck).toMatchObject({ ok: true });
+    expect(github.openPullRequest).toHaveBeenCalledTimes(1);
+    expect(review.pushBranch).not.toHaveBeenCalled();
+    // A follow-up in the same chain: no second request, the branch goes up again.
+    const again = await lib.startRun({ task: "and more", resumeRunId: started.id, source: "owner" });
+    await settled(again.id);
+    expect(github.openPullRequest).toHaveBeenCalledTimes(1);
+    expect(review.pushBranch).toHaveBeenCalledWith(expect.stringMatching(/gateway$/), `clawbox/${started.id}`);
+  });
+
+  it("does not meet a pr deliverable while a repository it changed has no pull request", async () => {
+    writeConfig({ coding_agent_auto_pr: true });
+    installWrapper([`echo api > "$PWD/gateway/api.txt"`, `echo ui > "$PWD/dashboard/ui.txt"`]);
+    github.openPullRequest.mockImplementation(async (input: { directory: string }) => (
+      input.directory.endsWith("gateway")
+        ? { ok: true, number: 11, url: "https://github.com/acme/gateway/pull/11" }
+        : { ok: false, detail: "GitHub refused the push." }
+    ));
+    github.updatePullRequestBody.mockResolvedValue({ ok: true, changed: true });
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    const started = await lib.startRun({ task: "both", projectId: "skyhub", source: "owner", deliverable: { kind: "pr" } });
+    const run = await settled(started.id);
+    expect(run.deliverableCheck).toMatchObject({ ok: false });
+    expect(run.progress.join("\n")).toMatch(/dashboard: no pull request: GitHub refused the push\./);
+  });
+
+  it("brings work the run committed on a branch of its own onto the folder's branch, and merges it home", async () => {
+    installWrapper([
+      `cd "$PWD/gateway" && git checkout -q -b fix/api && echo x > x.txt && git add x.txt && git -c user.name=t -c user.email=t@x commit -qm "on a branch of its own" && cd - >/dev/null`,
+    ]);
+    const started = await lib.startRun({ task: "fix the api on a branch", projectId: "skyhub", source: "owner" });
+    const run = await settled(started.id);
+    expect(run.multiFolder!.folders[0].result?.kind).toBe("merged");
+    expect(fs.readFileSync(path.join(gateway, "x.txt"), "utf8")).toBe("x\n");
+  });
+
+  it("refuses a follow-up when one repository's copy cannot be put back, and leaves the others' copies off the disk", async () => {
+    installWrapper([`echo api > "$PWD/gateway/api.txt"`]);
+    const started = await lib.startRun({ task: "first go", projectId: "skyhub", source: "owner" });
+    await settled(started.id);
+    fs.rmSync(path.join(dashboard, ".git"), { recursive: true, force: true });
+    await expect(lib.startRun({ task: "carry on", resumeRunId: started.id, source: "owner" }))
+      .rejects.toMatchObject({ kind: "not_found", message: expect.stringMatching(/^dashboard: the run's copy could not be put back/) });
+    expect(fs.existsSync(path.join(started.directory, "gateway"))).toBe(false);
   });
 
   it("opens no pull request for a repository the run left untouched", async () => {

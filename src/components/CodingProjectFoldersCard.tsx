@@ -147,6 +147,13 @@ export default function CodingProjectFoldersCard({ project, candidates }: {
         </ul>
       )}
       {error && <p className="mt-1 text-[11px] text-red-300" role="alert" data-testid="coding-project-folders-error">{error}</p>}
+      {/* The list could not be read: nothing may change until it is, and this reads it again. */}
+      {error && folders === null && (
+        <button type="button" onClick={() => void load()} data-testid="coding-project-folders-retry" className={`${BTN_QUIET} mt-1`}>
+          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">refresh</span>
+          {tr("retry", "Retry")}
+        </button>
+      )}
     </div>
   );
 }

@@ -9752,6 +9752,11 @@ async function commitRunFolders(run: CodingRun, multi: RunMultiFolder): Promise<
   for (const f of multi.folders) {
     if (f.removed || !fs.existsSync(f.path)) continue;
     try {
+      // Committed on a branch of its own in this copy: brought onto the
+      // folder's branch first, as `adoptRunBranchWork` does for a single run.
+      // When it cannot be, it is said, and the settle keeps the copy.
+      const adopted = await adoptOwnBranchWork(f.path, f.branch);
+      if (!adopted.ok) pushProgress(run, RUNNER_STEP.notCommitted(`${f.name}: the run committed on a branch of its own, which could not be brought onto ${f.branch}: ${adopted.detail}`));
       const outcome = await commitRunWork({ directory: f.path, runId: run.id, task: run.task, summary: run.summary });
       if (outcome.committed) pushProgress(run, RUNNER_STEP.folderCommitted(f.name, outcome.sha));
       else if (outcome.reason !== "no_changes") {
@@ -9760,6 +9765,13 @@ async function commitRunFolders(run: CodingRun, multi: RunMultiFolder): Promise<
       }
       const ahead = await commitsAhead(f.project, f.branch, f.base);
       f.commit = ahead && ahead > 0 ? await headCommitShort(f.path) : null;
+      // What the branch changed, as the run's own files (`<folder>/<path>`):
+      // a run that wrote only through its shell has no tool-reported file,
+      // and an empty list reads as "changed nothing" to the review pass.
+      if (ahead && ahead > 0) {
+        const diff = await gitIn(f.path, ["diff", "--name-only", "-z", `${f.base}...HEAD`]);
+        if (diff.code === 0) for (const file of diff.stdout.split("\0").filter(Boolean).slice(0, MAX_COMMITTED_FILES)) noteFile(run, path.join(f.name, file));
+      }
     } catch (err) {
       failed.push(`${f.name}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -10264,6 +10276,25 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
   }
 }
 
+/**
+ * A multi-folder run's pull requests as the deliverable gate reads one: its
+ * `pr` bar is met when EVERY repository it committed to has its pull request
+ * open. Null when one of them has none, when none was opened, or for every
+ * other run.
+ */
+function folderPrForGate(run: CodingRun): PrState | null {
+  const folders = run.multiFolder?.folders ?? [];
+  // Every repository whose branch holds the run's work needs its request; one
+  // that changed nothing needs none, and one whose request failed fails the bar.
+  if (folders.some((x) => x.commit && !x.pr)) return null;
+  const f = folders.find((x) => x.pr);
+  if (!f?.pr) return null;
+  return {
+    phase: "waiting", number: f.pr.number, url: f.pr.url, branch: f.branch, base: f.base,
+    checks: emptyChecks(), detail: null, startedAt: run.startedAt, endedAt: null, reviewOk: true, foundBy: "opened",
+  };
+}
+
 /** The marked block a multi-folder run's pull requests name each other in: replaced, never duplicated, on a rewrite. */
 const RELATED_PRS_START = "<!-- clawbox:related-pull-requests -->";
 const RELATED_PRS_END = "<!-- /clawbox:related-pull-requests -->";
@@ -10305,6 +10336,10 @@ async function openFolderPullRequests(origin: CodingRun, finished: CodingRun, en
   const open: RunFolder[] = [];
   for (const f of multi.folders) {
     if (f.pr) {
+      // Already open (a resume, a review pass or a Fix CI went on in it):
+      // its branch goes up again, or the request never sees the new commits.
+      const pushed = await pushBranch(where(f), f.branch).catch((err: unknown) => ({ ok: false as const, detail: err instanceof Error ? err.message : String(err) }));
+      if (!pushed.ok) pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, `${f.branch} was not pushed to ${f.pr.url}: ${pushed.detail}`));
       open.push(f);
       continue;
     }
@@ -11731,7 +11766,7 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     }
 
     const verdict = await checkDeliverable(
-      { directory: origin.directory, pr: origin.pr },
+      { directory: origin.directory, pr: origin.pr ?? folderPrForGate(origin) },
       deliverable,
       deliverable.kind === "command" ? await deliverableSandbox(origin) : null,
     );
@@ -14134,9 +14169,20 @@ async function reopenRunFolders(previous: CodingRun): Promise<RunMultiFolder | u
   const multi = previous.multiFolder;
   if (!multi) return undefined;
   const folders: RunFolder[] = [];
+  const madeNow: RunFolder[] = [];
   for (const f of multi.folders) {
+    const there = fs.existsSync(f.path);
     const back = await restoreRunWorktree(f.project, f.path, f.branch, f.base).catch(() => false);
-    folders.push({ ...f, removed: !back, branchRemoved: back ? false : f.branchRemoved, result: null, pr: f.pr ? { ...f.pr } : null });
+    if (!back) {
+      // All or nothing, as at the start: a run carrying on without one of its
+      // repositories would work as if it had them all. The copies put back
+      // just now hold nothing their branches do not, so they go again.
+      for (const m of madeNow) await removeRunWorktree(m.project, m.path).catch(() => false);
+      throw new CodingAgentError("not_found", `${f.name}: the run's copy could not be put back from ${f.branch}, so it cannot carry on. Start a new run instead.`);
+    }
+    const entry = { ...f, removed: false, branchRemoved: false, result: null, pr: f.pr ? { ...f.pr } : null };
+    if (!there) madeNow.push(entry);
+    folders.push(entry);
   }
   return { project: multi.project, folders };
 }
