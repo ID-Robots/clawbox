@@ -2301,8 +2301,19 @@ export interface RunFolder extends RunWorktree {
   name: string;
   /** The newest commit on its branch once the run settled, or null when it left nothing there. */
   commit: string | null;
-  /** The pull request opened for it, when its repository changed and pull requests are on. */
-  pr: { number: number; url: string } | null;
+  /**
+   * The pull request opened for it, when its repository changed and pull
+   * requests are on. `behind`: the last push of new commits to it failed, so
+   * the request does not hold all of the branch.
+   */
+  pr: { number: number; url: string; behind?: boolean } | null;
+  /**
+   * Why this repository's work must not go out — set when the run committed
+   * on a branch of its own there that could not be brought onto `branch`:
+   * then the branch is not the work, and neither a pull request nor a merge
+   * home is made from it; the copy is kept.
+   */
+  held?: string;
 }
 
 /** A multi-folder run's copies: the project they belong to, and one entry per repository. */
@@ -5032,7 +5043,8 @@ function parseRunMultiFolder(raw: unknown): { multiFolder?: RunMultiFolder } {
       ...wt,
       name,
       commit: typeof commit === "string" && commit ? commit : null,
-      pr: pr && typeof pr.number === "number" && typeof pr.url === "string" ? { number: pr.number, url: pr.url } : null,
+      pr: pr && typeof pr.number === "number" && typeof pr.url === "string" ? { number: pr.number, url: pr.url, ...((pr as { behind?: unknown }).behind === true ? { behind: true } : {}) } : null,
+      ...(typeof (f as { held?: unknown }).held === "string" && (f as { held: string }).held ? { held: (f as { held: string }).held } : {}),
     });
   }
   return folders.length ? { multiFolder: { project: m.project, folders } } : {};
@@ -9756,7 +9768,17 @@ async function commitRunFolders(run: CodingRun, multi: RunMultiFolder): Promise<
       // folder's branch first, as `adoptRunBranchWork` does for a single run.
       // When it cannot be, it is said, and the settle keeps the copy.
       const adopted = await adoptOwnBranchWork(f.path, f.branch);
-      if (!adopted.ok) pushProgress(run, RUNNER_STEP.notCommitted(`${f.name}: the run committed on a branch of its own, which could not be brought onto ${f.branch}: ${adopted.detail}`));
+      if (!adopted.ok) {
+        // Its branch is not its work now: nothing of this repository goes out
+        // — no commit on whatever is checked out, no pull request, no merge.
+        f.held = `the run committed on a branch of its own, which could not be brought onto ${f.branch}: ${adopted.detail}`;
+        // Not the run's `commitError`: that keeps EVERY copy at settle, and
+        // only this repository's work is in doubt.
+        pushProgress(run, RUNNER_STEP.notCommitted(`${f.name}: ${f.held}`));
+        mirrorOntoOrigin(run, f);
+        continue;
+      }
+      delete f.held;
       const outcome = await commitRunWork({ directory: f.path, runId: run.id, task: run.task, summary: run.summary });
       if (outcome.committed) pushProgress(run, RUNNER_STEP.folderCommitted(f.name, outcome.sha));
       else if (outcome.reason !== "no_changes") {
@@ -9772,6 +9794,7 @@ async function commitRunFolders(run: CodingRun, multi: RunMultiFolder): Promise<
         const diff = await gitIn(f.path, ["diff", "--name-only", "-z", `${f.base}...HEAD`]);
         if (diff.code === 0) for (const file of diff.stdout.split("\0").filter(Boolean).slice(0, MAX_COMMITTED_FILES)) noteFile(run, path.join(f.name, file));
       }
+      mirrorOntoOrigin(run, f);
     } catch (err) {
       failed.push(`${f.name}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -9781,6 +9804,21 @@ async function commitRunFolders(run: CodingRun, multi: RunMultiFolder): Promise<
   run.commit = multi.folders.find((f) => f.commit)?.commit ?? null;
   run.commitError = failed.length ? failed.join("; ").slice(0, MAX_ERROR_CHARS) : null;
   persist(true);
+}
+
+/**
+ * A review pass or review round works on copies of its ORIGIN's folder
+ * records; the pull request step and the deliverable gate read the origin's.
+ * What a follow-up's commit learned about a repository is written there too.
+ */
+function mirrorOntoOrigin(run: CodingRun, f: RunFolder): void {
+  const originId = run.reviewOf ?? run.reviewLoopOf;
+  if (!originId) return;
+  const twin = loadRuns().find((r) => r.id === originId)?.multiFolder?.folders.find((o) => o.name === f.name);
+  if (!twin) return;
+  twin.commit = f.commit ?? twin.commit;
+  if (f.held) twin.held = f.held;
+  else delete twin.held;
 }
 
 /** No run's commits are read past this many paths: the list is for the owner's page and the review's brief, not an index. */
@@ -10026,6 +10064,10 @@ async function settleRunFolders(run: CodingRun, multi: RunMultiFolder): Promise<
     const origin = run.reviewOf ?? run.reviewLoopOf;
     const owner = origin ? loadRuns().find((r) => r.id === origin)?.multiFolder : undefined;
     for (const f of multi.folders) {
+      if (f.held && !f.removed) {
+        pushProgress(run, `${f.name}: ${RUNNER_STEP.worktreeKept(f.held)}`);
+        continue;
+      }
       const prOwned = !!(f.pr ?? owner?.folders.find((o) => o.name === f.name)?.pr);
       await settleRunWorktree(run, f, { name: f.name, prOwned });
     }
@@ -10282,11 +10324,16 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
  * open. Null when one of them has none, when none was opened, or for every
  * other run.
  */
-function folderPrForGate(run: CodingRun): PrState | null {
+async function folderPrForGate(run: CodingRun): Promise<PrState | null> {
   const folders = run.multiFolder?.folders ?? [];
-  // Every repository whose branch holds the run's work needs its request; one
-  // that changed nothing needs none, and one whose request failed fails the bar.
-  if (folders.some((x) => x.commit && !x.pr)) return null;
+  // Every repository whose branch holds the chain's work — asked of the branch
+  // itself, so a review pass's commits count — needs its request, holding all
+  // of it; one that changed nothing needs none; a held one fails the bar.
+  for (const x of folders) {
+    if (x.held) return null;
+    const ahead = await commitsAhead(x.project, x.branch, x.base);
+    if (ahead !== 0 && (!x.pr || x.pr.behind)) return null;
+  }
   const f = folders.find((x) => x.pr);
   if (!f?.pr) return null;
   return {
@@ -10335,11 +10382,22 @@ async function openFolderPullRequests(origin: CodingRun, finished: CodingRun, en
   const where = (f: RunFolder) => (fs.existsSync(f.path) ? f.path : f.project);
   const open: RunFolder[] = [];
   for (const f of multi.folders) {
+    if (f.held) {
+      pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, f.held));
+      continue;
+    }
     if (f.pr) {
       // Already open (a resume, a review pass or a Fix CI went on in it):
       // its branch goes up again, or the request never sees the new commits.
+      // A push that failed is kept on the request (`behind`), which the
+      // deliverable gate reads as a bar not met.
       const pushed = await pushBranch(where(f), f.branch).catch((err: unknown) => ({ ok: false as const, detail: err instanceof Error ? err.message : String(err) }));
-      if (!pushed.ok) pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, `${f.branch} was not pushed to ${f.pr.url}: ${pushed.detail}`));
+      if (pushed.ok) delete f.pr.behind;
+      else {
+        f.pr.behind = true;
+        pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, `${f.branch} was not pushed to ${f.pr.url}: ${pushed.detail}`));
+      }
+      persist(true);
       open.push(f);
       continue;
     }
@@ -11766,7 +11824,7 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     }
 
     const verdict = await checkDeliverable(
-      { directory: origin.directory, pr: origin.pr ?? folderPrForGate(origin) },
+      { directory: origin.directory, pr: origin.pr ?? (await folderPrForGate(origin)) },
       deliverable,
       deliverable.kind === "command" ? await deliverableSandbox(origin) : null,
     );

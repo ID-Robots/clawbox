@@ -273,6 +273,71 @@ describe("a run on a multi-folder project", () => {
     expect(fs.existsSync(path.join(started.directory, "gateway"))).toBe(false);
   });
 
+  it("holds a repository back — no merge home, no pull request, its copy kept — when work on a branch of the run's own cannot be brought onto its branch", async () => {
+    writeConfig({ coding_agent_auto_pr: true });
+    github.openPullRequest.mockResolvedValue({ ok: true, number: 22, url: "https://github.com/acme/dashboard/pull/22" });
+    installWrapper([
+      `G="$PWD/gateway"; c() { git -C "$G" -c user.name=t -c user.email=t@x "$@"; }`,
+      `echo one > "$G/a.txt" && c add a.txt && c commit -qm one`,
+      `c checkout -q -b fix/api HEAD~1 && echo two > "$G/a.txt" && c add a.txt && c commit -qm two`,
+      `echo ui > "$PWD/dashboard/ui.txt"`,
+    ]);
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    const started = await lib.startRun({ task: "diverge", projectId: "skyhub", source: "owner", deliverable: { kind: "pr" } });
+    await lib.waitForRun(started.id, 20_000);
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.multiFolder?.folders[1].removed).toBe(true); }, { timeout: 20_000 });
+    const run = lib.getRun(started.id)!;
+    const [gw, db] = run.multiFolder!.folders;
+    expect(gw.held).toMatch(/could not be brought onto/);
+    expect(gw.pr).toBeNull();
+    expect(gw.removed).toBe(false);
+    expect(fs.existsSync(gw.path)).toBe(true);
+    expect(fs.existsSync(path.join(gateway, "a.txt"))).toBe(false);
+    expect(github.openPullRequest).toHaveBeenCalledTimes(1);
+    expect(db.pr?.number).toBe(22);
+    // One repository's work did not go out: the bar is not met.
+    expect(run.deliverableCheck).toMatchObject({ ok: false });
+  });
+
+  it("does not count a pull request whose follow-up commits could not be pushed", async () => {
+    writeConfig({ coding_agent_auto_pr: true });
+    installWrapper([`echo api >> "$PWD/gateway/api.txt"`]);
+    github.openPullRequest.mockResolvedValue({ ok: true, number: 11, url: "https://github.com/acme/gateway/pull/11" });
+    review.pushBranch.mockResolvedValue({ ok: false, detail: "the network is down" });
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    const started = await lib.startRun({ task: "add the api", projectId: "skyhub", source: "owner" });
+    await settled(started.id);
+    const again = await lib.startRun({ task: "and more", resumeRunId: started.id, source: "owner", deliverable: { kind: "pr" } });
+    const run = await settled(again.id);
+    expect(run.multiFolder!.folders[0].pr).toMatchObject({ number: 11, behind: true });
+    expect(run.progress.join("\n")).toMatch(/gateway: no pull request: clawbox\/run-\w+ was not pushed to .*the network is down/);
+    expect(run.deliverableCheck).toMatchObject({ ok: false });
+  });
+
+  it("counts a review pass's commits in the pr bar, through the origin's record", async () => {
+    // The run changes the gateway only; its review pass changes the dashboard, whose request is refused.
+    writeConfig({ coding_agent_auto_pr: true, coding_agent_review_pass: true });
+    installWrapper([
+      `if grep -q "Automatic review pass" "${path.join(base, "first-turn")}"; then echo fix > "$PWD/dashboard/fix.txt"; else echo api > "$PWD/gateway/api.txt"; fi`,
+    ]);
+    github.openPullRequest.mockImplementation(async (input: { directory: string }) => (
+      input.directory.endsWith("gateway")
+        ? { ok: true, number: 11, url: "https://github.com/acme/gateway/pull/11" }
+        : { ok: false, detail: "GitHub refused the push." }
+    ));
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    const started = await lib.startRun({ task: "add the api", projectId: "skyhub", source: "owner", deliverable: { kind: "pr" } });
+    await lib.waitForRun(started.id, 20_000);
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.deliverableCheck).toBeTruthy(); }, { timeout: 30_000 });
+    const origin = lib.getRun(started.id)!;
+    expect(github.openPullRequest).toHaveBeenCalledTimes(2);
+    expect(origin.multiFolder!.folders[1].commit).toMatch(/^[0-9a-f]{7,}$/);
+    expect(origin.deliverableCheck).toMatchObject({ ok: false });
+  });
+
   it("opens no pull request for a repository the run left untouched", async () => {
     writeConfig({ coding_agent_auto_pr: true });
     installWrapper([`echo ui > "$PWD/dashboard/ui.txt"`]);
