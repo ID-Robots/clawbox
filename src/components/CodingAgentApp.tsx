@@ -3082,14 +3082,16 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
                       />
                     </div>
                   )}
-                  {(run.commit || run.pr?.url || webApp) && (
+                  {/* A multi-folder run has a commit per repository (its timeline names
+                      each), none of them the project folder's own: no one commit here. */}
+                  {((run.commit && !run.multiFolder) || run.pr?.url || webApp) && (
                     <div className="mt-2 flex flex-wrap items-center gap-2">
-                      {run.commit && (
+                      {run.commit && !run.multiFolder && (
                         <span className={`${BTN_SECONDARY} font-mono cursor-default hover:bg-white/[0.06] hover:text-[var(--text-secondary)]`} data-testid="coding-agent-run-commit" title={run.commit}>
                           {t("codingAgent.statCommit").toLowerCase()} {run.commit.slice(0, 7)}
                         </span>
                       )}
-                      {run.commit && project && (
+                      {run.commit && project && !run.multiFolder && (
                         <button
                           type="button"
                           onClick={() => {

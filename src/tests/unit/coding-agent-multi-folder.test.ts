@@ -198,6 +198,11 @@ describe("a run on a multi-folder project", () => {
       ["dashboard", `clawbox/${started.id}`, "develop"],
     ]);
     expect(new Set(calls.map((c) => c.title))).toEqual(new Set(["TASK-2757: show gateway health on the dashboard"]));
+    // Each body names its own repository's commit, and carries the same task.
+    const bodiesSent = github.openPullRequest.mock.calls.map(([input]) => (input as { body: string }).body);
+    expect(bodiesSent[0]).toContain(git(gateway, "rev-parse", "--short", `clawbox/${started.id}`));
+    expect(bodiesSent[1]).toContain(git(dashboard, "rev-parse", "--short", `clawbox/${started.id}`));
+    for (const body of bodiesSent) expect(body).toContain("TASK-2757: show gateway health on the dashboard");
     expect(run.multiFolder!.folders.map((f) => f.pr?.url)).toEqual(["https://github.com/acme/gateway/pull/11", "https://github.com/acme/dashboard/pull/22"]);
     expect(bodies.get(11)).toContain("dashboard: https://github.com/acme/dashboard/pull/22");
     expect(bodies.get(11)).not.toContain("gateway: https://github.com/acme/gateway/pull/11");

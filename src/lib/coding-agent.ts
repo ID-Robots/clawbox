@@ -10318,7 +10318,10 @@ async function openFolderPullRequests(origin: CodingRun, finished: CodingRun, en
     if (mine?.url) {
       f.pr = { number: mine.number, url: mine.url };
     } else {
-      const created = await openPullRequest({ directory: where(f), branch: f.branch, base: f.base, title, body: prBody(origin, finished, taskMode), draft: false });
+      // The body names THIS repository's commit, not the first one the run made anywhere.
+      const commit = fs.existsSync(f.path) ? (await headCommitShort(f.path)) ?? f.commit : f.commit;
+      const body = prBody({ ...origin, commit }, finished, taskMode);
+      const created = await openPullRequest({ directory: where(f), branch: f.branch, base: f.base, title, body, draft: false });
       if (!created.ok) {
         pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, created.detail));
         persist(true);
