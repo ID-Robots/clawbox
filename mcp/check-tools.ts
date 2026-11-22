@@ -242,6 +242,9 @@ const PROBE_GATED_COMMON = [
   // app's Import panel as a tool (2026-10-30), under the coding agent's gate
   // like the runs it exists for.
   "coding_project_import",
+  // Multi-folder projects (TASK-2757): which repositories a project's runs
+  // get a copy of — the coding agent's own gate, like the runs they are for.
+  "coding_project_create", "coding_project_folder_add", "coding_project_folder_remove", "coding_project_folders",
   // The coding team's settings, read and changed (2026-10-30): the owner's
   // preferences about the agent, behind the agent's own gate — a box whose
   // coding agent is off has no team to tune, and the route admits the bearer

@@ -82,6 +82,7 @@ import { getDefaultDirectory, listRuns, projectDirectoryOf, type CodingProjectKi
 import { beginProjectRemoval, runStartingIn } from "@/lib/coding-project-removal-lock";
 import { deleteSecretsForScope, listSecrets } from "@/lib/project-secrets";
 import { deleteProjectMcpAllowlist } from "@/lib/project-mcp-servers";
+import { deleteProjectFolders } from "@/lib/project-folders";
 
 // ─── What may go wrong ───────────────────────────────────────────────────────
 
@@ -1152,6 +1153,8 @@ export async function deleteProject(input: {
     // The project's MCP servers go the same way, on the same condition: a
     // project that shares the scope still has its runs' tools.
     if (!sharedWith) await deleteProjectMcpAllowlist(target.folder);
+    // …and its folder list, when it was a multi-folder project (TASK-2757).
+    if (!sharedWith && target.kind === "folder") await deleteProjectFolders(target.folder);
     const pruned = await pruneProjectTrash(roots, deletedAt)
       .catch(() => ({ removed: [] as string[], expired: [] as string[], early: [] as string[] }));
 

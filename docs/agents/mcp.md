@@ -53,6 +53,9 @@ of them kept failing.
     (the app's Import panel as a tool since 2026-10-30: a GitHub repository
     or a folder on the box into the project folder; `POST
     coding-agent/projects/import` admits the MCP bearer for it),
+    `coding_project_create`, `coding_project_folder_add`, `coding_project_folder_remove`,
+    `coding_project_folders` (multi-folder projects, TASK-2757: `coding-agent/project-folders`,
+    owner cookie or bearer; `coding_agent_run` takes the project's name as `project_id`),
     `coding_settings_get`, `coding_settings_set` (the coding TEAM's
     settings since 2026-10-30 — effort, each role's provider/model/effort,
     review pass, auto PR and merge, PR body, dynamic team, runs at once,

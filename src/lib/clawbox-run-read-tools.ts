@@ -47,6 +47,7 @@ export const CLAWBOX_READ_ONLY_TOOLS = [
   "clawbox_health",
   "code_project_list",
   "coding_agent_status",
+  "coding_project_folders",
   "coding_project_status",
   "coding_run_list",
   "coding_secret_list",
