@@ -8167,7 +8167,11 @@ print("ok")
   # The core's own inventory, read by the same rules the refresh below uses
   # (`origin: bundled` ships with the core; ids normalised the same way). A
   # ClawBox plugin from the @openclaw scope must be at the target, as the
-  # refresh would pin it; clawbox-email-directives must match the copy in the
+  # refresh would pin it, or on a correction release (X.Y.Z-N) at its base
+  # X.Y.Z, the cohort doctor moves version-bound plugins to (OpenClaw
+  # 2026.11.5, docs/install/updating.md), which the refresh then leaves
+  # (gateway-pre-start.sh compares codex by base version too);
+  # clawbox-email-directives must match the copy in the
   # checkout it is installed from. Plugins the owner installed are not
   # version-checked — the core did not move, so the refresh has nothing to
   # line them up with — but any plugin that lost its payload, reports an error
@@ -8179,7 +8183,7 @@ print("ok")
   # root-only file and echo its fields into a journal that account can read.
   verdict="$(as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null \
     | as_clawbox -H python3 -c '
-import json, os, stat, sys
+import json, os, re, stat, sys
 
 target, repairs_path, email_pkg = sys.argv[1:4]
 MANAGED = {"codex", "deepseek", "discord", "whatsapp", "clawbox-email-directives"}
@@ -8227,6 +8231,10 @@ def payload_root(plugin):
         parent = os.path.dirname(source)
         return os.path.dirname(parent) if os.path.basename(parent) == "dist" else parent
     return ""
+
+
+def release(version):
+    return re.sub(r"[-+][0-9]+$", "", version)
 
 
 def check_diagnostics(node):
@@ -8291,14 +8299,16 @@ for plugin in plugins:
     name = pkg.get("name") if isinstance(pkg.get("name"), str) else ""
     if name.startswith("@openclaw/"):
         want = target
+        accepted = (target, release(target))
     elif key == "clawbox-email-directives":
         shipped = manifest(email_pkg)
         if shipped is None or not isinstance(shipped.get("version"), str):
             doubt("the checkout copy of clawbox-email-directives (%s) could not be read" % email_pkg)
         want = shipped["version"]
+        accepted = (want,)
     else:
         doubt("plugin %s comes from %s, not a package ClawBox pins" % (pid, name or "an unnamed package"))
-    if pkg.get("version") != want:
+    if pkg.get("version") not in accepted:
         doubt("plugin %s is at %s, the refresh would install %s" % (pid, pkg.get("version") or "no version", want))
 print("ok")
 ' "$target" "${PROJECT_DIR:-}/data/plugin-repair.json" \
@@ -8365,7 +8375,7 @@ if not picked and lines:
 
 cmd = os.environ["CLAWBOX_CAUSE_CMD"]
 rc = os.environ["CLAWBOX_CAUSE_RC"]
-# 124 is `timeout` at the ceiling and 137 the SIGKILL `-k 5` sends after it —
+# 124 is `timeout` at the ceiling and 137 the SIGKILL `timeout -k` sends after it —
 # neither is the core saying no, and the row must not read as though it were.
 head = f"{cmd} was killed at its deadline" if rc in ("124", "137") else f"{cmd} exited {rc}"
 if not picked:
@@ -8559,7 +8569,7 @@ step_openclaw_install() {
       # core refuses to run would only produce a restart loop, and `set -e` makes
       # this return abort the run either way. Said out loud so the operator knows
       # the box is parked rather than guessing.
-      echo "       The gateway is left stopped. Fix the Node, then Retry this step." >&2
+      echo "       The gateway is left stopped. Fix the Node, then press Try again." >&2
       as_clawbox rm -rf -- "$_oc_stage" 2>/dev/null || true
       return 1
     fi
@@ -8723,15 +8733,23 @@ step_openclaw_install() {
   #   current  an @openclaw payload at $TARGET's release, a trailing -N/+N
   #            stripped on both sides (a correction release runs the plugins of
   #            its base cohort, docs/install/updating.md), that the core reports
-  #            healthy: no error, no missing dependency, no error or consent
-  #            diagnostic, no repair on record. The five ids ClawBox manages
-  #            must be at $TARGET itself or a correction's base, the versions
-  #            the fast path accepts: a republished -N left in place would
-  #            hold every later update on this path;
+  #            healthy (no error, no missing dependency, no error or consent
+  #            diagnostic, no repair on record) and whose entry files are there
+  #            and not empty: its package.json says nothing of the code beside
+  #            it, and `plugins list` loads none of it (docs/cli/plugins/list.md).
+  #            The entries are the runtime ones when declared, else the source
+  #            ones by their built peers (docs/plugins/sdk-entrypoints/
+  #            package-entries.md). The five ids ClawBox manages must be at
+  #            $TARGET itself or a correction's base, the two versions the fast
+  #            path accepts for them: a republished -N left in place would hold
+  #            every later update on this path;
   #   foreign  a payload from another package: the owner's, left as installed,
-  #            as OpenClaw's own update leaves it. Never an id ClawBox manages:
-  #            the fast path refuses those from another package, so leaving one
-  #            would hold every later update on this path;
+  #            as OpenClaw's own update leaves it. One the core reports in error
+  #            raises ONE card naming it: the fast path refuses any plugin in
+  #            error, so every update takes this path until the owner fixes it.
+  #            Never an id ClawBox manages: the fast path refuses those from
+  #            another package, so leaving one would hold every later update on
+  #            this path;
   #   refresh  everything else, as before: an official plugin below the release
   #            (a disabled one too: doctor moves active ones only), any doubt,
   #            any orphan. A problem the core ties to no plugin, or a repair
@@ -8749,13 +8767,16 @@ step_openclaw_install() {
   # migration, with the gateway stopped.
   #
   # Each reinstall has a clock, laid INSIDE the account switch (sudo does not
-  # pass on a signal sent from its own process group), and the loop starts none
-  # that could run past the root unit's TimeoutStartSec (7200 s,
+  # pass on a signal sent from its own process group), its output is read
+  # through a file (see the call), and the loop starts none that could run,
+  # kill delay included, past the root unit's TimeoutStartSec (7200 s,
   # config/clawbox-root-update@.service) less 600 s for the restore after it.
   # This file otherwise caps no work by the clock; a reinstall is the exception
-  # because it is not the update's own work: one killed at its deadline keeps
-  # its previous version and is reported, and the step goes on. The plugin list
-  # is asked with no clock, as in the fast-path check.
+  # because it is not the update's own work: one killed at its deadline is
+  # reported as not updated, and the step goes on. What the kill leaves of that
+  # plugin the pinned core does not document; a payload left without its entry
+  # files is reinstalled by the next full path. The plugin list is asked with
+  # no clock, as in the fast-path check.
   #
   # A failed reinstall is non-fatal and keeps its cause: one WARN line under the
   # plugin, and ONE card naming them all. The gateway's pre-start reinstalls
@@ -8764,8 +8785,9 @@ step_openclaw_install() {
   # only the plugins ClawBox manages), and the lines say that and no more.
   local INSTALLED_PLUGINS="" _oc_list_out="" _oc_list_rc=0 _oc_list_read=0 _oc_list_why=""
   local _oc_plan="" _oc_said="" _oc_kind="" _oc_a="" _oc_b=""
-  local _oc_install_out="" _oc_install_rc=0 _oc_retry="" _oc_missed="" _oc_missed_n=0
-  local _oc_refresh_bound="${CLAWBOX_PLUGIN_REFRESH_TIMEOUT_S:-300}"
+  local _oc_install_out="" _oc_install_log="" _oc_install_rc=0 _oc_retry="" _oc_missed="" _oc_missed_n=0
+  local _oc_broken="" _oc_broken_n=0
+  local _oc_refresh_bound="${CLAWBOX_PLUGIN_REFRESH_TIMEOUT_S:-300}" _oc_refresh_kill=10
   case "$_oc_refresh_bound" in ''|0*|*[!0-9]*) _oc_refresh_bound=300 ;; esac
   local _oc_refresh_until=$((7200 - 600))
   _oc_list_out="$(as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json \
@@ -8822,6 +8844,38 @@ def word(value):
 
 def release(version):
     return re.sub(r"[-+][0-9]+$", "", version)
+
+
+def filled(path):
+    try:
+        info = os.stat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_size > 0
+
+
+# The files the core loads from an installed package: the declared runtime
+# entries, else the source entries, a TypeScript one by its built peer under
+# dist/ (flattened or not) or beside it. Every one must be there, not empty.
+def entries_present(root, pkg):
+    meta = pkg.get("openclaw") if isinstance(pkg.get("openclaw"), dict) else {}
+    runtime = meta.get("runtimeExtensions")
+    entries = runtime or meta.get("extensions")
+    if not isinstance(entries, list) or not entries:
+        return False
+    for entry in entries:
+        rel = os.path.normpath(entry) if isinstance(entry, str) and entry else ".."
+        if rel.startswith("..") or os.path.isabs(rel):
+            return False
+        stem, ext = os.path.splitext(rel)
+        candidates = [rel]
+        if not runtime and ext in (".ts", ".tsx", ".mts", ".cts"):
+            peers = {".mts": (".mjs",), ".cts": (".cjs",)}.get(ext, (".js", ".mjs", ".cjs"))
+            flat = stem[len("src/"):] if stem.startswith("src/") else stem
+            candidates = [base + peer for base in ("dist/" + flat, "dist/" + stem, stem) for peer in peers]
+        if not any(filled(os.path.join(root, c)) for c in candidates):
+            return False
+    return True
 
 
 # Every id the core reports a problem for, normalised; "" for one it ties to
@@ -8889,24 +8943,19 @@ for plugin in plugins:
     name = word(pkg.get("name")) if pkg else ""
     version = word(pkg.get("version")) if pkg else ""
     deps = plugin.get("dependencyStatus")
-    healthy = (
-        not doubt
-        and key not in flagged
-        and not plugin.get("error")
-        and str(plugin.get("status") or "").lower() != "error"
-        and not (isinstance(deps, dict) and deps.get("requiredInstalled") is False)
-    )
+    broken = key in flagged or bool(plugin.get("error")) or str(plugin.get("status") or "").lower() == "error"
+    healthy = not doubt and not broken and not (isinstance(deps, dict) and deps.get("requiredInstalled") is False)
     # The ids ClawBox manages are held to what the fast path checks them
     # against: the target itself, or a correction release base.
     if key in MANAGED:
         at_release = version in (target, release(target))
     else:
         at_release = release(version) == release(target)
-    if name.startswith("@openclaw/") and version and at_release and healthy:
+    if name.startswith("@openclaw/") and version and at_release and healthy and entries_present(root, pkg):
         print("current\t%s@%s" % (name, version))
         continue
     if name and not name.startswith("@openclaw/") and key not in MANAGED:
-        print("foreign\t" + pid)
+        print(("broken\t" if broken else "foreign\t") + pid)
         continue
     raw = plugin.get("rootDir") or plugin.get("source") or ""
     package = ""
@@ -8929,6 +8978,11 @@ print("ok")
       own) _oc_said+="    - $_oc_a (ClawBox's own plugin: the gateway start installs it from the checkout)"$'\n' ;;
       current) _oc_said+="    - $_oc_a (already at $TARGET)"$'\n' ;;
       foreign) _oc_said+="    - $_oc_a (not an OpenClaw or ClawBox plugin: left as installed, as OpenClaw's own update does)"$'\n' ;;
+      broken)
+        _oc_said+="    - $_oc_a (not an OpenClaw or ClawBox plugin: left as installed; the core reports an error for it)"$'\n'
+        _oc_broken="${_oc_broken:+$_oc_broken, }$_oc_a"
+        _oc_broken_n=$((_oc_broken_n + 1))
+        ;;
       doubt) _oc_said+="    ($_oc_a, so every official plugin is reinstalled)"$'\n' ;;
     esac
   done <<< "$_oc_plan"
@@ -8965,7 +9019,7 @@ print("ok")
           codex|discord|whatsapp) spec="@openclaw/$PLUGIN_KEY@$TARGET" ;;
         esac
       fi
-      if [ "$((SECONDS - _oc_step_started + _oc_refresh_bound))" -gt "$_oc_refresh_until" ]; then
+      if [ "$((SECONDS - _oc_step_started + _oc_refresh_bound + _oc_refresh_kill))" -gt "$_oc_refresh_until" ]; then
         echo "    - $spec: not attempted, too little of the update's time is left"
         _oc_missed="${_oc_missed:+$_oc_missed, }$plugin (not attempted)"
         _oc_missed_n=$((_oc_missed_n + 1))
@@ -9007,8 +9061,20 @@ print("ok")
           echo "      (not a ClawBox-managed plugin: refreshed without accepting new capabilities)"
           ;;
       esac
+      # Through a file, never `$(…)`: a child of the CLI that outlives the kill
+      # keeps a substitution's pipe open, and bash waits for that child, not
+      # for `timeout` (measured, and avoided the same way, in
+      # clawbox_run_openclaw_capture in gateway-pre-start.sh). Root's shell
+      # makes, reads and removes the file; with no temp directory the call
+      # still runs, only unquoted.
       _oc_install_rc=0
-      _oc_install_out="$(as_clawbox -H timeout -k 10 "$_oc_refresh_bound" "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins install "$spec" --force "${CAP_ARGS[@]}" 2>&1)" || _oc_install_rc=$?
+      _oc_install_out=""
+      _oc_install_log="$(mktemp 2>/dev/null)" || _oc_install_log=/dev/null
+      as_clawbox -H timeout -k "$_oc_refresh_kill" "$_oc_refresh_bound" "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins install "$spec" --force "${CAP_ARGS[@]}" </dev/null >"$_oc_install_log" 2>&1 || _oc_install_rc=$?
+      if [ "$_oc_install_log" != /dev/null ]; then
+        _oc_install_out="$(cat "$_oc_install_log" 2>/dev/null || true)"
+        rm -f "$_oc_install_log" 2>/dev/null || true
+      fi
       if [ "$_oc_install_rc" -ne 0 ]; then
         case "$PLUGIN_KEY" in
           codex|deepseek) _oc_retry="gateway-pre-start retries it" ;;
@@ -9021,6 +9087,9 @@ print("ok")
     done <<< "$INSTALLED_PLUGINS"
     if [ "$_oc_missed_n" -gt 0 ]; then
       echo "CLAWBOX-WARN[openclaw-plugin-refresh]: $_oc_missed_n plugin(s) could not be updated to OpenClaw $TARGET: $_oc_missed. They keep their previous version until the next OpenClaw update."
+    fi
+    if [ "$_oc_broken_n" -gt 0 ]; then
+      echo "CLAWBOX-WARN[openclaw-owner-plugin-error]: $_oc_broken_n plugin(s) that ClawBox did not install report an error in OpenClaw: $_oc_broken. ClawBox leaves them as installed; until they are fixed or removed, every update stops the assistant to refresh OpenClaw in full."
     fi
   else
     echo "  No external plugins to refresh"
