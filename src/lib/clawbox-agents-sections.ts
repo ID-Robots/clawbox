@@ -33,11 +33,12 @@
  */
 
 import { createHash } from "crypto";
-import fs from "fs/promises";
+import fs, { type FileHandle } from "fs/promises";
 import path from "@/lib/runtime-path";
 import { getActiveHarness } from "@/lib/harness";
 import { openclawWorkspaceDir } from "@/lib/language-persona";
-import { openclawDefaultAgentId } from "@/lib/openclaw-default-agent";
+import { CONFIG_PATH, resolveWorkspaceValue } from "@/lib/openclaw-config";
+import { openclawDefaultAgentId, rosterWorkspace } from "@/lib/openclaw-default-agent";
 import { GatewayRpcError, GatewayWsUnavailableError, gatewayWsCall } from "@/lib/openclaw-gateway-ws";
 
 export interface ClawboxAgentsSection {
@@ -173,22 +174,49 @@ function noteOnce(reason: string, message: string): void {
   console.warn(`[agents-md] ${message}`);
 }
 
-/** The text of AGENTS.md, or null when there is none to append to. Never creates it. */
+/**
+ * The text of AGENTS.md, or null when there is none to append to. Never creates it.
+ *
+ * Only the cheap gate: the write is based on the gateway's own read, with its
+ * hash as the precondition. Still asked through ONE handle, so the "regular
+ * file" answer and the text are about the same file, and opened non-blocking,
+ * so a FIFO in its place cannot hang the open.
+ */
 async function readAgentsMd(file: string): Promise<string | null> {
+  let handle: FileHandle | undefined;
   try {
-    const stat = await fs.stat(file);
-    if (!stat.isFile()) {
+    handle = await fs.open(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    if (!(await handle.stat()).isFile()) {
       noteOnce("not-a-file", `${file} exists and is not a regular file; leaving it as it is`);
       return null;
     }
-    return await fs.readFile(file, "utf-8");
+    return await handle.readFile({ encoding: "utf-8" });
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "ENOENT" && code !== "ENOTDIR") {
       noteOnce("unreadable", `could not read ${file}: ${err instanceof Error ? err.message : String(err)}`);
     }
     return null;
+  } finally {
+    await handle?.close().catch(() => { /* already closed */ });
   }
+}
+
+/**
+ * The workspace `agentId` loads, the way the gateway resolves it: the agent's
+ * own roster entry first, then `agents.defaults.workspace` (OpenClaw 2026.11.5
+ * docs/concepts/multi-agent.md). ClawBox's own org roster pins that entry to
+ * openclawWorkspaceDir() (org-staff-agents.ts), but the owner or a doctor
+ * roster migration may pin it elsewhere, and then that is the file to check.
+ */
+async function agentWorkspaceDir(agentId: string): Promise<string> {
+  try {
+    const own = rosterWorkspace(JSON.parse(await fs.readFile(CONFIG_PATH, "utf-8")), agentId);
+    if (own) return resolveWorkspaceValue(own);
+  } catch {
+    // No config, or one that cannot be read this moment: the defaults, as below.
+  }
+  return openclawWorkspaceDir();
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -201,16 +229,18 @@ async function appendMissingSections(): Promise<void> {
   try {
     if ((await getActiveHarness()) !== "openclaw") return;
 
-    // A cheap look on disk first, so the ticks with nothing to do (all of them,
-    // once the sections are in) make no gateway call.
-    const workspace = openclawWorkspaceDir();
-    const onDisk = await readAgentsMd(path.join(workspace, AGENTS_MD));
-    if (onDisk === null || withClawboxAgentsSections(onDisk) === onDisk) return;
-
     // The agent the config names, never "main" by assumption: the gateway
     // refuses an id its config does not have (TASK-2248's box names its agent
     // `default`), and every tick would fail there.
     const agentId = await openclawDefaultAgentId();
+
+    // A cheap look on disk first, in the workspace that agent loads, so the
+    // ticks with nothing to do (all of them, once the sections are in) make no
+    // gateway call.
+    const workspace = await agentWorkspaceDir(agentId);
+    const onDisk = await readAgentsMd(path.join(workspace, AGENTS_MD));
+    if (onDisk === null || withClawboxAgentsSections(onDisk) === onDisk) return;
+
     let read: Record<string, unknown>;
     try {
       read = await gatewayWsCall("agents.files.get", { agentId, name: AGENTS_MD });

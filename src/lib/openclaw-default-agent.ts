@@ -103,6 +103,17 @@ export function configuredAgentIds(config: unknown): string[] {
   return roster === null ? [FALLBACK_AGENT_ID] : [...new Set(roster.map((agent) => agent.id))];
 }
 
+/**
+ * The `workspace` that `agentId`'s own roster entry names, as written, or
+ * undefined when it names none. The core reads it before
+ * `agents.defaults.workspace` (OpenClaw 2026.11.5 docs/concepts/multi-agent.md,
+ * "Default agent's workspace").
+ */
+export function rosterWorkspace(config: unknown, agentId: string): string | undefined {
+  const workspace = readRoster(config)?.find((agent) => agent.id === agentId)?.entry.workspace;
+  return typeof workspace === "string" && workspace.trim() ? workspace.trim() : undefined;
+}
+
 /** The default agent a parsed openclaw.json names; see the module comment for the order. */
 export function resolveDefaultAgentId(config: unknown): string {
   const roster = readRoster(config);
