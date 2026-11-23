@@ -8349,10 +8349,11 @@ openclaw_refresh_marker_write() {
 # The core's own words about a failed plugin CLI call, as ONE line to append to
 # a sentence: escape sequences and control characters out, whitespace
 # collapsed, 160 characters, with a leading space; empty output is answered with
-# the exit code alone, and 124/137 (`timeout` and its kill) read as the deadline,
-# not as the core saying no. A copy of scripts/gateway-pre-start.sh's, where its
-# reasons are written down (that script is not sourced here);
-# install-openclaw-fast-path.test.ts holds the two programs to the same text.
+# the exit code alone. Taken from scripts/gateway-pre-start.sh's helper of the
+# same name, where its reasons are written down (that script is not sourced
+# here), less its reading of 124/137: the pre-start lays a `timeout` on its
+# calls, and this file lays none, so here every exit is the CLI's own (a 137 is
+# a SIGKILL from anywhere, the kernel's OOM killer among them).
 clawbox_plugin_cli_cause() {
   local cmd="$1" rc="$2" out="$3" script
   script="$(cat <<'CAUSEPY'
@@ -8374,11 +8375,7 @@ for line in lines:
 if not picked and lines:
     picked = lines[-1]
 
-cmd = os.environ["CLAWBOX_CAUSE_CMD"]
-rc = os.environ["CLAWBOX_CAUSE_RC"]
-# 124 is `timeout` at the ceiling and 137 the SIGKILL `timeout -k` sends after it —
-# neither is the core saying no, and the row must not read as though it were.
-head = f"{cmd} was killed at its deadline" if rc in ("124", "137") else f"{cmd} exited {rc}"
+head = os.environ["CLAWBOX_CAUSE_CMD"] + " exited " + os.environ["CLAWBOX_CAUSE_RC"]
 if not picked:
     print(f" {head} and said nothing.")
 else:
@@ -8767,18 +8764,13 @@ step_openclaw_install() {
   # pipefail, a failed list used to end the step here, after a completed
   # migration, with the gateway stopped.
   #
-  # Each reinstall has a clock, laid INSIDE the account switch (sudo does not
-  # pass on a signal sent from its own process group), its output is read
-  # through a file (see the call), and the loop starts none that could run,
-  # kill delay included, past the root unit's TimeoutStartSec (7200 s,
-  # config/clawbox-root-update@.service) less 600 s for the restore after it.
-  # This file otherwise caps no work by the clock; a reinstall is the exception
-  # because it is not the update's own work: one killed at its deadline is
-  # reported as not updated, and the step goes on. What the kill leaves of that
-  # plugin the pinned core does not document, and the marker is written all the
-  # same, so the entry-file check below runs again only on a full path: when the
-  # pin moves, or when the fast path refuses for another reason. The plugin list
-  # is asked with no clock, as in the fast-path check.
+  # No clock on any of it, the plugin list or a reinstall (the owner's rule for
+  # this file, held by install-no-time-limits.test.ts): a slow reinstall takes
+  # longer, as every reinstall always could, and runs to its end; only one
+  # truly hung waits on the root unit's own limit. A reinstall that fails is
+  # reported as not updated and the step goes on. The marker is written all the
+  # same, so the entry-file check below runs again only on a full path: when
+  # the pin moves, or when the fast path refuses for another reason.
   #
   # A failed reinstall is non-fatal and keeps its cause: one WARN line under the
   # plugin, and ONE card naming them all. The gateway's pre-start reinstalls
@@ -8789,9 +8781,6 @@ step_openclaw_install() {
   local _oc_plan="" _oc_said="" _oc_kind="" _oc_a="" _oc_b=""
   local _oc_install_out="" _oc_install_log="" _oc_install_rc=0 _oc_retry="" _oc_missed="" _oc_missed_n=0
   local _oc_broken="" _oc_broken_n=0
-  local _oc_refresh_bound="${CLAWBOX_PLUGIN_REFRESH_TIMEOUT_S:-300}" _oc_refresh_kill=10
-  case "$_oc_refresh_bound" in ''|0*|*[!0-9]*) _oc_refresh_bound=300 ;; esac
-  local _oc_refresh_until=$((7200 - 600))
   _oc_list_out="$(as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json \
     2>/dev/null)" || _oc_list_rc=$?
   if [ "$_oc_list_rc" -eq 0 ]; then
@@ -8857,8 +8846,9 @@ def filled(path):
 
 
 # The files the core loads from an installed package: the declared runtime
-# entries, else the source entries, a TypeScript one by its built peer under
-# dist/ (flattened or not) or beside it. Every one must be there, not empty.
+# entries, else the source entries, a TypeScript one by the first of its built
+# peers that exists, under dist/ (flattened, then keeping src/) and then beside
+# it. Every one must be there, not empty.
 def entries_present(root, pkg):
     meta = pkg.get("openclaw") if isinstance(pkg.get("openclaw"), dict) else {}
     runtime = meta.get("runtimeExtensions")
@@ -8875,7 +8865,10 @@ def entries_present(root, pkg):
             peers = {".mts": (".mjs",), ".cts": (".cjs",)}.get(ext, (".js", ".mjs", ".cjs"))
             flat = stem[len("src/"):] if stem.startswith("src/") else stem
             candidates = [base + peer for base in ("dist/" + flat, "dist/" + stem, stem) for peer in peers]
-        if not any(filled(os.path.join(root, c)) for c in candidates):
+        # The first that exists is the one the core loads: a later candidate
+        # cannot vouch for an empty one before it.
+        chosen = next((c for c in candidates if os.path.exists(os.path.join(root, c))), None)
+        if chosen is None or not filled(os.path.join(root, chosen)):
             return False
     return True
 
@@ -9021,12 +9014,6 @@ print("ok")
           codex|discord|whatsapp) spec="@openclaw/$PLUGIN_KEY@$TARGET" ;;
         esac
       fi
-      if [ "$((SECONDS - _oc_step_started + _oc_refresh_bound + _oc_refresh_kill))" -gt "$_oc_refresh_until" ]; then
-        echo "    - $spec: not attempted, too little of the update's time is left"
-        _oc_missed="${_oc_missed:+$_oc_missed, }$plugin (not attempted)"
-        _oc_missed_n=$((_oc_missed_n + 1))
-        continue
-      fi
       echo "    - $spec"
       # --accept-capabilities, for the plugins CLAWBOX installs and only those.
       #
@@ -9063,21 +9050,24 @@ print("ok")
           echo "      (not a ClawBox-managed plugin: refreshed without accepting new capabilities)"
           ;;
       esac
-      # Through a file, never `$(…)`: a child of the CLI that outlives the kill
-      # keeps a substitution's pipe open, and bash waits for that child, not
-      # for `timeout` (measured, and avoided the same way, in
+      # Through a file, never `$(…)`: a child of the CLI that outlives it keeps
+      # a substitution's pipe open, and bash would wait for that child after the
+      # CLI itself had answered (measured, and avoided the same way, in
       # clawbox_run_openclaw_capture in gateway-pre-start.sh). Root's shell
       # makes, reads and removes the file; with no temp directory the call
-      # still runs, only unquoted.
+      # still runs, only unquoted. The row above is printed before the call, so
+      # the line under it says how the call ended.
       _oc_install_rc=0
       _oc_install_out=""
       _oc_install_log="$(mktemp 2>/dev/null)" || _oc_install_log=/dev/null
-      as_clawbox -H timeout -k "$_oc_refresh_kill" "$_oc_refresh_bound" "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins install "$spec" --force "${CAP_ARGS[@]}" </dev/null >"$_oc_install_log" 2>&1 || _oc_install_rc=$?
+      as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins install "$spec" --force "${CAP_ARGS[@]}" </dev/null >"$_oc_install_log" 2>&1 || _oc_install_rc=$?
       if [ "$_oc_install_log" != /dev/null ]; then
         _oc_install_out="$(cat "$_oc_install_log" 2>/dev/null || true)"
         rm -f "$_oc_install_log" 2>/dev/null || true
       fi
-      if [ "$_oc_install_rc" -ne 0 ]; then
+      if [ "$_oc_install_rc" -eq 0 ]; then
+        echo "      updated"
+      else
         case "$PLUGIN_KEY" in
           codex|deepseek) _oc_retry="gateway-pre-start retries it" ;;
           *) _oc_retry="the next update that moves OpenClaw retries it" ;;
@@ -9088,7 +9078,7 @@ print("ok")
       fi
     done <<< "$INSTALLED_PLUGINS"
     if [ "$_oc_missed_n" -gt 0 ]; then
-      echo "CLAWBOX-WARN[openclaw-plugin-refresh]: $_oc_missed_n plugin(s) were not updated to OpenClaw $TARGET: $_oc_missed. A plugin stopped at its deadline may need the next OpenClaw update to repair it."
+      echo "CLAWBOX-WARN[openclaw-plugin-refresh]: $_oc_missed_n plugin(s) were not updated to OpenClaw $TARGET: $_oc_missed. The next update that moves OpenClaw tries them again."
     fi
     if [ "$_oc_broken_n" -gt 0 ]; then
       echo "CLAWBOX-WARN[openclaw-owner-plugin-error]: $_oc_broken_n plugin(s) that ClawBox did not install report an error in OpenClaw: $_oc_broken. ClawBox leaves them as installed; until they are fixed or removed, every update stops the assistant to refresh OpenClaw in full."

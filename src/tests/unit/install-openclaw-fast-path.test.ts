@@ -175,18 +175,16 @@ function makeBox(opts: {
 // The account switch and the OpenClaw CLI. `plugins list` answers with the
 // box's plugins.json; npm leaves a launcher for the version it was asked for
 // in the prefix it was handed, as the staged install expects. A plugin install
-// logs its spec (PLUGIN_INSTALL), its argv from the spec on (PLUGIN_INSTALL_ARGS)
-// and the clock laid on it (PLUGIN_INSTALL_BOUND); INSTALL_FAILS names specs
-// the CLI refuses. INSTALL_HANGS names one that never finishes: run under the
-// real `timeout` with the bound and kill delay the step gave, its own process
-// dies at the deadline but leaves a child that ignores SIGTERM, holds the
-// output it was handed for 10 s more and writes its pid to $BOX/straggler.
+// logs its spec (PLUGIN_INSTALL) and its argv from the spec on
+// (PLUGIN_INSTALL_ARGS), and a clock laid on any call, which the installers may
+// not lay, as PLUGIN_INSTALL_BOUND; INSTALL_FAILS names specs the CLI refuses,
+// with exit INSTALL_RC (1 unless set).
 const AS_CLAWBOX = `as_clawbox() {
   while [ "\${1:-}" = "-H" ]; do shift; done
-  local bound="" kill=""
+  local bound=""
   if [ "\${1:-}" = timeout ]; then
     shift
-    if [ "\${1:-}" = -k ]; then kill="$2"; shift 2; fi
+    [ "\${1:-}" != -k ] || shift 2
     bound="$1"
     shift
   fi
@@ -209,13 +207,7 @@ const AS_CLAWBOX = `as_clawbox() {
       event "PLUGIN_INSTALL $spec"
       event "PLUGIN_INSTALL_ARGS $args"
       [ -z "$bound" ] || event "PLUGIN_INSTALL_BOUND $bound"
-      if [ "$spec" = "\${INSTALL_HANGS:-}" ]; then
-        local hang=(bash -c '(trap "" TERM; exec sleep 10) & echo $! > "$1"; wait' _ "$BOX/straggler")
-        if [ -n "$bound" ]; then command timeout \${kill:+-k "$kill"} "$bound" "\${hang[@]}"; return; fi
-        "\${hang[@]}"
-        return 0
-      fi
-      case " \${INSTALL_FAILS:-} " in *" $spec "*) echo "example failure cause" >&2; return 1 ;; esac
+      case " \${INSTALL_FAILS:-} " in *" $spec "*) echo "example failure cause" >&2; return "\${INSTALL_RC:-1}" ;; esac
       return 0 ;;
     *"doctor --fix"*)
       event DOCTOR
@@ -908,7 +900,7 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     return box;
   }
 
-  it("reinstalls only the plugins the core update left behind, pinned and bounded", () => {
+  it("reinstalls only the plugins the core update left behind, pinned, with no clock on them", () => {
     const r = run(leftBehind());
     expect(r.status, r.stderr).toBe(0);
     expect(installs(r).sort()).toEqual([`@openclaw/codex@${TARGET}`, `@openclaw/discord@${TARGET}`, `@openclaw/example@${TARGET}`]);
@@ -917,8 +909,15 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     // Consent for the plugins ClawBox installs, and only those.
     expect(r.events).toContain(`PLUGIN_INSTALL_ARGS @openclaw/codex@${TARGET} --force --accept-capabilities`);
     expect(r.events).toContain(`PLUGIN_INSTALL_ARGS @openclaw/example@${TARGET} --force`);
-    // Every reinstall carries its own clock.
-    expect(r.events.filter((e) => e.startsWith("PLUGIN_INSTALL_BOUND "))).toEqual(Array(3).fill("PLUGIN_INSTALL_BOUND 300"));
+    // No clock: a slow reinstall takes longer, it is never cut off for it
+    // (install-no-time-limits.test.ts holds the whole file to that).
+    expect(r.events.filter((e) => e.startsWith("PLUGIN_INSTALL_BOUND "))).toEqual([]);
+    // Each one says how it ended: the row above is printed before the CLI runs.
+    expect(r.stdout).toContain([
+      `    - @openclaw/example@${TARGET}`,
+      "      (not a ClawBox-managed plugin: refreshed without accepting new capabilities)",
+      "      updated\n",
+    ].join("\n"));
     expect(cards(r)).toEqual([]);
     expect(r.marker).toMatch(new RegExp(`^target=${TARGET.replace(/\./g, "\\.")}\\n`));
     expect(r.events.at(-1)).toBe("START clawbox-gateway.service");
@@ -1014,6 +1013,24 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     expect(r.stdout).toContain(`    - @openclaw/example@${TARGET} (already at ${TARGET})\n`);
   });
 
+  it("judges the first built peer the core would load, not a later one", () => {
+    // dist/ first, then beside the source (docs/plugins/sdk-entrypoints/
+    // package-entries.md): an empty dist/index.js is what the core loads, and a
+    // filled src/index.js beside the source must not vouch for it.
+    const box = makeBox({ core: OLDER });
+    const root = box.payload("npm/projects/ts/node_modules/@openclaw/example",
+      { name: "@openclaw/example", version: TARGET, openclaw: { extensions: ["./src/index.ts"] } });
+    mkdirSync(path.join(root, "dist"), { recursive: true });
+    writeFileSync(path.join(root, "dist/index.js"), "");
+    mkdirSync(path.join(root, "src"), { recursive: true });
+    writeFileSync(path.join(root, "src/index.js"), "export default {};\n");
+    box.plugins.push({ id: "example", origin: "global", status: "loaded", rootDir: root });
+    box.publish();
+    const r = run(box);
+    expect(r.status, r.stderr).toBe(0);
+    expect(installs(r)).toEqual([`@openclaw/example@${TARGET}`]);
+  });
+
   it("raises one card for a plugin ClawBox did not install that the core reports broken, and leaves it", () => {
     // The fast path refuses any plugin in an error state, so until it is fixed
     // every update takes the full path: the owner must be told why.
@@ -1052,9 +1069,10 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     box.publish();
     const r = run(box);
     expect(r.status, r.stderr).toBe(0);
-    expect(installs(r)).toEqual(expect.arrayContaining([
-      `@openclaw/codex@${TARGET}`, `@openclaw/discord@${TARGET}`, `@openclaw/whatsapp@${TARGET}`, `@openclaw/example@${TARGET}`,
-    ]));
+    // Exactly these: a doubt about one plugin reinstalls that one, not its neighbours.
+    expect(installs(r).sort()).toEqual([
+      `@openclaw/codex@${TARGET}`, `@openclaw/discord@${TARGET}`, `@openclaw/example@${TARGET}`, `@openclaw/whatsapp@${TARGET}`,
+    ]);
   });
 
   it.each([
@@ -1104,66 +1122,27 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
 
   it("names a failed reinstall, its cause and what retries it, and raises one card", () => {
     const box = leftBehind();
-    const r = run(box, "step_openclaw_install", { INSTALL_FAILS: `@openclaw/example@${TARGET} @openclaw/codex@${TARGET}` });
+    // 137 is a SIGKILL from anywhere (the kernel's OOM killer among them): with
+    // no clock of its own, the step reports it as the exit it was.
+    const r = run(box, "step_openclaw_install", { INSTALL_FAILS: `@openclaw/example@${TARGET} @openclaw/codex@${TARGET}`, INSTALL_RC: "137" });
     expect(r.status, r.stderr).toBe(0);
     expect(r.stdout).toContain([
       `    - @openclaw/example@${TARGET}`,
       "      (not a ClawBox-managed plugin: refreshed without accepting new capabilities)",
-      "      WARN: not updated (non-fatal; the next update that moves OpenClaw retries it). The OpenClaw plugin install exited 1: example failure cause\n",
+      "      WARN: not updated (non-fatal; the next update that moves OpenClaw retries it). The OpenClaw plugin install exited 137: example failure cause\n",
     ].join("\n"));
     expect(r.stdout).toContain([
       `    - @openclaw/codex@${TARGET}`,
-      "      WARN: not updated (non-fatal; gateway-pre-start retries it). The OpenClaw plugin install exited 1: example failure cause\n",
+      "      WARN: not updated (non-fatal; gateway-pre-start retries it). The OpenClaw plugin install exited 137: example failure cause\n",
     ].join("\n"));
     expect(r.stdout).not.toContain("will retry on next boot");
+    expect(r.stdout).not.toMatch(/deadline|killed at/);
     expect(cards(r)).toEqual([
-      `CLAWBOX-WARN[openclaw-plugin-refresh]: 2 plugin(s) were not updated to OpenClaw ${TARGET}: codex, example. A plugin stopped at its deadline may need the next OpenClaw update to repair it.`,
+      `CLAWBOX-WARN[openclaw-plugin-refresh]: 2 plugin(s) were not updated to OpenClaw ${TARGET}: codex, example. The next update that moves OpenClaw tries them again.`,
     ]);
     // A failed reinstall is not a failed refresh: the full path finished.
     expect(r.marker).toMatch(new RegExp(`^target=${TARGET.replace(/\./g, "\\.")}\\n`));
     expect(r.events.at(-1)).toBe("START clawbox-gateway.service");
-  });
-
-  it("goes on at a reinstall's deadline, even past a child of it that outlives the kill", () => {
-    const box = leftBehind();
-    const started = Date.now();
-    try {
-      const r = run(box, "step_openclaw_install", { INSTALL_HANGS: `@openclaw/example@${TARGET}`, CLAWBOX_PLUGIN_REFRESH_TIMEOUT_S: "1" });
-      const took = Date.now() - started;
-      expect(r.status, r.stderr).toBe(0);
-      expect(r.events).toContain("PLUGIN_INSTALL_BOUND 1");
-      expect(r.stdout).toContain("retries it). The OpenClaw plugin install was killed at its deadline and said nothing.\n");
-      expect(cards(r)).toEqual([expect.stringContaining(": 1 plugin(s) were not updated to OpenClaw")]);
-      expect(r.events.at(-1)).toBe("START clawbox-gateway.service");
-      // The child keeps the output it was handed open for 10 s: a step that
-      // read it through a pipe would have waited for it, past its bound.
-      expect(took).toBeLessThan(7_000);
-    } finally {
-      const straggler = path.join(box.dir, "straggler");
-      if (existsSync(straggler)) {
-        try { process.kill(Number(readFileSync(straggler, "utf8")), "SIGKILL"); } catch { /* already gone */ }
-      }
-    }
-  });
-
-  it("starts no reinstall the root step's time could not hold", () => {
-    // A per-call bound past the step's budget: not one install fits.
-    const r = run(leftBehind(), "step_openclaw_install", { CLAWBOX_PLUGIN_REFRESH_TIMEOUT_S: "7000" });
-    expect(r.status, r.stderr).toBe(0);
-    expect(installs(r)).toEqual([]);
-    expect(r.stdout).toContain(`    - @openclaw/codex@${TARGET}: not attempted, too little of the update's time is left\n`);
-    expect(cards(r)).toEqual([
-      `CLAWBOX-WARN[openclaw-plugin-refresh]: 3 plugin(s) were not updated to OpenClaw ${TARGET}: codex (not attempted), discord (not attempted), example (not attempted). A plugin stopped at its deadline may need the next OpenClaw update to repair it.`,
-    ]);
-    expect(r.marker).toMatch(new RegExp(`^target=${TARGET.replace(/\./g, "\\.")}\\n`));
-    expect(r.events.at(-1)).toBe("START clawbox-gateway.service");
-  });
-
-  it("holds that budget to the root unit's own ceiling", () => {
-    const unit = readFileSync("config/clawbox-root-update@.service", "utf8");
-    const ceiling = /^TimeoutStartSec=(\d+)$/m.exec(unit)?.[1];
-    expect(ceiling).toBeDefined();
-    expect(/_oc_refresh_until=\$\(\((\d+) - \d+\)\)/.exec(shellFunction("step_openclaw_install"))?.[1]).toBe(ceiling);
   });
 
   it("cannot print a journal line of its own from an id, a package name or a version", () => {
@@ -1180,7 +1159,7 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     expect(installs(r)).toEqual([`@openclaw/example@${TARGET}`]);
   });
 
-  it("keeps its copies of the fast path's readers, and of the pre-start's cause, identical to them", () => {
+  it("keeps its copies of the fast path's readers identical to them", () => {
     // Copies, not a shared snippet: the fast-path check is left as it is.
     const def = (text: string, name: string) => {
       const start = text.indexOf(`\ndef ${name}(`);
@@ -1192,8 +1171,6 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     for (const name of ["canonical", "read_json", "manifest", "payload_root", "release"]) expect(def(step, name)).toBe(def(fast, name));
     const problems = /^PROBLEMS = .*$/m;
     expect(problems.exec(step)?.[0]).toBe(problems.exec(fast)?.[0]);
-    const cause = (text: string) => /<<'CAUSEPY'\n([\s\S]*?)\nCAUSEPY\n/.exec(text)?.[1];
-    expect(cause(shellFunction("clawbox_plugin_cli_cause"))).toBe(cause(readFileSync("scripts/gateway-pre-start.sh", "utf8")));
   });
 });
 
