@@ -31,6 +31,7 @@ gateway_setup harness_swap hermes_edition llamacpp_install nvidia_jetpack
 ollama_install openclaw_config openclaw_install openclaw_patch openclaw_setup
 openclaw_tts performance_mode post_update rebuild_reboot restart_ap
 set_hostname set_timezone user_add user_remove vnc_install vnc_refresh
+voice_kokoro_install voice_whisper_install
 "
 
 NO_BLOCK=""

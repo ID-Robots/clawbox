@@ -186,12 +186,17 @@ function runTtsOnly(
       // own python is irrelevant, so it is scripted here.
       '  *"sys.version_info"*) echo "${FAKE_PY_VERSION:-python3.10}"; exit 0 ;;',
       '  *"import kokoro, torch"*) exit "${KOKORO_IMPORT_EXIT:-1}" ;;',
+      // A DGX Spark's check for a CUDA 13 torch: true once the cu130 install
+      // ran, unless CU130_LANDS=0 (pip left another torch in place).
+      `  *"startswith('13')"*) [ -f "${root}/cu130-torch" ] && exit 0; exit 1 ;;`,
       // `cuda_torch_present`: is the PINNED Jetson CUDA wheel already unpacked
       // for this user? Defaults to 1 (no), so every existing case here still
       // describes a box that has to download it.
       '  *"torch.version.cuda"*) exit "${CUDA_TORCH_EXIT:-1}" ;;',
       '  *"from kokoro import KPipeline"*) echo "Kokoro model ready on cuda"; exit "${WARMUP_EXIT:-0}" ;;',
-      '  *"pip3 install"*) echo "Successfully installed"; exit "${PIP_EXIT:-0}" ;;',
+      '  *"pip3 install"*)',
+      `    case "$full" in *whl/cu130*) [ "\${CU130_LANDS:-1}" = 1 ] && touch "${root}/cu130-torch" ;; esac`,
+      '    echo "Successfully installed"; exit "${PIP_EXIT:-0}" ;;',
       "esac",
       "exit 0",
     ].join("\n"),
@@ -781,7 +786,7 @@ describe.skipIf(!hasBash)("install-voice.sh --kokoro on a DGX Spark", () => {
     const res = runTtsOnly(SPARK, false, "--kokoro");
     expect(res.status, res.stderr).toBe(0);
     const pip = res.su.filter((c) => c.includes("pip3 install"));
-    expect(pip.some((c) => c.includes("--index-url https://download.pytorch.org/whl/cu130 torch"))).toBe(true);
+    expect(pip.some((c) => c.includes("--upgrade --index-url https://download.pytorch.org/whl/cu130 torch"))).toBe(true);
     expect(pip.some((c) => c.includes(shellConst("JETSON_TORCH_URL")))).toBe(false);
     expect(pip.some((c) => c.includes("nvidia-cusparselt-cu12"))).toBe(false);
     // Ubuntu 24.04's Python is externally managed (PEP 668).
@@ -799,6 +804,13 @@ describe.skipIf(!hasBash)("install-voice.sh --kokoro on a DGX Spark", () => {
     const pip = res.su.filter((c) => c.includes("pip3 install"));
     expect(pip.length).toBeGreaterThan(0);
     expect(pip.every((c) => c.includes(`--find-links '${wheels}' --no-index`))).toBe(true);
+  });
+
+  it("fails torch rather than speak on the CPU when pip leaves a torch that is not a CUDA 13 build", () => {
+    const res = runTtsOnly({ ...SPARK, CU130_LANDS: "0" }, false, "--kokoro");
+    expect(res.status).toBe(12);
+    expect(res.ttsStatus).toMatch(/^KOKORO=failed:torch$/m);
+    expect(res.stderr).toContain("not a CUDA 13 build");
   });
 
   it("is still the Jetson path on CUDA 12, nvidia-smi or not", () => {

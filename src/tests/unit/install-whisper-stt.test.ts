@@ -373,6 +373,14 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
     expect(r.unitWritten).toBe(true);
   });
 
+  it("skips a DGX Spark whose wheelhouse CTranslate2 is a CPU build: no unit, skipped:no-ct2-cuda", () => {
+    const r = run({ sbsa: true, ct2Wheel: true, importOk: false });
+    expect(r.out).toContain("RC=13");
+    expect(r.out).toContain("skipped:no-ct2-cuda");
+    expect(r.unitWritten).toBe(false);
+    expect(r.stamped).toBe(false);
+  });
+
   it("skips a board with no CUDA rather than failing it", () => {
     const r = run({ cuda: false });
     expect(r.out).toContain("RC=13");

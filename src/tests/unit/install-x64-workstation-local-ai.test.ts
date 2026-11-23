@@ -277,6 +277,12 @@ describe("the voice steps a Workstation's Local AI tab starts", () => {
     expect(SOURCE.slice(SOURCE.indexOf("# ── Full Install Mode"))).not.toMatch(/step_voice_/);
   });
 
+  it("is a step the x64 launcher lets the web server start", () => {
+    const launcher = readFileSync(path.resolve(process.cwd(), "scripts/x64-migration/clawbox-x64-run-root-step.sh"), "utf8");
+    const list = /^WEB_ROOT_STEPS="([^"]*)"/m.exec(launcher)![1].split(/\s+/);
+    expect(list).toEqual(expect.arrayContaining(["voice_kokoro_install", "voice_whisper_install"]));
+  });
+
   it("runs root's own copy, which the root-step contract installs root-owned", () => {
     expect(sliceFunction("run_voice_install")).not.toContain("PROJECT_DIR");
     expect(sliceFunction("step_root_step_contract")).toContain(
@@ -338,12 +344,24 @@ describe("the cluster's ASR server becomes the transcription engine at install",
     expect(r.after).toEqual({ stt_endpoint_seeded: true, stt_primary: "cloud" });
   });
 
-  it.skipIf(!hasPython3)("keeps the owner's own server, and an owner's own engine pick", () => {
+  it.skipIf(!hasPython3)("keeps the owner's own server, and an engine the owner pinned", () => {
     const own = { stt_endpoint: { baseUrl: "http://127.0.0.1:9000/v1", model: "x" } };
     expect(seed("ASR_BASE_URL=http://127.0.0.1:8090/v1\nASR_MODEL=m\n", own).after).toEqual(own);
     rmSync(config());
-    const picked = seed("ASR_BASE_URL=http://127.0.0.1:8090/v1\nASR_MODEL=m\n", { stt_primary: "local" }).after;
-    expect(picked).toMatchObject({ stt_primary: "local", stt_endpoint: { baseUrl: "http://127.0.0.1:8090/v1" } });
+    const pinned = seed("ASR_BASE_URL=http://127.0.0.1:8090/v1\nASR_MODEL=m\n", { stt_primary: "local", stt_choice_source: "owner" }).after;
+    expect(pinned).toMatchObject({ stt_primary: "local", stt_endpoint: { baseUrl: "http://127.0.0.1:8090/v1" } });
+    rmSync(config());
+    // A cloud default nobody pinned gives way to the cluster's own server.
+    const defaulted = seed("ASR_BASE_URL=http://127.0.0.1:8090/v1\nASR_MODEL=m\n", { stt_primary: "cloud" }).after;
+    expect(defaulted).toMatchObject({ stt_primary: "endpoint" });
+  });
+
+  it.skipIf(!hasPython3)("writes nothing the app would refuse: stray whitespace is trimmed, a non-http value is no seed", () => {
+    expect(seed("ASR_BASE_URL= 'http://127.0.0.1:8090/v1/' \t\nASR_MODEL=m \n").after).toMatchObject({
+      stt_endpoint: { baseUrl: "http://127.0.0.1:8090/v1", model: "m" },
+    });
+    rmSync(config());
+    expect(seed("ASR_BASE_URL=127.0.0.1:8090\n").after).toBeNull();
   });
 
   it("does nothing on a box with no ASR server", () => {

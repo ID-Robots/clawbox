@@ -1253,7 +1253,7 @@ PY
 # ASR_BASE_URL (the OpenAI-compatible /v1 root; ASR_MODEL, when set, is the
 # model it serves). Settings → Speech's "own speech server" engine
 # (src/lib/stt-endpoint.ts) is pre-filled from it and made the transcription
-# engine, so speech is transcribed on the cluster without a hand-set OpenClaw
+# engine (unless the owner pinned one), so speech is transcribed on the cluster without a hand-set OpenClaw
 # audio block; the app aligns channel voice notes with it at its next boot.
 # ONCE: `stt_endpoint_seeded` records it, so an owner who removes or changes
 # the server is never overruled by a later install or update. The app
@@ -1261,13 +1261,14 @@ PY
 # so a value it would refuse is simply no engine. Never fatal.
 seed_stt_endpoint_from_asr() {
   local env_file="$1" url model
-  url="$(sed -n 's/^ASR_BASE_URL=//p' "$env_file" 2>/dev/null | tail -1 | tr -d '\r"'"'"'' || true)"
-  url="${url%/}"
+  url="$(sed -n 's/^ASR_BASE_URL=//p' "$env_file" 2>/dev/null | tail -1 || true)"
   [ -n "$url" ] || return 0
-  model="$(sed -n 's/^ASR_MODEL=//p' "$env_file" 2>/dev/null | tail -1 | tr -d '\r"'"'"'' || true)"
+  model="$(sed -n 's/^ASR_MODEL=//p' "$env_file" 2>/dev/null | tail -1 || true)"
   if ! as_user python3 -I - "$PROJECT_DIR/data/config.json" "$url" "$model" <<'PY'
 import json, os, sys, tempfile, urllib.request
 path, url, model = sys.argv[1:4]
+url = url.strip().strip("\"'").strip().rstrip("/")
+model = model.strip().strip("\"'").strip()
 try:
     with open(path) as f:
         data = json.load(f)
@@ -1280,7 +1281,7 @@ except (OSError, ValueError) as err:
     sys.exit(0)
 if data.get("stt_endpoint_seeded") is True or data.get("stt_endpoint") is not None:
     sys.exit(0)
-if not url.startswith(("http://", "https://")):
+if not url.startswith(("http://", "https://")) or any(c.isspace() for c in url):
     print("  WARN: ASR_BASE_URL is not an http(s) address; not pre-filling the speech server", file=sys.stderr)
     sys.exit(0)
 # No ASR_MODEL: the model the server itself serves (an ASR server such as vLLM
@@ -1293,7 +1294,9 @@ if not model:
         model = "whisper-1"
 data["stt_endpoint"] = {"baseUrl": url, "model": model}
 data["stt_endpoint_seeded"] = True
-data.setdefault("stt_primary", "endpoint")
+# The engine, unless the owner pinned one (src/lib/clawai-cloud-choice.ts).
+if data.get("stt_choice_source") != "owner":
+    data["stt_primary"] = "endpoint"
 tmp = None
 try:
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".config.json.")

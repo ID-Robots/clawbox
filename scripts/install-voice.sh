@@ -440,7 +440,13 @@ install_cuda_torch() {
     # pip picks the wheel for the box's own Python, from the wheelhouse first
     # (where --no-index leaves the index unused), else from the cu130 index.
     echo "  Installing CUDA 13 PyTorch for this SBSA aarch64 box (cu130, several GB with its CUDA libraries)..."
-    pip_as_clawbox "--index-url $SBSA_TORCH_INDEX torch" || return 1
+    # --upgrade: a torch already in user-site (a CPU build) would otherwise
+    # satisfy the request and leave Kokoro on the CPU. Checked after, too.
+    pip_as_clawbox "--upgrade --index-url $SBSA_TORCH_INDEX torch" || return 1
+    if ! cuda_torch_present; then
+      echo "  ERROR: the torch now installed is not a CUDA 13 build" >&2
+      return 1
+    fi
     ensure_cuda_bashrc_exports
     return 0
   fi
@@ -1503,8 +1509,13 @@ install_whisper_stt() {
   # CPU wheel transcribes, and both runtime scripts already fall back to
   # cpu/int8, so a failed build costs speed and not the feature.
   if [ "$sbsa" = true ]; then
-    clawbox_python 'import sys, ctranslate2; sys.exit(0 if ctranslate2.get_cuda_device_count() > 0 else 1)' >/dev/null 2>&1 \
-      || echo "  Warning: the CTranslate2 wheel from $VOICE_WHEELHOUSE sees no CUDA device - faster-whisper will transcribe on the CPU" >&2
+    # A CPU wheel (what `pip download ctranslate2` fetches for aarch64) is not
+    # the CUDA wheel this needs: no unit, no stamp, the same skip.
+    if ! clawbox_python 'import sys, ctranslate2; sys.exit(0 if ctranslate2.get_cuda_device_count() > 0 else 1)' >/dev/null 2>&1; then
+      STT_SKIP_REASON="skipped:no-ct2-cuda"
+      echo "  The CTranslate2 wheel from $VOICE_WHEELHOUSE sees no CUDA device - not installing faster-whisper ($STT_SKIP_REASON)"
+      return 13
+    fi
   elif ctranslate2_cuda_present; then
     echo "  CTranslate2 CUDA build already present"
   elif ! build_ctranslate2_cuda; then
