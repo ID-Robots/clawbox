@@ -889,6 +889,13 @@ const REBUILD_TAKEOVER_TIMEOUT_MS = 1_200_000;
 // would silently disable the failure detection below).
 const REBUILD_ROOT_STEP = "rebuild_reboot";
 
+/**
+ * The rebuild's own verdict: install.sh `do_rebuild` prints exactly this, with
+ * what failed and why, for every failure after it stops the dashboard — and
+ * before it restores the previous build and runs its exit guard.
+ */
+const REBUILD_FAILED_LINE = /^Error: rebuild failed \(exit \d+\)/;
+
 /** `systemctl show <unit> -p Result --value`, or null if unqueryable. */
 async function getRootStepResult(stepId: string): Promise<string | null> {
   try {
@@ -1097,8 +1104,12 @@ const SESSION_BOOKKEEPING_LINE =
  * showed the owner. install.sh says every fatal thing as `echo "Error: …" >&2`,
  * so the newest of those wins; failing that, the last line the STEP itself
  * wrote, once systemd's and sudo's lines are out of the way.
+ *
+ * `own` is the step's own verdict line, for a caller that knows its shape: it
+ * outranks a later error line, which is then something the step did AFTER it
+ * failed (its exit guard's git, say), not the reason.
  */
-function getStepFailureLine(logText: string, unit: string): string | null {
+function getStepFailureLine(logText: string, unit: string, own?: RegExp): string | null {
   const lines = logText
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -1107,6 +1118,8 @@ function getStepFailureLine(logText: string, unit: string): string | null {
       && !SYSTEMD_LIFECYCLE_LINE.test(line)
       && !SESSION_BOOKKEEPING_LINE.test(line)
       && !DISPATCH_VERDICT_LINE.test(line));
+  const verdict = own ? lines.findLast((line) => own.test(line)) : undefined;
+  if (verdict) return verdict;
   for (let i = lines.length - 1; i >= 0; i--) {
     if (/^(?:error|fatal)\b/i.test(lines[i])) return lines[i];
   }
@@ -1271,18 +1284,24 @@ async function collectRootStepWarnings(stepId: string, sinceMs: number): Promise
  * reads the unit's history as it always has, where only the `failed` gate keeps
  * it to the latest run.
  *
- * `lines` is how much of THIS run's tail is searched; the unbounded read keeps
- * its 40, since a wider one reaches further into earlier runs.
+ * `lines` is how much of THIS run's tail is searched, and `own` the step's own
+ * verdict line (getStepFailureLine). The unbounded read keeps its 40 lines and
+ * no `own`: a wider window, or a preferred line, reaches into earlier runs.
  */
-async function readRootStepFailure(stepId: string, sinceMs: number | null, lines = 40): Promise<string | null> {
+async function readRootStepFailure(
+  stepId: string,
+  sinceMs: number | null,
+  { lines = 40, own }: { lines?: number; own?: RegExp } = {},
+): Promise<string | null> {
   const unit = rootStepUnit(stepId);
   try {
     // Without `--since`, `-n 40` IS the unit's last 40 entries on every
     // journalctl; with it, only the tail reader is (root-step-journal.ts).
-    const stdout = sinceMs === null
-      ? (await execFile("/usr/bin/journalctl", ["-u", unit, "-n", "40", "--no-pager", "-o", "cat"], { timeout: 10_000 })).stdout
-      : await readRootStepJournalTail(stepId, { sinceMs, lines, timeoutMs: 10_000 });
-    return getStepFailureLine(stdout, unit);
+    if (sinceMs === null) {
+      const { stdout } = await execFile("/usr/bin/journalctl", ["-u", unit, "-n", "40", "--no-pager", "-o", "cat"], { timeout: 10_000 });
+      return getStepFailureLine(stdout, unit);
+    }
+    return getStepFailureLine(await readRootStepJournalTail(stepId, { sinceMs, lines, timeoutMs: 10_000 }), unit, own);
   } catch {
     return null;
   }
@@ -5930,6 +5949,10 @@ interface UpdaterRuntime {
   state: UpdateState;
   running: boolean;
   continuationInFlight: Promise<boolean> | null;
+  /** The continuation's own next ask while it waits on a root unit (askContinuationAgainLater). */
+  continuationRecheck?: NodeJS.Timeout | null;
+  /** When this process began waiting for the rebuild unit to end, on `monotonicNow()`. */
+  rebuildWaitSince?: number | null;
 }
 const runtimeKey: unique symbol = Symbol.for("clawbox.updater.runtime.v1");
 const processRuntime = globalThis as typeof globalThis & { [runtimeKey]?: UpdaterRuntime };
@@ -5956,6 +5979,8 @@ export function resetUpdateState(): void {
   runtime.state = createInitialState(applicableSteps());
   runtime.running = false;
   runtime.continuationInFlight = null;
+  cancelContinuationRecheck();
+  runtime.rebuildWaitSince = null;
 }
 
 export type DismissOutcome =
@@ -6326,7 +6351,69 @@ export function checkContinuation(): Promise<boolean> {
   return runtime.continuationInFlight;
 }
 
+/** How often a continuation that waits on a root unit asks again by itself. */
+const CONTINUATION_RECHECK_MS = 5_000;
+
+/**
+ * Ask again by itself, once, a little later: the continuation is waiting on a
+ * root unit that has not ended. Nothing else is sure to ask — the boot hook asks
+ * once, and on a box with no page open (an update approved from a chat) no
+ * status poll ever comes, which left the update lock held and the box "updating"
+ * for as long as nobody looked. Unref'd and never blocking; each ask that still
+ * waits arms the next, so it stops with the unit, and a server that restarts
+ * mid-wait starts again from its boot hook.
+ */
+function askContinuationAgainLater(): void {
+  if (runtime.continuationRecheck) return;
+  const timer = setTimeout(() => {
+    runtime.continuationRecheck = null;
+    checkContinuation().catch((err) => {
+      console.warn("[Updater] Could not judge the update yet:", err instanceof Error ? err.message : err);
+      askContinuationAgainLater();
+    });
+  }, CONTINUATION_RECHECK_MS);
+  timer.unref();
+  runtime.continuationRecheck = timer;
+}
+
+function cancelContinuationRecheck(): void {
+  if (runtime.continuationRecheck) clearTimeout(runtime.continuationRecheck);
+  runtime.continuationRecheck = null;
+}
+
+/**
+ * The rebuild unit outlived the restart: its step is shown still running, and
+ * the continuation asks again later. "running", not "idle", on purpose: the
+ * status route answers any other phase as it is, so it skips its idle reads —
+ * `git status` among them, which takes the checkout's index lock while the
+ * unit's exit guard runs `git reset --hard` (install.sh
+ * restore_checkout_to_served_build). That reset then fails, and git's `fatal:`
+ * line lands in the unit's journal.
+ */
+function waitForRebuildUnit(steps: UpdateStepDef[], restartIndex: number): void {
+  if (runtime.rebuildWaitSince == null) {
+    runtime.rebuildWaitSince = monotonicNow();
+    console.log("[Updater] ClawBox came back before its rebuild step ended: the update is judged when that step ends");
+  }
+  runtime.state = createInitialState(steps);
+  runtime.state.phase = "running";
+  for (let i = 0; i < restartIndex; i++) runtime.state.steps[i].status = "completed";
+  runtime.state.steps[restartIndex].status = "running";
+  runtime.state.currentStepIndex = restartIndex;
+  askContinuationAgainLater();
+}
+
+/** The second of the wait's two log lines, with how it ended. */
+function endRebuildWait(outcome: string): void {
+  if (runtime.rebuildWaitSince == null) return;
+  const seconds = Math.round((monotonicNow() - runtime.rebuildWaitSince) / 1000);
+  runtime.rebuildWaitSince = null;
+  console.log(`[Updater] The rebuild step ended ${seconds} s after ClawBox came back: ${outcome}`);
+}
+
 async function resumeContinuation(): Promise<boolean> {
+  // This ask is the one a pending recheck was for.
+  cancelContinuationRecheck();
   const handoverFile = path.join(PROJECT_DIR, "data", "updater-handover.json");
   let handover: unknown;
   try {
@@ -6344,7 +6431,10 @@ async function resumeContinuation(): Promise<boolean> {
       bootstrapState = stdout.trim() || null;
     } catch { /* a later status/boot probe can retry */ }
     const verdict = classifyUpdaterHandover(handover, await readBuildId(), bootstrapState);
-    if (verdict === "wait") return false;
+    if (verdict === "wait") {
+      askContinuationAgainLater();
+      return false;
+    }
     if (verdict === "failed") {
       runtime.state = createInitialState(applicableSteps());
       runtime.state.phase = "failed";
@@ -6541,13 +6631,16 @@ async function resumeContinuation(): Promise<boolean> {
   // before its unit has ended, and a oneshot still running answers
   // `Result=success`: judged now, the failure read as "no new build", a fixed
   // sentence over the `Error:` line already in the unit's journal, and the
-  // checkout rollback below stood aside for a unit "still running". The next
-  // status poll asks again, as the handover above does. Nothing here blocks:
-  // each poll asks systemd and returns. Only a positive answer waits — a unit
-  // systemd cannot be asked about is judged now, as before — and the wait ends
-  // with the unit (its TimeoutStartSec caps it). Not on the owner's path, where
-  // that unit is never this run's.
-  if (unitRunning && !unitFailed && (buildUnchanged || buildMissing)) return false;
+  // checkout rollback below stood aside for a unit "still running". This
+  // process asks again by itself until the unit has ended. Nothing here blocks:
+  // each ask questions systemd and returns. Only a positive answer waits — a
+  // unit systemd cannot be asked about is judged now, as before — and the wait
+  // ends with the unit (its TimeoutStartSec caps it). Not on the owner's path,
+  // where that unit is never this run's.
+  if (unitRunning && !unitFailed && (buildUnchanged || buildMissing)) {
+    waitForRebuildUnit(steps, restartIndex);
+    return false;
+  }
 
   // The restart this is resuming is the one the update ASKED FOR: the flag is
   // written by the rebuild step itself. So anything a reader stamped while that
@@ -6567,12 +6660,17 @@ async function resumeContinuation(): Promise<boolean> {
       // readRootStepFailure. A longer tail than the other readers': this one
       // comes after everything the unit did once the server was back (engines,
       // node-pty, exit traps, every sudo's session lines — 16 entries after the
-      // `Error:` line on a board, more when node-pty is rebuilt).
-      ? (await readRootStepFailure(REBUILD_ROOT_STEP, rebuildDispatchedWallClock(rebuildDispatchedAt), 200))
-        ?? "Rebuild failed before the restart"
+      // `Error:` line on a board, more when node-pty is rebuilt), and some of
+      // that can print an error line of its own: the rebuild's verdict line is
+      // the reason, whatever came after it.
+      ? (await readRootStepFailure(REBUILD_ROOT_STEP, rebuildDispatchedWallClock(rebuildDispatchedAt), {
+        lines: 200,
+        own: REBUILD_FAILED_LINE,
+      })) ?? "Rebuild failed before the restart"
       : buildMissing
         ? `ClawBox restarted with no build at all (.next/BUILD_ID is missing) — see ${logs}`
         : `ClawBox restarted without producing a new build — see ${logs}`;
+    endRebuildWait(`the update failed: ${message}`);
     runtime.state = createInitialState(steps);
     runtime.state.warnings = await restoreWarnings();
     runtime.state.phase = "failed";
@@ -6599,6 +6697,7 @@ async function resumeContinuation(): Promise<boolean> {
     return false;
   }
 
+  endRebuildWait("its build is in place, the update goes on");
   runtime.running = true;
   runtime.state = createInitialState(steps);
   // The drift warnings were raised before the rebuild, one reboot ago. Carry

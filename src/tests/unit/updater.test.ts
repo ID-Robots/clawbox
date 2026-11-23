@@ -5979,18 +5979,34 @@ describe("updater", () => {
     const THIS_RUN_ERROR = "Error: rebuild failed (exit 137) — bun run build was killed by signal 9 "
       + "(no OOM kill in the kernel log; a stop, a timeout or an operator looks the same).";
     const NO_NEW_BUILD = "ClawBox restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
+    interface RestoredBox {
+      /** The rebuild unit, which a case moves on; still running unless it says otherwise. */
+      unit?: { active: string; result: string };
+      /** The dispatch record: this run's, with its moment, unless a case says otherwise. */
+      record?: unknown;
+      /** More of the store, more files (by the end of their path), more commands. */
+      store?: Record<string, unknown>;
+      files?: Record<string, string>;
+      exec?: Record<string, ExecFileAnswer>;
+    }
     /** The restored box: the same build, this run's dispatch record, and a rebuild unit the case moves on. */
-    function restoredBox(journal: JournalEntry[], unit = { active: "activating", result: "success" }) {
+    function restoredBox(journal: JournalEntry[], options: RestoredBox = {}) {
+      const unit = options.unit ?? { active: "activating", result: "success" };
+      const record = "record" in options ? options.record : { boot: BOOT, uptime: 1000.5, at: DISPATCHED_AT };
       mockGet.mockImplementation(async (key: string) => {
         if (key === "update_needs_continuation") return "build-aaa";
-        if (key === "update_rebuild_dispatched") return { boot: BOOT, uptime: 1000.5, at: DISPATCHED_AT };
-        return undefined;
+        if (key === "update_rebuild_dispatched") return record;
+        return options.store?.[key];
       });
       mockReadFile.mockImplementation(async (file) => {
-        if (String(file).endsWith("BUILD_ID")) return "build-aaa\n";
+        const f = String(file);
+        if (f.endsWith("BUILD_ID")) return "build-aaa\n";
+        const known = Object.entries(options.files ?? {}).find(([suffix]) => f.endsWith(suffix));
+        if (known) return known[1];
         throw new Error("ENOENT");
       });
       setupExecFileMock({
+        ...options.exec,
         [`show ${REBUILD_UNIT} -p ActiveState`]: () => ({ stdout: `${unit.active}\n`, stderr: "" }),
         [`show ${REBUILD_UNIT} -p Result`]: () => ({ stdout: `${unit.result}\n`, stderr: "" }),
         "/usr/bin/journalctl": journalctlModel({ [REBUILD_UNIT]: journal }),
@@ -6010,15 +6026,36 @@ describe("updater", () => {
         { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
         { message: "  Restored the previous build; the dashboard answers on :80 again", atMs: DISPATCHED_AT + 57_000 },
       ];
-      const unit = restoredBox(journal);
-      const warn = vi.spyOn(console, "warn");
+      // The checkout still on the new commit beside the restored build, so the
+      // rollback has something to do (install.sh's exit guard normally has).
+      const OLD = "a".repeat(40);
+      const NEW = "b".repeat(40);
+      const unit = restoredBox(journal, {
+        store: { update_rollback_target: JSON.stringify({ commit: OLD, branch: "main", recordedAt: "2026-01-01T00:00:00Z" }) },
+        files: { "build-info.json": JSON.stringify({ commit: OLD, builtAt: "2026-01-01T00:00:00Z", buildId: "build-aaa" }) },
+        exec: {
+          "rev-parse --abbrev-ref HEAD": { stdout: "beta\n", stderr: "" },
+          "rev-parse HEAD": { stdout: `${NEW}\n`, stderr: "" },
+        },
+      });
+      const checkoutMoves = () => mockExecFile.mock.calls
+        .filter(([cmd, args]) => cmd === "git" && (args as string[]).join(" ").endsWith(`checkout -q -f -B main ${OLD}`))
+        .length;
+      const log = vi.spyOn(console, "log");
+      const waitLines = () => log.mock.calls.map(([m]) => String(m)).filter((m) => m.includes("rebuild step"));
 
-      // The restored server's first poll: the unit has not ended, so there is
-      // no verdict yet, and the flag stays for the poll that can give one.
-      expect(await updater.checkContinuation()).toBe(false);
-      expect(updater.getUpdateState().error ?? null).toBeNull();
-      expect(updater.getUpdateState().phase).toBe("idle");
+      // The restored server's first polls: the unit has not ended, so there is
+      // no verdict yet — the restart step is still running, the flag stays, and
+      // the checkout is not moved under the unit.
+      for (let poll = 0; poll < 2; poll++) {
+        expect(await updater.checkContinuation()).toBe(false);
+        const waiting = updater.getUpdateState();
+        expect(waiting.error ?? null).toBeNull();
+        expect(waiting.phase).toBe("running");
+        expect(waiting.steps.find((step) => step.id === "restart")?.status).toBe("running");
+      }
       expect(flagCleared()).toBe(false);
+      expect(checkoutMoves()).toBe(0);
 
       // The unit ends as it does on the box: failed, with its exit code.
       journal.push(
@@ -6034,10 +6071,126 @@ describe("updater", () => {
       expect(state.error).toBe(THIS_RUN_ERROR);
       expect(state.steps.find((step) => step.id === "restart")?.error).toBe(THIS_RUN_ERROR);
       expect(flagCleared()).toBe(true);
-      // Judged once the unit had ended, so the checkout rollback ran instead of
-      // standing aside for a build still in progress.
-      expect(warn.mock.calls.some(([m]) => String(m).includes("Rebuild still running"))).toBe(false);
-      warn.mockRestore();
+      // Judged once the unit had ended, so the checkout rollback ran.
+      expect(checkoutMoves()).toBe(1);
+      // One line when the wait began, one when it ended — never one per poll.
+      expect(waitLines()).toHaveLength(2);
+      expect(waitLines()[1]).toMatch(/rebuild step ended \d+ s after .*: the update failed: Error: rebuild failed \(exit 137\)/);
+      log.mockRestore();
+    });
+
+    it("gives its verdict with nobody watching: the server asks again by itself until the unit ends", async () => {
+      // Approved from a chat, on a box with no page open: the boot hook's one
+      // ask lands while the unit still runs, and no status poll ever comes.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const log = vi.spyOn(console, "log");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+
+        unit.active = "failed";
+        unit.result = "exit-code";
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        // Read from what the continuation itself wrote, not the process-wide
+        // state: earlier cases leave runs polling this very Result query, and
+        // the "exit-code" answered here can end one of them into that state.
+        expect(log.mock.calls.map(([m]) => String(m))).toContainEqual(
+          expect.stringMatching(/rebuild step ended \d+ s after .*: the update failed: Error: rebuild failed \(exit 137\)/),
+        );
+        // Its own clear of the flag (with the interruption record beside it),
+        // and the desktop lock released after it.
+        const writes = mockSetMany.mock.calls.map(([entries]) => entries as Record<string, unknown>);
+        const ownClear = writes.findIndex((e) => "update_needs_continuation" in e && "update_interrupted_at" in e);
+        expect(ownClear).toBeGreaterThan(-1);
+        expect(writes.slice(ownClear).some((e) => "update_in_progress" in e && e.update_in_progress === undefined)).toBe(true);
+      } finally {
+        log.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps every status poll off git while the rebuild unit still runs", async () => {
+      // `git status` takes the index lock, and the unit's exit guard runs
+      // `git reset --hard` in that window: a collision fails the reset.
+      try {
+        updater.resetUpdateState();
+        restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        const { GET } = await import("@/app/setup-api/update/status/route");
+        const phases: string[] = [];
+        for (let poll = 0; poll < 2; poll++) phases.push((await (await GET()).json()).phase);
+        const gitStatus = mockExecFile.mock.calls
+          .filter(([cmd, args]) => cmd === "git" && (args as string[]).includes("status"))
+          .map(([, args]) => (args as string[]).join(" "));
+        expect(gitStatus).toEqual([]);
+        expect(phases).toEqual(["running", "running"]);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("names the rebuild's own failure, not a later error line from the unit's exit", async () => {
+      updater.resetUpdateState();
+      restoredBox([
+        { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
+        { message: "  Moving the checkout back from bbbbbbb to aaaaaaa, the commit the restored build was made from", atMs: DISPATCHED_AT + 62_000 },
+        { message: "fatal: Unable to create '/home/clawbox/clawbox/.git/index.lock': File exists.", atMs: DISPATCHED_AT + 62_100 },
+        { message: "  Warning: could not move the checkout back to aaaaaaa", atMs: DISPATCHED_AT + 62_200 },
+        { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 64_000 },
+      ], { unit: { active: "failed", result: "exit-code" } });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+    });
+
+    it("reads an older updater's record, which carries no dispatch moment, as before: the unit's last 40 entries", async () => {
+      updater.resetUpdateState();
+      restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }], {
+        unit: { active: "failed", result: "exit-code" },
+        record: { boot: BOOT, uptime: 1000.5 },
+      });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      const reads = mockExecFile.mock.calls
+        .filter(([cmd, args]) => cmd === "/usr/bin/journalctl" && (args as string[]).includes(REBUILD_UNIT))
+        .map(([, args]) => args);
+      expect(reads).toEqual([["-u", REBUILD_UNIT, "-n", "40", "--no-pager", "-o", "cat"]]);
+      expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+    });
+
+    it("asks the handover again by itself while the root bootstrap still runs", async () => {
+      // The same probe-once hole as the rebuild's wait: the boot hook asks once.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
+      try {
+        updater.resetUpdateState();
+        mockReadFile.mockImplementation(async (file) => {
+          const f = String(file);
+          if (f.endsWith("updater-handover.json")) return JSON.stringify({ version: 1, previousBuildId: "build-old" });
+          if (f.endsWith("BUILD_ID")) return "build-new\n";
+          throw new Error("ENOENT");
+        });
+        setupExecFileMock({
+          "show clawbox-root-update@bootstrap_updater.service -p ActiveState": { stdout: "activating\n", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+        const asks = () => mockExecFile.mock.calls
+          .filter(([, args]) => (args as string[]).join(" ").includes("bootstrap_updater.service -p ActiveState"))
+          .length;
+
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(asks()).toBe(1);
+        await vi.advanceTimersByTimeAsync(11_000);
+        expect(asks()).toBeGreaterThanOrEqual(2);
+      } finally {
+        updater.resetUpdateState();
+        vi.useRealTimers();
+        const actual = await vi.importActual<typeof import("fs")>("fs");
+        mockExists.mockImplementation(actual.existsSync);
+      }
     });
 
     it("reads the unit's state before its result, so a unit that ends between the two is still judged failed", async () => {
@@ -6049,8 +6202,10 @@ describe("updater", () => {
         { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
         { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 64_000 },
       ], {
-        get active() { return asked++ === 0 ? "activating" : "failed"; },
-        get result() { return asked++ === 0 ? "success" : "exit-code"; },
+        unit: {
+          get active() { return asked++ === 0 ? "activating" : "failed"; },
+          get result() { return asked++ === 0 ? "success" : "exit-code"; },
+        },
       });
 
       for (let poll = 0; poll < 3 && updater.getUpdateState().phase !== "failed"; poll++) {
@@ -6071,7 +6226,7 @@ describe("updater", () => {
         { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
         ...tail,
         { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 70_000 },
-      ], { active: "failed", result: "exit-code" });
+      ], { unit: { active: "failed", result: "exit-code" } });
 
       expect(await updater.checkContinuation()).toBe(false);
       expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
@@ -6105,7 +6260,7 @@ describe("updater", () => {
         { message: "Running bun build...", atMs: DISPATCHED_AT + 51_000 },
         { message: `${REBUILD_UNIT}: Main process exited, code=killed, status=9/KILL`, atMs: DISPATCHED_AT + 54_000 },
         { message: `${REBUILD_UNIT}: Failed with result 'signal'.`, atMs: DISPATCHED_AT + 54_000 },
-      ], { active: "failed", result: "signal" });
+      ], { unit: { active: "failed", result: "signal" } });
 
       expect(await updater.checkContinuation()).toBe(false);
       const state = updater.getUpdateState();
