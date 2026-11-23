@@ -69,6 +69,8 @@ const UPGRADE_BRANCH = process.env.CLAWBOX_UPGRADE_TARGET_BRANCH ?? "beta";
  */
 const CODEX_ARM_MODEL = "openai/gpt-5.5";
 const CODEX_ARM_PATH = `agents.defaults.models[${JSON.stringify(CODEX_ARM_MODEL)}].agentRuntime.id`;
+/** Where a ChatGPT sign-in is filed (CHATGPT_PROFILE_KEY in src/lib/chatgpt-subscription.ts). */
+const CHATGPT_PROFILE_PATH = "auth.profiles.openai:chatgpt";
 const OPENCLAW_JSON = "/home/clawbox/.openclaw/openclaw.json";
 /** The root step that installs the core and runs doctor; its journal is its own output. */
 const OPENCLAW_INSTALL_UNIT = "clawbox-root-update@openclaw_install.service";
@@ -355,6 +357,15 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     );
     expect(install.exit, `fixture: plugins install @openclaw/codex@${mainPin}: ${install.stdout}${install.stderr}`).toBe(0);
     const installSeconds = Math.round((Date.now() - installStarted) / 1000);
+    // The sign-in's profile entry, without a credential (as 22-anthropic-accounts
+    // stages one): on an OpenAI API-key box with no ChatGPT sign-in, main's and
+    // the target's pre-start remove the codex arm, and the wizard's OpenAI key
+    // may have left such a profile.
+    const profile = await openclawCli(
+      ["config", "set", CHATGPT_PROFILE_PATH, JSON.stringify({ provider: "openai", mode: "oauth" }), "--strict-json"],
+      120_000,
+    );
+    expect(profile.exit, `fixture: config set ${CHATGPT_PROFILE_PATH}: ${profile.stdout}${profile.stderr}`).toBe(0);
     const arm = await openclawCli(["config", "set", CODEX_ARM_PATH, "codex"], 120_000);
     expect(arm.exit, `fixture: config set ${CODEX_ARM_PATH}: ${arm.stdout}${arm.stderr}`).toBe(0);
     const restartStarted = Date.now();
