@@ -1370,7 +1370,7 @@ describe("gateway-pre-start tells the agent how speech-to-text is turned on", ()
 });
 
 /**
- * What the agent says when asked how hard it is thinking (E2E-03).
+ * What the agent says when asked how hard it is thinking.
  *
  * OpenClaw's system prompt carries `Reasoning=<level>` in its Runtime section,
  * and that is reasoning VISIBILITY (`/reasoning on|off|stream`, off by default),
@@ -1444,7 +1444,7 @@ describe("gateway-pre-start tells the agent where its thinking level is", () => 
 });
 
 /**
- * The heartbeat appends what this block appends, byte for byte (E2E-04).
+ * The heartbeat appends what this block appends, byte for byte.
  *
  * OpenClaw creates AGENTS.md on the agent's first run, after this block's last
  * run on a fresh box, so the five-minute heartbeat appends the same sections

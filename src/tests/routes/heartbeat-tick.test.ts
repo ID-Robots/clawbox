@@ -307,10 +307,11 @@ describe("the pending first-conversation ritual", () => {
 });
 
 /**
- * E2E-04. OpenClaw creates AGENTS.md on the agent's first run. On a freshly
- * set-up box that comes after the gateway's last start, so the ExecStartPre
- * that appends ClawBox's rules found no file, and the box ran without them
- * until something restarted its gateway. The tick is what runs in between.
+ * ClawBox's AGENTS.md rules on a freshly set-up box. OpenClaw creates
+ * AGENTS.md on the agent's first run, which there comes after the gateway's
+ * last start, so the ExecStartPre that appends the rules found no file, and the
+ * box ran without them until something restarted its gateway. The tick is what
+ * runs in between.
  */
 describe("ClawBox's AGENTS.md rules", () => {
   // OpenClaw's own template, the way it lands on the first run: no ClawBox section.

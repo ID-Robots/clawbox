@@ -4,7 +4,7 @@
  *
  * AGENTS.md is the file OpenClaw injects into every session ("a good place for
  * rules", docs/concepts/agent-workspace.md), so ClawBox appends its rules to
- * it. Until E2E-04 only scripts/gateway-pre-start.sh did, as the gateway's
+ * it. Before this module only scripts/gateway-pre-start.sh did, as the gateway's
  * ExecStartPre, and only to an AGENTS.md that already exists: it never creates
  * the file, the harness owns that. But OpenClaw 2026.11.5 creates AGENTS.md on
  * the agent's FIRST RUN (docs/cli/setup.md: "The Gateway seeds missing
@@ -273,8 +273,10 @@ let inFlight: Promise<void> | null = null;
 /**
  * Append every ClawBox section AGENTS.md lacks, while OpenClaw is the harness.
  *
- * One run at a time: the owner's browser calls the tick too, and two
- * overlapping runs would only cost each other a conflict. Never rejects. A
+ * One run at a time: a tick that outlives the five-minute interval (each of
+ * the two gateway calls may wait up to 10 s on a busy box), or a manual call
+ * of the route, would otherwise overlap the next one, and two overlapping runs
+ * would only cost each other a conflict. Never rejects. A
  * heading the owner or the agent deleted comes back on the next tick, as it
  * already did on every gateway start.
  */

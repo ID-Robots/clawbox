@@ -65,9 +65,9 @@ export async function GET(request: Request) {
   // ClawBox's rules in AGENTS.md. OpenClaw creates that file on the agent's
   // first run, which on a freshly set-up box comes after the gateway's last
   // start, so the ExecStartPre that appends them found nothing to append to
-  // and the box ran without them until its next restart (E2E-04). NOT AWAITED,
-  // for the curl budget explained at `refreshCatalogIfDue` below: while a
-  // section is missing this is two gateway round-trips. It never rejects.
+  // and the box ran without them until its next restart. NOT AWAITED, for
+  // the curl budget explained at `refreshCatalogIfDue` below: while a section
+  // is missing this is two gateway round-trips. It never rejects.
   void ensureClawboxAgentsSections();
 
   // Pay back a language pick OpenClaw's first-conversation ritual made us

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 /**
- * The heartbeat's half of ClawBox's AGENTS.md rules (E2E-04), awaited here: the
+ * The heartbeat's half of ClawBox's AGENTS.md rules, awaited here: the
  * route does not wait for it, so "no gateway call" there would hold whether or
  * not the step had run yet.
  *
