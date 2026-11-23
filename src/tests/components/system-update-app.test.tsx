@@ -162,7 +162,7 @@ describe("SystemUpdateApp — a dismissal refused by a live update", () => {
 // offered Dismiss alone (which forgets the position) and the hero's update
 // button is hidden while a run is settled, so the resume was reachable by no
 // gesture. The Resume button is that gesture, and only an interrupted run
-// gets it: any other failure gets Try again, a fresh run from step 1 (below).
+// gets it: any other failure gets Try again, which runs the update again (below).
 describe("SystemUpdateApp — an interrupted run offers Resume", () => {
   const INTERRUPTED =
     "The update was interrupted before it could finish: the box restarted — or lost power — while "

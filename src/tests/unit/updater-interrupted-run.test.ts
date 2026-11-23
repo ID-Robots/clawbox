@@ -549,6 +549,30 @@ describe("an interrupted run says which step died and what took the box, and res
     expect(mockSetMany).not.toHaveBeenCalledWith(expect.objectContaining({ update_interrupted_at: undefined }));
   });
 
+  it("continues from that step on the next press, the refusal card's Try again", async () => {
+    // The refusal is not an interrupted verdict, so its card offers Try again
+    // rather than Resume. That press is the same startUpdate(), and with the
+    // record still on disk it lands on the step that died, not on step 1.
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    networkAnswers(false);
+    diskState({ locked: false, interruptedAt: STAMP, detail: { cause: "reboot", step: "openclaw_install" } });
+    expect(updater.startUpdate()).toEqual({ started: true });
+    await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+    expect(updater.isInterruptedVerdict(updater.getUpdateState())).toBe(false);
+    await vi.waitFor(async () => expect(await updater.updateInFlight()).toBe(false));
+
+    networkAnswers(true);
+    const died = stepIndex("openclaw_install");
+    expect(died).toBeGreaterThan(0);
+    expect(updater.startUpdate()).toEqual({ started: true });
+
+    await vi.waitFor(() => expect(updater.getUpdateState().currentStepIndex).toBe(died));
+    const state = updater.getUpdateState();
+    expect(state.phase).toBe("running");
+    expect(state.steps.slice(0, died).every((s) => s.status === "completed")).toBe(true);
+    expect(state.steps[died].status).not.toBe("completed");
+  });
+
   it("names the assistant for a run cut short before the gateway was started again", async () => {
     // `openclaw_install` stops the gateway and LEAVES it stopped; `gateway_setup`
     // restarts it. A run that died between the two has an intact core and no

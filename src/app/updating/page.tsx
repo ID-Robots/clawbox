@@ -53,8 +53,9 @@ import {
  *     to the desktop" on a finished run whose lock is never released, and the
  *     clock starts again for a run the owner starts from here. A run that
  *     stops says so with its step and reason, Resume where the box can resume
- *     it, Try again (a fresh run from step 1) on any other failure but a
- *     refused downgrade, which has its own override, and Dismiss, which clears
+ *     it, Try again (the update run again; a run the box lost continues where
+ *     it stopped) on any other failure of the full update but a refused
+ *     downgrade, which has its own override, and Dismiss, which clears
  *     the verdict and goes back to the desktop — or, when the box does not
  *     take it, keeps the verdict and says why (with no Try again beside it).
  *  3. LEAVE WHEN THE LOCK DOES. The lock is the middleware's to release, and
@@ -252,9 +253,10 @@ function UpdatingScreen() {
                 });
               }}
               // Resume starts the fresh run that continues an interrupted one,
-              // and Try again a fresh run from step 1 over any other failure;
-              // this screen follows either like the first. Like Resume, it does
-              // not ask about agent work: the hook sends `ignoreBusy` here.
+              // and Try again runs the update again over any other failure (a
+              // run the box lost still continues where it stopped); this screen
+              // follows either like the first. Like Resume, it does not ask
+              // about agent work: the hook sends `ignoreBusy` here.
               onResume={canResume(run.state) ? () => startRun() : undefined}
               onTryAgain={() => startRun()}
               onOverrideDowngrade={() => startRun(true)}
