@@ -374,7 +374,7 @@ describe("an update whose process was replaced is reported, not forgotten", () =
  *
  * The holder record has always carried the boot it was written on; it now
  * carries the step too (update-lock.ts), so the verdict names both — and
- * "Try again" continues from that step.
+ * "Resume update" continues from that step.
  */
 describe("an interrupted run says which step died and what took the box, and resumes there", () => {
   const STAMP = "2026-09-16T18:27:49.910Z";

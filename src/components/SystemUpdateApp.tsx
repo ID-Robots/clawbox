@@ -480,8 +480,12 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
               // update button is hidden while a run is settled, so without
               // this the resume was reachable by no gesture at all. Any other
               // failure starts over from step 1 on a fresh run, so it is not
-              // offered as a "resume": Dismiss, then Update everything.
+              // offered as a "resume": it gets Try again, below.
               onResume={canResume(updateState) ? () => void startUpdate() : undefined}
+              // Update everything's own request, from step 1: `bootstrap_updater`
+              // fetches the newest head, where a resume would run the tree the
+              // failed run rolled back to. Agent work still asks first (409).
+              onTryAgain={() => void startUpdate()}
               onOverrideDowngrade={() => void startUpdate(true)}
             />
           ) : (
