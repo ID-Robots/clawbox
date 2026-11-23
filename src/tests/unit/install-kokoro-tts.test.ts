@@ -817,6 +817,32 @@ describe.skipIf(!hasBash)("install-voice.sh --kokoro on a DGX Spark", () => {
     expect(res.stderr).toContain("not a CUDA 13 build");
   });
 
+  it("finds a torch that is not a CUDA 13 build, replaces it from the cu130 index, and checks again", () => {
+    // Until pip lands the cu130 build, the harness's torch is not a CUDA 13
+    // one: the state of a CPU or CUDA 12 torch already in the user's site.
+    const res = runTtsOnly(SPARK, false, "--kokoro");
+    expect(res.status, res.stderr).toBe(0);
+    const checks = res.su.flatMap((c, i) => (c.includes("startswith('13')") ? [i] : []));
+    const install = res.su.findIndex((c) => c.includes("pip3 install") && c.includes("whl/cu130 torch"));
+    expect(install).toBeGreaterThan(-1);
+    expect(checks.length).toBeGreaterThanOrEqual(2);
+    expect(checks[0]).toBeLessThan(install);
+    expect(checks[checks.length - 1]).toBeGreaterThan(install);
+    // --upgrade: a bare torch requirement an installed CPU build already
+    // satisfies would be kept, not replaced.
+    expect(res.su[install]).toContain("--upgrade");
+  });
+
+  it("keeps a torch that is already a CUDA 13 build: no torch download, and Kokoro still lands", () => {
+    writeFileSync(path.join(root, "cu130-torch"), "");
+    const res = runTtsOnly(SPARK, false, "--kokoro");
+    expect(res.status, res.stderr).toBe(0);
+    const pip = res.su.filter((c) => c.includes("pip3 install"));
+    expect(pip.filter((c) => c.includes("whl/cu130"))).toEqual([]);
+    expect(pip.some((c) => c.includes("kokoro"))).toBe(true);
+    expect(res.ttsStatus).toMatch(/^KOKORO=ready$/m);
+  });
+
   it("tries the cu130 index when the wheelhouse leaves a torch that is not a CUDA 13 build", () => {
     const wheels = path.join(root, "home", "clawbox", ".cache", "clawbox", "wheels");
     mkdirSync(wheels, { recursive: true });
