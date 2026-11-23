@@ -245,7 +245,7 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
 
   function run({
     cuda = true, pipOk = true, importOk = true, buildOk = true,
-    skip = false, stamped = false, unitWritable = true, sbsa = false, ct2Wheel = false,
+    skip = false, stamped = false, unitWritable = true, sbsa = false, ct2Wheel = false as boolean | string,
   } = {}) {
     if (stamped) fs.writeFileSync(stampPath(), "1\n");
     // A regular FILE where the unit directory should be: `mkdir -p` cannot
@@ -254,7 +254,8 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
     if (!unitWritable) fs.writeFileSync(path.join(tmp, "blocked"), "not a directory");
     if (ct2Wheel) {
       fs.mkdirSync(path.join(tmp, "wheels"), { recursive: true });
-      fs.writeFileSync(path.join(tmp, "wheels", "ctranslate2-4.6.0-cp312-cp312-manylinux_2_28_aarch64.whl"), "");
+      const tag = typeof ct2Wheel === "string" ? ct2Wheel : "cp312";
+      fs.writeFileSync(path.join(tmp, "wheels", `ctranslate2-4.6.0-${tag}-${tag}-manylinux_2_28_aarch64.whl`), "");
     }
     const log = path.join(tmp, "calls.log");
     fs.writeFileSync(log, "");
@@ -272,7 +273,8 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
       'note() { printf "%s\\n" "$1" >> "$LOG"; }',
       `detect_cuda() { note detect_cuda; ${cuda ? "return 0" : "return 1"}; }`,
       `pip_as_clawbox() { note "pip $1"; ${pipOk ? "return 0" : "return 1"}; }`,
-      `clawbox_python() { note "py"; ${importOk ? "return 0" : "return 1"}; }`,
+      // The box's Python tag is asked of the clawbox user's python3 (DGX OS: cp312).
+      `clawbox_python() { note "py"; case "$1" in *version_info*) echo cp312; return 0 ;; esac; ${importOk ? "return 0" : "return 1"}; }`,
       'ctranslate2_cuda_present() { return 1; }',
       // A DGX Spark (TASK-2501) and its wheelhouse.
       `is_sbsa_cuda13() { ${sbsa ? "return 0" : "return 1"}; }`,
@@ -373,8 +375,18 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
     const fw = r.calls.findIndex((c) => c.startsWith("pip") && c.includes("faster-whisper"));
     expect(ct2).toBeGreaterThan(-1);
     expect(fw).toBeGreaterThan(ct2);
+    // …and named in that resolve, so pip keeps it or fails rather than swapping it.
+    expect(r.calls[fw]).toContain("/wheels/ctranslate2-4.6.0-cp312-");
     expect(r.calls).not.toContain("build");
     expect(r.unitWritten).toBe(true);
+  });
+
+  it("does not take a CTranslate2 wheel built for another Python", () => {
+    const r = run({ sbsa: true, ct2Wheel: "cp313" });
+    expect(r.out).toContain("RC=13");
+    expect(r.out).toContain("skipped:no-ct2-cuda");
+    expect(r.calls.some((c) => c.startsWith("pip"))).toBe(false);
+    expect(r.unitWritten).toBe(false);
   });
 
   it("skips a DGX Spark whose wheelhouse CTranslate2 is a CPU build: no unit, skipped:no-ct2-cuda", () => {

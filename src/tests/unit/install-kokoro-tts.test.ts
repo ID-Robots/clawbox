@@ -195,7 +195,9 @@ function runTtsOnly(
       '  *"torch.version.cuda"*) exit "${CUDA_TORCH_EXIT:-1}" ;;',
       '  *"from kokoro import KPipeline"*) echo "Kokoro model ready on cuda"; exit "${WARMUP_EXIT:-0}" ;;',
       '  *"pip3 install"*)',
-      `    case "$full" in *whl/cu130*) [ "\${CU130_LANDS:-1}" = 1 ] && touch "${root}/cu130-torch" ;; esac`,
+      // WHEELHOUSE_CPU_TORCH=1: the wheelhouse holds a CPU torch, so only a
+      // network (no --no-index) install of it lands a CUDA 13 build.
+      `    case "$full" in *whl/cu130*) if [ "\${CU130_LANDS:-1}" = 1 ]; then case "\${WHEELHOUSE_CPU_TORCH:-0}:$full" in 1:*--no-index*) ;; *) touch "${root}/cu130-torch" ;; esac; fi ;; esac`,
       '    echo "Successfully installed"; exit "${PIP_EXIT:-0}" ;;',
       "esac",
       "exit 0",
@@ -811,6 +813,28 @@ describe.skipIf(!hasBash)("install-voice.sh --kokoro on a DGX Spark", () => {
     expect(res.status).toBe(12);
     expect(res.ttsStatus).toMatch(/^KOKORO=failed:torch$/m);
     expect(res.stderr).toContain("not a CUDA 13 build");
+  });
+
+  it("tries the cu130 index when the wheelhouse leaves a torch that is not a CUDA 13 build", () => {
+    const wheels = path.join(root, "home", "clawbox", ".cache", "clawbox", "wheels");
+    mkdirSync(wheels, { recursive: true });
+    writeFileSync(path.join(wheels, "torch-2.9.1-cp312-cp312-manylinux_2_28_aarch64.whl"), "");
+    const res = runTtsOnly({ ...SPARK, WHEELHOUSE_CPU_TORCH: "1" }, false, "--kokoro");
+    expect(res.status, res.stderr).toBe(0);
+    const torch = res.su.filter((c) => c.includes("pip3 install") && c.includes("whl/cu130 torch"));
+    expect(torch.length).toBe(2);
+    expect(torch[0]).toContain("--no-index");
+    expect(torch[1]).not.toContain("--no-index");
+    expect(res.ttsStatus).toMatch(/^KOKORO=ready$/m);
+  });
+
+  it("the no-flag full pipeline installs with the same SBSA pip sources", () => {
+    const res = runTtsOnly(SPARK, false, "");
+    // Every resolve from an index or the wheelhouse. (The full mode's own
+    // CTranslate2 source build, `pip3 install --user .`, stays Jetson-only.)
+    const pip = res.su.filter((c) => c.includes("pip3 install") && !c.includes("pip3 install --user ."));
+    expect(pip.some((c) => c.includes("faster-whisper"))).toBe(true);
+    expect(pip.filter((c) => !c.includes("--break-system-packages")), "a pip step without PEP 668's flag").toEqual([]);
   });
 
   it("is still the Jetson path on CUDA 12, nvidia-smi or not", () => {

@@ -443,6 +443,12 @@ install_cuda_torch() {
     # --upgrade: a torch already in user-site (a CPU build) would otherwise
     # satisfy the request and leave Kokoro on the CPU. Checked after, too.
     pip_as_clawbox "--upgrade --index-url $SBSA_TORCH_INDEX torch" || return 1
+    # A wheelhouse can "succeed" with the torch already there (a CPU build):
+    # then the cu130 index, once, before calling it a failure.
+    if [ -n "$PIP_NET_SRC" ] && ! cuda_torch_present; then
+      echo "  The wheelhouse left a torch that is not a CUDA 13 build - trying the cu130 index"
+      PIP_SRC="$PIP_NET_SRC" PIP_NET_SRC="" pip_as_clawbox "--upgrade --index-url $SBSA_TORCH_INDEX torch" || return 1
+    fi
     if ! cuda_torch_present; then
       echo "  ERROR: the torch now installed is not a CUDA 13 build" >&2
       return 1
@@ -1469,11 +1475,13 @@ install_whisper_stt() {
   # An SBSA box (DGX Spark) has no Jetson toolchain to build CTranslate2 for,
   # and PyPI's aarch64 ctranslate2 wheel is CPU-only: only a prebuilt CUDA
   # wheel on the install media makes the engine worth installing there.
-  local sbsa=false ct2_whl=""
+  local sbsa=false ct2_whl="" pytag
   if is_sbsa_cuda13; then
     sbsa=true
     sbsa_pip_sources
-    ct2_whl=$(as_clawbox sh -c 'ls -- "$1"/ctranslate2-*aarch64*.whl' sh "$VOICE_WHEELHOUSE" 2>/dev/null | tail -1 || true)
+    # The wheel for the clawbox user's own Python (cp312 on DGX OS).
+    pytag=$(clawbox_python 'import sys; print("cp%d%d" % sys.version_info[:2])' 2>/dev/null | tail -1 || true)
+    ct2_whl=$(as_clawbox sh -c 'ls -- "$1"/ctranslate2-*-"$2"-*aarch64*.whl' sh "$VOICE_WHEELHOUSE" "${pytag:-none}" 2>/dev/null | tail -1 || true)
     if [ -z "$ct2_whl" ]; then
       STT_SKIP_REASON="skipped:no-ct2-cuda"
       echo "  No prebuilt CTranslate2 CUDA wheel in $VOICE_WHEELHOUSE - skipping faster-whisper ($STT_SKIP_REASON)"
@@ -1501,13 +1509,14 @@ install_whisper_stt() {
   # ctranslate2 4.8.2, huggingface-hub 0.36.2, tokenizers 0.23.2, numpy 1.26.4,
   # onnxruntime 1.23.2 and av 17.1.0. faster-whisper only asks for hub>=0.21,
   # and Kokoro's transformers<5 needs hub<1 anyway, so both engines agree on it.
-  # That wheel by its file, over any CPU ctranslate2 already in user-site, so
-  # the faster-whisper resolve below keeps it rather than an index's.
+  # That wheel by its file, over any CPU ctranslate2 already in user-site, and
+  # named again in the faster-whisper resolve below, so pip keeps it (or fails
+  # loudly) rather than taking an index's.
   if [ -n "$ct2_whl" ] && ! pip_as_clawbox "--force-reinstall --no-deps '$ct2_whl'"; then
     echo "  Warning: the CTranslate2 wheel $ct2_whl did not install" >&2
     return 12
   fi
-  if ! pip_as_clawbox "'numpy>=1.24,<2' faster-whisper 'huggingface-hub<1'"; then
+  if ! pip_as_clawbox "${ct2_whl:+'$ct2_whl' }'numpy>=1.24,<2' faster-whisper 'huggingface-hub<1'"; then
     echo "  Warning: faster-whisper wheels did not install" >&2
     return 12
   fi
@@ -1752,7 +1761,7 @@ echo "[2/7] Installing faster-whisper (STT)..."
 # The command install_whisper_stt runs, which the board resolved on its pip
 # 22.0.2: without huggingface-hub<1 that pip cannot resolve the hub 1.x graph,
 # and the numpy floor keeps the Jetson torch wheel from step 1 working.
-su - "$CLAWBOX_USER" -c "$PIP install --user 'numpy>=1.24,<2' faster-whisper 'huggingface-hub<1'" 2>&1 | tail -3
+su - "$CLAWBOX_USER" -c "$PIP install --user ${PIP_SRC:+$PIP_SRC }'numpy>=1.24,<2' faster-whisper 'huggingface-hub<1'" 2>&1 | tail -3
 
 # ── Step 3: Build CTranslate2 with CUDA (if available) ──────────────────────
 
