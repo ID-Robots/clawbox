@@ -45,17 +45,17 @@ const APPROVED_NOTICE = "You're approved — send me a message and I'll answer."
  * written only as a side effect of /setup-api/telegram/configure. Asking that
  * copy on a box paired through the harness's own CLI, or restored without
  * config.json, answered `configured: false` for a working bot — and this route's
- * GET returns an EMPTY pairing state on that answer: page.tsx polls it every 20 s
- * for the "someone wants to talk to your bot" popup, so a new household member's
- * request was never shown to anyone.
+ * GET returns an EMPTY pairing state on that answer: page.tsx polls it (3 s with a
+ * bot, 20 s without) for the "someone wants to talk to your bot" popup, so a new
+ * household member's request was never shown to anyone.
  *
  * The three surfaces used to answer this from three different places with three
  * different failure policies — this one raised a 500 out of `hermesSecretsPresent`
  * where the others degraded — which meant the panel's verdict depended on which
  * route it happened to call. Now they share the reader and its tri-state.
  *
- * A plain file read, no CLI: this route is on a 20 s desktop poll, which is why
- * its Hermes paths are deliberately CLI-free.
+ * A plain file read, no CLI: this route is on a desktop poll (3 s with a bot,
+ * 20 s without), which is why its Hermes paths are deliberately CLI-free.
  */
 async function isConfigured(
   source: ActiveHarnessSource,
@@ -112,7 +112,7 @@ export async function GET(request: Request) {
     const harness = harnessSource.active;
     const state = await isConfigured(harnessSource);
     // Only a CONFIDENT "this box has no bot" short-circuits. An `unknown` used
-    // to take this branch too, and the desktop's 20 s poller reads an empty
+    // to take this branch too, and the desktop's pairing poller reads an empty
     // `pending` as "nothing is waiting" and clears the pairing popup — so an
     // unreadable ~/.hermes/.env (root-owned after a `sudo hermes config set`,
     // which the gateway survives because it loaded the token at start) silently
@@ -125,7 +125,7 @@ export async function GET(request: Request) {
     // token" is still to say what is waiting. (`?pending=1` — the Settings
     // "Check" button, an explicit gesture — spawns the harness's own CLI, which
     // on the same broken box may fail and 500; that is a stated failure the
-    // owner asked for, not a silent empty list on a 20 s poll.)
+    // owner asked for, not a silent empty list on a 3 s poll.)
     if (!state.configured && !state.unknown) {
       return NextResponse.json(
         { configured: false, unknown: false, approved: [], pending: [] },

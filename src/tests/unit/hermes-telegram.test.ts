@@ -509,7 +509,7 @@ describe("ensureHermesGateway", () => {
 });
 
 // The pairing store is read directly (not through the CLI) for the desktop
-// popup, which polls every 20 s and should not spawn a process each time.
+// popup, which polls every 3 s and should not spawn a process each time.
 describe("pairing store reads", () => {
   let home: string;
   let storeDir: string;

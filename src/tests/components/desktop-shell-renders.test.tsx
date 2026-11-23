@@ -123,13 +123,20 @@ let ringBoxLeadMs: number | null = null;
 let powerPending: unknown = null;
 /** The box's saved preferences (`/setup-api/preferences?all=1`). */
 let prefs: Record<string, unknown> = {};
+type Held = { promise: Promise<unknown>; release: (body: unknown) => void };
 /** The pairing poll's answer, released by the case when it chooses. */
-let pairing: { promise: Promise<unknown>; release: (body: unknown) => void };
+let pairing: Held;
+/** The Approve POST's answer, released by the case when it chooses. */
+let approval: Held;
 
-function holdPairing() {
+function held(): Held {
   let release: (body: unknown) => void = () => {};
   const promise = new Promise<unknown>((resolve) => { release = resolve; });
-  pairing = { promise, release };
+  return { promise, release };
+}
+
+function holdPairing() {
+  pairing = held();
 }
 
 function installFetch() {
@@ -142,7 +149,10 @@ function installFetch() {
     if (url.includes("/setup-api/users/me")) return answer({ username: "clawbox", isOwner: true, multiUser: false });
     if (url.includes("/setup-api/setup/status")) return answer({ setup_complete: true });
     if (url.includes("/setup-api/harness/active")) return answer({ active: "openclaw", edition: "openclaw", activeKnown: true });
-    if (url.includes("/setup-api/telegram/pairing")) return answer(await pairing.promise);
+    if (url.includes("/setup-api/telegram/pairing")) {
+      if ((init?.method ?? "GET").toUpperCase() === "POST") return answer(await approval.promise);
+      return answer(await pairing.promise);
+    }
     if (url.includes("/setup-api/kv?key=ui:pending-actions")) {
       const res = answer({ value: JSON.stringify(ring) });
       if (ringBoxLeadMs !== null) res.headers.set("date", new Date(Date.now() + ringBoxLeadMs).toUTCString());
@@ -159,7 +169,7 @@ function installFetch() {
 // so the stub is read through its own reference.
 let fetchStub = vi.mocked(fetch);
 
-const pairingPolls = () => fetchStub.mock.calls.filter(([input]) => String(input).includes("/setup-api/telegram/pairing"));
+const pairingPolls = () => fetchStub.mock.calls.filter(([input]) => String(input).includes("/setup-api/telegram/pairing?poll=1"));
 const approvalAsks = () => fetchStub.mock.calls.filter(([input]) => String(input).includes("/setup-api/system/power/approval"));
 
 // The translation catalogue reaches the desktop through a dynamic import in
@@ -200,6 +210,7 @@ beforeEach(() => {
   prefs = {};
   seen.launcherProps = null;
   holdPairing();
+  approval = held();
   resetHarnessCache();
   _resetSessionUserForTest();
   window.localStorage.clear();
@@ -214,6 +225,7 @@ beforeEach(() => {
 
 afterEach(() => {
   pairing.release({ configured: false, pending: [] });
+  approval.release({ success: false });
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -234,6 +246,56 @@ describe("the Telegram pairing poll", () => {
       await wait(50);
     });
     expect(await screen.findByText("Approve")).toBeInTheDocument();
+  });
+
+  // The poll asked every 20 s, so an access request reached the
+  // owner's screen up to 20 s after the gateway recorded it.
+  it("puts a request recorded after the first answer on screen within a few seconds", async () => {
+    await mountDesktop();
+    await act(async () => { pairing.release({ configured: true, pending: [] }); await wait(50); });
+    // What the next poll answers: a request the gateway recorded since.
+    holdPairing();
+    pairing.release({ configured: true, pending: [{ code: "PAIR2", id: "43", name: "Bob" }] });
+    // Within the 3 s poll (the wait allows for a loaded worker).
+    expect(await screen.findByText("Approve", {}, { timeout: 6_000 })).toBeInTheDocument();
+  });
+
+  it("asks a box with no bot no faster than before", async () => {
+    await mountDesktop();
+    await act(async () => { pairing.release({ configured: false, pending: [] }); await wait(50); });
+    const asked = pairingPolls().length;
+    // The bot's cadence would have asked again by 3 s.
+    await act(async () => { await wait(4_500); });
+    expect(pairingPolls().length).toBe(asked);
+  });
+
+  it("keeps the fast cadence when the box cannot tell whether it has a bot", async () => {
+    await mountDesktop();
+    // An unreadable credential: the cards are still drawn from the store.
+    await act(async () => { pairing.release({ configured: false, unknown: true, pending: [] }); await wait(50); });
+    const asked = pairingPolls().length;
+    await waitFor(() => expect(pairingPolls().length).toBeGreaterThan(asked), { timeout: 4_500 });
+  });
+
+  it("keeps a card on screen while its Approve is on the way", async () => {
+    await mountDesktop();
+    await act(async () => {
+      pairing.release({ configured: true, pending: [{ code: "PAIR1", id: "42", name: "Ann" }] });
+      await wait(50);
+    });
+    fireEvent.click(await screen.findByText("Approve"));
+    // `pairing approve` takes the request out of the store about 5 s into a
+    // POST of about 12 s, so the polls in between answer without it.
+    holdPairing();
+    pairing.release({ configured: true, pending: [] });
+    const asked = pairingPolls().length;
+    await act(async () => { await wait(4_500); });
+    expect(pairingPolls().length).toBeGreaterThan(asked);
+    expect(screen.getByText("Approve")).toBeInTheDocument();
+
+    // Approved: the card goes, as it always has.
+    await act(async () => { approval.release({ success: true }); await wait(50); });
+    await waitFor(() => expect(screen.queryByText("Approve")).toBeNull());
   });
 });
 
