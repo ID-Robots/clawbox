@@ -273,12 +273,14 @@ let inFlight: Promise<void> | null = null;
 /**
  * Append every ClawBox section AGENTS.md lacks, while OpenClaw is the harness.
  *
- * One run at a time: a tick that outlives the five-minute interval (each of
- * the two gateway calls may wait up to 10 s on a busy box), or a manual call
- * of the route, would otherwise overlap the next one, and two overlapping runs
- * would only cost each other a conflict. Never rejects. A
- * heading the owner or the agent deleted comes back on the next tick, as it
- * already did on every gateway start.
+ * One run at a time. A run is short: at most two gateway calls, each capped at
+ * 1.5 s to connect and 10 s to answer (openclaw-gateway-ws.ts), so about 23 s,
+ * far inside the five-minute interval. What the guard covers is two callers in
+ * that window: a manual call of the tick, or a tick started while the previous
+ * tick's un-awaited run is still inside its calls. Two overlapping runs would
+ * only cost each other a conflict. Never rejects. A heading the owner or the
+ * agent deleted comes back on the next tick, as it already did on every
+ * gateway start.
  */
 export function ensureClawboxAgentsSections(): Promise<void> {
   inFlight ??= appendMissingSections().finally(() => {
