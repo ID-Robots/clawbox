@@ -79,6 +79,16 @@ export const CLAWBOX_AGENTS_SECTIONS: readonly ClawboxAgentsSection[] = [
       + "ClawBox AI under Settings -> Providers for cloud transcription. Then answer anything they also typed, "
       + "and offer to carry on in text meanwhile.",
   ], "Appended the voice-notes rule to AGENTS.md"),
+  section("## Thinking level on this ClawBox", [
+    "How hard you think is your thinking level. The owner calls it reasoning effort and sets it with the effort "
+      + "pill (brain icon) under the message box in the ClawBox chat. Your prompt does not state it: `Reasoning=` "
+      + "in your Runtime section is only OpenClaw reasoning VISIBILITY (`/reasoning on|off|stream`: whether your "
+      + "thinking is shown as a separate message), and it says nothing about whether or how hard you think.",
+    "When asked what reasoning, effort or thinking level you use, call `session_status` with "
+      + "`sessionKey: \"current\"` and no `model` (find it with `tool_search` if it is not among your tools), and "
+      + "report the `think` value on its card. If you cannot read it, say so and never name a level you did not "
+      + "read there. To change the level, point to the effort pill, not to `/reasoning` or `/think`.",
+  ], "Appended the thinking-level rule to AGENTS.md"),
 ];
 
 /** pre-start trims these, and only these, off the end of a line before it compares. */

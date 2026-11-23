@@ -1215,7 +1215,8 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     // the failure whole-line matching was introduced to prevent, not cause.
     const existing = "# AGENTS\r\n\r\n## ClawBox integration\r\n\r\nSee `CLAWBOX.md`.\r\n"
       + "## System actions on this ClawBox\r\n\r\nMine.\r\n"
-      + "## Voice notes on this ClawBox\r\n\r\nMine too.\r\n";
+      + "## Voice notes on this ClawBox\r\n\r\nMine too.\r\n"
+      + "## Thinking level on this ClawBox\r\n\r\nMine as well.\r\n";
     writeFileSync(agents, existing);
 
     const { stdout } = run();
@@ -1357,7 +1358,82 @@ describe("gateway-pre-start tells the agent how speech-to-text is turned on", ()
   it("leaves an owner's own voice-notes section alone", () => {
     const existing = "# AGENTS\n\n## ClawBox integration\n\nSee `CLAWBOX.md`.\n\n"
       + "## System actions on this ClawBox\n\nMine.\n\n"
-      + `${VOICE_RULE}\n\nAnswer voice notes in Bulgarian.\n`;
+      + `${VOICE_RULE}\n\nAnswer voice notes in Bulgarian.\n\n`
+      + "## Thinking level on this ClawBox\n\nMine.\n";
+    writeFileSync(agents, existing);
+
+    const { stdout } = run();
+
+    expect(stdout).not.toMatch(/Appended/);
+    expect(readFileSync(agents, "utf-8")).toBe(existing);
+  });
+});
+
+/**
+ * What the agent says when asked how hard it is thinking (E2E-03).
+ *
+ * OpenClaw's system prompt carries `Reasoning=<level>` in its Runtime section,
+ * and that is reasoning VISIBILITY (`/reasoning on|off|stream`, off by default),
+ * not the thinking level, which the prompt never states. Asked what reasoning
+ * it used, the agent read that line and told an owner whose effort pill said
+ * High that reasoning was off, and to use `/reasoning`. The level is on the
+ * card of OpenClaw's own `session_status` tool; the rule sends the agent there.
+ */
+describe("gateway-pre-start tells the agent where its thinking level is", () => {
+  const THINKING_RULE = "## Thinking level on this ClawBox";
+  let agents: string;
+
+  beforeEach(() => {
+    agents = path.join(workspace, "AGENTS.md");
+    writeFileSync(guide, readFileSync(TEMPLATE, "utf-8"));
+  });
+
+  it("appends the thinking-level rule to an AGENTS.md that already carries the other three", () => {
+    const existing = "# AGENTS\n\n## ClawBox integration\n\nSee `CLAWBOX.md`.\n\n"
+      + "## System actions on this ClawBox\n\nMine.\n\n"
+      + "## Voice notes on this ClawBox\n\nMine too.\n";
+    writeFileSync(agents, existing);
+
+    const { stdout } = run();
+
+    expect(stdout).toContain("Appended the thinking-level rule to AGENTS.md");
+    expect(stdout).not.toContain("Appended the voice-notes rule");
+    const after = readFileSync(agents, "utf-8");
+    expect(after.startsWith(existing)).toBe(true);
+    expect(after.match(/^## Thinking level on this ClawBox$/gm)).toHaveLength(1);
+    const rule = after.slice(existing.length);
+    // The prompt line it must not read as its level, and what that line is.
+    expect(rule).toMatch(/Reasoning=/);
+    expect(rule).toMatch(/visibility/i);
+    expect(rule).toMatch(/says nothing about whether or how hard you think/i);
+    // Where the level is, and how to ask without changing the chat's model.
+    expect(rule).toMatch(/session_status/);
+    expect(rule).toMatch(/sessionKey: "current"/);
+    expect(rule).toMatch(/no `model`/);
+    // No guessing when the card cannot be read.
+    expect(rule).toMatch(/never name a level you did not read/i);
+    // The owner's own control, and never a typed level the picker would not show.
+    expect(rule).toMatch(/effort pill/i);
+    expect(rule).not.toMatch(/\/think [a-z]/);
+  });
+
+  it("appends it once, however many times the gateway starts", () => {
+    writeFileSync(agents, "# AGENTS\n");
+
+    run();
+    const afterFirst = readFileSync(agents, "utf-8");
+    const second = run();
+
+    expect(second.stdout).not.toContain("Appended the thinking-level rule");
+    expect(readFileSync(agents, "utf-8")).toBe(afterFirst);
+    expect(afterFirst.split(THINKING_RULE)).toHaveLength(2);
+  });
+
+  it("leaves an owner's own thinking-level section alone", () => {
+    const existing = "# AGENTS\n\n## ClawBox integration\n\nSee `CLAWBOX.md`.\n\n"
+      + "## System actions on this ClawBox\n\nMine.\n\n"
+      + "## Voice notes on this ClawBox\n\nMine too.\n\n"
+      + `${THINKING_RULE}\n\nAlways think at High.\n`;
     writeFileSync(agents, existing);
 
     const { stdout } = run();
