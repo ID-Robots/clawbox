@@ -373,7 +373,7 @@ exit 0
       'openclaw_refresh_fast_path_check() { OPENCLAW_REFRESH_WHY="fixture: full path"; return 1; }',
       "openclaw_refresh_marker_clear() { :; }",
       "openclaw_refresh_marker_write() { :; }",
-      shellFunction("step_openclaw_install").replace(/\n  # Force-reinstall every externally-installed plugin[\s\S]*$/, "\n}"),
+      shellFunction("step_openclaw_install").replace(/\n  # The plugin refresh after doctor[\s\S]*$/, "\n}"),
       opts.prelude ?? "",
       ...(opts.account ? ["__ao_lock"] : []),
       "step_openclaw_install",

@@ -8050,8 +8050,8 @@ remove_shadowing_system_openclaw() {
 }
 
 # ── step_openclaw_install's fast path ───────────────────────────────────────
-# The full path stops the gateway, runs `doctor --fix`, force-reinstalls every
-# external plugin and starts the gateway again: one to three minutes, with chat
+# The full path stops the gateway, runs `doctor --fix`, reinstalls the external
+# plugins doctor left behind and starts the gateway again: one to three minutes, with chat
 # down throughout — and on most updates it changes nothing, because the pin
 # did not move. The fast path returns BEFORE the stop, and only on positive
 # evidence that the full path has nothing to do:
@@ -8333,6 +8333,54 @@ openclaw_refresh_marker_write() {
     echo "  WARN: could not record the finished OpenClaw refresh in $marker; the next run takes the full path again" >&2
   fi
   return 0
+}
+
+# The core's own words about a failed plugin CLI call, as ONE line to append to
+# a sentence: escape sequences and control characters out, whitespace
+# collapsed, 160 characters, with a leading space; empty output is answered with
+# the exit code alone, and 124/137 (`timeout` and its kill) read as the deadline,
+# not as the core saying no. A copy of scripts/gateway-pre-start.sh's, where its
+# reasons are written down (that script is not sourced here);
+# install-openclaw-fast-path.test.ts holds the two programs to the same text.
+clawbox_plugin_cli_cause() {
+  local cmd="$1" rc="$2" out="$3" script
+  script="$(cat <<'CAUSEPY'
+import os, re, sys
+
+text = sys.stdin.read()
+# ANSI first, so a colour code cannot survive as stray letters in the message.
+text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
+lines = [" ".join(line.split()) for line in text.splitlines()]
+lines = [line for line in lines if line]
+
+# The LAST line that reads like a refusal, because a CLI prints progress first
+# and its verdict last; the last line of any kind when none of them do.
+picked = ""
+for line in lines:
+    if re.search(r"error|failed|cannot|not found|denied|refus|permission", line, re.I):
+        picked = line
+if not picked and lines:
+    picked = lines[-1]
+
+cmd = os.environ["CLAWBOX_CAUSE_CMD"]
+rc = os.environ["CLAWBOX_CAUSE_RC"]
+# 124 is `timeout` at the ceiling and 137 the SIGKILL `-k 5` sends after it —
+# neither is the core saying no, and the row must not read as though it were.
+head = f"{cmd} was killed at its deadline" if rc in ("124", "137") else f"{cmd} exited {rc}"
+if not picked:
+    print(f" {head} and said nothing.")
+else:
+    if len(picked) > 160:
+        picked = picked[:159].rstrip() + "\u2026"
+    print(f" {head}: {picked}")
+CAUSEPY
+)"
+  # Never fatal and never noisy: a reason that could not be enriched is still a
+  # reason, and this runs on the path where something has already gone wrong.
+  printf '%s' "$out" \
+    | CLAWBOX_CAUSE_CMD="$cmd" CLAWBOX_CAUSE_RC="$rc" python3 -c "$script" 2>/dev/null \
+    || true
 }
 
 # The updater's half of the fast path. It runs the update's `openclaw_install`
@@ -8650,49 +8698,237 @@ step_openclaw_install() {
 
   fi
 
-  # Force-reinstall every externally-installed plugin so they're bumped
-  # alongside the core. Without this, a core 5.12→5.22 bump leaves
-  # @openclaw/codex stuck at whatever was first installed by
-  # gateway-pre-start.sh's peer-dep heal — and the in-UI updater silently
-  # reports "Up to date" because it only checks the core package. The new
-  # protocol bits introduced by the core (e.g. 5.22's deferred history
-  # replay) sit unused until the plugins also move.
+  # The plugin refresh after doctor: the external plugins the core update left
+  # behind, and only those. Bundled plugins (origin: bundled) ship with the core.
   #
-  # Runs even when the core was already at target, because plugins drift
-  # independently. Bundled plugins (origin: bundled) come with the core
-  # npm install and don't need a separate refresh — only external/global
-  # plugins do. Failures are non-fatal: a missing-from-npm plugin
-  # shouldn't roll back the whole update; gateway-pre-start.sh will retry
-  # on next boot. Gateway restart happens later in step_gateway_setup.
-  # Emit "<id>\t<npm-package>" per external plugin. The npm package is
-  # derived from rootDir (.../node_modules/@scope/name -> @scope/name) so we
-  # can pin @openclaw/* plugins to $TARGET. Reinstalling by bare id resolves
-  # @latest, which is exactly how @openclaw/codex drifted ahead of the
-  # pinned core and crashed every Codex chat.
-  local INSTALLED_PLUGINS
-  INSTALLED_PLUGINS=$(as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null \
-    | python3 -c '
-import json, sys
+  # Why it exists: a core bump (5.12 -> 5.22) once left @openclaw/codex at the
+  # old release while the updater said "Up to date", and a reinstall by bare id
+  # once resolved @latest and crashed every Codex chat. So an @openclaw plugin is
+  # reinstalled pinned to $TARGET (its package derived from a node_modules/
+  # rootDir), the pin is rebuilt for an orphaned codex/discord/whatsapp
+  # (TASK-602), and the refresh runs on every full path, because plugins drift
+  # independently of the core.
+  #
+  # What it leaves: the pinned core's `doctor --fix`, run above, already
+  # "updates drifted active official npm plugins ... to the installed OpenClaw
+  # release" and "leaves third-party plugins unchanged" (OpenClaw 2026.11.5,
+  # docs/cli/doctor/checks.md). Reinstalling every plugin again, one CLI cold
+  # start each with the gateway stopped, took 35 installs and about 18 minutes
+  # on a box crossing a pin, 28 of them plugins doctor had just moved. So the
+  # reader below sorts every plugin first, as the clawbox account (each path it
+  # opens is that account's to write, as in the fast-path check):
+  #   own      a safe id with a directory under scripts/openclaw-plugins/ in the
+  #            checkout: ClawBox's own, which the gateway's pre-start copies from
+  #            there (a bare id here was a ClawHub lookup that always failed);
+  #   current  an @openclaw payload at $TARGET's release, a trailing -N/+N
+  #            stripped on both sides (a correction release runs the plugins of
+  #            its base cohort, docs/install/updating.md), that the core reports
+  #            healthy: no error, no missing dependency, no error or consent
+  #            diagnostic, no repair on record;
+  #   foreign  a payload from another package: the owner's, left as installed,
+  #            as OpenClaw's own update leaves it. Never an id ClawBox manages:
+  #            the fast path refuses those from another package, so leaving one
+  #            would hold every later update on this path;
+  #   refresh  everything else, as before: an official plugin below the release
+  #            (a disabled one too: doctor moves active ones only), any doubt,
+  #            any orphan. A problem the core ties to no plugin, or a repair
+  #            record that cannot be read, is doubt about every one.
+  # Its helpers are copies of the fast-path check's, held to them by
+  # install-openclaw-fast-path.test.ts. Every value it prints is one word: ids,
+  # names and versions are the clawbox account's to write, and a newline in one
+  # must not print a line the updater reads off this step's journal.
+  #
+  # A list that cannot be read (the CLI failed, or answered something that is not
+  # an object with a plugins array) refreshes nothing, says so on a CLAWBOX-WARN
+  # line and records no finished refresh, so the next update runs this again;
+  # the step goes on to the gateway restore below. Unguarded under errexit and
+  # pipefail, a failed list used to end the step here, after a completed
+  # migration, with the gateway stopped.
+  #
+  # Each reinstall has a clock, laid INSIDE the account switch (sudo does not
+  # pass on a signal sent from its own process group), and the loop starts none
+  # that could run past the root unit's TimeoutStartSec (7200 s,
+  # config/clawbox-root-update@.service) less 600 s for the restore after it.
+  # This file otherwise caps no work by the clock; a reinstall is the exception
+  # because it is not the update's own work: one killed at its deadline keeps
+  # its previous version and is reported, and the step goes on. The plugin list
+  # is asked with no clock, as in the fast-path check.
+  #
+  # A failed reinstall is non-fatal and keeps its cause: one WARN line under the
+  # plugin, and ONE card naming them all. The gateway's pre-start reinstalls
+  # only codex and deepseek by version; for any other plugin the retry that
+  # really happens is the next update that moves OpenClaw (the fast path checks
+  # only the plugins ClawBox manages), and the lines say that and no more.
+  local INSTALLED_PLUGINS="" _oc_list_out="" _oc_list_rc=0 _oc_list_read=0 _oc_list_why=""
+  local _oc_plan="" _oc_said="" _oc_kind="" _oc_a="" _oc_b=""
+  local _oc_install_out="" _oc_install_rc=0 _oc_retry="" _oc_missed="" _oc_missed_n=0
+  local _oc_refresh_bound="${CLAWBOX_PLUGIN_REFRESH_TIMEOUT_S:-300}"
+  case "$_oc_refresh_bound" in ''|0*|*[!0-9]*) _oc_refresh_bound=300 ;; esac
+  local _oc_refresh_until=$((7200 - 600))
+  _oc_list_out="$(as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json \
+    2>/dev/null)" || _oc_list_rc=$?
+  if [ "$_oc_list_rc" -eq 0 ]; then
+    _oc_plan="$(printf '%s' "$_oc_list_out" | as_clawbox -H python3 -c '
+import json, os, re, stat, sys
+
+target, repairs_path, own_dir = sys.argv[1:4]
+MANAGED = {"codex", "deepseek", "discord", "whatsapp", "clawbox-email-directives"}
+PROBLEMS = ("requires capability consent", "payload verification failed", "plugin not installed")
+
+
+def canonical(name):
+    for prefix in ("@openclaw/", "openclaw-"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    return name[:-len("-provider")] if name.endswith("-provider") else name
+
+
+# Without blocking, and only a regular file: a FIFO in data/ or a payload
+# would otherwise hold the root step until the updater gave up on it.
+def read_json(path):
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), encoding="utf-8") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise ValueError("not a regular file")
+        return json.load(fh)
+
+
+def manifest(path):
+    try:
+        data = read_json(path)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def payload_root(plugin):
+    root = plugin.get("rootDir")
+    if isinstance(root, str) and root:
+        return root
+    source = plugin.get("source")
+    if isinstance(source, str) and source:
+        parent = os.path.dirname(source)
+        return os.path.dirname(parent) if os.path.basename(parent) == "dist" else parent
+    return ""
+
+
+# One printable word, or nothing.
+def word(value):
+    return value if isinstance(value, str) and re.fullmatch(r"[\x21-\x7e]+", value) else ""
+
+
+def release(version):
+    return re.sub(r"[-+][0-9]+$", "", version)
+
+
+# Every id the core reports a problem for, normalised; "" for one it ties to
+# no plugin.
+def problems(node, owner, found):
+    if isinstance(node, dict):
+        entries = node.get("diagnostics")
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            message = str(entry.get("message") or "").lower()
+            if str(entry.get("level") or "").lower() == "error" or any(p in message for p in PROBLEMS):
+                found.add(canonical(str(entry.get("pluginId") or owner)))
+        for value in node.values():
+            problems(value, owner, found)
+    elif isinstance(node, list):
+        for value in node:
+            problems(value, owner, found)
+
+
 try:
-    d = json.load(sys.stdin)
+    data = json.load(sys.stdin)
 except Exception:
+    print("unreadable\tnot JSON")
     sys.exit(0)
-for p in d.get("plugins", []):
-    pid = p.get("id")
-    if not pid or p.get("origin") == "bundled":
+plugins = data.get("plugins") if isinstance(data, dict) else None
+if not isinstance(plugins, list):
+    print("unreadable\tno plugins array")
+    sys.exit(0)
+
+flagged = set()
+problems({key: value for key, value in data.items() if key != "plugins"}, "", flagged)
+for plugin in plugins:
+    if isinstance(plugin, dict):
+        problems(plugin, str(plugin.get("id") or ""), flagged)
+doubt = "the core reports a problem it ties to no plugin" if "" in flagged else ""
+try:
+    repairs = read_json(repairs_path)
+except FileNotFoundError:
+    repairs = {}
+except Exception:
+    repairs = None
+if isinstance(repairs, dict):
+    flagged.update(canonical(str(key)) for key in repairs)
+else:
+    doubt = "the plugin repairs on record could not be read"
+if doubt:
+    print("doubt\t" + doubt)
+
+for plugin in plugins:
+    if not isinstance(plugin, dict):
         continue
-    root = p.get("rootDir") or p.get("source") or ""
-    pkg = ""
-    if "node_modules/" in root:
-        tail = root.split("node_modules/", 1)[1].split("/")
+    pid = plugin.get("id")
+    if not isinstance(pid, str) or not pid or plugin.get("origin") == "bundled":
+        continue
+    if not word(pid):
+        print("foreign\t" + ascii(pid))
+        continue
+    if re.fullmatch(r"[a-z0-9][a-z0-9._-]*", pid) and os.path.isdir(os.path.join(own_dir, pid)):
+        print("own\t" + pid)
+        continue
+    key = canonical(pid)
+    root = payload_root(plugin)
+    pkg = manifest(os.path.join(root, "package.json")) if root else None
+    name = word(pkg.get("name")) if pkg else ""
+    version = word(pkg.get("version")) if pkg else ""
+    deps = plugin.get("dependencyStatus")
+    healthy = (
+        not doubt
+        and key not in flagged
+        and not plugin.get("error")
+        and str(plugin.get("status") or "").lower() != "error"
+        and not (isinstance(deps, dict) and deps.get("requiredInstalled") is False)
+    )
+    if name.startswith("@openclaw/") and version and release(version) == release(target) and healthy:
+        print("current\t%s@%s" % (name, version))
+        continue
+    if name and not name.startswith("@openclaw/") and key not in MANAGED:
+        print("foreign\t" + pid)
+        continue
+    raw = plugin.get("rootDir") or plugin.get("source") or ""
+    package = ""
+    if isinstance(raw, str) and "node_modules/" in raw:
+        tail = raw.split("node_modules/", 1)[1].split("/")
         if tail and tail[0].startswith("@") and len(tail) >= 2:
-            pkg = tail[0] + "/" + tail[1]
+            package = tail[0] + "/" + tail[1]
         elif tail:
-            pkg = tail[0]
-    print(pid + "\t" + pkg)
-' 2>/dev/null)
-  if [ -n "$INSTALLED_PLUGINS" ]; then
+            package = tail[0]
+    print("refresh\t%s\t%s" % (pid, word(package)))
+print("ok")
+' "$TARGET" "${PROJECT_DIR:-}/data/plugin-repair.json" \
+      "${PROJECT_DIR:-}/scripts/openclaw-plugins" 2>/dev/null || true)"
+  fi
+  while IFS=$'\t' read -r _oc_kind _oc_a _oc_b; do
+    case "$_oc_kind" in
+      ok) _oc_list_read=1 ;;
+      unreadable) _oc_list_why="$_oc_a" ;;
+      refresh) INSTALLED_PLUGINS+="$_oc_a"$'\t'"$_oc_b"$'\n' ;;
+      own) _oc_said+="    - $_oc_a (ClawBox's own plugin: the gateway start installs it from the checkout)"$'\n' ;;
+      current) _oc_said+="    - $_oc_a (already at $TARGET)"$'\n' ;;
+      foreign) _oc_said+="    - $_oc_a (not an OpenClaw or ClawBox plugin: left as installed, as OpenClaw's own update does)"$'\n' ;;
+      doubt) _oc_said+="    ($_oc_a, so every official plugin is reinstalled)"$'\n' ;;
+    esac
+  done <<< "$_oc_plan"
+  if [ "$_oc_list_read" -ne 1 ]; then
+    [ "$_oc_list_rc" -ne 0 ] || _oc_list_why="${_oc_list_why:-its answer could not be parsed}"
+    echo "CLAWBOX-WARN[openclaw-plugin-refresh-skipped]: the OpenClaw plugin list could not be read (exit $_oc_list_rc${_oc_list_why:+, $_oc_list_why}); plugins were not refreshed in this update"
+  elif [ -n "$INSTALLED_PLUGINS$_oc_said" ]; then
     echo "  Refreshing OpenClaw plugins to match core $TARGET:"
+    printf '%s' "$_oc_said"
     while IFS=$'\t' read -r plugin pkg; do
       [ -z "$plugin" ] && continue
       # Pin @openclaw/* plugins to the core target; others reinstall by id
@@ -8719,6 +8955,12 @@ for p in d.get("plugins", []):
         case "$PLUGIN_KEY" in
           codex|discord|whatsapp) spec="@openclaw/$PLUGIN_KEY@$TARGET" ;;
         esac
+      fi
+      if [ "$((SECONDS - _oc_step_started + _oc_refresh_bound))" -gt "$_oc_refresh_until" ]; then
+        echo "    - $spec: not attempted, too little of the update's time is left"
+        _oc_missed="${_oc_missed:+$_oc_missed, }$plugin (not attempted)"
+        _oc_missed_n=$((_oc_missed_n + 1))
+        continue
       fi
       echo "    - $spec"
       # --accept-capabilities, for the plugins CLAWBOX installs and only those.
@@ -8756,18 +8998,32 @@ for p in d.get("plugins", []):
           echo "      (not a ClawBox-managed plugin: refreshed without accepting new capabilities)"
           ;;
       esac
-      if ! as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins install "$spec" --force "${CAP_ARGS[@]}" >/dev/null 2>&1; then
-        echo "      WARN: refresh failed (non-fatal; gateway-pre-start will retry on next boot)"
+      _oc_install_rc=0
+      _oc_install_out="$(as_clawbox -H timeout -k 10 "$_oc_refresh_bound" "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins install "$spec" --force "${CAP_ARGS[@]}" 2>&1)" || _oc_install_rc=$?
+      if [ "$_oc_install_rc" -ne 0 ]; then
+        case "$PLUGIN_KEY" in
+          codex|deepseek) _oc_retry="gateway-pre-start retries it" ;;
+          *) _oc_retry="the next update that moves OpenClaw retries it" ;;
+        esac
+        echo "      WARN: not updated (non-fatal; $_oc_retry).$(clawbox_plugin_cli_cause "The OpenClaw plugin install" "$_oc_install_rc" "$_oc_install_out")"
+        _oc_missed="${_oc_missed:+$_oc_missed, }$plugin"
+        _oc_missed_n=$((_oc_missed_n + 1))
       fi
     done <<< "$INSTALLED_PLUGINS"
+    if [ "$_oc_missed_n" -gt 0 ]; then
+      echo "CLAWBOX-WARN[openclaw-plugin-refresh]: $_oc_missed_n plugin(s) could not be updated to OpenClaw $TARGET: $_oc_missed. They keep their previous version until the next OpenClaw update."
+    fi
   else
     echo "  No external plugins to refresh"
   fi
   # The full path has finished: the core is at the target and, on OpenClaw 2,
-  # doctor's migration completed (an incomplete one returned above). A refresh
-  # that only WARNed does not hold the record back — the fast path asks the
-  # plugin list itself every time.
-  openclaw_refresh_marker_write "$TARGET"
+  # doctor's migration completed (an incomplete one returned above). A reinstall
+  # that failed does not hold the record back — the fast path asks the plugin
+  # list itself every time — but a list that could not be read does: nothing
+  # was refreshed, so the next update takes the full path again.
+  if [ "$_oc_list_read" -eq 1 ]; then
+    openclaw_refresh_marker_write "$TARGET"
+  fi
   # Standalone installs restore only after plugin refresh. The composite setup
   # step owns restoration after its remaining patch/config/voice operations.
   # `_oc_gateway_stopped` is set whether or not a gateway was running, so the
