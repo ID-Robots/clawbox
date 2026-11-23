@@ -38,12 +38,15 @@ import {
 import { startUpdate, waitForUpdate } from "./helpers/setup-api";
 import { READY_ACTION_TIMEOUT, waitForAppReady, waitForGatewayReady } from "./helpers/readiness";
 import {
+  KEY_LINE,
   baseVersion,
+  describePass,
   journalAfter,
   journalCursor,
   openclawCli,
   parseJsonOut,
   readMigrationRow,
+  retiredKeyPathMissed,
   summarizeDoctor,
   type DoctorSummary,
   type MigrationRowRead,
@@ -66,11 +69,25 @@ const UPGRADE_BRANCH = process.env.CLAWBOX_UPGRADE_TARGET_BRANCH ?? "beta";
  * builds never has it. So the fixture gives main's core exactly that box, and
  * the last test proves from the core's own record that the obligation was
  * owed during this update AND completed: it cannot pass with nothing owed.
+ *
+ * And a config key the new core retired. On that box `openclaw.json` also held
+ * a per-agent heartbeat (`agents.entries.<id>.heartbeat`), valid on the old core
+ * and unknown to 2026.11.5. With an invalid config, doctor plans an automatic
+ * repair from a snapshot taken BEFORE it rewrites codex's obligation, and
+ * commits it AFTER, carrying the old obligation list: the core's publication
+ * check then throws "Plugin migration obligations changed during migration
+ * input publication" and the pass ends incomplete (dist doctor-config-flow:
+ * planAdmittedConfigRepair, then the obligation rewrite, then
+ * commitAutomaticConfigRepair). A config the new core accepts never takes
+ * that path.
  */
 const CODEX_ARM_MODEL = "openai/gpt-5.5";
 const CODEX_ARM_PATH = `agents.defaults.models[${JSON.stringify(CODEX_ARM_MODEL)}].agentRuntime.id`;
 /** Where a ChatGPT sign-in is filed (CHATGPT_PROFILE_KEY in src/lib/chatgpt-subscription.ts). */
 const CHATGPT_PROFILE_PATH = "auth.profiles.openai:chatgpt";
+/** Valid at 2026.10.9 and retired at 2026.11.5; "0m" turns off only the recurring cadence. */
+const RETIRED_KEY_PATH = "agents.entries.main.heartbeat";
+const RETIRED_KEY_VALUE = JSON.stringify({ every: "0m" });
 const OPENCLAW_JSON = "/home/clawbox/.openclaw/openclaw.json";
 /** The root step that installs the core and runs doctor; its journal is its own output. */
 const OPENCLAW_INSTALL_UNIT = "clawbox-root-update@openclaw_install.service";
@@ -79,6 +96,8 @@ const OPENCLAW_INSTALL_UNIT = "clawbox-root-update@openclaw_install.service";
 let mainPin = "";
 let targetPin = "";
 let crossing = false;
+/** Main's core took the retired key, so the update must cross the path it opens. */
+let retiredKeySet = false;
 /** Where the target update's openclaw_install journal starts, and when it was triggered (epoch ms, container clock). */
 let updateCursor: string | null = null;
 let triggeredAtMs = 0;
@@ -140,16 +159,32 @@ async function codexPlugin(): Promise<{ row: PluginRow | undefined; version: str
   return { row, version };
 }
 
-/** Does main's core know `agents.defaults.models.*.agentRuntime.id` (its own `config schema --json`)? */
-function schemaHasRuntimeId(schema: unknown): boolean {
+interface OpenclawJson {
+  agents?: {
+    defaults?: { models?: Record<string, { agentRuntime?: { id?: unknown } }> };
+    entries?: Record<string, { heartbeat?: unknown }>;
+  };
+  plugins?: { allow?: unknown };
+}
+
+const readOpenclawJson = async () =>
+  JSON.parse(await dockerExec(["cat", OPENCLAW_JSON], { user: "clawbox" })) as OpenclawJson;
+
+/**
+ * Does main's core (its own `config schema --json`) know this string key? `*`
+ * is a map entry. `agents.defaults.models.*.agentRuntime.id` is the codex arm;
+ * `agents.entries.*.heartbeat.every` the retired key.
+ */
+function schemaHasString(schema: unknown, path: string): boolean {
   let node: unknown = schema;
-  for (const step of [
-    "properties", "agents", "properties", "defaults", "properties", "models",
-    "additionalProperties", "properties", "agentRuntime", "properties", "id", "type",
-  ]) {
-    node = node && typeof node === "object" ? (node as Record<string, unknown>)[step] : undefined;
+  for (const key of path.split(".")) {
+    const steps = key === "*" ? ["additionalProperties"] : ["properties", key];
+    for (const step of steps) {
+      node = node && typeof node === "object" ? (node as Record<string, unknown>)[step] : undefined;
+    }
   }
-  return node === "string";
+  const type = node && typeof node === "object" ? (node as Record<string, unknown>).type : undefined;
+  return type === "string";
 }
 
 const describeRow = (read: MigrationRowRead | null) =>
@@ -173,11 +208,19 @@ async function reportCrossing(outcome: string): Promise<{ doctor: DoctorSummary 
     doctor = summarizeDoctor(lines);
     log(
       `${OPENCLAW_INSTALL_UNIT} since the trigger: ${doctor.entries} entries over ${doctor.spanSeconds ?? "?"} s; ` +
-      `doctor passes ${doctor.passes} (start lines ${doctor.runLines}; ${doctor.passEnds.join(", ") || "no numbered pass lines"}); ` +
-      `conflict line ${doctor.conflict ? "present" : "absent"}`,
+      `doctor passes ${doctor.passes.length}`,
     );
-    const excerpt = doctor.doctorStart >= 0 ? lines.slice(doctor.doctorStart, doctor.doctorStart + 150) : [];
-    for (const line of excerpt) log(`doctor| ${line.message}`);
+    doctor.passes.forEach((pass, index) => {
+      log(describePass(pass, index));
+      if (pass.conflictLine) log(`pass ${index + 1} conflict line: ${pass.conflictLine}`);
+    });
+    if (retiredKeySet) log(`retired-key path in pass 1: ${retiredKeyPathMissed(doctor.passes[0]) ?? "exercised"}`);
+    // Every doctor phase and the lines the checks read; the full journal is the attachment.
+    const tempWarnings = lines.filter((line) => line.message.includes("Temp workspace ancestor")).length;
+    for (const line of lines) {
+      if (KEY_LINE.test(line.message) && !line.message.includes("Temp workspace ancestor")) log(`doctor| ${line.message}`);
+    }
+    if (tempWarnings > 0) log(`(${tempWarnings} "Temp workspace ancestor" lines left out: a fallback, not a failure)`);
     if (outcome !== "completed") {
       for (const line of lines.slice(-60)) log(`tail| ${line.message}`);
     }
@@ -318,7 +361,7 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     expect(branch, "the upgrade must exercise main → target, not target → itself").toBe("main");
   });
 
-  test("a ChatGPT-style box: codex configured at main's core", async () => {
+  test("a ChatGPT-style box with a heartbeat the new core retires", async () => {
     mainPin = firstWord(await dockerExec(["cat", "/home/clawbox/clawbox/config/openclaw-target.txt"]));
     targetPin = await readTargetPin(UPGRADE_BRANCH);
     expect(mainPin, "fixture: main's checkout has no OpenClaw pin").not.toBe("");
@@ -339,10 +382,21 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     expect(await coreVersion(), "fixture: main's core does not answer main's pin").toBe(mainPin);
     const schema = await openclawCli(["config", "schema", "--json"], 300_000);
     expect(schema.exit, `fixture: openclaw config schema --json: ${schema.stderr}`).toBe(0);
+    const schemaJson = parseJsonOut(schema.stdout);
     expect(
-      schemaHasRuntimeId(parseJsonOut(schema.stdout)),
+      schemaHasString(schemaJson, "agents.defaults.models.*.agentRuntime.id"),
       "fixture: main's core has no agents.defaults.models.*.agentRuntime.id",
     ).toBe(true);
+    // Only while main's core still knows the key: once main carries a core that
+    // retired it, its CLI refuses the write and that path has nothing to cross.
+    // Then it is "not exercised", never a failure; every codex check still runs.
+    retiredKeySet = schemaHasString(schemaJson, "agents.entries.*.heartbeat.every");
+    if (!retiredKeySet) {
+      test.info().annotations.push({
+        type: "retired-key path",
+        description: "not exercised (main's core has no agents.entries.*.heartbeat)",
+      });
+    }
 
     // The plugin first, at main's pin, the way the installer's refresh pins it
     // (`plugins install @openclaw/codex@<pin> --force --accept-capabilities`):
@@ -368,6 +422,12 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     expect(profile.exit, `fixture: config set ${CHATGPT_PROFILE_PATH}: ${profile.stdout}${profile.stderr}`).toBe(0);
     const arm = await openclawCli(["config", "set", CODEX_ARM_PATH, "codex"], 120_000);
     expect(arm.exit, `fixture: config set ${CODEX_ARM_PATH}: ${arm.stdout}${arm.stderr}`).toBe(0);
+    if (retiredKeySet) {
+      // Through the old core's own CLI, which checks it against its schema.
+      const heartbeat = await openclawCli(["config", "set", RETIRED_KEY_PATH, RETIRED_KEY_VALUE, "--strict-json"], 120_000);
+      expect(heartbeat.exit, `fixture: main's core refused ${RETIRED_KEY_PATH}: ${heartbeat.stdout}${heartbeat.stderr}`)
+        .toBe(0);
+    }
     const restartStarted = Date.now();
     await dockerExec(["systemctl", "restart", "clawbox-gateway.service"], { user: "root", timeoutMs: 10 * 60_000 });
     await waitForGatewayReady({ timeoutMs: 10 * 60_000, context: "the codex fixture's gateway restart" });
@@ -380,10 +440,7 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     expect(codex.row?.origin, "fixture: codex is the bundled copy, not the external plugin").not.toBe("bundled");
     expect(codex.row?.enabled, `fixture: codex is not enabled (status ${String(codex.row?.status)})`).toBe(true);
     expect(baseVersion(codex.version), "fixture: codex is not at main's pin").toBe(baseVersion(mainPin));
-    const config = JSON.parse(await dockerExec(["cat", OPENCLAW_JSON], { user: "clawbox" })) as {
-      agents?: { defaults?: { models?: Record<string, { agentRuntime?: { id?: unknown } }> } };
-      plugins?: { allow?: unknown };
-    };
+    const config = await readOpenclawJson();
     expect(
       config.agents?.defaults?.models?.[CODEX_ARM_MODEL]?.agentRuntime?.id,
       "fixture: the codex runtime arm did not survive the gateway restart",
@@ -393,6 +450,12 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
       allow === undefined || (Array.isArray(allow) && allow.includes("codex")),
       `fixture: plugins.allow ${JSON.stringify(allow)} keeps codex out`,
     ).toBe(true);
+    if (retiredKeySet) {
+      expect(
+        config.agents?.entries?.main?.heartbeat,
+        "fixture: the per-agent heartbeat did not survive the gateway restart",
+      ).toBeDefined();
+    }
 
     codexRowBefore = await readMigrationRow("codex");
     test.info().annotations.push({
@@ -591,15 +654,17 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
   });
 
   // Last, so that a failure here leaves the checks above with their own verdicts.
-  test("the core and codex crossed, and codex's obligation completed", async () => {
+  test("codex obligation and a retired config key crossed in one update", async () => {
     test.skip(!crossing, "codex-obligation: not exercised (no core crossing)");
     // Printed first, so a failing assertion below still leaves the evidence.
     const { doctor, row } = await reportCrossing("completed");
+    // Recorded, never asserted: a later core that publishes the current
+    // obligation list completes in one pass, and that is still a pass.
     test.info().annotations.push(
       {
         type: "doctor-passes",
         description: doctor
-          ? `${doctor.passes} (${doctor.passEnds.join(", ") || `${doctor.runLines} start lines`}); conflict line ${doctor.conflict ? "present" : "absent"}`
+          ? `${doctor.passes.length}: ${doctor.passes.map((pass, index) => describePass(pass, index)).join(" | ")}`
           : "unknown",
       },
       {
@@ -608,6 +673,16 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
       },
     );
     expect(doctor?.entries ?? 0, "no openclaw_install journal after the trigger: the core crossing never ran").toBeGreaterThan(0);
+    // The trigger: the first pass met the retired key and took the repair that
+    // follows codex's obligation rewrite. Without it this case proves only the
+    // convergence a valid config already had.
+    if (retiredKeySet) {
+      expect(retiredKeyPathMissed(doctor?.passes[0]), "the retired-key path in the first doctor pass").toBeNull();
+      expect(
+        (await readOpenclawJson()).agents?.entries?.main?.heartbeat,
+        "the retired heartbeat key is still in openclaw.json after the update",
+      ).toBeUndefined();
+    }
 
     // The box is on the target's core, and the pin it carries is the one the
     // fixture compared against.
