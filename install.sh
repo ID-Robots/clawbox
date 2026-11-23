@@ -8715,9 +8715,9 @@ step_openclaw_install() {
   # old release while the updater said "Up to date", and a reinstall by bare id
   # once resolved @latest and crashed every Codex chat. So an @openclaw plugin is
   # reinstalled pinned to $TARGET (its package derived from a node_modules/
-  # rootDir), the pin is rebuilt for an orphaned codex/discord/whatsapp
-  # (TASK-602), and the refresh runs on every full path, because plugins drift
-  # independently of the core.
+  # rootDir), the pin is rebuilt for an orphaned codex/discord/whatsapp, and
+  # the refresh runs on every full path, because plugins drift independently
+  # of the core.
   #
   # What it leaves: the pinned core's `doctor --fix`, run above, already
   # "updates drifted active official npm plugins ... to the installed OpenClaw
