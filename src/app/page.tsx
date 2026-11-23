@@ -76,6 +76,7 @@ import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
 import { readChatFirstEnvironment, shouldOpenChatFirst } from "@/lib/mobile-chat-first";
 import { runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
 import { isBoxOwnScreen, setVisibleInterval } from "@/lib/visible-interval";
+import { pairingPollCadence } from "@/lib/pairing-poll-cadence";
 import { confirmSessionStillValid } from "@/lib/session-expiry";
 import { useSessionExpiryGuard } from "@/hooks/useSessionExpiryGuard";
 import { samePairingRequests, sameSelection, type PairingRequestCard } from "@/lib/desktop-shell-equality";
@@ -240,6 +241,16 @@ const RING_HIDDEN_POLL_MS = 20_000;
 function ringHiddenPollMs(): number {
   return isBoxOwnScreen() ? RING_POLL_MS : RING_HIDDEN_POLL_MS;
 }
+
+// How often the desktop asks for Telegram access requests while a bot can
+// receive them: this poll is the only road a new request takes to the screen,
+// and the route is a direct read of the pairing store (about 12 ms on a Nano),
+// so a request is on screen within 3 s of the gateway recording it rather than
+// up to 20 s later.
+const PAIRING_POLL_MS = 3_000;
+// The same poll on a box with no bot, whose every answer is an empty list: the
+// old 20 s, so the fast beat costs nothing there (`pairing-poll-cadence.ts`).
+const PAIRING_NO_BOT_POLL_MS = 20_000;
 
 // Desktop icon grid metrics. Module-level so the resize listener can derive
 // `rowsPerColumn` without reaching into the component.
@@ -3035,6 +3046,11 @@ function ChromeDesktopInner() {
   // request doesn't pop again.
   const [pairingRequests, setPairingRequests] = useState<PairingRequestCard[]>([]);
   const [approvingPairCode, setApprovingPairCode] = useState<string | null>(null);
+  // Codes whose Approve POST has not answered yet. `pairing approve` takes the
+  // request out of the store about 5 s into a POST of about 12 s, and a poll
+  // in between would take the card off screen under the owner's click; the
+  // handler removes it once the POST says approved. A ref, so it re-renders nothing.
+  const approvingPairCodesRef = useRef(new Set<string>());
 
   // Requests whose card has timed out in this session. Not the persisted
   // dismissal list: that is the owner's "no", this is only "not on screen".
@@ -3050,17 +3066,20 @@ function ChromeDesktopInner() {
     if (!boxApis) return;
     let active = true;
     let polling = false;
+    // 3 s with a bot, 20 s without (pairing-poll-cadence.ts).
+    const cadence = pairingPollCadence(PAIRING_POLL_MS, PAIRING_NO_BOT_POLL_MS);
     const poll = async () => {
-      if (!active || polling) return;
+      if (!active || polling || !cadence.shouldAsk()) return;
       polling = true;
       try {
         const res = await fetch("/setup-api/telegram/pairing?poll=1", { cache: "no-store" });
         if (res.ok) {
           const data = await res.json();
+          cadence.answered(data);
           // The list the cards would draw, kept as the SAME array when it is
           // what is on screen already. A new array — even an empty one on a
           // box with no bot, which is every answer there — re-rendered the
-          // whole desktop every 20 s for nothing that had changed.
+          // whole desktop on every poll for nothing that had changed.
           let next: PairingRequestCard[] = [];
           // `unknown` is not "no bot": the route could not read this device's
           // Telegram credential, and it still answers with the pairing store,
@@ -3071,7 +3090,17 @@ function ChromeDesktopInner() {
             const expired = expiredPairCodesRef.current;
             next = data.pending.filter((r: { code?: string }) => r.code && !dismissed.has(r.code) && !expired.has(r.code));
           }
-          setPairingRequests((prev) => (samePairingRequests(prev, next) ? prev : next));
+          const approving = [...approvingPairCodesRef.current];
+          setPairingRequests((prev) => {
+            // A card whose Approve is on the way keeps its place until the
+            // POST answers, even when the store has already let it go.
+            const shown = [...next];
+            prev.forEach((card, i) => {
+              const inFlight = approving.some((code) => samePairingToken(card.code, code));
+              if (inFlight && !shown.some((r) => samePairingToken(r.code, card.code))) shown.splice(i, 0, card);
+            });
+            return samePairingRequests(prev, shown) ? prev : shown;
+          });
         }
       } catch {}
       polling = false;
@@ -3079,13 +3108,14 @@ function ChromeDesktopInner() {
     poll();
     // Requests are state, re-read in full on every poll: behind a hidden tab
     // the poll waits, and the page asks at once when it is visible again.
-    const stop = setVisibleInterval(poll, 20000);
+    const stop = setVisibleInterval(poll, PAIRING_POLL_MS);
     return () => { active = false; stop(); };
   }, [loadDismissedPairCodes, boxApis]);
 
   const approvePairingRequest = useCallback(async (code: string) => {
     if (!code) return;
     setApprovingPairCode(code);
+    approvingPairCodesRef.current.add(code);
     try {
       const res = await fetch("/setup-api/telegram/pairing", {
         method: "POST",
@@ -3103,6 +3133,7 @@ function ChromeDesktopInner() {
     } catch {
       window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: "Couldn't approve — please try again." } }));
     } finally {
+      approvingPairCodesRef.current.delete(code);
       setApprovingPairCode(null);
     }
   }, []);

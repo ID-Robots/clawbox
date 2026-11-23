@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { ensureClawboxAgentsSections } from "@/lib/clawbox-agents-sections";
 import { readTunnelUrl, startTunnelService } from "@/lib/cloudflared";
 import { isInternalRequest } from "@/lib/internal-token";
 import { applyDeferredLanguagePersona, retireOnboardingRitual } from "@/lib/language-persona";
@@ -60,6 +61,14 @@ export async function GET(request: Request) {
   // not restarted its gateway since. A no-op once it is done, and it never
   // throws. First, because the language payback below waits on exactly this.
   await retireOnboardingRitual();
+
+  // ClawBox's rules in AGENTS.md. OpenClaw creates that file on the agent's
+  // first run, which on a freshly set-up box comes after the gateway's last
+  // start, so the ExecStartPre that appends them found nothing to append to
+  // and the box ran without them until its next restart. NOT AWAITED, for
+  // the curl budget explained at `refreshCatalogIfDue` below: while a section
+  // is missing this is two gateway round-trips. It never rejects.
+  void ensureClawboxAgentsSections();
 
   // Pay back a language pick OpenClaw's first-conversation ritual made us
   // defer, if the introduction is over. This rides on the heartbeat because

@@ -47,6 +47,8 @@ const mockStartRootStep = vi.mocked(startRootStep);
 let root: string;
 const envFile = () => path.join(root, "data", "hotspot.env");
 const readEnv = () => readFileSync(envFile(), "utf8");
+// wifi_lock's line when another radio owner held the lock past its wait.
+const RADIO_LOCK_TIMEOUT = "[WiFi] Radio ownership timed out";
 
 function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
   mockExecFile.mockImplementation(((
@@ -508,13 +510,82 @@ describe("/setup-api/system/hotspot", () => {
       });
 
       it("names a failed AP stop as failed, so 'off' is not claimed for a live radio", async () => {
-        setupExecFileMock({ bash: new Error("Script failed") });
+        setupExecFileMock({
+          bash: new Error("Script failed"),
+          nmcli: { stdout: "ClawBox-Setup:802-11-wireless:wlP1p1s0\n", stderr: "" },
+        });
 
         const res = await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: false }));
         const body = await res.json();
 
         expect(body.apAction).toBe("failed");
         expect(body.warning).toMatch(/still be broadcasting/i);
+      });
+
+      it("a failed stop with no ClawBox-Setup AP up is stopped: nothing is broadcasting", async () => {
+        // The web account cannot create the root-owned radio lock folder, so on
+        // a box whose AP unit has not run since boot stop-ap.sh exits 1 before
+        // it looks. The radio, read back, has no AP: the hotspot is off.
+        const stopErr = Object.assign(new Error("Command failed: bash /usr/local/libexec/clawbox/stop-ap.sh"), {
+          code: 1, stdout: "", stderr: "",
+        });
+        setupExecFileMock({ bash: stopErr, nmcli: { stdout: "", stderr: "" } });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const res = await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: false }));
+        const body = await res.json();
+
+        expect(res.status).toBe(200);
+        expect(body.success).toBe(true);
+        expect(body.apAction).toBe("stopped");
+        expect(body.warning).toBeUndefined();
+        // The script's failure stays in the log, exit code and stderr with it.
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining("stop-ap.sh failed"), stopErr);
+        warn.mockRestore();
+      });
+
+      it("a failed stop is failed when nmcli cannot read the radio back: unknown is not off", async () => {
+        setupExecFileMock({ bash: new Error("Script failed"), nmcli: new Error("nmcli timed out") });
+
+        const body = await (await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: false }))).json();
+
+        expect(body.apAction).toBe("failed");
+        expect(body.warning).toMatch(/still be broadcasting/i);
+      });
+
+      it("a clean stop with an unreadable read-back is stopped: stop-ap.sh read NetworkManager itself", async () => {
+        // Its own nmcli calls deleted the AP it owns (or found none); a read-back
+        // that times out right after is no sign of a live AP, and GET shows none.
+        setupExecFileMock({
+          bash: { stdout: "[AP] Access point stopped.\n", stderr: "" },
+          nmcli: new Error("nmcli timed out"),
+        });
+
+        const body = await (await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: false }))).json();
+
+        expect(body.apAction).toBe("stopped");
+        expect(body.warning).toBeUndefined();
+      });
+
+      it.each([
+        ["gave up waiting on another radio owner", { code: 1, stderr: `${RADIO_LOCK_TIMEOUT}\n` }],
+        ["was killed by this route's own timeout", { code: null, killed: true, signal: "SIGTERM", stderr: "" }],
+      ])("a stop that %s is failed even with no AP up yet: the AP unit may be raising it", async (_why, props) => {
+        // start-ap.sh holds the radio lock for its whole run and reads the
+        // switch once, so a radio with no AP this second proves nothing.
+        setupExecFileMock({
+          bash: Object.assign(new Error("Command failed: bash /usr/local/libexec/clawbox/stop-ap.sh"), props),
+          nmcli: { stdout: "", stderr: "" },
+        });
+
+        const body = await (await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: false }))).json();
+
+        expect(body.apAction).toBe("failed");
+        expect(body.warning).toMatch(/still be broadcasting/i);
+      });
+
+      it("reads the lock-timeout line wifi_lock really prints", () => {
+        expect(readFileSync("scripts/wifi-radio.sh", "utf8")).toContain(`echo '${RADIO_LOCK_TIMEOUT}' >&2`);
       });
 
       it("names a stop after which the ClawBox-Setup AP is still active as failed", async () => {

@@ -631,3 +631,66 @@ describe("readTelegramBotsInUse", () => {
     expect(await identity.readTelegramBotsInUse()).toEqual({ ids: ["333333"], known: true });
   });
 });
+
+// The desktop's pairing poll reads the active bot every 3 s while a bot
+// is configured, and a store that stays unreadable printed its line on every
+// poll — about 29 000 a day per open desktop, burying the line that matters.
+// Logged when the failure first appears or changes, and again after a good read.
+describe("an unreadable bot store under the pairing poll", () => {
+  function linesSaying(logged: { mock: { calls: unknown[][] } }, text: string): number {
+    return logged.mock.calls.filter(([line]) => String(line).includes(text)).length;
+  }
+
+  it("logs an unreadable openclaw.json once, again after a good read, and at once when the failure changes", async () => {
+    const config = path.join(openclawHome, "openclaw.json");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const said = () => linesSaying(logged, "openclaw.json could not be read");
+    try {
+      makeUnreadable(config);
+      expect(await identity.readActiveTelegramBot("openclaw")).toMatchObject({ known: false });
+      await identity.readActiveTelegramBot("openclaw");
+      expect(said()).toBe(1);
+
+      fs.rmSync(config, { recursive: true });
+      writeOpenClawToken(OPENCLAW_BOT);
+      expect(await identity.readActiveTelegramBot("openclaw")).toMatchObject({ token: OPENCLAW_BOT, known: true });
+      makeUnreadable(config);
+      await identity.readActiveTelegramBot("openclaw");
+      expect(said()).toBe(2);
+
+      fs.rmSync(config, { recursive: true });
+      fs.writeFileSync(config, "{ half written", "utf-8");
+      await identity.readActiveTelegramBot("openclaw");
+      expect(said()).toBe(3);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it("logs an unreadable ~/.hermes/.env once, again after a good read, and at once when the failure changes", async () => {
+    const env = path.join(hermesHome, ".env");
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    const said = () => linesSaying(logged, ".hermes/.env could not be read");
+    try {
+      makeUnreadable(env);
+      expect(await identity.readActiveTelegramBot("hermes")).toMatchObject({ known: false });
+      await identity.readActiveTelegramBot("hermes");
+      expect(said()).toBe(1);
+
+      fs.rmSync(env, { recursive: true });
+      writeHermesToken(HERMES_BOT);
+      expect(await identity.readActiveTelegramBot("hermes")).toMatchObject({ token: HERMES_BOT, known: true });
+      makeUnreadable(env);
+      await identity.readActiveTelegramBot("hermes");
+      expect(said()).toBe(2);
+
+      // A link to itself: ELOOP where the last failure was "not a regular file".
+      fs.rmSync(env, { recursive: true });
+      fs.symlinkSync(env, env);
+      await identity.readActiveTelegramBot("hermes");
+      expect(said()).toBe(3);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+});

@@ -22,9 +22,13 @@ let saveGeneration = 0;
  *  * `restarted` — the AP was bounced, so this connection has just dropped.
  *  * `deferred`  — deliberately not bounced (the radio is a client right now);
  *                  the saved settings apply at the next AP start.
- *  * `stopped`   — the owner turned the hotspot off and it went down.
+ *  * `stopped`   — the owner turned the hotspot off and no ClawBox-Setup AP is
+ *                  up: stop-ap.sh succeeded and the read-back shows none (or
+ *                  cannot read, as GET then shows none), or stop-ap.sh failed
+ *                  and the read-back did read none.
  *  * `failed`    — the toggle threw; the settings are saved, the radio is not
- *                  in the state the owner asked for, and `warning` says so.
+ *                  (or may not be) in the state the owner asked for, and
+ *                  `warning` says so.
  */
 type HotspotApAction = "restarted" | "deferred" | "stopped" | "failed";
 
@@ -193,11 +197,29 @@ export async function POST(request: Request) {
         }
       } else {
         // Stop the AP — run stop-ap.sh directly since clawbox user can execute it
-        await execFileAsync("bash", ["/usr/local/libexec/clawbox/stop-ap.sh"], { timeout: 240_000 });
+        let stopErr: unknown = null;
+        try {
+          await execFileAsync("bash", ["/usr/local/libexec/clawbox/stop-ap.sh"], { timeout: 240_000 });
+        } catch (err) {
+          // It gave up waiting on another radio owner: the AP unit may be
+          // raising the AP this moment, so no read-back now says it stays down.
+          if (waitedOnRadioOwner(err)) throw err;
+          stopErr = err;
+        }
         // stop-ap.sh says "Access point stopped." also when it found no AP of
-        // its own to stop. "stopped" is claimed only for what GET reads back.
-        if (await setupApActive(iface)) {
+        // its own to stop, and fails also before it looked (the web account
+        // has no radio lock on a box whose AP unit has not run since boot).
+        // "stopped" is claimed only for what GET reads back, and after a
+        // failed stop only when nmcli could read it. A successful stop already
+        // read NetworkManager itself (it deleted the AP it owns, or found
+        // none), so an unreadable read-back after it is not a warning.
+        const ap = await readSetupAp(iface);
+        if (stopErr && ap !== "down") throw stopErr;
+        if (ap === "up") {
           throw new Error("the ClawBox-Setup access point is still active after stop-ap.sh");
+        }
+        if (stopErr) {
+          console.warn("[hotspot] stop-ap.sh failed, but no ClawBox-Setup access point is up:", stopErr);
         }
       }
     } catch (apErr) {
@@ -242,19 +264,33 @@ function isSetupApRow(iface: string): (row: string[]) => boolean {
   return (r) => r[0] === "ClawBox-Setup" && r[2] === iface;
 }
 
-/** Is the setup AP up on `iface`, as GET reads it? False when nmcli cannot say. */
-async function setupApActive(iface: string): Promise<boolean> {
+/** Is the setup AP up on `iface`, as GET reads it? "unknown" when nmcli cannot say. */
+async function readSetupAp(iface: string): Promise<"up" | "down" | "unknown"> {
   try {
     const { stdout } = await execFileAsync(
       "nmcli",
       ["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"],
       { timeout: 3_000 }
     );
-    if (!stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine).some(isSetupApRow(iface))) return false;
+    if (!stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine).some(isSetupApRow(iface))) return "down";
   } catch {
-    return false;
+    return "unknown";
   }
-  return !(await radioIsClient(iface));
+  return (await radioIsClient(iface)) ? "down" : "up";
+}
+
+/** wifi_lock's line when another radio owner held the lock past its wait (scripts/wifi-radio.sh). */
+const RADIO_LOCK_TIMEOUT = "[WiFi] Radio ownership timed out";
+
+/**
+ * Did stop-ap.sh end while it may have been waiting on another radio owner:
+ * wifi_lock's own timeout, or killed (this route's timeout among the causes)?
+ * start-ap.sh holds that lock for its whole run and reads the switch once.
+ */
+function waitedOnRadioOwner(err: unknown): boolean {
+  const e = err as { killed?: unknown; signal?: unknown; stderr?: unknown } | null;
+  return Boolean(e?.killed || e?.signal)
+    || (typeof e?.stderr === "string" && e.stderr.includes(RADIO_LOCK_TIMEOUT));
 }
 
 /**
