@@ -317,12 +317,10 @@ trap 'exit 143' TERM INT HUP
 
 # ---- 1. off -----------------------------------------------------------------------
 switch_hotspot false || { not_ok "switching the hotspot off failed"; finish; }
+# Also on a lab board, whose AP unit never runs: there stop-ap.sh (unprivileged)
+# finds no radio lock folder and fails, and the route reads the radio back.
 if [ "$AP_ACTION" = stopped ]; then
   ok "off: the route stopped the AP (apAction stopped)"
-elif [ "$LAB_OFF" = yes ]; then
-  # stop-ap.sh (unprivileged) takes the radio lock in /run/clawbox-radio, which
-  # the root AP unit creates; on a lab board that unit never runs.
-  note "off: apAction ${AP_ACTION:-?} (stop-ap.sh has no radio lock directory on a board whose AP unit never ran: lab policy)"
 else
   not_ok "off: apAction ${AP_ACTION:-?}, not stopped"
 fi
