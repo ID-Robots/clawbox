@@ -310,10 +310,10 @@ describe("SystemUpdateApp — a failed run", () => {
 });
 
 /**
- * A failure with a cause of its own is run again by a fresh run from step 1:
- * Try again, beside Dismiss. It is read from the run's own verdict — never on
- * an interrupted run (Resume), a refused harness downgrade (its own override)
- * or a Dismiss the box did not take, whose sentence says "Try again in a moment".
+ * A failed full update with a cause of its own is run again by Try again, beside
+ * Dismiss. It is read from the run's own verdict — never on an interrupted run
+ * (Resume), a refused harness downgrade (its own override), a Dismiss the box did
+ * not take, whose sentence says "Try again in a moment", or the OpenClaw-only run.
  */
 describe("UpdateRunView — Try again on a failed run", () => {
   const OWN_CAUSE: Partial<UpdateState> = {
@@ -375,6 +375,20 @@ describe("UpdateRunView — Try again on a failed run", () => {
     const { panel } = draw(OWN_CAUSE, { dismissError: "The device could not clear that result. Try again in a moment." });
     expect(within(panel).getByTestId("update-dismiss-error")).toBeInTheDocument();
     expect(within(panel).queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it("offers no Try again under a failed OpenClaw-only run: the press would start the full update", () => {
+    // The OpenClaw-only flow shares this state and has no restart step.
+    const { panel } = draw({
+      error: "openclaw_install exited with code 1",
+      steps: [
+        { id: "openclaw_install", label: "Updating OpenClaw", status: "failed", error: "npm could not reach the registry" },
+        { id: "openclaw_patch", label: "Patching OpenClaw gateway", status: "pending" },
+        { id: "gateway_restart", label: "Restarting OpenClaw gateway", status: "pending" },
+      ],
+    });
+    expect(within(panel).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(within(panel).getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
   });
 });
 
