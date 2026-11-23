@@ -18,8 +18,9 @@
  * - `--reverse`: newest first; with `-n N`, the newest N;
  * - `-g <pattern>`: matching entries only (smart case, as journalctl does);
  *   no match exits 1. Beside `-n` it is not modelled, and says so;
- * - nothing to show prints `-- No entries --` unless `-q`, as journalctl does.
- * Output is `-o cat`: one message per line.
+ * - nothing to show prints `-- No entries --` unless quiet: `-q`, or an output
+ *   mode that implies it (`cat`, the JSON modes, `export`), as journalctl does.
+ * Output is `-o cat` form whatever `-o` says: one message per line.
  */
 
 export type JournalctlGeneration = 249 | 255;
@@ -33,6 +34,8 @@ export interface JournalEntry {
 export type ModelJournal = readonly (string | JournalEntry)[];
 
 export type ExecAnswer = { stdout: string; stderr: string } | Error;
+
+const QUIET_OUTPUT_MODES = new Set(["cat", "json", "json-pretty", "json-sse", "json-seq", "export"]);
 
 function valueOf(args: readonly string[], ...names: string[]): string | undefined {
   for (const name of names) {
@@ -56,7 +59,10 @@ export function answerJournalctl(
   const n = valueOf(args, "-n", "--lines");
   const lines = n === undefined ? undefined : Number(n);
   const reverse = args.includes("--reverse") || args.includes("-r");
-  const quiet = args.includes("-q") || args.includes("--quiet");
+  // `-o cat`, the JSON modes and `export` set quiet by themselves (journalctl's
+  // parse_argv, 249.11 through 257).
+  const quiet = args.includes("-q") || args.includes("--quiet")
+    || QUIET_OUTPUT_MODES.has(valueOf(args, "-o", "--output") ?? "short");
   const pattern = valueOf(args, "-g", "--grep");
   if (pattern !== undefined && lines !== undefined) {
     throw new Error("journalctl model: -g beside -n is not modelled");

@@ -6,7 +6,7 @@ import {
   rootStepJournalTailArgs,
   rootStepUnit,
 } from "@/lib/root-step-journal";
-import { journalctlModel, numberedEntries } from "@/tests/helpers/journalctl-model";
+import { answerJournalctl, journalctlModel, numberedEntries } from "@/tests/helpers/journalctl-model";
 
 vi.mock("child_process", () => ({ execFile: vi.fn() }));
 
@@ -84,6 +84,22 @@ describe("rootStepJournalTailArgs", () => {
     expect(args).toContain("--reverse");
     expect(args[args.indexOf("-n") + 1]).toBe("40");
     expect(args.slice(args.indexOf("-o"), args.indexOf("-o") + 2)).toEqual(["-o", "cat"]);
+  });
+});
+
+describe("the journalctl model the suites answer with (helpers/journalctl-model.ts)", () => {
+  it.each([249, 255] as const)("prints nothing for an empty -o cat window, as journalctl %i does", (generation) => {
+    // `-o cat` sets quiet mode by itself; only an output mode without it
+    // prints the "-- No entries --" banner (measured on 249.11 and 259).
+    const sinceMs = 1_700_000_000_000;
+    for (const args of [
+      rootStepJournalArgs("openclaw_install", { sinceMs }),
+      rootStepJournalTailArgs("openclaw_install", { sinceMs, lines: 40 }),
+    ]) {
+      expect(answerJournalctl([], args, generation)).toEqual({ stdout: "", stderr: "" });
+    }
+    expect(answerJournalctl([], ["-u", rootStepUnit("openclaw_install"), "-o", "short-iso"], generation))
+      .toEqual({ stdout: "-- No entries --\n", stderr: "" });
   });
 });
 
