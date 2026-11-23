@@ -11,6 +11,7 @@ import { requireSession } from "@/lib/route-auth";
 import { reconcileClawaiModelsWithHermes } from "@/lib/hermes-clawai";
 import { reconcileLocalAiWithHermes } from "@/lib/hermes-local-ai";
 import { reconcileExternalEngineWithHermes } from "@/lib/external-engine-hermes";
+import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
 import {
   catalogStaleness,
   getModelOptions,
@@ -109,7 +110,13 @@ export async function GET(request: Request) {
     await reconcileClawaiModelsWithHermes();
     // A dual box that switched here after the external engine was saved on
     // OpenClaw (TASK-2376): register the provider, leave the selection alone.
-    await reconcileExternalEngineWithHermes();
+    //
+    // Under the Local AI transition lock the save and remove routes take: the
+    // reconcile reads the engine record and then patches `providers.clawext.*`
+    // from it, so a save landing between the two would be overwritten by the
+    // older record while the latch still says "in place". The record is read
+    // inside the boundary because the whole call is wrapped (TASK-2694 review).
+    await withLocalAiTransitionLock(() => reconcileExternalEngineWithHermes());
   }
 
   // When this box last got the harness to re-read its providers' lists, as

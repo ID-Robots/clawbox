@@ -111,6 +111,26 @@ describe("GET /setup-api/hermes/models — cloudProvidersHidden", () => {
     expect((await res.json()).cloudProvidersHidden).toBe(true);
   });
 
+  it("waits for a Local AI transition in flight before it repairs the engine's block (TASK-2694)", async () => {
+    fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({ org_mode: true, external_engine: ENGINE }));
+    const { withLocalAiTransitionLock } = await import("@/lib/local-ai-transition-lock");
+    const { reconcileExternalEngineWithHermes } = await import("@/lib/external-engine-hermes");
+    let release!: () => void;
+    const held = withLocalAiTransitionLock(() => new Promise<void>((resolve) => { release = resolve; }));
+    let settled = false;
+    const mod = await import("@/app/setup-api/hermes/models/route");
+    const pending = mod.GET(new Request("http://127.0.0.1/setup-api/hermes/models")).then((res) => { settled = true; return res; });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    // A save holding the lock is still writing config.yaml: the reconcile reads
+    // the record it would patch from, so it must not run beside it.
+    expect(settled).toBe(false);
+    expect(reconcileExternalEngineWithHermes).not.toHaveBeenCalled();
+    release();
+    await held;
+    expect((await pending).status).toBe(200);
+    expect(reconcileExternalEngineWithHermes).toHaveBeenCalledTimes(1);
+  });
+
   it("follows the owner's own choice either way", async () => {
     expect((await models({ org_mode: true, external_engine: ENGINE, hide_cloud_providers: false })).cloudProvidersHidden).toBe(false);
     expect((await models({ hide_cloud_providers: true })).cloudProvidersHidden).toBe(true);
