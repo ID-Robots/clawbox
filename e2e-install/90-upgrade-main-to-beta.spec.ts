@@ -41,6 +41,7 @@ import {
   KEY_LINE,
   baseVersion,
   describePass,
+  describeRefresh,
   journalAfter,
   journalCursor,
   openclawCli,
@@ -199,10 +200,13 @@ const describeRow = (read: MigrationRowRead | null) =>
  * the HTML report): the bounded openclaw_install journal, its doctor passes,
  * the conflict line, the unit's own result and the core's record for codex.
  */
-async function reportCrossing(outcome: string): Promise<{ doctor: DoctorSummary | null; row: MigrationRowRead }> {
+async function reportCrossing(
+  outcome: string,
+): Promise<{ doctor: DoctorSummary | null; refresh: string | null; row: MigrationRowRead }> {
   const log = (line: string) => console.log(`[codex crossing] ${line}`);
   log(`core ${mainPin} -> ${targetPin}; update ${outcome}`);
   let doctor: DoctorSummary | null = null;
+  let refresh: string | null = null;
   if (updateCursor) {
     const lines = await journalAfter(OPENCLAW_INSTALL_UNIT, updateCursor);
     doctor = summarizeDoctor(lines);
@@ -215,6 +219,9 @@ async function reportCrossing(outcome: string): Promise<{ doctor: DoctorSummary 
       if (pass.conflictLine) log(`pass ${index + 1} conflict line: ${pass.conflictLine}`);
     });
     if (retiredKeySet) log(`retired-key path in pass 1: ${retiredKeyPathMissed(doctor.passes[0]) ?? "exercised"}`);
+    // What the plugin refresh after doctor did with the real @openclaw/codex.
+    refresh = describeRefresh(lines);
+    log(`plugin refresh after doctor: ${refresh}`);
     // Every doctor phase and the lines the checks read; the full journal is the attachment.
     const tempWarnings = lines.filter((line) => line.message.includes("Temp workspace ancestor")).length;
     for (const line of lines) {
@@ -239,7 +246,7 @@ async function reportCrossing(outcome: string): Promise<{ doctor: DoctorSummary 
   const row = await readMigrationRow("codex");
   log(`migration_runs deferred-plugin-migration:codex before the update: ${describeRow(codexRowBefore)}`);
   log(`migration_runs deferred-plugin-migration:codex now: ${describeRow(row)}`);
-  return { doctor, row };
+  return { doctor, refresh, row };
 }
 
 /**
@@ -657,7 +664,7 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
   test("codex obligation and a retired config key crossed in one update", async () => {
     test.skip(!crossing, "codex-obligation: not exercised (no core crossing)");
     // Printed first, so a failing assertion below still leaves the evidence.
-    const { doctor, row } = await reportCrossing("completed");
+    const { doctor, refresh, row } = await reportCrossing("completed");
     // Recorded, never asserted: a later core that publishes the current
     // obligation list completes in one pass, and that is still a pass.
     test.info().annotations.push(
@@ -671,6 +678,9 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
         type: "update-seconds",
         description: `whole update ${updateSeconds ?? "?"} s, openclaw_install ${doctor?.spanSeconds ?? "?"} s`,
       },
+      // The refresh's own row for codex after doctor, recorded like the passes:
+      // the first word from a real package on what the skip rule does.
+      { type: "plugin-refresh", description: refresh ?? "unknown" },
     );
     expect(doctor?.entries ?? 0, "no openclaw_install journal after the trigger: the core crossing never ran").toBeGreaterThan(0);
     // The trigger: the first pass met the retired key and took the repair that

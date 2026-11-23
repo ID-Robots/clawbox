@@ -141,12 +141,16 @@ function makeBox(opts: {
     payload(rel, pkg) {
       const root = path.join(dir, "state", rel);
       mkdirSync(root, { recursive: true });
-      // An @openclaw payload is a built package, as the core's own are: its
-      // package.json names ./index.js as its entry, and that file is there.
+      // An @openclaw payload as npm publishes it: a TypeScript source entry
+      // with its built runtime peer declared, and only the built file present.
       if (!pkg) return root;
-      const built = typeof pkg.name === "string" && pkg.name.startsWith("@openclaw/") && !("openclaw" in pkg);
-      writeFileSync(path.join(root, "package.json"), JSON.stringify(built ? { ...pkg, openclaw: { extensions: ["./index.js"] } } : pkg));
-      if (built) writeFileSync(path.join(root, "index.js"), "export default {};\n");
+      const published = typeof pkg.name === "string" && pkg.name.startsWith("@openclaw/") && !("openclaw" in pkg);
+      writeFileSync(path.join(root, "package.json"), JSON.stringify(
+        published ? { ...pkg, openclaw: { extensions: ["./index.ts"], runtimeExtensions: ["./dist/index.js"] } } : pkg));
+      if (published) {
+        mkdirSync(path.join(root, "dist"), { recursive: true });
+        writeFileSync(path.join(root, "dist/index.js"), "export default {};\n");
+      }
       return root;
     },
   };
@@ -948,10 +952,13 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
   });
 
   it.each([
-    ["is missing", (root: string) => rmSync(path.join(root, "index.js"))],
-    ["is empty", (root: string) => writeFileSync(path.join(root, "index.js"), "")],
-    ["is a declared runtime entry that is not there", (root: string) => writeFileSync(path.join(root, "package.json"), JSON.stringify(
-      { name: "@openclaw/discord", version: TARGET, openclaw: { extensions: ["./index.ts"], runtimeExtensions: ["./dist/index.js"] } }))],
+    ["is missing", (root: string) => rmSync(path.join(root, "dist/index.js"))],
+    ["is empty", (root: string) => writeFileSync(path.join(root, "dist/index.js"), "")],
+    // A declared runtime entry is the one the core loads: no fallback to a peer.
+    ["is a declared runtime entry that is missing, though a built file sits beside the source", (root: string) => {
+      rmSync(path.join(root, "dist/index.js"));
+      writeFileSync(path.join(root, "index.js"), "export default {};\n");
+    }],
   ])("reinstalls a plugin at the release whose entry file %s", (_what, spoil) => {
     // A package.json at the release says nothing of the code beside it: a
     // power cut or a kill mid-replacement can leave the one without the other.
@@ -960,6 +967,37 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     const r = run(box);
     expect(r.status, r.stderr).toBe(0);
     expect(installs(r)).toEqual([`@openclaw/discord@${TARGET}`]);
+  });
+
+  it("takes a package as npm publishes it for current: its declared runtime entry, built", () => {
+    const box = makeBox({ core: OLDER });
+    const root = box.plugins[0].rootDir!;
+    expect(JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).openclaw)
+      .toEqual({ extensions: ["./index.ts"], runtimeExtensions: ["./dist/index.js"] });
+    expect(existsSync(path.join(root, "index.ts"))).toBe(false);
+    const r = run(box);
+    expect(r.status, r.stderr).toBe(0);
+    expect(installs(r)).toEqual([]);
+    expect(r.stdout).toContain(`    - @openclaw/codex@${TARGET} (already at ${TARGET})\n`);
+  });
+
+  it.each([
+    ["a NUL", "./dist/index\u0000.js"],
+    ["a lone surrogate", "./dist/\ud800.js"],
+  ])("reinstalls a plugin whose entry holds %s, and handles every other plugin as usual", (_what, entry) => {
+    // JSON carries either; a path holding one cannot be asked of the disk, and
+    // the reader must say so of that plugin, not die before its last line.
+    const box = makeBox({ core: OLDER });
+    writeFileSync(path.join(box.plugins[1].rootDir!, "package.json"), JSON.stringify(
+      { name: "@openclaw/discord", version: TARGET, openclaw: { extensions: ["./index.ts"], runtimeExtensions: [entry] } }));
+    const r = run(box);
+    expect(r.status, r.stderr).toBe(0);
+    expect(installs(r)).toEqual([`@openclaw/discord@${TARGET}`]);
+    expect(r.stdout).toContain(`    - @openclaw/codex@${TARGET} (already at ${TARGET})\n`);
+    expect(r.stdout).toContain("    - owner-plugin (not an OpenClaw or ClawBox plugin: left as installed, as OpenClaw's own update does)\n");
+    // The reader finished: no warning that the list could not be read, and the refresh is recorded.
+    expect(cards(r)).toEqual([]);
+    expect(r.marker).toMatch(new RegExp(`^target=${TARGET.replace(/\./g, "\\.")}\\n`));
   });
 
   it("finds a TypeScript entry by its built peer, as the core loads an installed package", () => {
@@ -1079,7 +1117,7 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     ].join("\n"));
     expect(r.stdout).not.toContain("will retry on next boot");
     expect(cards(r)).toEqual([
-      `CLAWBOX-WARN[openclaw-plugin-refresh]: 2 plugin(s) could not be updated to OpenClaw ${TARGET}: codex, example. They keep their previous version until the next OpenClaw update.`,
+      `CLAWBOX-WARN[openclaw-plugin-refresh]: 2 plugin(s) were not updated to OpenClaw ${TARGET}: codex, example. A plugin stopped at its deadline may need the next OpenClaw update to repair it.`,
     ]);
     // A failed reinstall is not a failed refresh: the full path finished.
     expect(r.marker).toMatch(new RegExp(`^target=${TARGET.replace(/\./g, "\\.")}\\n`));
@@ -1095,7 +1133,7 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
       expect(r.status, r.stderr).toBe(0);
       expect(r.events).toContain("PLUGIN_INSTALL_BOUND 1");
       expect(r.stdout).toContain("retries it). The OpenClaw plugin install was killed at its deadline and said nothing.\n");
-      expect(cards(r)).toEqual([expect.stringContaining(": 1 plugin(s) could not be updated to OpenClaw")]);
+      expect(cards(r)).toEqual([expect.stringContaining(": 1 plugin(s) were not updated to OpenClaw")]);
       expect(r.events.at(-1)).toBe("START clawbox-gateway.service");
       // The child keeps the output it was handed open for 10 s: a step that
       // read it through a pipe would have waited for it, past its bound.
@@ -1115,7 +1153,7 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     expect(installs(r)).toEqual([]);
     expect(r.stdout).toContain(`    - @openclaw/codex@${TARGET}: not attempted, too little of the update's time is left\n`);
     expect(cards(r)).toEqual([
-      `CLAWBOX-WARN[openclaw-plugin-refresh]: 3 plugin(s) could not be updated to OpenClaw ${TARGET}: codex (not attempted), discord (not attempted), example (not attempted). They keep their previous version until the next OpenClaw update.`,
+      `CLAWBOX-WARN[openclaw-plugin-refresh]: 3 plugin(s) were not updated to OpenClaw ${TARGET}: codex (not attempted), discord (not attempted), example (not attempted). A plugin stopped at its deadline may need the next OpenClaw update to repair it.`,
     ]);
     expect(r.marker).toMatch(new RegExp(`^target=${TARGET.replace(/\./g, "\\.")}\\n`));
     expect(r.events.at(-1)).toBe("START clawbox-gateway.service");

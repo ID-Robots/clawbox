@@ -280,6 +280,30 @@ export function describePass(pass: DoctorPass, index: number): string {
     `conflict ${pass.conflictPhase ? `during ${pass.conflictPhase}` : "none"}; doctor complete ${yes(pass.complete)}`;
 }
 
+/**
+ * What the installer's plugin refresh after doctor did, from its own rows in
+ * the openclaw_install journal: codex's row (left "(already at <pin>)", or
+ * reinstalled) and how many rows of each kind. Never a verdict: a refresh that
+ * printed no rows, or another installer's wording, reads as such.
+ */
+export function describeRefresh(lines: readonly JournalLine[]): string {
+  const messages = lines.map((line) => line.message.trim());
+  const start = messages.findIndex((message) => message.startsWith("Refreshing OpenClaw plugins to match core"));
+  if (start < 0) {
+    const other = messages.find((message) =>
+      message === "No external plugins to refresh" || message.startsWith("CLAWBOX-WARN[openclaw-plugin-refresh-skipped]"));
+    return other ?? "no refresh rows in the journal";
+  }
+  const rows = messages.slice(start + 1).filter((message) => message.startsWith("- "));
+  const codex = rows.find((message) => message.startsWith("- @openclaw/codex@"));
+  const current = rows.filter((message) => message.includes(" (already at ")).length;
+  const reinstalled = rows.filter((message) => /^- \S+$/.test(message)).length;
+  const codexSaid = !codex ? "no row"
+    : codex.includes(" (already at ") ? `left: ${codex.slice(2)}`
+      : /^- \S+$/.test(codex) ? `reinstalled: ${codex.slice(2)}` : codex.slice(2);
+  return `codex ${codexSaid}; ${rows.length} rows: ${current} already at the release, ${reinstalled} reinstalled`;
+}
+
 /** The lines worth reading in the job log: every doctor phase and the lines the checks above read. */
 export const KEY_LINE =
   /Doctor[: ]|\[state-migrations\]|Config warnings|Unrecognized key|Migrated legacy config keys|Retired heartbeat|Refreshed stale|Plugin migration obligations changed|ended with exit|Running openclaw doctor|\[db-maintenance\]|cron partition|heartbeat data migration/;

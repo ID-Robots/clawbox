@@ -8057,8 +8057,9 @@ remove_shadowing_system_openclaw() {
 # evidence that the full path has nothing to do:
 #   1. the core answers the target (the caller's own check, made first);
 #   2. the plugins ClawBox manages are at the version the full path would
-#      install, and the core's plugin list reports nothing broken, orphaned or
-#      waiting for consent;
+#      install, or on a correction release at the base it leaves them at, and
+#      the core's plugin list reports nothing broken, orphaned or waiting for
+#      consent;
 #   3. the marker says the full path last FINISHED for this very target, and on
 #      OpenClaw 2 doctor's own record agrees: its last run for this core
 #      completed and no database is behind (or ahead of) the core's schema;
@@ -8569,7 +8570,7 @@ step_openclaw_install() {
       # core refuses to run would only produce a restart loop, and `set -e` makes
       # this return abort the run either way. Said out loud so the operator knows
       # the box is parked rather than guessing.
-      echo "       The gateway is left stopped. Fix the Node, then press Try again." >&2
+      echo "       The gateway is left stopped. Fix the Node, then run the update again." >&2
       as_clawbox rm -rf -- "$_oc_stage" 2>/dev/null || true
       return 1
     fi
@@ -8774,9 +8775,10 @@ step_openclaw_install() {
   # This file otherwise caps no work by the clock; a reinstall is the exception
   # because it is not the update's own work: one killed at its deadline is
   # reported as not updated, and the step goes on. What the kill leaves of that
-  # plugin the pinned core does not document; a payload left without its entry
-  # files is reinstalled by the next full path. The plugin list is asked with
-  # no clock, as in the fast-path check.
+  # plugin the pinned core does not document, and the marker is written all the
+  # same, so the entry-file check below runs again only on a full path: when the
+  # pin moves, or when the fast path refuses for another reason. The plugin list
+  # is asked with no clock, as in the fast-path check.
   #
   # A failed reinstall is non-fatal and keeps its cause: one WARN line under the
   # plugin, and ONE card naming them all. The gateway's pre-start reinstalls
@@ -8849,7 +8851,7 @@ def release(version):
 def filled(path):
     try:
         info = os.stat(path)
-    except OSError:
+    except (OSError, ValueError):
         return False
     return stat.S_ISREG(info.st_mode) and info.st_size > 0
 
@@ -9086,7 +9088,7 @@ print("ok")
       fi
     done <<< "$INSTALLED_PLUGINS"
     if [ "$_oc_missed_n" -gt 0 ]; then
-      echo "CLAWBOX-WARN[openclaw-plugin-refresh]: $_oc_missed_n plugin(s) could not be updated to OpenClaw $TARGET: $_oc_missed. They keep their previous version until the next OpenClaw update."
+      echo "CLAWBOX-WARN[openclaw-plugin-refresh]: $_oc_missed_n plugin(s) were not updated to OpenClaw $TARGET: $_oc_missed. A plugin stopped at its deadline may need the next OpenClaw update to repair it."
     fi
     if [ "$_oc_broken_n" -gt 0 ]; then
       echo "CLAWBOX-WARN[openclaw-owner-plugin-error]: $_oc_broken_n plugin(s) that ClawBox did not install report an error in OpenClaw: $_oc_broken. ClawBox leaves them as installed; until they are fixed or removed, every update stops the assistant to refresh OpenClaw in full."
