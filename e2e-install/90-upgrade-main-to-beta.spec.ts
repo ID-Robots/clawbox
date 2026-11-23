@@ -37,10 +37,165 @@ import {
 } from "./helpers/container";
 import { startUpdate, waitForUpdate } from "./helpers/setup-api";
 import { READY_ACTION_TIMEOUT, waitForAppReady, waitForGatewayReady } from "./helpers/readiness";
+import {
+  baseVersion,
+  journalAfter,
+  journalCursor,
+  openclawCli,
+  parseJsonOut,
+  readMigrationRow,
+  summarizeDoctor,
+  type DoctorSummary,
+  type MigrationRowRead,
+} from "./helpers/openclaw-plugin-migration";
 
 test.use(READY_ACTION_TIMEOUT);
 
 const UPGRADE_BRANCH = process.env.CLAWBOX_UPGRADE_TARGET_BRANCH ?? "beta";
+
+/**
+ * The core crossing. A box whose owner signed in with a ChatGPT subscription
+ * runs the Codex runtime: `agents.defaults.models["openai/<id>"].agentRuntime.id
+ * = "codex"` (src/lib/chatgpt-subscription.ts) and the external @openclaw/codex
+ * plugin at its core's version. The pinned core binds codex's version to its
+ * own (dist official-runtime-plugins: VERSION_BOUND_RUNTIME_PLUGIN_IDS), so
+ * after a core bump that plugin is stale when doctor runs — ClawBox refreshes
+ * plugins only after doctor — and doctor owes it a data/settings migration
+ * (codex declares doctorContract.stateMigrations). That is the state an update
+ * once stopped on at "Updating OpenClaw", and the emptied home the baseline
+ * builds never has it. So the fixture gives main's core exactly that box, and
+ * the last test proves from the core's own record that the obligation was
+ * owed during this update AND completed: it cannot pass with nothing owed.
+ */
+const CODEX_ARM_MODEL = "openai/gpt-5.5";
+const CODEX_ARM_PATH = `agents.defaults.models[${JSON.stringify(CODEX_ARM_MODEL)}].agentRuntime.id`;
+const OPENCLAW_JSON = "/home/clawbox/.openclaw/openclaw.json";
+/** The root step that installs the core and runs doctor; its journal is its own output. */
+const OPENCLAW_INSTALL_UNIT = "clawbox-root-update@openclaw_install.service";
+
+/** Main's pin and the target's; set by the fixture. Equal pins cross nothing. */
+let mainPin = "";
+let targetPin = "";
+let crossing = false;
+/** Where the target update's openclaw_install journal starts, and when it was triggered (epoch ms, container clock). */
+let updateCursor: string | null = null;
+let triggeredAtMs = 0;
+let updateSeconds: number | null = null;
+let codexRowBefore: MigrationRowRead | null = null;
+
+/** The first word of a pin file, as the updater reads it (readPinsAtBranch). */
+const firstWord = (text: string) => text.trim().split(/\s+/)[0] ?? "";
+
+/**
+ * The target branch's OpenClaw pin, read from the branch itself. Not the host
+ * checkout: the schedule and a push to main check out main and target beta.
+ * Not a fetch into the box's checkout either, which would change what the
+ * updater then finds there: a blob-less shallow clone in a scratch directory,
+ * from the remote the updater fetches.
+ */
+async function readTargetPin(branch: string): Promise<string> {
+  if (!/^[A-Za-z0-9._\-/]+$/.test(branch)) throw new Error(`unsafe branch name: ${branch}`);
+  const out = await dockerExec([
+    "bash", "-c",
+    [
+      "set -euo pipefail",
+      'dir="$(mktemp -d)"',
+      "trap 'rm -rf \"$dir\"' EXIT",
+      'url="$(git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox remote get-url origin)"',
+      'git clone --quiet --filter=blob:none --depth=1 --no-checkout --single-branch --branch "$1" "$url" "$dir/pin"',
+      'git -C "$dir/pin" show HEAD:config/openclaw-target.txt',
+    ].join("; "),
+    "bash", branch,
+  ], { user: "clawbox", timeoutMs: 120_000 });
+  return firstWord(out);
+}
+
+async function coreVersion(): Promise<string> {
+  const out = await openclawCli(["--version"], 120_000);
+  return out.stdout.split(/\s+/).find((field) => /^\d+\.\d+\.\d+/.test(field)) ?? "";
+}
+
+interface PluginRow {
+  id?: unknown;
+  origin?: unknown;
+  enabled?: unknown;
+  status?: unknown;
+  version?: unknown;
+  rootDir?: unknown;
+}
+
+/** codex's row in `openclaw plugins list --json`, with the version of the package it loads. */
+async function codexPlugin(): Promise<{ row: PluginRow | undefined; version: string }> {
+  const listed = await openclawCli(["plugins", "list", "--json"], 120_000);
+  expect(listed.exit, `openclaw plugins list --json: ${listed.stderr}`).toBe(0);
+  const plugins = (parseJsonOut(listed.stdout) as { plugins?: PluginRow[] }).plugins ?? [];
+  const row = plugins.find((plugin) => plugin.id === "codex");
+  let version = typeof row?.version === "string" ? row.version : "";
+  if (!version && typeof row?.rootDir === "string") {
+    const pkg = await dockerExec(["cat", `${row.rootDir}/package.json`], { user: "clawbox" });
+    version = String((JSON.parse(pkg) as { version?: unknown }).version ?? "");
+  }
+  return { row, version };
+}
+
+/** Does main's core know `agents.defaults.models.*.agentRuntime.id` (its own `config schema --json`)? */
+function schemaHasRuntimeId(schema: unknown): boolean {
+  let node: unknown = schema;
+  for (const step of [
+    "properties", "agents", "properties", "defaults", "properties", "models",
+    "additionalProperties", "properties", "agentRuntime", "properties", "id", "type",
+  ]) {
+    node = node && typeof node === "object" ? (node as Record<string, unknown>)[step] : undefined;
+  }
+  return node === "string";
+}
+
+const describeRow = (read: MigrationRowRead | null) =>
+  !read ? "(not read)"
+    : !read.db ? "(no state database)"
+      : !read.table ? "(no migration_runs table)"
+        : read.row ? JSON.stringify(read.row) : "(no row)";
+
+/**
+ * What the target update did to codex, printed to the job log (the workflow
+ * dumps the container's journal only on failure, and annotations live only in
+ * the HTML report): the bounded openclaw_install journal, its doctor passes,
+ * the conflict line, the unit's own result and the core's record for codex.
+ */
+async function reportCrossing(outcome: string): Promise<{ doctor: DoctorSummary | null; row: MigrationRowRead }> {
+  const log = (line: string) => console.log(`[codex crossing] ${line}`);
+  log(`core ${mainPin} -> ${targetPin}; update ${outcome}`);
+  let doctor: DoctorSummary | null = null;
+  if (updateCursor) {
+    const lines = await journalAfter(OPENCLAW_INSTALL_UNIT, updateCursor);
+    doctor = summarizeDoctor(lines);
+    log(
+      `${OPENCLAW_INSTALL_UNIT} since the trigger: ${doctor.entries} entries over ${doctor.spanSeconds ?? "?"} s; ` +
+      `doctor passes ${doctor.passes} (start lines ${doctor.runLines}; ${doctor.passEnds.join(", ") || "no numbered pass lines"}); ` +
+      `conflict line ${doctor.conflict ? "present" : "absent"}`,
+    );
+    const excerpt = doctor.doctorStart >= 0 ? lines.slice(doctor.doctorStart, doctor.doctorStart + 150) : [];
+    for (const line of excerpt) log(`doctor| ${line.message}`);
+    if (outcome !== "completed") {
+      for (const line of lines.slice(-60)) log(`tail| ${line.message}`);
+    }
+    await test.info().attach("openclaw_install journal since the trigger", {
+      body: lines.map((line) => line.message).join("\n"),
+      contentType: "text/plain",
+    });
+  } else {
+    log("no journal cursor was taken at the trigger");
+  }
+  const unit = await dockerExec(
+    ["systemctl", "show", OPENCLAW_INSTALL_UNIT, "-p", "ActiveState", "-p", "Result", "-p", "ExecMainStatus"],
+    { user: "root" },
+  );
+  log(`unit ${unit.trim().split("\n").join(", ")}`);
+  const row = await readMigrationRow("codex");
+  log(`migration_runs deferred-plugin-migration:codex before the update: ${describeRow(codexRowBefore)}`);
+  log(`migration_runs deferred-plugin-migration:codex now: ${describeRow(row)}`);
+  return { doctor, row };
+}
 
 /**
  * How many consecutive unanswered status polls (3 s apart) are a rebuild rather
@@ -161,6 +316,84 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     expect(branch, "the upgrade must exercise main → target, not target → itself").toBe("main");
   });
 
+  test("a ChatGPT-style box: codex configured at main's core", async () => {
+    mainPin = firstWord(await dockerExec(["cat", "/home/clawbox/clawbox/config/openclaw-target.txt"]));
+    targetPin = await readTargetPin(UPGRADE_BRANCH);
+    expect(mainPin, "fixture: main's checkout has no OpenClaw pin").not.toBe("");
+    expect(targetPin, `fixture: ${UPGRADE_BRANCH} has no OpenClaw pin`).not.toBe("");
+    crossing = mainPin !== targetPin;
+    test.info().annotations.push({
+      type: "codex-obligation",
+      description: crossing ? `core ${mainPin} -> ${targetPin}` : `not exercised (no core crossing: both pin ${mainPin})`,
+    });
+    console.log(`[codex crossing] main pins ${mainPin}, ${UPGRADE_BRANCH} pins ${targetPin}: ${crossing ? "crossing" : "not exercised"}`);
+    // Equal pins owe nothing, so there is nothing to prove and no reason to
+    // fetch codex twice: "not exercised", never a pass and never a failure.
+    if (!crossing) return;
+
+    // The baseline ends when the web server answers; the CLI below wants the
+    // core and its gateway settled first.
+    await waitForGatewayReady({ timeoutMs: 10 * 60_000, context: "the codex fixture" });
+    expect(await coreVersion(), "fixture: main's core does not answer main's pin").toBe(mainPin);
+    const schema = await openclawCli(["config", "schema", "--json"], 300_000);
+    expect(schema.exit, `fixture: openclaw config schema --json: ${schema.stderr}`).toBe(0);
+    expect(
+      schemaHasRuntimeId(parseJsonOut(schema.stdout)),
+      "fixture: main's core has no agents.defaults.models.*.agentRuntime.id",
+    ).toBe(true);
+
+    // The plugin first, at main's pin, the way the installer's refresh pins it
+    // (`plugins install @openclaw/codex@<pin> --force --accept-capabilities`):
+    // with the arm already set, a gateway start in between would race to
+    // install it under main's pre-start, whose attempt is time-boxed to 120 s.
+    // Then the arm, then the restart, whose pre-start finds codex at its core's
+    // version and leaves it be. The plugin pulls a large app-server package.
+    const installStarted = Date.now();
+    const install = await openclawCli(
+      ["plugins", "install", `@openclaw/codex@${mainPin}`, "--force", "--accept-capabilities"],
+      15 * 60_000,
+    );
+    expect(install.exit, `fixture: plugins install @openclaw/codex@${mainPin}: ${install.stdout}${install.stderr}`).toBe(0);
+    const installSeconds = Math.round((Date.now() - installStarted) / 1000);
+    const arm = await openclawCli(["config", "set", CODEX_ARM_PATH, "codex"], 120_000);
+    expect(arm.exit, `fixture: config set ${CODEX_ARM_PATH}: ${arm.stdout}${arm.stderr}`).toBe(0);
+    const restartStarted = Date.now();
+    await dockerExec(["systemctl", "restart", "clawbox-gateway.service"], { user: "root", timeoutMs: 10 * 60_000 });
+    await waitForGatewayReady({ timeoutMs: 10 * 60_000, context: "the codex fixture's gateway restart" });
+    const restartSeconds = Math.round((Date.now() - restartStarted) / 1000);
+
+    // Hard preconditions: without every one of them the update below owes
+    // codex nothing and would pass for the wrong reason.
+    const codex = await codexPlugin();
+    expect(codex.row, "fixture: codex is not in `openclaw plugins list --json`").toBeDefined();
+    expect(codex.row?.origin, "fixture: codex is the bundled copy, not the external plugin").not.toBe("bundled");
+    expect(codex.row?.enabled, `fixture: codex is not enabled (status ${String(codex.row?.status)})`).toBe(true);
+    expect(baseVersion(codex.version), "fixture: codex is not at main's pin").toBe(baseVersion(mainPin));
+    const config = JSON.parse(await dockerExec(["cat", OPENCLAW_JSON], { user: "clawbox" })) as {
+      agents?: { defaults?: { models?: Record<string, { agentRuntime?: { id?: unknown } }> } };
+      plugins?: { allow?: unknown };
+    };
+    expect(
+      config.agents?.defaults?.models?.[CODEX_ARM_MODEL]?.agentRuntime?.id,
+      "fixture: the codex runtime arm did not survive the gateway restart",
+    ).toBe("codex");
+    const allow = config.plugins?.allow;
+    expect(
+      allow === undefined || (Array.isArray(allow) && allow.includes("codex")),
+      `fixture: plugins.allow ${JSON.stringify(allow)} keeps codex out`,
+    ).toBe(true);
+
+    codexRowBefore = await readMigrationRow("codex");
+    test.info().annotations.push({
+      type: "codex-fixture-seconds",
+      description: `plugins install ${installSeconds} s, gateway restart ${restartSeconds} s`,
+    });
+    console.log(
+      `[codex crossing] fixture: codex ${codex.version} at main's core ${mainPin}; install ${installSeconds} s, ` +
+      `restart ${restartSeconds} s; migration row before the update: ${describeRow(codexRowBefore)}`,
+    );
+  });
+
   test(`pin .update-branch to ${UPGRADE_BRANCH}`, async () => {
     await setUpdateBranch(UPGRADE_BRANCH);
     const contents = await dockerExec(["cat", "/home/clawbox/clawbox/.update-branch"], {
@@ -170,6 +403,11 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
   });
 
   test("trigger updater", async () => {
+    // The baseline's own update ran openclaw_install in the same unit, so only
+    // what comes after this point is the target update's.
+    triggeredAtMs = Number((await dockerExec(["date", "+%s%3N"])).trim());
+    updateCursor = await journalCursor();
+    if (crossing) expect(updateCursor, "fixture: no journal cursor to bound openclaw_install's journal by").not.toBeNull();
     const result = await startUpdate(true);
     expect(result.started).toBe(true);
   });
@@ -187,12 +425,22 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     expect(["completed", "failed"]).toContain(state.phase);
     if (state.phase === "failed") {
       const failedStep = state.steps.find((s) => s.status === "failed");
+      if (crossing) {
+        // Before the throw: the cases after this one are skipped (serial). A
+        // collection error must not replace the step id below.
+        try {
+          await reportCrossing(`failed at step '${failedStep?.id}'`);
+        } catch (err) {
+          console.log(`[codex crossing] evidence could not be collected: ${String(err)}`);
+        }
+      }
       throw new Error(`update failed at step '${failedStep?.id}': ${failedStep?.error ?? state.error ?? "unknown"}`);
     }
     // Every step should be completed by the end.
     for (const step of state.steps) {
       expect(step.status).toBe("completed");
     }
+    if (crossing) updateSeconds = Math.round((Date.now() - triggeredAtMs) / 1000);
   });
 
   test(`git HEAD is on ${UPGRADE_BRANCH}`, async () => {
@@ -329,5 +577,61 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     expect(statusJson.setup_complete).toBe(true);
     expect(statusJson.wifi_configured).toBe(true);
     expect(statusJson.password_configured).toBe(true);
+  });
+
+  // Last, so that a failure here leaves the checks above with their own verdicts.
+  test("the core and codex crossed, and codex's obligation completed", async () => {
+    test.skip(!crossing, "codex-obligation: not exercised (no core crossing)");
+    // Printed first, so a failing assertion below still leaves the evidence.
+    const { doctor, row } = await reportCrossing("completed");
+    test.info().annotations.push(
+      {
+        type: "doctor-passes",
+        description: doctor
+          ? `${doctor.passes} (${doctor.passEnds.join(", ") || `${doctor.runLines} start lines`}); conflict line ${doctor.conflict ? "present" : "absent"}`
+          : "unknown",
+      },
+      {
+        type: "update-seconds",
+        description: `whole update ${updateSeconds ?? "?"} s, openclaw_install ${doctor?.spanSeconds ?? "?"} s`,
+      },
+    );
+    expect(doctor?.entries ?? 0, "no openclaw_install journal after the trigger: the core crossing never ran").toBeGreaterThan(0);
+
+    // The box is on the target's core, and the pin it carries is the one the
+    // fixture compared against.
+    const onBox = firstWord(await dockerExec(["cat", "/home/clawbox/clawbox/config/openclaw-target.txt"]));
+    expect(onBox, `fixture: the pin read from ${UPGRADE_BRANCH} is not the one the update installed`).toBe(targetPin);
+    expect(await coreVersion()).toBe(targetPin);
+    const codex = await codexPlugin();
+    expect(codex.row, "codex is gone from `openclaw plugins list --json` after the update").toBeDefined();
+    expect(baseVersion(codex.version), "codex did not follow the core").toBe(baseVersion(targetPin));
+    const status = JSON.parse(await dockerExec(
+      ["cat", "/home/clawbox/clawbox/data/openclaw-migration-status.json"],
+      { user: "root" },
+    )) as { doctor?: { core?: unknown; verdict?: unknown } };
+    expect(status.doctor?.core, "the doctor verdict names another core").toBe(targetPin);
+    expect(status.doctor?.verdict).toBe("complete");
+
+    // The witness. No row means no obligation was ever recorded: the update
+    // exercised nothing, whatever it reported.
+    const record = row.row;
+    expect(record, `fixture: no codex obligation was ever recorded, so the upgrade exercised nothing (${describeRow(row)})`)
+      .toBeTruthy();
+    if (!record) return;
+    expect(
+      record.finishedAt ?? record.startedAt,
+      `fixture: the codex record predates this update (${JSON.stringify(record)})`,
+    ).toBeGreaterThanOrEqual(triggeredAtMs);
+    // "deferred" is the settle path ("Deferred until active"), which moves no
+    // data; "pending" is an obligation the update left unfinished.
+    const why: Record<string, string> = {
+      deferred: "settled without migrating",
+      pending: "left unfinished by the update",
+    };
+    expect(
+      record.status,
+      `codex's obligation was ${why[record.status] ?? record.status}: ${record.report}`,
+    ).toBe("completed");
   });
 });
