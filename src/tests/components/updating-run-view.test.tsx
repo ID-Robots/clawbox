@@ -393,12 +393,48 @@ describe("/updating draws the System Update run view", () => {
 
     expect(view.getByTestId("update-error-panel")).toHaveTextContent("Installing Chromium");
     expect(view.getByTestId("update-error-reason")).toHaveTextContent("apt could not reach the mirror");
-    expect(view.queryByRole("button", { name: /Resume|again/ })).toBeNull();
+    expect(view.queryByRole("button", { name: /Resume|Start the update again/ })).toBeNull();
 
     fireEvent.click(view.getByRole("button", { name: "Dismiss" }));
     await advance();
     expect(posts).toEqual(["/setup-api/update/dismiss"]);
     expect(replace).toHaveBeenCalledWith("/");
+  });
+
+  it("offers Try again for a failure with a cause of its own, and follows the fresh run it starts", async () => {
+    let again = false;
+    const { fetchMock, posts } = stubBox(() => ({ body: again ? { phase: "running", currentStepIndex: 0, steps: steps(0) } : FAILED, locked: again }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    again = true;
+    const button = view.getByRole("button", { name: "Try again" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await advance();
+    // The page's Resume request: /updating is the update's own screen, so it
+    // asks nothing about agent work and draws no busy dialog.
+    expect(posts).toEqual(["/setup-api/update/run"]);
+    const run = fetchMock.mock.calls.find(([u]) => String(u) === "/setup-api/update/run");
+    expect(JSON.parse(String(run?.[1]?.body))).toEqual({ force: true, ignoreBusy: true });
+    expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
+    await advance(2_000);
+    expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("offers no Try again beside a Dismiss the box did not take", async () => {
+    const { fetchMock, posts } = stubBox(() => ({ body: FAILED, locked: false }));
+    const view = render(<UpdatingPage />);
+    await advance();
+    fetchMock.mockImplementationOnce(async () => respond({ error: "disk full" }, {}, 500));
+    fireEvent.click(view.getByRole("button", { name: "Dismiss" }));
+    await advance();
+    expect(view.getByTestId("update-dismiss-error")).toHaveTextContent("The device could not clear that result.");
+    expect(view.getByTestId("update-error-panel")).toHaveTextContent("Installing Chromium");
+    expect(view.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    expect(posts).not.toContain("/setup-api/update/run");
   });
 
   it("keeps a verdict the box could not clear — its Resume included — and says why beside it", async () => {
