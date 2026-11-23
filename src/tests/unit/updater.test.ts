@@ -6040,6 +6040,43 @@ describe("updater", () => {
       warn.mockRestore();
     });
 
+    it("reads the unit's state before its result, so a unit that ends between the two is still judged failed", async () => {
+      updater.resetUpdateState();
+      // Whichever systemd question comes first sees the unit running; it has
+      // ended, failed, by the next one.
+      let asked = 0;
+      restoredBox([
+        { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
+        { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 64_000 },
+      ], {
+        get active() { return asked++ === 0 ? "activating" : "failed"; },
+        get result() { return asked++ === 0 ? "success" : "exit-code"; },
+      });
+
+      for (let poll = 0; poll < 3 && updater.getUpdateState().phase !== "failed"; poll++) {
+        await updater.checkContinuation();
+      }
+      expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+    });
+
+    it("finds this run's error line behind a long tail of what the unit did after the restore", async () => {
+      // Engines resumed, node-pty rebuilt, the exit traps: each sudo leaves
+      // session lines in the unit's journal, and they all come after the error.
+      updater.resetUpdateState();
+      const tail = Array.from({ length: 60 }, (_, i) => ({
+        message: i % 2 ? "pam_unix(sudo:session): session closed for user clawbox" : "  Still waiting for node-pty...",
+        atMs: DISPATCHED_AT + 60_000 + i,
+      }));
+      restoredBox([
+        { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
+        ...tail,
+        { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 70_000 },
+      ], { active: "failed", result: "exit-code" });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+    });
+
     it("keeps the no-new-build sentence when the rebuild unit ended without failing, whatever it printed last", async () => {
       updater.resetUpdateState();
       const unit = restoredBox([
