@@ -13,6 +13,13 @@ describe("required OpenClaw migration verdict",()=>{
  it("rejects the customer's incomplete-migration warnings even on zero exit",()=>{
   for(const output of ["Agent identity migration requires stopped-writer maintenance", "Legacy session store requires migration", "OpenClaw startup migrations did not complete cleanly", "Skipped historical transcript directive migration"]) expect(verdict(0,output)).toBe(1);
  });
+ // install.sh runs under pipefail, and a doctor run can print a thousand lines: a
+ // `printf | grep -q` check that met the phrase early read printf's SIGPIPE as "no blocker".
+ it("finds a blocker phrase early in output past the pipe buffer, under pipefail",()=>{
+  const output=`Agent identity migration requires stopped-writer maintenance\n${"Doctor: checked one more agent state section\n".repeat(20000)}`;
+  const r=spawnSync("bash",["-c",`set -o pipefail\n${fn}\nopenclaw_migration_complete 0 "$(cat)"`],{input:output});
+  expect(r.status).toBe(1);
+ });
  it("does not confuse optional maintenance notices with migration failures",()=>{
   expect(verdict(0,"Session SQLite: Legacy entries 8; SQLite entries 8.\n5 dead-lettered ingress events.\nNo successful backup is recorded.\nDoctor complete.")).toBe(0);
  });

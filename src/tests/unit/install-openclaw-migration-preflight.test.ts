@@ -116,7 +116,39 @@ function installHelper(freeBytes: number | null): void {
   ].join("\n"));
 }
 
-function runStep(opts: { freeBytes?: number | null; doctor?: "ok" | "incomplete"; helper?: boolean } = {}) {
+/**
+ * A doctor that answers each call from its own script: call n prints
+ * doctor-<n>.out and exits doctor-<n>.rc, and logs its argv with the service
+ * repair policy it was handed. A call nobody scripted fails loudly.
+ */
+function scriptDoctor(passes: Array<{ out: string; rc: number }>): void {
+  passes.forEach((p, i) => {
+    writeFileSync(path.join(dir, `doctor-${i + 1}.out`), p.out);
+    writeFileSync(path.join(dir, `doctor-${i + 1}.rc`), String(p.rc));
+  });
+  const q = (name: string) => JSON.stringify(path.join(dir, name));
+  writeFileSync(path.join(dir, "doctor.sh"), `n=$(( $(cat ${q("doctor-count")} 2>/dev/null || echo 0) + 1 ))
+echo "$n" > ${q("doctor-count")}
+printf 'doctor %s policy=%s\\n' "$*" "\${OPENCLAW_SERVICE_REPAIR_POLICY:-unset}" >> ${q("calls")}
+[ -f ${q("doctor-")}"$n.rc" ] || { echo "UNSCRIPTED doctor call $n"; exit 99; }
+cat ${q("doctor-")}"$n.out"
+exit "$(cat ${q("doctor-")}"$n.rc")"
+`);
+}
+
+function doctorBody(doctor: "ok" | "incomplete" | "scripted" | undefined): string {
+  if (doctor === "scripted") return `exec bash ${JSON.stringify(path.join(dir, "doctor.sh"))} "$@"`;
+  return `printf 'doctor %s\\n' "$*" >> ${JSON.stringify(path.join(dir, "calls"))}
+  ${doctor === "incomplete" ? "echo 'startup migrations did not complete'; exit 1" : "echo 'Doctor complete'; exit 0"}`;
+}
+
+function runStep(opts: {
+  freeBytes?: number | null;
+  doctor?: "ok" | "incomplete" | "scripted";
+  helper?: boolean;
+  /** `set -e` as install.sh dispatches the step, and stderr folded into stdout in order. */
+  asDispatched?: boolean;
+} = {}) {
   if (opts.helper !== false) installHelper(opts.freeBytes ?? null);
   const bin = path.join(dir, "bin");
   mkdirSync(bin, { recursive: true });
@@ -129,8 +161,7 @@ mkdir -p "$stage/bin" "$stage/lib/node_modules/openclaw"
 cat > "$stage/lib/node_modules/openclaw/openclaw.mjs" <<'EOF'
 #!/usr/bin/env bash
 if [ "\${1:-}" = doctor ]; then
-  printf 'doctor %s\\n' "$*" >> ${JSON.stringify(path.join(dir, "calls"))}
-  ${opts.doctor === "incomplete" ? "echo 'startup migrations did not complete'; exit 1" : "echo 'Doctor complete'; exit 0"}
+  ${doctorBody(opts.doctor)}
 fi
 echo "OpenClaw 2026.10.3 (new)"
 EOF
@@ -141,7 +172,7 @@ ln -s ../lib/node_modules/openclaw/openclaw.mjs "$stage/bin/openclaw"
   chmodSync(npm, 0o755);
   const log = JSON.stringify(path.join(dir, "calls"));
   const program = [
-    "set -uo pipefail",
+    opts.asDispatched ? "set -euo pipefail\nexec 2>&1" : "set -uo pipefail",
     `NPM_PREFIX=${JSON.stringify(prefix)}`,
     `OPENCLAW_BIN=${JSON.stringify(path.join(prefix, "bin", "openclaw"))}`,
     `SRC_DIR=${JSON.stringify(src)}`,
@@ -171,7 +202,10 @@ ln -s ../lib/node_modules/openclaw/openclaw.mjs "$stage/bin/openclaw"
     shellFunction("openclaw_migration_complete"),
     shellFunction("openclaw_db_maintenance"),
     shellFunction("openclaw_migration_disk_preflight"),
-    shellFunction("openclaw_record_migration_verdict"),
+    // The shipped record, logged on the way in so a case can count the verdicts.
+    shellFunction("openclaw_record_migration_verdict")
+      .replace("openclaw_record_migration_verdict() {", "shipped_record_migration_verdict() {"),
+    `openclaw_record_migration_verdict() { printf 'verdict %s\\n' "$1" >> ${log}; shipped_record_migration_verdict "$@"; }`,
     // The fast path and its marker have a suite of their own
     // (install-openclaw-fast-path.test.ts); every case here is a full path.
     'openclaw_refresh_fast_path_check() { OPENCLAW_REFRESH_WHY="fixture: full path"; return 1; }',
@@ -180,11 +214,10 @@ ln -s ../lib/node_modules/openclaw/openclaw.mjs "$stage/bin/openclaw"
     shellFunction("step_openclaw_install").replace(/\n  # Force-reinstall every externally-installed plugin[\s\S]*$/, "\n}"),
     "step_openclaw_install",
   ].join("\n");
-  return spawnSync("bash", ["-c", program], {
-    encoding: "utf-8",
-    timeout: 25_000,
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
-  });
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` };
+  // Not inherited: doctor must get the service-repair policy from the step itself.
+  delete env.OPENCLAW_SERVICE_REPAIR_POLICY;
+  return spawnSync("bash", ["-c", program], { encoding: "utf-8", timeout: 25_000, maxBuffer: 64 * 1024 * 1024, env });
 }
 
 describe.skipIf(!hasPython3)("step_openclaw_install: free disk before the schema migration", () => {
@@ -368,4 +401,117 @@ describe.skipIf(!hasPython3)("step_openclaw_install: a core older than the datab
     expect(calls()).toContain("doctor doctor --fix --non-interactive");
     expect(existsSync(agentDb())).toBe(true);
   });
+});
+
+/**
+ * The second doctor pass. On a core bump, doctor converged a stale configured
+ * plugin in the same run (ClawBox refreshes the plugins only after doctor), the
+ * plugin's migration obligation changed under it, and doctor exited 1 with
+ * "Plugin migration obligations changed during migration input publication":
+ * the pinned core leaves that conflict "for a later repair"
+ * (docs/gateway/doctor/state-and-sessions.md), and on a box the next pass
+ * finished it. The step used to give up after one pass with the gateway stopped.
+ *
+ * One more pass, under exactly that gate: exit 1, the conflict line, no blocker
+ * phrase. The verdict is the last pass's, recorded once. Run as install.sh
+ * dispatches the step (`set -euo pipefail`), with stderr folded into stdout so
+ * "the `Error:` line comes last" is about the whole output.
+ */
+describe.skipIf(!hasPython3)("step_openclaw_install: a second doctor pass for a plugin obligation that changed under the first", () => {
+  const CONFLICT = "Plugin migration obligations changed during migration input publication";
+  // Doctor's own lines, cut down, from a pass that converged a plugin under its own obligation.
+  const CONFLICT_PASS = [
+    "◇  Doctor changes",
+    '  - Refreshed stale configured plugin "codex" from @openclaw/codex@2026.11.5.',
+    '[state-migrations] Plugin "codex" data/settings upgrade is unfinished: The installed plugin has not confirmed that its saved data and settings are ready for this version. Run "openclaw doctor --fix" to retry the upgrade.',
+    "Doctor could not complete maintenance. Check the reported service state and resolve the failure.",
+    "Doctor: maintenance release",
+    `${CONFLICT}. expected=[codex], current=[codex], changed=[codex:command, codex:reason]. Retained inputs remain protected; run "openclaw doctor --fix" after the other repair finishes.`,
+    "",
+  ].join("\n");
+  const COMPLETE_PASS = [
+    '[state-migrations] Deferred state migration completed for plugin "codex".',
+    "Doctor: maintenance release",
+    "└  Doctor complete.",
+    "",
+  ].join("\n");
+  const PREFIX = "Error: OpenClaw migration did not complete; leaving the gateway stopped.";
+  // Past any pipe buffer, so a `printf | grep -q` blocker check would read SIGPIPE as "no blocker".
+  const FILLER = Array.from({ length: 6000 }, (_, i) => `Doctor: check ${i} of the agent state ${"·".repeat(40)}`).join("\n");
+
+  const doctorCalls = () => calls().filter((c) => c.startsWith("doctor "));
+  const verdicts = () => calls().filter((c) => c.startsWith("verdict "));
+  const lastLine = (out: string) => out.trimEnd().split("\n").pop() ?? "";
+  const run = (passes: Array<{ out: string; rc: number }>) => {
+    scriptDoctor(passes);
+    return runStep({ freeBytes: 1024 ** 4, doctor: "scripted", asDispatched: true });
+  };
+
+  it("runs under errexit as dispatched, with one pass when the first completes", () => {
+    const r = run([{ out: COMPLETE_PASS, rc: 0 }]);
+    expect(r.status, r.stdout).toBe(0);
+    expect(doctorCalls()).toEqual(["doctor doctor --fix --non-interactive policy=external"]);
+    expect(verdicts()).toEqual(["verdict complete"]);
+    expect(r.stdout).not.toMatch(/pass 2 of 2/);
+  });
+
+  it("runs doctor once more when the first pass ends on the obligation conflict, and records the second pass complete", () => {
+    const r = run([{ out: CONFLICT_PASS, rc: 1 }, { out: COMPLETE_PASS, rc: 0 }]);
+    expect(r.status, r.stdout).toBe(0);
+    expect(doctorCalls()).toEqual([
+      "doctor doctor --fix --non-interactive policy=external",
+      "doctor doctor --fix --non-interactive policy=external",
+    ]);
+    expect(verdicts()).toEqual(["verdict complete"]);
+    expect(statusFile()).toMatchObject({ doctor: { core: "2026.10.3", verdict: "complete" } });
+    const header = r.stdout.split("\n").find((l) => l.includes("pass 2 of 2")) ?? "";
+    expect(header).toMatch(new RegExp(`^  Running openclaw doctor --fix again \\(pass 2 of 2\\) after: ${CONFLICT}; \\d+s into the step$`));
+    expect(r.stdout).not.toMatch(/^(Error|Fatal)\b|CLAWBOX-WARN/m);
+    expect(calls().some((c) => c.startsWith("npm "))).toBe(true);
+  });
+
+  it("stops after two passes that both end on the conflict, records incomplete once and leaves the gateway stopped", () => {
+    const r = run([{ out: CONFLICT_PASS, rc: 1 }, { out: CONFLICT_PASS, rc: 1 }]);
+    expect(r.status).toBe(1);
+    expect(doctorCalls()).toHaveLength(2);
+    expect(verdicts()).toEqual(["verdict incomplete"]);
+    expect(statusFile()).toMatchObject({ doctor: { verdict: "incomplete" } });
+    expect(lastLine(r.stdout)).toBe(`${PREFIX} Doctor: ${CONFLICT}`);
+    expect(calls()).not.toContain("systemctl start clawbox-gateway.service");
+  });
+
+  // A rerun cannot cure these (docs/cli/doctor/running.md), so they get one pass, as before.
+  const ONE_PASS: Array<[string, { out: string; rc: number }, string]> = [
+    ["exit 2", { out: "Doctor could not resolve the database target.\n", rc: 2 }, "doctor exited 2"],
+    [
+      "exit 1 without the conflict line",
+      { out: "Doctor could not complete maintenance. Check the reported service state and resolve the failure.\nUnsupported workspace version: use an OpenClaw build that supports that version.\n", rc: 1 },
+      "Doctor could not complete maintenance",
+    ],
+    ["exit 124", { out: "", rc: 124 }, "doctor exited 124"],
+    [
+      "the conflict line beside a blocker phrase",
+      { out: `Agent identity migration requires stopped-writer maintenance\n${FILLER}\n${CONFLICT_PASS}`, rc: 1 },
+      "requires stopped-writer maintenance",
+    ],
+  ];
+
+  for (const [name, pass] of ONE_PASS) {
+    it(`does not run doctor again on ${name}`, () => {
+      const r = run([pass, { out: COMPLETE_PASS, rc: 0 }]);
+      expect(r.status).toBe(1);
+      expect(doctorCalls()).toHaveLength(1);
+      expect(verdicts()).toEqual(["verdict incomplete"]);
+      expect(lastLine(r.stdout).startsWith(PREFIX), lastLine(r.stdout)).toBe(true);
+      expect(calls()).not.toContain("systemctl start clawbox-gateway.service");
+    });
+  }
+
+  // Only a line doctor is known to print, never its free last line: the sentence reaches the UI.
+  for (const [name, pass, reason] of ONE_PASS) {
+    it(`names doctor's recognised reason on the Error line after ${name}`, () => {
+      const r = run([pass]);
+      expect(lastLine(r.stdout)).toBe(`${PREFIX} Doctor: ${reason}`);
+    });
+  }
 });

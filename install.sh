@@ -7720,12 +7720,15 @@ step_edition_select() {
   edition_select_restart_web "$name"
 }
 
+# Doctor finished the migration: exit 0, and none of the phrases that name one
+# it left unfinished. The first such phrase is left in OPENCLAW_MIGRATION_BLOCKER
+# for the caller's retry gate and `Error:` line. A here-string, not
+# `printf | grep`: on output past the pipe buffer, grep leaving at an early
+# match is SIGPIPE to printf, which pipefail reads as "no blocker".
 openclaw_migration_complete() {
-  [ "$1" -eq 0 ] || return 1
-  if printf '%s\n' "$2" | grep -qiE 'requires stopped-writer maintenance|Legacy session store requires migration|startup migrations did not complete|Skipped historical transcript directive migration'; then
-    return 1
-  fi
-  return 0
+  OPENCLAW_MIGRATION_BLOCKER="$(grep -m 1 -oiE 'requires stopped-writer maintenance|Legacy session store requires migration|startup migrations did not complete|Skipped historical transcript directive migration' <<<"$2" || true)"
+  OPENCLAW_MIGRATION_BLOCKER="${OPENCLAW_MIGRATION_BLOCKER%%$'\n'*}"
+  [ "$1" -eq 0 ] && [ -z "$OPENCLAW_MIGRATION_BLOCKER" ]
 }
 
 # scripts/openclaw-db-maintenance.py, run as the clawbox account: it only reads
@@ -8404,6 +8407,7 @@ step_openclaw_install() {
   local CORE_NEEDS_INSTALL=1
   local _oc_gateway_stopped=0
   local _oc_core_why="no OpenClaw core is installed at $OPENCLAW_BIN"
+  local _oc_step_started=$SECONDS
 
   # Keep this guard inside the OpenClaw step too, not only in apt_update:
   # update retries can start from this step, and EVERY Node 22 — not just the
@@ -8578,17 +8582,44 @@ step_openclaw_install() {
       echo "Error: ${OPENCLAW_MIGRATION_REFUSAL:-OpenClaw $TARGET cannot take over the databases on this box (too old for them, or not enough free disk for their migration)}; leaving the gateway stopped" >&2
       return 1
     fi
+    # One more pass for exactly one failure: doctor converged a stale configured
+    # plugin in this same run (ClawBox refreshes the plugins only after this
+    # block), the plugin's migration obligation changed under it, and doctor
+    # exited 1 with the conflict below, which the pinned core leaves "for a later
+    # repair" (docs/gateway/doctor/state-and-sessions.md); on a box the next pass
+    # finished it. Nothing else is retried: exit 2 ran no migration, and the
+    # other exit-1 states "cannot" be resolved by "repeating the same repair
+    # invocation" (docs/cli/doctor/running.md). The verdict is the last pass's.
     local _oc_doctor_out
-    local _oc_doctor_rc=0
-    _oc_doctor_out="$(as_clawbox -H env \
-      OPENCLAW_STATE_DIR="$CLAWBOX_HOME/.openclaw" \
-      OPENCLAW_CONFIG_PATH="$CLAWBOX_HOME/.openclaw/openclaw.json" \
-      OPENCLAW_SERVICE_REPAIR_POLICY="$OPENCLAW_SERVICE_REPAIR_POLICY" \
-      "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)" || _oc_doctor_rc=$?
-    printf '%s\n' "$_oc_doctor_out"
+    local _oc_doctor_rc _oc_doctor_pass _oc_doctor_why
+    local _oc_doctor_conflict='Plugin migration obligations changed during migration input publication'
+    for _oc_doctor_pass in 1 2; do
+      _oc_doctor_rc=0
+      _oc_doctor_out="$(as_clawbox -H env \
+        OPENCLAW_STATE_DIR="$CLAWBOX_HOME/.openclaw" \
+        OPENCLAW_CONFIG_PATH="$CLAWBOX_HOME/.openclaw/openclaw.json" \
+        OPENCLAW_SERVICE_REPAIR_POLICY="$OPENCLAW_SERVICE_REPAIR_POLICY" \
+        "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)" || _oc_doctor_rc=$?
+      printf '%s\n' "$_oc_doctor_out"
+      echo "  openclaw doctor --fix pass $_oc_doctor_pass ended with exit $_oc_doctor_rc, $((SECONDS - _oc_step_started))s into the step"
+      if openclaw_migration_complete "$_oc_doctor_rc" "$_oc_doctor_out" \
+        || [ "$_oc_doctor_pass" -ne 1 ] || [ "$_oc_doctor_rc" -ne 1 ] \
+        || [ -n "$OPENCLAW_MIGRATION_BLOCKER" ] \
+        || [[ "$_oc_doctor_out" != *"$_oc_doctor_conflict"* ]]; then
+        break
+      fi
+      echo "  Running openclaw doctor --fix again (pass 2 of 2) after: $_oc_doctor_conflict; $((SECONDS - _oc_step_started))s into the step"
+    done
     if ! openclaw_migration_complete "$_oc_doctor_rc" "$_oc_doctor_out"; then
       openclaw_record_migration_verdict incomplete "$_oc_live_pkg"
-      echo "Error: OpenClaw migration did not complete; leaving the gateway stopped. Resolve the reported blocker and Retry before rebuilding." >&2
+      # Only a line doctor is known to print, never its free last line: this
+      # sentence is copied into the update status the UI and MCP serve.
+      case "$_oc_doctor_out" in
+        *"$_oc_doctor_conflict"*) _oc_doctor_why="$_oc_doctor_conflict" ;;
+        *'Doctor could not complete maintenance'*) _oc_doctor_why='Doctor could not complete maintenance' ;;
+        *) _oc_doctor_why="doctor exited $_oc_doctor_rc" ;;
+      esac
+      echo "Error: OpenClaw migration did not complete; leaving the gateway stopped. Doctor: ${OPENCLAW_MIGRATION_BLOCKER:-$_oc_doctor_why}" >&2
       return 1
     fi
     # Complete: the gateway's pre-start retires the copies once every database
