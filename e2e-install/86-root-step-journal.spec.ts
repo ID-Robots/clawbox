@@ -11,11 +11,12 @@
  * this spec checks them against the binary.
  *
  * The probe is a real instance of the root-step template with only its
- * ExecStart replaced by a runtime drop-in. The shipped reader takes a step
- * name, not a unit, and systemd refuses a transient unit named after an
- * installed template, so an instance is how the reader reads the probe as it
- * is. The probe prints N lines, then an `Error:` line on stderr as install.sh
- * does, and exits 1.
+ * ExecStart replaced by a runtime drop-in: the shipped reader takes a step
+ * name, not a unit, so the probe is the unit that name stands for. It prints
+ * N lines, then an `Error:` line on stderr as install.sh does, and exits 1.
+ *
+ * Numbered late on purpose: it reloads systemd and writes 20,000 journal
+ * lines, which the setup wizard and the UI specs should not run right after.
  *
  * `getStepFailureLine` and `readRootStepFailure` are private to updater.ts, so
  * the reader script loads a copy of the shipped file with one export line
