@@ -2,6 +2,7 @@
 # timeout: 2100
 # tier: long
 # covers: src/lib/external-engine.ts src/lib/external-engine-shared.ts src/app/setup-api/local-ai/external/*
+# covers: src/lib/external-engine-hermes.ts src/lib/external-engine-ops.ts
 # covers: src/components/local-ai/ExternalEngineCard.tsx
 # covers: scripts/nano-tests/board/openai-mock.mjs scripts/nano-tests/board/external-engine-reasoning-ui.mjs
 #
@@ -15,7 +16,9 @@
 #   * Test with `detectReasoning` says the engine reasons;
 #   * Save with the switch ON: the record keeps it, OpenClaw's model entry is
 #     `reasoning: true` with Off mapped to `none` (Hermes keeps its own
-#     per-turn level and gets no new key);
+#     per-turn level and gets no reasoning key in `providers.clawext`; every
+#     Hermes save does declare the model's capabilities under `model_overrides`, and
+#     Hermes' own picker reads them from /api/model/info);
 #   * EVERY level, by the CLI and in the owner's browser: the picker lists
 #     them, a turn at each sends the expected `reasoning_effort` (the mock's
 #     log is the proof); on Hermes the reply shows its reasoning part or, at
@@ -355,6 +358,18 @@ else
   # shellcheck disable=SC2016  # expanded on the board
   hk=$(board 'PATH="$HOME/.local/bin:$PATH" timeout 60 hermes config get providers.clawext 2>/dev/null | grep -ci reason || true' | tail -n1)
   if [ "${hk:-0}" = 0 ]; then ok "Hermes: no reasoning key is written into providers.clawext (Hermes sends the chat's level itself)"; else not_ok "Hermes providers.clawext carries a reasoning key"; fi
+  # Hermes' own picker (v0.23+) shows only for a model whose /api/model/info
+  # capabilities say it reasons; models.dev does not know clawext, so the box
+  # declares them (model_overrides). The dashboard reads config.yaml per request.
+  caps=
+  for _ in 1 2 3 4 5 6; do
+    # shellcheck disable=SC2016  # expanded on the board
+    caps=$(board 'curl -s --max-time 20 http://127.0.0.2:9119/api/model/info' | tail -n1)
+    caps=$(jq -r '[.provider, .model, (.capabilities.supports_reasoning | tostring), (.capabilities.supports_tools | tostring)] | join(" ")' <<<"$caps" 2>/dev/null)
+    [ "$caps" = "clawext $MODEL true true" ] && break
+    sleep 5
+  done
+  if [ "$caps" = "clawext $MODEL true true" ]; then ok "Hermes' /api/model/info: clawext's model reasons and calls tools"; else not_ok "Hermes' /api/model/info for the engine (provider model reasoning tools): ${caps:-no answer}"; fi
 fi
 
 # 4. Every level by the runtime's CLI.

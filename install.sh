@@ -1366,8 +1366,8 @@ OPENCLAW_VERSION="2026.11.5"
 # Bump the default in a PR, ship it through beta -> main, and the fleet
 # follows on its next update.
 #
-# Current pin: upstream tag v0.23.1 == "Hermes Agent v0.23.1".
-HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-3b421578588243f920886e6fe79a6faa87ea026e}"
+# Current pin: upstream tag v0.23.3 == "Hermes Agent v0.23.3".
+HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-caafe5389ae585ef77387a962aee05b1bcf17029}"
 
 # WHO OWNS THE GATEWAY SERVICE, said to the core rather than left for it to
 # guess. ClawBox supervises the gateway itself, as the SYSTEM unit

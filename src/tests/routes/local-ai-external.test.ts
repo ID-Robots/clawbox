@@ -395,6 +395,8 @@ describe("on Hermes", () => {
       "providers.clawext.api_key": KEY,
       "providers.clawext.models": MODEL,
       "providers.clawext.context_length": "131072",
+      "model_overrides.clawext._default.supports_reasoning": "true",
+      "model_overrides.clawext._default.supports_tools": "true",
       "model.provider": "clawext",
       "model.default": MODEL,
     });
@@ -438,7 +440,10 @@ describe("on Hermes", () => {
     const res = await DELETE(req("DELETE"));
     expect(res.status).toBe(200);
     const patch = vi.mocked(patchHermesConfig).mock.calls[0][0];
-    expect(patch.unset).toEqual(expect.arrayContaining(["providers.clawext.base_url", "providers.clawext.api_key", "model.provider", "model.default"]));
+    expect(patch.unset).toEqual(expect.arrayContaining([
+      "providers.clawext.base_url", "providers.clawext.api_key", "model.provider", "model.default",
+      "model_overrides.clawext._default.supports_reasoning", "model_overrides.clawext._default.supports_tools",
+    ]));
     expect(applyLocalAiToHermes).toHaveBeenCalledWith({ provider: "llamacpp", model: "gemma4-e2b-it-q4_0", makeDefault: true });
     expect(store.local_ai_provider).toBe("llamacpp");
     expect(store.external_engine).toBeUndefined();
@@ -612,7 +617,8 @@ describe("a save the store could not record, and Hermes' provider block", () => 
     const { reconcileExternalEngineWithHermes, resetExternalEngineReconcileForTests } = await import("@/lib/external-engine-hermes");
     await POST(req("POST", saveBody()));
     resetExternalEngineReconcileForTests();
-    vi.mocked(resolveHermesConfigValue).mockResolvedValue({ state: "value", value: BASE });
+    vi.mocked(resolveHermesConfigValue).mockImplementation(async (key: string) =>
+      ({ state: "value", value: key === "providers.clawext.base_url" ? BASE : "true" }));
     vi.mocked(patchHermesConfig).mockClear();
     expect(await reconcileExternalEngineWithHermes()).toBe(true);
     expect(patchHermesConfig).not.toHaveBeenCalled();
@@ -621,6 +627,37 @@ describe("a save the store could not record, and Hermes' provider block", () => 
     expect(await reconcileExternalEngineWithHermes()).toBe(true);
     const sets = vi.mocked(patchHermesConfig).mock.calls.map(([p]) => p.set ?? {});
     expect(sets.some((set) => set["providers.clawext.base_url"] === BASE)).toBe(true);
+  });
+
+  it("the Hermes read path rewrites a current block saved before the model's capabilities were declared", async () => {
+    // An engine saved on an older build, then updated: the block is in place,
+    // the declaration Hermes needs for the reasoning picker is not.
+    const { reconcileExternalEngineWithHermes, resetExternalEngineReconcileForTests } = await import("@/lib/external-engine-hermes");
+    await POST(req("POST", saveBody()));
+    resetExternalEngineReconcileForTests();
+    vi.mocked(resolveHermesConfigValue).mockImplementation(async (key: string) =>
+      key === "providers.clawext.base_url" ? { state: "value", value: BASE } : { state: "absent" });
+    vi.mocked(patchHermesConfig).mockClear();
+    expect(await reconcileExternalEngineWithHermes()).toBe(true);
+    const sets = vi.mocked(patchHermesConfig).mock.calls.map(([p]) => p.set ?? {});
+    expect(sets).toContainEqual(expect.objectContaining({
+      "providers.clawext.base_url": BASE,
+      "model_overrides.clawext._default.supports_reasoning": "true",
+      "model_overrides.clawext._default.supports_tools": "true",
+    }));
+  });
+
+  it("the Hermes read path rewrites a block that declares reasoning but not tool calls", async () => {
+    const { reconcileExternalEngineWithHermes, resetExternalEngineReconcileForTests } = await import("@/lib/external-engine-hermes");
+    await POST(req("POST", saveBody()));
+    resetExternalEngineReconcileForTests();
+    vi.mocked(resolveHermesConfigValue).mockImplementation(async (key: string) =>
+      key === "model_overrides.clawext._default.supports_tools" ? { state: "absent" }
+        : { state: "value", value: key === "providers.clawext.base_url" ? BASE : "true" });
+    vi.mocked(patchHermesConfig).mockClear();
+    expect(await reconcileExternalEngineWithHermes()).toBe(true);
+    const sets = vi.mocked(patchHermesConfig).mock.calls.map(([p]) => p.set ?? {});
+    expect(sets).toContainEqual(expect.objectContaining({ "model_overrides.clawext._default.supports_tools": "true" }));
   });
 
   it("registers a later save with a window Hermes can run, after one under its floor was skipped", async () => {
@@ -752,8 +789,9 @@ describe("the reasoning switch (TASK-2497)", () => {
     const res = await POST(req("POST", saveBody({ reasoning: true })));
     expect(res.status).toBe(200);
     expect((store.external_engine as { reasoning: boolean }).reasoning).toBe(true);
+    // Only the capability declaration every save writes, switch on or off.
     const keys = vi.mocked(patchHermesConfig).mock.calls.flatMap(([p]) => Object.keys(p.set ?? {}));
-    expect(keys.some((k) => /reason/i.test(k))).toBe(false);
+    expect(keys.filter((k) => /reason/i.test(k))).toEqual(["model_overrides.clawext._default.supports_reasoning"]);
     const got = await (await GET(req("GET"))).json();
     expect(got.unsupported).toEqual(["maxTokens", "imageInput", "reasoning"]);
     expect(got.reasoning).toBe(true);
