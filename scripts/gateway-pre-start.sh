@@ -6641,7 +6641,7 @@ if not picked and lines:
 
 cmd = os.environ["CLAWBOX_CAUSE_CMD"]
 rc = os.environ["CLAWBOX_CAUSE_RC"]
-# 124 is `timeout` at the ceiling and 137 the SIGKILL `-k 5` sends after it —
+# 124 is `timeout` at the ceiling and 137 the SIGKILL `timeout -k` sends after it —
 # neither is the core saying no, and the row must not read as though it were.
 head = f"{cmd} was killed at its deadline" if rc in ("124", "137") else f"{cmd} exited {rc}"
 if not picked:
