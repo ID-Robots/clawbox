@@ -11092,6 +11092,22 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
     clawbox_agents_append "$CLAWBOX_AGENTS_VOICE_RULE" "$CLAWBOX_AGENTS_VOICE_RULE_TEXT" \
       "Appended the voice-notes rule to AGENTS.md" \
       "could not append the voice-notes rule to AGENTS.md"
+
+    # WHERE THE THINKING LEVEL IS. OpenClaw's system prompt carries
+    # `Reasoning=<level>` in its Runtime section, and that is reasoning
+    # VISIBILITY (`/reasoning on|off|stream`, off by default), not how hard the
+    # model thinks, which the prompt never states: "Reasoning effort travels
+    # through provider controls" (OpenClaw 2026.11.5
+    # docs/concepts/system-prompt.md). Asked what reasoning it used, the agent
+    # read that line and told an owner whose effort pill said High that
+    # reasoning was off, and to use /reasoning. The level is on the card of
+    # OpenClaw's own `session_status` tool, so the rule sends the agent there.
+    # Its own marker, so it lands on every box once, like the rules above.
+    CLAWBOX_AGENTS_THINKING_RULE="## Thinking level on this ClawBox"
+    printf -v CLAWBOX_AGENTS_THINKING_RULE_TEXT '\n\n%s\n\nHow hard you think is your thinking level. The owner calls it reasoning effort and sets it with the effort pill (brain icon) under the message box in the ClawBox chat. Your prompt does not state it: `Reasoning=` in your Runtime section is only OpenClaw reasoning VISIBILITY (`/reasoning on|off|stream`: whether your thinking is shown as a separate message), and it says nothing about whether or how hard you think.\n\nWhen asked what reasoning, effort or thinking level you use, call `session_status` with `sessionKey: "current"` and no `model` (find it with `tool_search` if it is not among your tools), and report the `think` value on its card. If you cannot read it, say so and never name a level you did not read there. To change the level, point to the effort pill, not to `/reasoning` or `/think`.\n' "$CLAWBOX_AGENTS_THINKING_RULE"
+    clawbox_agents_append "$CLAWBOX_AGENTS_THINKING_RULE" "$CLAWBOX_AGENTS_THINKING_RULE_TEXT" \
+      "Appended the thinking-level rule to AGENTS.md" \
+      "could not append the thinking-level rule to AGENTS.md"
   fi
 
   # --- clawbox language re-apply ---
