@@ -4731,7 +4731,7 @@ function readConfiguredWorkspace(): string | undefined {
  * the same expression, and the shell side is out of this route's scope to
  * change.
  */
-function resolveWorkspaceValue(workspace: string): string {
+export function resolveWorkspaceValue(workspace: string): string {
   const home = process.env.HOME || "/home/clawbox";
   const expanded = workspace === "~" ? home
     : workspace.startsWith("~/") ? path.join(home, workspace.slice(2))
