@@ -863,7 +863,12 @@ import { currentCoreRelease } from "./plugin-repair-run";
 // InvocationID` cannot answer it (systemd has collected the instance by the
 // time anyone asks), and the same read is owed to the follow in
 // root-step-follow.ts.
-import { DISPATCH_VERDICT_LINE, rootStepJournalArgs, rootStepUnit } from "./root-step-journal";
+import {
+  DISPATCH_VERDICT_LINE,
+  readRootStepJournalTail,
+  rootStepJournalArgs,
+  rootStepUnit,
+} from "./root-step-journal";
 
 // Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
 // Jetson, plus the config/redeploy steps before it and the reboot after.
@@ -1178,6 +1183,15 @@ const STEP_WARNING_LINE = /^CLAWBOX-WARN(?:\[([a-z0-9._:-]{1,60})\])?:\s*(.+)$/i
 const STEP_WARNING_MAX_CHARS = 300;
 
 /**
+ * The ceiling for a read of a root step's WHOLE run, which fails outright when
+ * the run outgrows it. Node's 1 MiB default is within reach of the longest
+ * steps (an `openclaw_install` with doctor's transcript wrote 126 KB in
+ * `-o cat` form; `rebuild_reboot` and `post_update` were not measured). A
+ * chosen margin, not a measured need.
+ */
+const ROOT_STEP_JOURNAL_MAX_BUFFER = 16 * 1024 * 1024;
+
+/**
  * Raise every marker THIS dispatch of a root step left in its journal.
  *
  * Read after the step settles, whatever its outcome: a step that failed reports
@@ -1194,12 +1208,18 @@ const STEP_WARNING_MAX_CHARS = 300;
 async function collectRootStepWarnings(stepId: string, sinceMs: number): Promise<void> {
   let stdout = "";
   try {
+    // The WHOLE run: a marker can be its first line or its last, and any `-n`
+    // drops one end (root-step-journal.ts). Not `--grep` either, which exits 1
+    // on the clean run that has no marker.
     ({ stdout } = await execFile(
       "/usr/bin/journalctl",
-      rootStepJournalArgs(stepId, { sinceMs, lines: 500 }),
-      { timeout: 10_000 },
+      rootStepJournalArgs(stepId, { sinceMs }),
+      { timeout: 10_000, maxBuffer: ROOT_STEP_JOURNAL_MAX_BUFFER },
     ));
-  } catch {
+  } catch (err) {
+    console.warn(
+      `[Updater] ${stepId}: its journal could not be read for skipped fixups (${err instanceof Error ? err.message : String(err)})`,
+    );
     return;
   }
   const seen = new Set<string>();
@@ -1240,13 +1260,11 @@ async function collectRootStepWarnings(stepId: string, sinceMs: number): Promise
 async function readRootStepFailure(stepId: string, sinceMs: number | null): Promise<string | null> {
   const unit = rootStepUnit(stepId);
   try {
-    const { stdout } = await execFile(
-      "/usr/bin/journalctl",
-      sinceMs === null
-        ? ["-u", unit, "-n", "40", "--no-pager", "-o", "cat"]
-        : rootStepJournalArgs(stepId, { sinceMs, lines: 40 }),
-      { timeout: 10_000 },
-    );
+    // Without `--since`, `-n 40` IS the unit's last 40 entries on every
+    // journalctl; with it, only the tail reader is (root-step-journal.ts).
+    const stdout = sinceMs === null
+      ? (await execFile("/usr/bin/journalctl", ["-u", unit, "-n", "40", "--no-pager", "-o", "cat"], { timeout: 10_000 })).stdout
+      : await readRootStepJournalTail(stepId, { sinceMs, lines: 40, timeoutMs: 10_000 });
     return getStepFailureLine(stdout, unit);
   } catch {
     return null;
@@ -5222,13 +5240,17 @@ interface X64SkippedSteps {
   labels: string[];
 }
 
-/** Everything THIS dispatch of a root step wrote, or "" if it cannot be read. */
+/**
+ * Everything THIS dispatch of a root step wrote, or "" if it cannot be read.
+ * The whole run, not a slice of it: its readers look for a line that can sit
+ * anywhere in it (the fast-path line comes early, doctor's output after it).
+ */
 async function readRootStepJournal(stepId: string, sinceMs: number): Promise<string> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/journalctl",
-      rootStepJournalArgs(stepId, { sinceMs, lines: 80 }),
-      { timeout: 10_000 },
+      rootStepJournalArgs(stepId, { sinceMs }),
+      { timeout: 10_000, maxBuffer: ROOT_STEP_JOURNAL_MAX_BUFFER },
     );
     return String(stdout ?? "");
   } catch {

@@ -1,6 +1,12 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import * as childProcess from "child_process";
-import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
+import {
+  readRootStepJournalTail,
+  rootStepJournalArgs,
+  rootStepJournalTailArgs,
+  rootStepUnit,
+} from "@/lib/root-step-journal";
+import { journalctlModel, numberedEntries } from "@/tests/helpers/journalctl-model";
 
 vi.mock("child_process", () => ({ execFile: vi.fn() }));
 
@@ -32,7 +38,7 @@ const mockExecFile = vi.mocked(childProcess.execFile);
  */
 describe("rootStepJournalArgs", () => {
   it("reads by unit NAME, which outlives the unit", () => {
-    const args = rootStepJournalArgs("post_update", { sinceMs: 1_700_000_000_000, lines: 500 });
+    const args = rootStepJournalArgs("post_update", { sinceMs: 1_700_000_000_000 });
 
     expect(args).toContain("-u");
     expect(args).toContain(rootStepUnit("post_update"));
@@ -44,7 +50,7 @@ describe("rootStepJournalArgs", () => {
   it("bounds the read to the run the caller dispatched", () => {
     // The journal is persistent, so an unbounded read answers with the last
     // update's failures over a clean one.
-    const args = rootStepJournalArgs("post_update", { sinceMs: 1_700_000_000_500, lines: 500 });
+    const args = rootStepJournalArgs("post_update", { sinceMs: 1_700_000_000_500 });
     const since = args[args.indexOf("--since") + 1];
 
     expect(since).toBe("@1700000000.500");
@@ -56,11 +62,66 @@ describe("rootStepJournalArgs", () => {
     // a floored bound opens BEFORE the line it exists to exclude. systemd.time
     // takes fractions to 1 us and journalctl really filters on them.
     const previousAttemptWroteAt = 1_700_000_000_100;
-    const args = rootStepJournalArgs("post_update", { sinceMs: 1_700_000_000_900, lines: 40 });
-    const since = Number(args[args.indexOf("--since") + 1].slice(1));
+    for (const args of [
+      rootStepJournalArgs("post_update", { sinceMs: 1_700_000_000_900 }),
+      rootStepJournalTailArgs("post_update", { sinceMs: 1_700_000_000_900, lines: 40 }),
+    ]) {
+      const since = Number(args[args.indexOf("--since") + 1].slice(1));
+      expect(since * 1000).toBeGreaterThan(previousAttemptWroteAt);
+    }
+  });
 
-    expect(since * 1000).toBeGreaterThan(previousAttemptWroteAt);
+  it("reads the WHOLE window: beside --since, -n is the window's FIRST entries on journalctl 249", () => {
+    expect(rootStepJournalArgs("post_update", { sinceMs: 1_700_000_000_000 })).not.toContain("-n");
+  });
+});
+
+describe("rootStepJournalTailArgs", () => {
+  it("counts the tail from the window's END on every journalctl: --reverse beside -n", () => {
+    const args = rootStepJournalTailArgs("openclaw_install", { sinceMs: 1_700_000_000_000, lines: 40 });
+
+    expect(args.slice(0, 2)).toEqual(["-u", rootStepUnit("openclaw_install")]);
+    expect(args).toContain("--reverse");
     expect(args[args.indexOf("-n") + 1]).toBe("40");
+    expect(args.slice(args.indexOf("-o"), args.indexOf("-o") + 2)).toEqual(["-o", "cat"]);
+  });
+});
+
+describe("readRootStepJournalTail", () => {
+  function answer(result: { stdout: string } | Error) {
+    mockExecFile.mockImplementation(((
+      _cmd: string,
+      _args: string[],
+      optsOrCallback?: unknown,
+      maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+    ) => {
+      const callback = (typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback) as
+        (error: Error | null, out: { stdout: string; stderr: string }) => void;
+      if (result instanceof Error) callback?.(result, { stdout: "", stderr: "" });
+      else callback?.(null, { stdout: result.stdout, stderr: "" });
+      return undefined as unknown as ReturnType<typeof childProcess.execFile>;
+    }) as unknown as typeof childProcess.execFile);
+  }
+
+  beforeEach(() => vi.clearAllMocks());
+
+  it("hands the newest lines back in journal order, indents kept", async () => {
+    answer({ stdout: "Error: the step failed\n  Installing Kokoro TTS...\nfirst line\n" });
+
+    await expect(readRootStepJournalTail("openclaw_tts", { sinceMs: 1_700_000_000_000, lines: 3, timeoutMs: 1_000 }))
+      .resolves.toBe("first line\n  Installing Kokoro TTS...\nError: the step failed\n");
+    const [cmd, args] = mockExecFile.mock.calls[0];
+    expect(cmd).toBe("/usr/bin/journalctl");
+    expect(args).toEqual(rootStepJournalTailArgs("openclaw_tts", { sinceMs: 1_700_000_000_000, lines: 3 }));
+  });
+
+  it("answers an empty window with nothing, and a journal it cannot read with execFile's own rejection", async () => {
+    answer({ stdout: "" });
+    await expect(readRootStepJournalTail("openclaw_tts", { sinceMs: 0, lines: 3, timeoutMs: 1_000 })).resolves.toBe("");
+
+    answer(new Error("No journal files were opened due to insufficient permissions."));
+    await expect(readRootStepJournalTail("openclaw_tts", { sinceMs: 0, lines: 3, timeoutMs: 1_000 }))
+      .rejects.toThrow("insufficient permissions");
   });
 });
 
@@ -117,6 +178,43 @@ describe("followRootStep", () => {
     expect(result.error).not.toContain("kokoro model download failed");
     expect(result.error).toContain("Voice install failed");
     expect(statuses).toEqual([]);
+  });
+
+  it.each([249, 255] as const)("reads the NEWEST lines of a long run on journalctl %i", async (generation) => {
+    // A failed run of 70 entries whose own reason is its last: on systemd up
+    // to 253 `--since T -n 40` is the run's FIRST 40 entries, which hold no
+    // error at all, and the status line (`-n 5`) froze on the fifth.
+    const entries = [...numberedEntries(69, (i) => `  Downloading the speech model: part ${i} of 69`),
+      "Error: the speech model could not be downloaded (HTTP 503)"];
+    const model = journalctlModel({ [rootStepUnit("voice_whisper_install")]: entries }, generation);
+    mockExecFile.mockImplementation(((
+      cmd: string,
+      args: string[],
+      optsOrCallback?: unknown,
+      maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+    ) => {
+      const callback = (typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback) as
+        (error: Error | null, result: { stdout: string; stderr: string }) => void;
+      if (cmd.includes("systemctl")) {
+        callback?.(null, { stdout: "ActiveState=failed\nResult=exit-code\n", stderr: "" });
+      } else {
+        const answer = model(cmd, args);
+        if (answer instanceof Error) callback?.(answer, { stdout: "", stderr: "" });
+        else callback?.(null, answer);
+      }
+      return undefined as unknown as ReturnType<typeof childProcess.execFile>;
+    }) as unknown as typeof childProcess.execFile);
+    const { followRootStep } = await import("@/lib/root-step-follow");
+    const statuses: string[] = [];
+
+    const result = await followRootStep("voice_whisper_install", {
+      timeoutMs: 5_000,
+      label: "Speech install",
+      onStatus: (line) => statuses.push(line),
+    });
+
+    expect(result).toEqual({ ok: false, error: "Error: the speech model could not be downloaded (HTTP 503)" });
+    expect(statuses).toEqual(["Error: the speech model could not be downloaded (HTTP 503)"]);
   });
 
   it("bounds every journal read it makes to this run", async () => {
