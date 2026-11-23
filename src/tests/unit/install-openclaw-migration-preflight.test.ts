@@ -211,7 +211,7 @@ ln -s ../lib/node_modules/openclaw/openclaw.mjs "$stage/bin/openclaw"
     'openclaw_refresh_fast_path_check() { OPENCLAW_REFRESH_WHY="fixture: full path"; return 1; }',
     "openclaw_refresh_marker_clear() { :; }",
     // The plugin refresh after the migration is not this suite's: cut there.
-    shellFunction("step_openclaw_install").replace(/\n  # Force-reinstall every externally-installed plugin[\s\S]*$/, "\n}"),
+    shellFunction("step_openclaw_install").replace(/\n  # The plugin refresh after doctor[\s\S]*$/, "\n}"),
     "step_openclaw_install",
   ].join("\n");
   const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` };

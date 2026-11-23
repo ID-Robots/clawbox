@@ -62,6 +62,8 @@ runuser() { shift 2; [ "\${1:-}" = "--" ] && shift; "$@"; }
 as_clawbox() {
   # The staging prefix, emptied, made and removed by the account that owns it.
   case "\${1:-}" in rm|mkdir) command "$@"; return ;; esac
+  # The plugin refresh's reader, run as the account whose files it opens.
+  if [ "\${1:-}" = -H ] && [ "\${2:-}" = python3 ]; then shift; "$@"; return; fi
   case "$*" in
     *'systemctl --user'*) shift 5; ctl user "$@" ;;
     *'doctor --fix'*) echo DOCTOR_CALLED; case "$SCENARIO" in v2-replacement|v2-current|setup-*) return 0 ;; *) return 42 ;; esac ;;
