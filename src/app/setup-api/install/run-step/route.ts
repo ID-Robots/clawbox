@@ -1,14 +1,10 @@
 import { NextResponse } from "next/server";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import { requireSession } from "@/lib/route-auth";
 import { UI_ROOT_STEPS } from "@/lib/root-steps";
-import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
+import { readRootStepJournalTail, rootStepUnit } from "@/lib/root-step-journal";
 import { startRootStep } from "@/lib/root-step-runner";
 
 export const dynamic = "force-dynamic";
-
-const execFileAsync = promisify(execFile);
 
 // POST /setup-api/install/run-step  body: { step: "<step_name>" }
 //
@@ -45,12 +41,7 @@ const STEP_TIMEOUT_MS = 10 * 60 * 1000;
  */
 async function getJournalTail(step: string, sinceMs: number): Promise<string> {
   try {
-    const { stdout } = await execFileAsync(
-      "/usr/bin/journalctl",
-      rootStepJournalArgs(step, { sinceMs, lines: 60 }),
-      { timeout: 10_000 },
-    );
-    return stdout.trim();
+    return (await readRootStepJournalTail(step, { sinceMs, lines: 60, timeoutMs: 10_000 })).trim();
   } catch {
     return "";
   }
