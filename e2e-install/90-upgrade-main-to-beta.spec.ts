@@ -37,10 +37,210 @@ import {
 } from "./helpers/container";
 import { startUpdate, waitForUpdate } from "./helpers/setup-api";
 import { READY_ACTION_TIMEOUT, waitForAppReady, waitForGatewayReady } from "./helpers/readiness";
+import {
+  KEY_LINE,
+  baseVersion,
+  describePass,
+  journalAfter,
+  journalCursor,
+  openclawCli,
+  parseJsonOut,
+  readMigrationRow,
+  retiredKeyPathMissed,
+  summarizeDoctor,
+  type DoctorSummary,
+  type MigrationRowRead,
+} from "./helpers/openclaw-plugin-migration";
 
 test.use(READY_ACTION_TIMEOUT);
 
 const UPGRADE_BRANCH = process.env.CLAWBOX_UPGRADE_TARGET_BRANCH ?? "beta";
+
+/**
+ * The core crossing. A box whose owner signed in with a ChatGPT subscription
+ * runs the Codex runtime: `agents.defaults.models["openai/<id>"].agentRuntime.id
+ * = "codex"` (src/lib/chatgpt-subscription.ts) and the external @openclaw/codex
+ * plugin at its core's version. The pinned core binds codex's version to its
+ * own (dist official-runtime-plugins: VERSION_BOUND_RUNTIME_PLUGIN_IDS), so
+ * after a core bump that plugin is stale when doctor runs — ClawBox refreshes
+ * plugins only after doctor — and doctor owes it a data/settings migration
+ * (codex declares doctorContract.stateMigrations). That is the state an update
+ * once stopped on at "Updating OpenClaw", and the emptied home the baseline
+ * builds never has it. So the fixture gives main's core exactly that box, and
+ * the last test proves from the core's own record that the obligation was
+ * owed during this update AND completed: it cannot pass with nothing owed.
+ *
+ * And a config key the new core retired. On that box `openclaw.json` also held
+ * a per-agent heartbeat (`agents.entries.<id>.heartbeat`), valid on the old core
+ * and unknown to 2026.11.5. With an invalid config, doctor plans an automatic
+ * repair from a snapshot taken BEFORE it rewrites codex's obligation, and
+ * commits it AFTER, carrying the old obligation list: the core's publication
+ * check then throws "Plugin migration obligations changed during migration
+ * input publication" and the pass ends incomplete (dist doctor-config-flow:
+ * planAdmittedConfigRepair, then the obligation rewrite, then
+ * commitAutomaticConfigRepair). A config the new core accepts never takes
+ * that path.
+ */
+const CODEX_ARM_MODEL = "openai/gpt-5.5";
+const CODEX_ARM_PATH = `agents.defaults.models[${JSON.stringify(CODEX_ARM_MODEL)}].agentRuntime.id`;
+/** Where a ChatGPT sign-in is filed (CHATGPT_PROFILE_KEY in src/lib/chatgpt-subscription.ts). */
+const CHATGPT_PROFILE_PATH = "auth.profiles.openai:chatgpt";
+/** Valid at 2026.10.9 and retired at 2026.11.5; "0m" turns off only the recurring cadence. */
+const RETIRED_KEY_PATH = "agents.entries.main.heartbeat";
+const RETIRED_KEY_VALUE = JSON.stringify({ every: "0m" });
+const OPENCLAW_JSON = "/home/clawbox/.openclaw/openclaw.json";
+/** The root step that installs the core and runs doctor; its journal is its own output. */
+const OPENCLAW_INSTALL_UNIT = "clawbox-root-update@openclaw_install.service";
+
+/** Main's pin and the target's; set by the fixture. Equal pins cross nothing. */
+let mainPin = "";
+let targetPin = "";
+let crossing = false;
+/** Main's core took the retired key, so the update must cross the path it opens. */
+let retiredKeySet = false;
+/** Where the target update's openclaw_install journal starts, and when it was triggered (epoch ms, container clock). */
+let updateCursor: string | null = null;
+let triggeredAtMs = 0;
+let updateSeconds: number | null = null;
+let codexRowBefore: MigrationRowRead | null = null;
+
+/** The first word of a pin file, as the updater reads it (readPinsAtBranch). */
+const firstWord = (text: string) => text.trim().split(/\s+/)[0] ?? "";
+
+/**
+ * The target branch's OpenClaw pin, read from the branch itself. Not the host
+ * checkout: the schedule and a push to main check out main and target beta.
+ * Not a fetch into the box's checkout either, which would change what the
+ * updater then finds there: a blob-less shallow clone in a scratch directory,
+ * from the remote the updater fetches.
+ */
+async function readTargetPin(branch: string): Promise<string> {
+  if (!/^[A-Za-z0-9._\-/]+$/.test(branch)) throw new Error(`unsafe branch name: ${branch}`);
+  const out = await dockerExec([
+    "bash", "-c",
+    [
+      "set -euo pipefail",
+      'dir="$(mktemp -d)"',
+      "trap 'rm -rf \"$dir\"' EXIT",
+      'url="$(git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox remote get-url origin)"',
+      'git clone --quiet --filter=blob:none --depth=1 --no-checkout --single-branch --branch "$1" "$url" "$dir/pin"',
+      'git -C "$dir/pin" show HEAD:config/openclaw-target.txt',
+    ].join("; "),
+    "bash", branch,
+  ], { user: "clawbox", timeoutMs: 120_000 });
+  return firstWord(out);
+}
+
+async function coreVersion(): Promise<string> {
+  const out = await openclawCli(["--version"], 120_000);
+  return out.stdout.split(/\s+/).find((field) => /^\d+\.\d+\.\d+/.test(field)) ?? "";
+}
+
+interface PluginRow {
+  id?: unknown;
+  origin?: unknown;
+  enabled?: unknown;
+  status?: unknown;
+  version?: unknown;
+  rootDir?: unknown;
+}
+
+/** codex's row in `openclaw plugins list --json`, with the version of the package it loads. */
+async function codexPlugin(): Promise<{ row: PluginRow | undefined; version: string }> {
+  const listed = await openclawCli(["plugins", "list", "--json"], 120_000);
+  expect(listed.exit, `openclaw plugins list --json: ${listed.stderr}`).toBe(0);
+  const plugins = (parseJsonOut(listed.stdout) as { plugins?: PluginRow[] }).plugins ?? [];
+  const row = plugins.find((plugin) => plugin.id === "codex");
+  let version = typeof row?.version === "string" ? row.version : "";
+  if (!version && typeof row?.rootDir === "string") {
+    const pkg = await dockerExec(["cat", `${row.rootDir}/package.json`], { user: "clawbox" });
+    version = String((JSON.parse(pkg) as { version?: unknown }).version ?? "");
+  }
+  return { row, version };
+}
+
+interface OpenclawJson {
+  agents?: {
+    defaults?: { models?: Record<string, { agentRuntime?: { id?: unknown } }> };
+    entries?: Record<string, { heartbeat?: unknown }>;
+  };
+  plugins?: { allow?: unknown };
+}
+
+const readOpenclawJson = async () =>
+  JSON.parse(await dockerExec(["cat", OPENCLAW_JSON], { user: "clawbox" })) as OpenclawJson;
+
+/**
+ * Does main's core (its own `config schema --json`) know this string key? `*`
+ * is a map entry. `agents.defaults.models.*.agentRuntime.id` is the codex arm;
+ * `agents.entries.*.heartbeat.every` the retired key.
+ */
+function schemaHasString(schema: unknown, path: string): boolean {
+  let node: unknown = schema;
+  for (const key of path.split(".")) {
+    const steps = key === "*" ? ["additionalProperties"] : ["properties", key];
+    for (const step of steps) {
+      node = node && typeof node === "object" ? (node as Record<string, unknown>)[step] : undefined;
+    }
+  }
+  const type = node && typeof node === "object" ? (node as Record<string, unknown>).type : undefined;
+  return type === "string";
+}
+
+const describeRow = (read: MigrationRowRead | null) =>
+  !read ? "(not read)"
+    : !read.db ? "(no state database)"
+      : !read.table ? "(no migration_runs table)"
+        : read.row ? JSON.stringify(read.row) : "(no row)";
+
+/**
+ * What the target update did to codex, printed to the job log (the workflow
+ * dumps the container's journal only on failure, and annotations live only in
+ * the HTML report): the bounded openclaw_install journal, its doctor passes,
+ * the conflict line, the unit's own result and the core's record for codex.
+ */
+async function reportCrossing(outcome: string): Promise<{ doctor: DoctorSummary | null; row: MigrationRowRead }> {
+  const log = (line: string) => console.log(`[codex crossing] ${line}`);
+  log(`core ${mainPin} -> ${targetPin}; update ${outcome}`);
+  let doctor: DoctorSummary | null = null;
+  if (updateCursor) {
+    const lines = await journalAfter(OPENCLAW_INSTALL_UNIT, updateCursor);
+    doctor = summarizeDoctor(lines);
+    log(
+      `${OPENCLAW_INSTALL_UNIT} since the trigger: ${doctor.entries} entries over ${doctor.spanSeconds ?? "?"} s; ` +
+      `doctor passes ${doctor.passes.length}`,
+    );
+    doctor.passes.forEach((pass, index) => {
+      log(describePass(pass, index));
+      if (pass.conflictLine) log(`pass ${index + 1} conflict line: ${pass.conflictLine}`);
+    });
+    if (retiredKeySet) log(`retired-key path in pass 1: ${retiredKeyPathMissed(doctor.passes[0]) ?? "exercised"}`);
+    // Every doctor phase and the lines the checks read; the full journal is the attachment.
+    const tempWarnings = lines.filter((line) => line.message.includes("Temp workspace ancestor")).length;
+    for (const line of lines) {
+      if (KEY_LINE.test(line.message) && !line.message.includes("Temp workspace ancestor")) log(`doctor| ${line.message}`);
+    }
+    if (tempWarnings > 0) log(`(${tempWarnings} "Temp workspace ancestor" lines left out: a fallback, not a failure)`);
+    if (outcome !== "completed") {
+      for (const line of lines.slice(-60)) log(`tail| ${line.message}`);
+    }
+    await test.info().attach("openclaw_install journal since the trigger", {
+      body: lines.map((line) => line.message).join("\n"),
+      contentType: "text/plain",
+    });
+  } else {
+    log("no journal cursor was taken at the trigger");
+  }
+  const unit = await dockerExec(
+    ["systemctl", "show", OPENCLAW_INSTALL_UNIT, "-p", "ActiveState", "-p", "Result", "-p", "ExecMainStatus"],
+    { user: "root" },
+  );
+  log(`unit ${unit.trim().split("\n").join(", ")}`);
+  const row = await readMigrationRow("codex");
+  log(`migration_runs deferred-plugin-migration:codex before the update: ${describeRow(codexRowBefore)}`);
+  log(`migration_runs deferred-plugin-migration:codex now: ${describeRow(row)}`);
+  return { doctor, row };
+}
 
 /**
  * How many consecutive unanswered status polls (3 s apart) are a rebuild rather
@@ -161,6 +361,113 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     expect(branch, "the upgrade must exercise main → target, not target → itself").toBe("main");
   });
 
+  test("a ChatGPT-style box with a heartbeat the new core retires", async () => {
+    mainPin = firstWord(await dockerExec(["cat", "/home/clawbox/clawbox/config/openclaw-target.txt"]));
+    targetPin = await readTargetPin(UPGRADE_BRANCH);
+    expect(mainPin, "fixture: main's checkout has no OpenClaw pin").not.toBe("");
+    expect(targetPin, `fixture: ${UPGRADE_BRANCH} has no OpenClaw pin`).not.toBe("");
+    crossing = mainPin !== targetPin;
+    test.info().annotations.push({
+      type: "codex-obligation",
+      description: crossing ? `core ${mainPin} -> ${targetPin}` : `not exercised (no core crossing: both pin ${mainPin})`,
+    });
+    console.log(`[codex crossing] main pins ${mainPin}, ${UPGRADE_BRANCH} pins ${targetPin}: ${crossing ? "crossing" : "not exercised"}`);
+    // Equal pins owe nothing, so there is nothing to prove and no reason to
+    // fetch codex twice: "not exercised", never a pass and never a failure.
+    if (!crossing) return;
+
+    // The baseline ends when the web server answers; the CLI below wants the
+    // core and its gateway settled first.
+    await waitForGatewayReady({ timeoutMs: 10 * 60_000, context: "the codex fixture" });
+    expect(await coreVersion(), "fixture: main's core does not answer main's pin").toBe(mainPin);
+    const schema = await openclawCli(["config", "schema", "--json"], 300_000);
+    expect(schema.exit, `fixture: openclaw config schema --json: ${schema.stderr}`).toBe(0);
+    const schemaJson = parseJsonOut(schema.stdout);
+    expect(
+      schemaHasString(schemaJson, "agents.defaults.models.*.agentRuntime.id"),
+      "fixture: main's core has no agents.defaults.models.*.agentRuntime.id",
+    ).toBe(true);
+    // Only while main's core still knows the key: once main carries a core that
+    // retired it, its CLI refuses the write and that path has nothing to cross.
+    // Then it is "not exercised", never a failure; every codex check still runs.
+    retiredKeySet = schemaHasString(schemaJson, "agents.entries.*.heartbeat.every");
+    if (!retiredKeySet) {
+      test.info().annotations.push({
+        type: "retired-key path",
+        description: "not exercised (main's core has no agents.entries.*.heartbeat)",
+      });
+    }
+
+    // The plugin first, at main's pin, the way the installer's refresh pins it
+    // (`plugins install @openclaw/codex@<pin> --force --accept-capabilities`):
+    // with the arm already set, a gateway start in between would race to
+    // install it under main's pre-start, whose attempt is time-boxed to 120 s.
+    // Then the arm, then the restart, whose pre-start finds codex at its core's
+    // version and leaves it be. The plugin pulls a large app-server package.
+    const installStarted = Date.now();
+    const install = await openclawCli(
+      ["plugins", "install", `@openclaw/codex@${mainPin}`, "--force", "--accept-capabilities"],
+      15 * 60_000,
+    );
+    expect(install.exit, `fixture: plugins install @openclaw/codex@${mainPin}: ${install.stdout}${install.stderr}`).toBe(0);
+    const installSeconds = Math.round((Date.now() - installStarted) / 1000);
+    // The sign-in's profile entry, without a credential (as 22-anthropic-accounts
+    // stages one): on an OpenAI API-key box with no ChatGPT sign-in, main's and
+    // the target's pre-start remove the codex arm, and the wizard's OpenAI key
+    // may have left such a profile.
+    const profile = await openclawCli(
+      ["config", "set", CHATGPT_PROFILE_PATH, JSON.stringify({ provider: "openai", mode: "oauth" }), "--strict-json"],
+      120_000,
+    );
+    expect(profile.exit, `fixture: config set ${CHATGPT_PROFILE_PATH}: ${profile.stdout}${profile.stderr}`).toBe(0);
+    const arm = await openclawCli(["config", "set", CODEX_ARM_PATH, "codex"], 120_000);
+    expect(arm.exit, `fixture: config set ${CODEX_ARM_PATH}: ${arm.stdout}${arm.stderr}`).toBe(0);
+    if (retiredKeySet) {
+      // Through the old core's own CLI, which checks it against its schema.
+      const heartbeat = await openclawCli(["config", "set", RETIRED_KEY_PATH, RETIRED_KEY_VALUE, "--strict-json"], 120_000);
+      expect(heartbeat.exit, `fixture: main's core refused ${RETIRED_KEY_PATH}: ${heartbeat.stdout}${heartbeat.stderr}`)
+        .toBe(0);
+    }
+    const restartStarted = Date.now();
+    await dockerExec(["systemctl", "restart", "clawbox-gateway.service"], { user: "root", timeoutMs: 10 * 60_000 });
+    await waitForGatewayReady({ timeoutMs: 10 * 60_000, context: "the codex fixture's gateway restart" });
+    const restartSeconds = Math.round((Date.now() - restartStarted) / 1000);
+
+    // Hard preconditions: without every one of them the update below owes
+    // codex nothing and would pass for the wrong reason.
+    const codex = await codexPlugin();
+    expect(codex.row, "fixture: codex is not in `openclaw plugins list --json`").toBeDefined();
+    expect(codex.row?.origin, "fixture: codex is the bundled copy, not the external plugin").not.toBe("bundled");
+    expect(codex.row?.enabled, `fixture: codex is not enabled (status ${String(codex.row?.status)})`).toBe(true);
+    expect(baseVersion(codex.version), "fixture: codex is not at main's pin").toBe(baseVersion(mainPin));
+    const config = await readOpenclawJson();
+    expect(
+      config.agents?.defaults?.models?.[CODEX_ARM_MODEL]?.agentRuntime?.id,
+      "fixture: the codex runtime arm did not survive the gateway restart",
+    ).toBe("codex");
+    const allow = config.plugins?.allow;
+    expect(
+      allow === undefined || (Array.isArray(allow) && allow.includes("codex")),
+      `fixture: plugins.allow ${JSON.stringify(allow)} keeps codex out`,
+    ).toBe(true);
+    if (retiredKeySet) {
+      expect(
+        config.agents?.entries?.main?.heartbeat,
+        "fixture: the per-agent heartbeat did not survive the gateway restart",
+      ).toBeDefined();
+    }
+
+    codexRowBefore = await readMigrationRow("codex");
+    test.info().annotations.push({
+      type: "codex-fixture-seconds",
+      description: `plugins install ${installSeconds} s, gateway restart ${restartSeconds} s`,
+    });
+    console.log(
+      `[codex crossing] fixture: codex ${codex.version} at main's core ${mainPin}; install ${installSeconds} s, ` +
+      `restart ${restartSeconds} s; migration row before the update: ${describeRow(codexRowBefore)}`,
+    );
+  });
+
   test(`pin .update-branch to ${UPGRADE_BRANCH}`, async () => {
     await setUpdateBranch(UPGRADE_BRANCH);
     const contents = await dockerExec(["cat", "/home/clawbox/clawbox/.update-branch"], {
@@ -170,6 +477,11 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
   });
 
   test("trigger updater", async () => {
+    // The baseline's own update ran openclaw_install in the same unit, so only
+    // what comes after this point is the target update's.
+    triggeredAtMs = Number((await dockerExec(["date", "+%s%3N"])).trim());
+    updateCursor = await journalCursor();
+    if (crossing) expect(updateCursor, "fixture: no journal cursor to bound openclaw_install's journal by").not.toBeNull();
     const result = await startUpdate(true);
     expect(result.started).toBe(true);
   });
@@ -187,12 +499,22 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     expect(["completed", "failed"]).toContain(state.phase);
     if (state.phase === "failed") {
       const failedStep = state.steps.find((s) => s.status === "failed");
+      if (crossing) {
+        // Before the throw: the cases after this one are skipped (serial). A
+        // collection error must not replace the step id below.
+        try {
+          await reportCrossing(`failed at step '${failedStep?.id}'`);
+        } catch (err) {
+          console.log(`[codex crossing] evidence could not be collected: ${String(err)}`);
+        }
+      }
       throw new Error(`update failed at step '${failedStep?.id}': ${failedStep?.error ?? state.error ?? "unknown"}`);
     }
     // Every step should be completed by the end.
     for (const step of state.steps) {
       expect(step.status).toBe("completed");
     }
+    if (crossing) updateSeconds = Math.round((Date.now() - triggeredAtMs) / 1000);
   });
 
   test(`git HEAD is on ${UPGRADE_BRANCH}`, async () => {
@@ -329,5 +651,73 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     expect(statusJson.setup_complete).toBe(true);
     expect(statusJson.wifi_configured).toBe(true);
     expect(statusJson.password_configured).toBe(true);
+  });
+
+  // Last, so that a failure here leaves the checks above with their own verdicts.
+  test("codex obligation and a retired config key crossed in one update", async () => {
+    test.skip(!crossing, "codex-obligation: not exercised (no core crossing)");
+    // Printed first, so a failing assertion below still leaves the evidence.
+    const { doctor, row } = await reportCrossing("completed");
+    // Recorded, never asserted: a later core that publishes the current
+    // obligation list completes in one pass, and that is still a pass.
+    test.info().annotations.push(
+      {
+        type: "doctor-passes",
+        description: doctor
+          ? `${doctor.passes.length}: ${doctor.passes.map((pass, index) => describePass(pass, index)).join(" | ")}`
+          : "unknown",
+      },
+      {
+        type: "update-seconds",
+        description: `whole update ${updateSeconds ?? "?"} s, openclaw_install ${doctor?.spanSeconds ?? "?"} s`,
+      },
+    );
+    expect(doctor?.entries ?? 0, "no openclaw_install journal after the trigger: the core crossing never ran").toBeGreaterThan(0);
+    // The trigger: the first pass met the retired key and took the repair that
+    // follows codex's obligation rewrite. Without it this case proves only the
+    // convergence a valid config already had.
+    if (retiredKeySet) {
+      expect(retiredKeyPathMissed(doctor?.passes[0]), "the retired-key path in the first doctor pass").toBeNull();
+      expect(
+        (await readOpenclawJson()).agents?.entries?.main?.heartbeat,
+        "the retired heartbeat key is still in openclaw.json after the update",
+      ).toBeUndefined();
+    }
+
+    // The box is on the target's core, and the pin it carries is the one the
+    // fixture compared against.
+    const onBox = firstWord(await dockerExec(["cat", "/home/clawbox/clawbox/config/openclaw-target.txt"]));
+    expect(onBox, `fixture: the pin read from ${UPGRADE_BRANCH} is not the one the update installed`).toBe(targetPin);
+    expect(await coreVersion()).toBe(targetPin);
+    const codex = await codexPlugin();
+    expect(codex.row, "codex is gone from `openclaw plugins list --json` after the update").toBeDefined();
+    expect(baseVersion(codex.version), "codex did not follow the core").toBe(baseVersion(targetPin));
+    const status = JSON.parse(await dockerExec(
+      ["cat", "/home/clawbox/clawbox/data/openclaw-migration-status.json"],
+      { user: "root" },
+    )) as { doctor?: { core?: unknown; verdict?: unknown } };
+    expect(status.doctor?.core, "the doctor verdict names another core").toBe(targetPin);
+    expect(status.doctor?.verdict).toBe("complete");
+
+    // The witness. No row means no obligation was ever recorded: the update
+    // exercised nothing, whatever it reported.
+    const record = row.row;
+    expect(record, `fixture: no codex obligation was ever recorded, so the upgrade exercised nothing (${describeRow(row)})`)
+      .toBeTruthy();
+    if (!record) return;
+    expect(
+      record.finishedAt ?? record.startedAt,
+      `fixture: the codex record predates this update (${JSON.stringify(record)})`,
+    ).toBeGreaterThanOrEqual(triggeredAtMs);
+    // "deferred" is the settle path ("Deferred until active"), which moves no
+    // data; "pending" is an obligation the update left unfinished.
+    const why: Record<string, string> = {
+      deferred: "settled without migrating",
+      pending: "left unfinished by the update",
+    };
+    expect(
+      record.status,
+      `codex's obligation was ${why[record.status] ?? record.status}: ${record.report}`,
+    ).toBe("completed");
   });
 });
