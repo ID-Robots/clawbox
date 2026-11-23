@@ -39,6 +39,7 @@ import {
 } from "@/lib/harness";
 import { readHermesTelegramToken } from "@/lib/hermes-telegram";
 import { readConfigStrict } from "@/lib/openclaw-config";
+import { failureLog } from "@/lib/log-once";
 import {
   defaultTelegramAccount,
   holdsTelegramCredentialReference,
@@ -98,6 +99,9 @@ async function clawboxMirror(snapshot?: Record<string, unknown>): Promise<string
   return botTokenOrNull(snapshot ? snapshot.telegram_bot_token : await configGet("telegram_bot_token"));
 }
 
+/** An unreadable openclaw.json, logged once per failure (`log-once.ts`). */
+const openclawUnreadableLog = failureLog();
+
 /**
  * OpenClaw's Telegram channel block, the one its gateway polls from — or null
  * when openclaw.json exists and could not be read.
@@ -109,17 +113,20 @@ async function clawboxMirror(snapshot?: Record<string, unknown>): Promise<string
  */
 async function readOpenclawTelegramChannel(): Promise<{ channel: unknown } | null> {
   try {
-    return { channel: (await readConfigStrict()).channels?.telegram };
+    const channel = (await readConfigStrict()).channels?.telegram;
+    openclawUnreadableLog.clear();
+    return { channel };
   } catch (err) {
     // The MESSAGE, not the error. `OpenclawConfigUnreadableError` carries the
     // original on `cause`, and V8's JSON parse errors quote a window of the
     // INPUT — a corruption landing next to `"botToken":"…"` would print token
     // characters into the service log. The message alone already names what
-    // happened, which is the whole of what support needs.
-    console.error(
-      "[telegram] openclaw.json could not be read; the bot it holds is unknown:",
-      err instanceof Error ? err.message : err,
-    );
+    // happened, which is the whole of what support needs. Once per failure:
+    // the desktop's pairing poll reads this every 3 s (`log-once.ts`).
+    const message = err instanceof Error ? err.message : err;
+    if (openclawUnreadableLog.isNew(String(message))) {
+      console.error("[telegram] openclaw.json could not be read; the bot it holds is unknown:", message);
+    }
     return null;
   }
 }
