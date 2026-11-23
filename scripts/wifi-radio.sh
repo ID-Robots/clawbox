@@ -4,7 +4,8 @@
 # All overrides are root-service inputs or unprivileged test seams, never data/.
 export LC_ALL=C
 RADIO_IFACE="${NETWORK_INTERFACE:-wlP1p1s0}"
-[ "${#RADIO_IFACE}" -le 15 ] && [[ "$RADIO_IFACE" =~ ^[A-Za-z0-9_.-]+$ ]] || exit 1
+[ "${#RADIO_IFACE}" -le 15 ] && [[ "$RADIO_IFACE" =~ ^[A-Za-z0-9_.-]+$ ]] ||
+  { echo '[WiFi] Invalid Wi-Fi interface name' >&2; exit 1; }
 RADIO_DIR="${CLAWBOX_RADIO_RUN_DIR:-/run/clawbox-radio}"
 RADIO_SNAPSHOT="$RADIO_DIR/$RADIO_IFACE.policy"
 
@@ -19,19 +20,28 @@ wifi_is_uuid() {
 wifi_lock() {
   # Directory entries are root-owned; readers can lock but cannot replace the
   # inode or write recovery state. flock works on a read-only fd on Linux.
+  # Every refusal says why in one line: the web routes show the owner the last
+  # stderr line of a failed radio command (nmcliReason, src/lib/network.ts).
   if [ ! -d "$RADIO_DIR" ]; then
-    mkdir -m 0755 "$RADIO_DIR" 2>/dev/null || [ -d "$RADIO_DIR" ] || return 1
+    # Only root can create it, and the AP unit does at boot.
+    mkdir -m 0755 "$RADIO_DIR" 2>/dev/null || [ -d "$RADIO_DIR" ] || {
+      echo "[WiFi] Radio lock folder missing: the box's Wi-Fi service has not started since boot" >&2
+      return 1
+    }
   fi
-  [ ! -L "$RADIO_DIR" ] || return 1
+  [ ! -L "$RADIO_DIR" ] || { echo '[WiFi] Radio lock folder is a link; refusing it' >&2; return 1; }
   if [ "$EUID" -eq 0 ]; then
-    [ "$(stat -c %u "$RADIO_DIR")" = 0 ] || return 1
-    [ "$(stat -c %a "$RADIO_DIR")" = 755 ] || return 1
+    [ "$(stat -c %u "$RADIO_DIR")" = 0 ] || { echo '[WiFi] Radio lock folder is not owned by root; refusing it' >&2; return 1; }
+    [ "$(stat -c %a "$RADIO_DIR")" = 755 ] || { echo '[WiFi] Radio lock folder permissions changed; refusing it' >&2; return 1; }
   fi
   local lock="$RADIO_DIR/$RADIO_IFACE.lock"
   if [ ! -e "$lock" ]; then
-    (umask 022; set -C; : > "$lock") 2>/dev/null || [ -f "$lock" ] || return 1
+    (umask 022; set -C; : > "$lock") 2>/dev/null || [ -f "$lock" ] || {
+      echo "[WiFi] Radio lock missing: the box's Wi-Fi service has not used this radio since boot" >&2
+      return 1
+    }
   fi
-  [ -f "$lock" ] && [ ! -L "$lock" ] || return 1
+  [ -f "$lock" ] && [ ! -L "$lock" ] || { echo '[WiFi] Radio lock is not a plain file; refusing it' >&2; return 1; }
   exec 9< "$lock" || return 1
   flock -x -w 180 9 || { echo '[WiFi] Radio ownership timed out' >&2; return 1; }
 }
