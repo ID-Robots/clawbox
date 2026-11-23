@@ -8582,14 +8582,17 @@ step_openclaw_install() {
     # One more pass for exactly one failure: doctor converged a stale configured
     # plugin in this same run (ClawBox refreshes the plugins only after this
     # block), the plugin's migration obligation changed under it, and doctor
-    # exited 1 with the conflict below, which the pinned core leaves "for a later
-    # repair" (docs/gateway/doctor/state-and-sessions.md); on a box the next pass
-    # finished it. Nothing else is retried: exit 2 ran no migration, and the
-    # other exit-1 states "cannot" be resolved by "repeating the same repair
+    # exited 1 with "Plugin migration obligations changed during <phase>.", which
+    # the pinned core leaves "for a later repair"
+    # (docs/gateway/doctor/state-and-sessions.md); on a box the next pass
+    # finished it. One error class builds that sentence for every phase (input
+    # publication, settlement, session archive publication, session source
+    # retirement, config include publication), always advising doctor --fix
+    # again. Nothing else is retried: exit 2 ran no migration, and the other
+    # exit-1 states "cannot" be resolved by "repeating the same repair
     # invocation" (docs/cli/doctor/running.md). The verdict is the last pass's.
     local _oc_doctor_out
-    local _oc_doctor_rc _oc_doctor_pass _oc_doctor_why _oc_doctor_blocker
-    local _oc_doctor_conflict='Plugin migration obligations changed during migration input publication'
+    local _oc_doctor_rc _oc_doctor_pass _oc_doctor_why _oc_doctor_blocker _oc_doctor_conflict
     # openclaw_migration_complete's phrases, read here only for the gate and the
     # Error line. Not through that function: its `printf | grep -q` can miss a
     # phrase early in long output under pipefail (SIGPIPE), and changing what it
@@ -8606,11 +8609,14 @@ step_openclaw_install() {
       echo "  openclaw doctor --fix pass $_oc_doctor_pass ended with exit $_oc_doctor_rc, $((SECONDS - _oc_step_started))s into the step"
       _oc_doctor_blocker="$(grep -a -m 1 -oiE "$_oc_doctor_blockers" <<<"$_oc_doctor_out" || true)"
       _oc_doctor_blocker="${_oc_doctor_blocker%%$'\n'*}"
+      # The conflict sentence as doctor printed it, up to its phase.
+      _oc_doctor_conflict="$(LC_ALL=C grep -a -m 1 -oE 'Plugin migration obligations changed during [a-z][a-z -]*[a-z]' <<<"$_oc_doctor_out" || true)"
+      _oc_doctor_conflict="${_oc_doctor_conflict%%$'\n'*}"
       # Exit 1 is already incomplete to openclaw_migration_complete (rc first),
       # so the verdict function runs once, after the last pass, as before.
       if [ "$_oc_doctor_pass" -ne 1 ] || [ "$_oc_doctor_rc" -ne 1 ] \
         || [ -n "$_oc_doctor_blocker" ] \
-        || [[ "$_oc_doctor_out" != *"$_oc_doctor_conflict"* ]]; then
+        || [ -z "$_oc_doctor_conflict" ]; then
         break
       fi
       echo "  Running openclaw doctor --fix again (pass 2 of 2) after: $_oc_doctor_conflict; $((SECONDS - _oc_step_started))s into the step"
@@ -8620,11 +8626,10 @@ step_openclaw_install() {
       # A recognised doctor line, or the exit code; never doctor's free last
       # line: this sentence is copied into the update status the UI and MCP serve.
       case "$_oc_doctor_out" in
-        *"$_oc_doctor_conflict"*) _oc_doctor_why="$_oc_doctor_conflict" ;;
         *'Doctor could not complete maintenance'*) _oc_doctor_why='Doctor could not complete maintenance' ;;
         *) _oc_doctor_why="doctor exited $_oc_doctor_rc" ;;
       esac
-      echo "Error: OpenClaw migration did not complete; leaving the gateway stopped. Doctor: ${_oc_doctor_blocker:-$_oc_doctor_why}" >&2
+      echo "Error: OpenClaw migration did not complete; leaving the gateway stopped. Doctor: ${_oc_doctor_blocker:-${_oc_doctor_conflict:-$_oc_doctor_why}}" >&2
       return 1
     fi
     # Complete: the gateway's pre-start retires the copies once every database
