@@ -211,7 +211,7 @@ the engine does list), `bad_response` or `address_refused`.
 
 | | OpenClaw | Hermes |
 |---|---|---|
-| Provider | `models.providers.clawext`: `baseUrl`, `api: openai-completions`, `apiKey`, one model row with `contextWindow`, `maxTokens`, `input` (`["text","image"]` with image input) | `providers.clawext`: `base_url`, `api_key`, `api_mode`, `models`, `name`, `context_length` |
+| Provider | `models.providers.clawext`: `baseUrl`, `api: openai-completions`, `apiKey`, one model row with `contextWindow`, `maxTokens`, `input` (`["text","image"]` with image input) | `providers.clawext`: `base_url`, `api_key`, `api_mode`, `models`, `name`, `context_length`; with it `model_overrides.clawext._default`: `supports_reasoning` and `supports_tools`, both `true` (Hermes' own reasoning-effort picker reads them) |
 | Selection | the primary `clawext/<model id>`, written through `POST /setup-api/chat/model` (session sweep, Tool Search and the compaction model follow it as on any pick) | `model.provider: clawext`, `model.default: <model id>` |
 | Not supported | — | max output tokens and image input (Hermes decides both); a window under 64,000 tokens is refused |
 

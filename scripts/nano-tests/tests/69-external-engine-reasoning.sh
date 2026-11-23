@@ -16,7 +16,9 @@
 #   * Test with `detectReasoning` says the engine reasons;
 #   * Save with the switch ON: the record keeps it, OpenClaw's model entry is
 #     `reasoning: true` with Off mapped to `none` (Hermes keeps its own
-#     per-turn level and gets no new key);
+#     per-turn level and gets no reasoning key in `providers.clawext`; every
+#     save does declare the model's capabilities under `model_overrides`, and
+#     Hermes' own picker reads them from /api/model/info);
 #   * EVERY level, by the CLI and in the owner's browser: the picker lists
 #     them, a turn at each sends the expected `reasoning_effort` (the mock's
 #     log is the proof); on Hermes the reply shows its reasoning part or, at

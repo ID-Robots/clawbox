@@ -647,6 +647,19 @@ describe("a save the store could not record, and Hermes' provider block", () => 
     }));
   });
 
+  it("the Hermes read path rewrites a block that declares reasoning but not tool calls", async () => {
+    const { reconcileExternalEngineWithHermes, resetExternalEngineReconcileForTests } = await import("@/lib/external-engine-hermes");
+    await POST(req("POST", saveBody()));
+    resetExternalEngineReconcileForTests();
+    vi.mocked(resolveHermesConfigValue).mockImplementation(async (key: string) =>
+      key === "model_overrides.clawext._default.supports_tools" ? { state: "absent" }
+        : { state: "value", value: key === "providers.clawext.base_url" ? BASE : "true" });
+    vi.mocked(patchHermesConfig).mockClear();
+    expect(await reconcileExternalEngineWithHermes()).toBe(true);
+    const sets = vi.mocked(patchHermesConfig).mock.calls.map(([p]) => p.set ?? {});
+    expect(sets).toContainEqual(expect.objectContaining({ "model_overrides.clawext._default.supports_tools": "true" }));
+  });
+
   it("registers a later save with a window Hermes can run, after one under its floor was skipped", async () => {
     const { reconcileExternalEngineWithHermes, resetExternalEngineReconcileForTests } = await import("@/lib/external-engine-hermes");
     resetExternalEngineReconcileForTests();

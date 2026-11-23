@@ -73,13 +73,15 @@ export async function reconcileExternalEngineWithHermes(opts: { force?: boolean 
     if (declared.state === "unreadable") return false;
     // A block saved before the capabilities were declared (an updated box)
     // is written again, so its picker comes back without a re-save.
-    const caps = await resolveHermesConfigValue("model_overrides.clawext._default.supports_reasoning");
+    const reasons = await resolveHermesConfigValue("model_overrides.clawext._default.supports_reasoning");
+    const callsTools = await resolveHermesConfigValue("model_overrides.clawext._default.supports_tools");
     // A block that names another endpoint is an older save's (a dual box that
     // saved again on OpenClaw): rewritten from the record. The selection
     // rewrites it in any case, so it never names a stale endpoint or key.
     const inPlace = (declared.state === "present"
       || (declared.state === "value" && declared.value === record.baseUrl))
-      && caps.state === "value" && caps.value === "true";
+      && reasons.state === "value" && reasons.value === "true"
+      && callsTools.state === "value" && callsTools.value === "true";
     if (inPlace && !opts.force) {
       hermesReconciled = true;
       return true;
