@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as childProcess from "child_process";
 import { startRootStep } from "@/lib/root-step-runner";
 import { rootStepUnit } from "@/lib/root-step-journal";
+import { journalctlModel, numberedEntries } from "@/tests/helpers/journalctl-model";
 
 /**
  * POST /setup-api/install/run-step — the desktop panels' "run this install
@@ -85,6 +86,37 @@ describe("POST /setup-api/install/run-step", () => {
     expect(body.ok).toBe(false);
     expect(body.journalTail).toContain(THIS_ATTEMPT);
     expect(body.journalTail).not.toContain("previous attempt");
+  });
+
+  it.each([249, 255] as const)("returns the NEWEST lines of a long run (journalctl %i)", async (generation) => {
+    // On systemd up to 253 `--since T -n 60` is the run's FIRST 60 entries,
+    // so a long apt run's tail stopped two-fifths of the way in.
+    const model = journalctlModel({
+      [rootStepUnit(STEP)]: [
+        ...numberedEntries(99, (i) => `Get:${i} http://ports.ubuntu.com/ubuntu-ports jammy/main arm64 package-${i}`),
+        "E: Unable to fetch some archives, maybe run apt-get update or try with --fix-missing?",
+      ],
+    }, generation);
+    mockExecFile.mockImplementation(((
+      cmd: string,
+      args: string[],
+      optsOrCallback?: unknown,
+      maybeCallback?: (error: Error | null, result: { stdout: string; stderr: string }) => void,
+    ) => {
+      const callback = (typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback) as
+        (error: Error | null, result: { stdout: string; stderr: string }) => void;
+      const answer = cmd.includes("journalctl") ? model(cmd, args) : { stdout: "", stderr: "" };
+      if (answer instanceof Error) callback?.(answer, { stdout: "", stderr: "" });
+      else callback?.(null, answer);
+      return undefined as unknown as ReturnType<typeof childProcess.execFile>;
+    }) as unknown as typeof childProcess.execFile);
+    const { POST } = await import("@/app/setup-api/install/run-step/route");
+
+    const body = await (await POST(post(STEP))).json() as { journalTail: string };
+
+    // The route keeps the last 2000 characters of what it read.
+    expect(body.journalTail.split("\n").at(-1))
+      .toBe("E: Unable to fetch some archives, maybe run apt-get update or try with --fix-missing?");
   });
 
   it("reads by unit name, bounded to this run", async () => {

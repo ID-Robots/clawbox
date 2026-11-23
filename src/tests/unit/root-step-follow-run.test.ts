@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as childProcess from "child_process";
+import { cannedJournal } from "@/tests/helpers/journalctl-model";
 
 /**
  * A root step outlives the web server that started it: its unit runs on under
@@ -47,8 +48,11 @@ beforeEach(() => {
       shows += 1;
     } else if (cmd.includes("journalctl") && args.some((a) => a.startsWith("INVOCATION_ID="))) {
       stdout = args.includes(`INVOCATION_ID=${RUN_A}`) ? ending : "";
-    } else if (cmd.includes("journalctl")) {
-      stdout = journal;
+    } else if (cmd.includes("journalctl") && journal !== "") {
+      // Answered by what the read asked for: the follow reads the newest
+      // entries newest first (helpers/journalctl-model.ts).
+      const answer = cannedJournal(journal)(cmd, args);
+      if (!(answer instanceof Error)) stdout = answer.stdout;
     }
     callback?.(null, { stdout, stderr: "" });
     return undefined as unknown as ReturnType<typeof childProcess.execFile>;

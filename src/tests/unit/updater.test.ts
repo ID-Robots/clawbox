@@ -238,6 +238,14 @@ import { get, set, setMany } from "@/lib/config-store";
 import { GatewayRpcError, GatewayWsUnavailableError } from "@/lib/openclaw-gateway-ws";
 import { waitForPortOpen } from "@/lib/port-probe";
 import { deferred } from "@/tests/helpers/deferred";
+import {
+  answerJournalctl,
+  cannedJournal,
+  journalctlModel,
+  numberedEntries,
+  type ExecAnswer,
+} from "@/tests/helpers/journalctl-model";
+import { OPENCLAW_INSTALL_FAILED_JOURNAL, OPENCLAW_INSTALL_FAILED_REASON } from "@/tests/fixtures/openclaw-install-failed-journal";
 
 const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
@@ -334,7 +342,14 @@ function setupExecMock(results: Record<string, { stdout: string; stderr: string 
   }) as unknown as typeof childProcess.exec);
 }
 
-function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
+/**
+ * A fixed answer, or one computed from the argv — the form the journalctl
+ * model (helpers/journalctl-model.ts) needs, since what a journal read returns
+ * depends on what it asked for.
+ */
+type ExecFileAnswer = ExecAnswer | ((cmd: string, args: readonly string[]) => ExecAnswer);
+
+function setupExecFileMock(results: Record<string, ExecFileAnswer> = {}) {
   mockExecFile.mockImplementation(((
     cmd: string,
     args: string[],
@@ -343,10 +358,11 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
   ) => {
     const key = `${cmd} ${args.join(" ")}`;
 
-    let result: { stdout: string; stderr: string } | Error | undefined;
+    let result: ExecAnswer | undefined;
     for (const k of [...Object.keys(results), ...Object.keys(execFileFallbackResults)]) {
       if (key.includes(k) || k.includes(cmd)) {
-        result = results[k] ?? execFileFallbackResults[k];
+        const answer = results[k] ?? execFileFallbackResults[k];
+        result = typeof answer === "function" ? answer(cmd, args) : answer;
         break;
       }
     }
@@ -653,10 +669,10 @@ describe("updater", () => {
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         // The journal only overrides the error when the unit reports failed.
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": {
-          stdout: "Waiting for apt lock...\nE: Could not get lock /var/lib/dpkg/lock-frontend\n",
-          stderr: "",
-        },
+        "/usr/bin/journalctl": cannedJournal([
+          "Waiting for apt lock...",
+          "E: Could not get lock /var/lib/dpkg/lock-frontend",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -695,7 +711,7 @@ describe("updater", () => {
       // The mock is the OS: the window this run opened sees only this run.
       let dispatchedAt = 0;
       const previousAttempt = "Error: apt-get update failed (exit 100)";
-      const thisAttempt = ["Fetching package lists...", "Killed"].join(String.fromCharCode(10));
+      const thisAttempt = ["Fetching package lists...", "Killed"];
       setupExecFileMock({
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
         ping: { stdout: "", stderr: "" },
@@ -738,10 +754,7 @@ describe("updater", () => {
         if (key.includes("journalctl") && key.includes("clawbox-root-update@apt_update.service")) {
           const since = Number(/--since @([\d.]+)/.exec(key)?.[1] ?? NaN);
           const bounded = since * 1000 <= dispatchedAt;
-          return answer({
-            stdout: bounded ? thisAttempt : [previousAttempt, thisAttempt].join(String.fromCharCode(10)),
-            stderr: "",
-          });
+          return answer(answerJournalctl(bounded ? thisAttempt : [previousAttempt, ...thisAttempt], args));
         }
         return (fallback as unknown as (
           cmd: string,
@@ -824,6 +837,48 @@ describe("updater", () => {
       // And the CODE is install.sh's, so a condition both sides can report —
       // the doctor refusal — collapses to one card rather than two.
       expect(warning?.code).toBe("post-update-fixups");
+    });
+
+    /**
+     * A marker can be anywhere in a long run: install.sh prints the fixups'
+     * one as the LAST line of `post_update`, the doctor refusal mid-run. A
+     * `--since T -n 500` read is the run's FIRST 500 entries on journalctl 249
+     * and its LAST 500 on 255, so each of them dropped one of the two ends
+     * without a word, and the owner was told the update landed whole.
+     */
+    it.each([
+      [249, "last"],
+      [249, "first"],
+      [255, "last"],
+      [255, "first"],
+    ] as const)("journalctl %i: raises a marker that is the %s of a run's 600 entries", async (generation, where) => {
+      const marker = "CLAWBOX-WARN[post-update-fixups]: these system fixups failed and were skipped: vnc_refresh";
+      const filler = numberedEntries(599, (i) => `  Fixup ${i}: done`);
+      setupExecFileMock({
+        "-u clawbox-root-update@apt_update.service": journalctlModel(
+          { "clawbox-root-update@apt_update.service": where === "last" ? [...filler, marker] : [marker, ...filler] },
+          generation,
+        ),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().steps.find((s) => s.id === "apt_update")?.status).toBe("completed");
+      });
+
+      const warning = updater.getUpdateState().warnings?.find((w) => w.code === "post-update-fixups");
+      expect(warning?.message ?? "no post-update-fixups warning was raised").toContain("vnc_refresh");
     });
 
     it("raises the marker after systemd has UNLOADED the step's unit", async () => {
@@ -1004,23 +1059,19 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": {
-          stdout: [
-            "Starting ClawBox Root Update Step (apt_update).",
-            "    root : PWD=/ ; USER=clawbox ; COMMAND=/usr/bin/systemctl --user stop kokoro-server.service",
-            "pam_unix(sudo:session): session opened for user clawbox(uid=1000) by (uid=0)",
-            "Running bun build...",
-            "(to clawbox) root on none",
-            "Error: rebuild failed (exit 137)",
-            "  Restored the previous build; the dashboard answers on :80 again",
-            "clawbox-root-update@apt_update.service: Main process exited, code=exited, status=137/n/a",
-            "clawbox-root-update@apt_update.service: Failed with result 'exit-code'.",
-            "Failed to start ClawBox Root Update Step (apt_update).",
-            "clawbox-root-update@apt_update.service: Consumed 8.523s CPU time.",
-            "",
-          ].join("\n"),
-          stderr: "",
-        },
+        "/usr/bin/journalctl": cannedJournal([
+          "Starting ClawBox Root Update Step (apt_update).",
+          "    root : PWD=/ ; USER=clawbox ; COMMAND=/usr/bin/systemctl --user stop kokoro-server.service",
+          "pam_unix(sudo:session): session opened for user clawbox(uid=1000) by (uid=0)",
+          "Running bun build...",
+          "(to clawbox) root on none",
+          "Error: rebuild failed (exit 137)",
+          "  Restored the previous build; the dashboard answers on :80 again",
+          "clawbox-root-update@apt_update.service: Main process exited, code=exited, status=137/n/a",
+          "clawbox-root-update@apt_update.service: Failed with result 'exit-code'.",
+          "Failed to start ClawBox Root Update Step (apt_update).",
+          "clawbox-root-update@apt_update.service: Consumed 8.523s CPU time.",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -1050,16 +1101,12 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": {
-          stdout: [
-            "E: Could not get lock /var/lib/dpkg/lock-frontend",
-            "pam_unix(sudo:session): session closed for user clawbox",
-            "clawbox-root-update@apt_update.service: Failed with result 'exit-code'.",
-            "clawbox-root-update@apt_update.service: Consumed 1.204s CPU time.",
-            "",
-          ].join("\n"),
-          stderr: "",
-        },
+        "/usr/bin/journalctl": cannedJournal([
+          "E: Could not get lock /var/lib/dpkg/lock-frontend",
+          "pam_unix(sudo:session): session closed for user clawbox",
+          "clawbox-root-update@apt_update.service: Failed with result 'exit-code'.",
+          "clawbox-root-update@apt_update.service: Consumed 1.204s CPU time.",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -1093,19 +1140,15 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": {
-          stdout: [
-            "  Swapfile already active: 4G",
-            "  Memory available for the build: 712 MB (was 690 MB)",
-            "Running bun build...",
-            "clawbox-root-update@apt_update.service: Main process exited, code=killed, status=9/KILL",
-            // systemd's cgroup OOM verdict — the evidence, not the inference.
-            "clawbox-root-update@apt_update.service: Failed with result 'oom-kill'.",
-            "clawbox-root-update@apt_update.service: Consumed 611.183s CPU time.",
-            "",
-          ].join("\n"),
-          stderr: "",
-        },
+        "/usr/bin/journalctl": cannedJournal([
+          "  Swapfile already active: 4G",
+          "  Memory available for the build: 712 MB (was 690 MB)",
+          "Running bun build...",
+          "clawbox-root-update@apt_update.service: Main process exited, code=killed, status=9/KILL",
+          // systemd's cgroup OOM verdict — the evidence, not the inference.
+          "clawbox-root-update@apt_update.service: Failed with result 'oom-kill'.",
+          "clawbox-root-update@apt_update.service: Consumed 611.183s CPU time.",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -1165,19 +1208,19 @@ describe("updater", () => {
       ].join("\n");
       const dispatched = spawnSync("bash", ["-c", program, "bash", "--step", "post_update"], { encoding: "utf-8" });
       expect(dispatched.status, dispatched.stdout).not.toBe(0);
-      // What `journalctl -u … -n 40` hands the reader: the step's tail and
-      // systemd's epilogue, newest last.
+      // The run as the journal holds it, systemd's epilogue last; the reader
+      // asks for the newest 40 entries itself.
       const journal = [
         ...dispatched.stdout.split("\n").filter(Boolean),
         "clawbox-root-update@post_update.service: Main process exited, code=exited, status=1/FAILURE",
         "clawbox-root-update@post_update.service: Failed with result 'exit-code'.",
         "clawbox-root-update@post_update.service: Consumed 9min 3.112s CPU time.",
-      ].slice(-40).join("\n");
+      ];
 
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": new Error("systemctl failed"),
         "show clawbox-root-update@post_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": { stdout: `${journal}\n`, stderr: "" },
+        "/usr/bin/journalctl": cannedJournal(journal),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -1198,7 +1241,7 @@ describe("updater", () => {
 
       const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
       expect(postStep?.status).toBe("failed");
-      expect(postStep?.error, `the reason does not name the fixup that failed:\n${journal}`).toMatch(/^Error: .*openclaw_tts/);
+      expect(postStep?.error, `the reason does not name the fixup that failed:\n${journal.join("\n")}`).toMatch(/^Error: .*openclaw_tts/);
       // The owner reads this line: the step, not an operator's command or path.
       expect(postStep?.error).not.toMatch(/sudo|\/home\//);
     });
@@ -1220,12 +1263,11 @@ describe("updater", () => {
         "[provision-run] 20261013T183500Z-4242",
         "clawbox-root-update@post_update.service: Main process exited, code=exited, status=1/FAILURE",
         "clawbox-root-update@post_update.service: Failed with result 'exit-code'.",
-        "",
-      ].join("\n");
+      ];
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": new Error("systemctl failed"),
         "show clawbox-root-update@post_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": { stdout: journal, stderr: "" },
+        "/usr/bin/journalctl": cannedJournal(journal),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -1256,15 +1298,11 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": {
-          stdout: [
-            "Running bun build...",
-            "clawbox-root-update@apt_update.service: Main process exited, code=killed, status=9/KILL",
-            "clawbox-root-update@apt_update.service: Failed with result 'signal'.",
-            "",
-          ].join("\n"),
-          stderr: "",
-        },
+        "/usr/bin/journalctl": cannedJournal([
+          "Running bun build...",
+          "clawbox-root-update@apt_update.service: Main process exited, code=killed, status=9/KILL",
+          "clawbox-root-update@apt_update.service: Failed with result 'signal'.",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -1299,16 +1337,12 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": {
-          stdout: [
-            "Running bun build...",
-            "clawbox-root-update@apt_update.service: Main process exited, code=exited, status=137/n/a",
-            "clawbox-root-update@apt_update.service: Failed with result 'oom-kill'.",
-            "clawbox-root-update@apt_update.service: Consumed 611.183s CPU time.",
-            "",
-          ].join("\n"),
-          stderr: "",
-        },
+        "/usr/bin/journalctl": cannedJournal([
+          "Running bun build...",
+          "clawbox-root-update@apt_update.service: Main process exited, code=exited, status=137/n/a",
+          "clawbox-root-update@apt_update.service: Failed with result 'oom-kill'.",
+          "clawbox-root-update@apt_update.service: Consumed 611.183s CPU time.",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -4571,10 +4605,10 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh openclaw_install": new Error("Job for clawbox-root-update@openclaw_install.service failed"),
         "show clawbox-root-update@openclaw_install.service -p Result": { stdout: "exit-code\n", stderr: "" },
-        "-u clawbox-root-update@openclaw_install.service": {
-          stdout: "Installed: none, Target: 2026.9.4\nError: OpenClaw installation failed — /home/clawbox/.npm-global/bin/openclaw not found\n",
-          stderr: "",
-        },
+        "-u clawbox-root-update@openclaw_install.service": cannedJournal([
+          "Installed: none, Target: 2026.9.4",
+          "Error: OpenClaw installation failed — /home/clawbox/.npm-global/bin/openclaw not found",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
       });
@@ -4779,7 +4813,7 @@ describe("updater", () => {
     const commands = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
 
     /** A full update that ends at the rebuild dispatch, refused so the run settles. */
-    function runUpdate(results: Record<string, { stdout: string; stderr: string } | Error>) {
+    function runUpdate(results: Record<string, ExecFileAnswer>) {
       setupExecFileMock({
         "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
           stderr: "sudo: a password is required\n",
@@ -4869,6 +4903,78 @@ describe("updater", () => {
       const calls = commands();
       expect(calls.some((call) => call.includes(FAST_STEP))).toBe(false);
       expect(calls.some(isFullStep)).toBe(true);
+    });
+
+    /**
+     * The fast check's fast-path line is printed near the START of its run;
+     * doctor and plugin output can follow it. On journalctl 255 `--since T
+     * -n 80` is the window's last 80 entries, so a long run lost the line and
+     * paid for a quiesced full step it did not need.
+     */
+    it.each([249, 255] as const)("takes the fast path from an early line of a long run (journalctl %i)", async (generation) => {
+      runUpdate({
+        "-u clawbox-root-update@openclaw_install_fast.service": journalctlModel({
+          "clawbox-root-update@openclaw_install_fast.service": [
+            `  Installed: OpenClaw ${PINNED_CORE} (abc1234), Target: ${PINNED_CORE}`,
+            `  OpenClaw refresh: fast path (the core, the plugins ClawBox manages and the last full refresh are all at ${PINNED_CORE}, and the gateway is serving) — no gateway stop, no doctor, no plugin reinstall`,
+            ...numberedEntries(98, (i) => `  plugin check ${i}: current`),
+          ],
+        }, generation),
+      });
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      expect(commands().some(isFullStep)).toBe(false);
+      expect(commands().some((call) => call.includes("clawbox-gateway-maintenance.sh enter"))).toBe(false);
+    });
+
+    /**
+     * E2E-05, seen on an owner's box: "Updating OpenClaw" failed and the page
+     * said "npm notice". On systemd up to 253 (the boxes' 249) `journalctl
+     * --since T -n 40` is the FIRST 40 entries of the run, and the last line
+     * the failure picker keeps there is the close of npm's update banner, two
+     * minutes before the installer's own `Error:` line. The journal is that
+     * box's (fixtures/openclaw-install-failed-journal.ts), read through the
+     * runner exactly as the update reads it.
+     */
+    describe.each([249, 255] as const)("a full step that failed, read on journalctl %i", (generation) => {
+      async function failFullStep(journal: readonly string[]) {
+        runUpdate({
+          "-u clawbox-root-update@openclaw_install_fast.service": {
+            stdout: "  OpenClaw refresh: full path needed (the core on the box is older than the pin) — nothing changed here; the updater runs it with the gateway quiesced\n",
+            stderr: "",
+          },
+          // Before the full step's key, which is a prefix of this one.
+          [FAST_STEP]: { stdout: "", stderr: "" },
+          "clawbox-run-root-step.sh openclaw_install": new Error("systemctl failed"),
+          "show clawbox-root-update@openclaw_install.service -p Result": { stdout: "exit-code\n", stderr: "" },
+          "-u clawbox-root-update@openclaw_install.service": journalctlModel(
+            { "clawbox-root-update@openclaw_install.service": journal },
+            generation,
+          ),
+        });
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        const state = updater.getUpdateState();
+        return { step: state.steps.find((s) => s.id === "openclaw_install"), runError: state.error };
+      }
+
+      it("reports the installer's own Error: line, not a line from the start of the run", async () => {
+        const { step, runError } = await failFullStep(OPENCLAW_INSTALL_FAILED_JOURNAL);
+
+        expect(step?.status).toBe("failed");
+        expect(step?.error).toBe(OPENCLAW_INSTALL_FAILED_REASON);
+        expect(runError).toBe(OPENCLAW_INSTALL_FAILED_REASON);
+      });
+
+      it("falls back to the NEWEST line the step wrote when it printed no Error: line", async () => {
+        // Without entry 313 the picker's last resort decides, and that only
+        // comes out right when the newest lines reach it in journal order.
+        const { step, runError } = await failFullStep(
+          OPENCLAW_INSTALL_FAILED_JOURNAL.filter((line) => line !== OPENCLAW_INSTALL_FAILED_REASON),
+        );
+
+        expect(step?.error).toBe("[db-maintenance] recorded the migration as incomplete (degraded)");
+        expect(runError).toBe("[db-maintenance] recorded the migration as incomplete (degraded)");
+      });
     });
   });
 

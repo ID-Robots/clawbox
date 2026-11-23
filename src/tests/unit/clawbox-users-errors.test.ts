@@ -29,6 +29,7 @@ vi.mock("child_process", async () => {
 import fs from "fs";
 import fsp from "fs/promises";
 import { execFile, spawn } from "child_process";
+import { cannedJournal, numberedEntries, type JournalctlGeneration } from "@/tests/helpers/journalctl-model";
 
 type Cb = (err: Error | null, out?: { stdout: string; stderr: string }) => void;
 
@@ -38,8 +39,10 @@ const X64_ENV = "/etc/clawbox/x64.env";
 interface Box {
   /** What `sudo -n <launcher> <step>` does: undefined runs the step fine. */
   launcher?: (step: string) => Error | null;
-  /** The step's journal, as `journalctl -o cat` prints it. */
+  /** The step's journal, one entry per line, answered by what each read asks for (helpers/journalctl-model.ts). */
   journal?: string;
+  /** Which journalctl generation answers it: they disagree on `--since T -n N`. */
+  generation?: JournalctlGeneration;
   /** Whether journalctl itself fails (the web server cannot read the journal). */
   journalUnreadable?: boolean;
 }
@@ -52,7 +55,12 @@ function stage(box: Box) {
       cb(box.launcher ? box.launcher(args[args.length - 1]) : null, { stdout: "", stderr: "" });
     } else if (bin === "/usr/bin/journalctl") {
       if (box.journalUnreadable) cb(Object.assign(new Error("No journal files were opened due to insufficient permissions."), { code: 1 }));
-      else cb(null, { stdout: box.journal ?? "", stderr: "" });
+      else if (box.journal === undefined) cb(null, { stdout: "", stderr: "" });
+      else {
+        const answer = cannedJournal(box.journal, box.generation)(bin, args);
+        if (answer instanceof Error) cb(answer);
+        else cb(null, answer);
+      }
     } else {
       cb(Object.assign(new Error(`unexpected ${bin}`), { code: 127 }));
     }
@@ -140,6 +148,21 @@ describe("Settings → Users on an x64 desktop: every failure says why", () => {
     const err = await lib.createUser("carol", "correct horse battery").catch((e: unknown) => e);
     expect(err).toMatchObject({ code: "create_failed", status: 500, detail: "useradd could not create 'carol'" });
     expect((err as Error).message).toBe("The account could not be created: useradd could not create 'carol'");
+  });
+
+  it.each([249, 255] as const)("finds the step's reason at the end of a long run (journalctl %i)", async (generation) => {
+    // On systemd up to 253 `--since T -n 80` is the run's FIRST 80 entries:
+    // a step that printed more than that before its `Error:` line lost it.
+    stage({
+      launcher: unitFailed,
+      generation,
+      journal: [...numberedEntries(119, (i) => `useradd: waiting for the passwd lock (${i})`),
+        "Error: useradd could not create 'carol'"].join("\n"),
+    });
+    await expect(lib.createUser("carol", "correct horse battery")).rejects.toMatchObject({
+      code: "create_failed",
+      detail: "useradd could not create 'carol'",
+    });
   });
 
   it("answers a name that appeared between the check and the step as taken", async () => {
