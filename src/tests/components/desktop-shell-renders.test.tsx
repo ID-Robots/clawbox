@@ -297,6 +297,21 @@ describe("the Telegram pairing poll", () => {
     await act(async () => { approval.release({ success: true }); await wait(50); });
     await waitFor(() => expect(screen.queryByText("Approve")).toBeNull());
   });
+
+  it("lets the card go after a failed Approve once the store no longer holds it", async () => {
+    await mountDesktop();
+    await act(async () => {
+      pairing.release({ configured: true, pending: [{ code: "PAIR1", id: "42", name: "Ann" }] });
+      await wait(50);
+    });
+    fireEvent.click(await screen.findByText("Approve"));
+    holdPairing();
+    pairing.release({ configured: true, pending: [] });
+    await act(async () => { approval.release({ success: false, error: "That code has expired." }); await wait(50); });
+    expect(await screen.findByText("That code has expired.")).toBeInTheDocument();
+    // The hold ends with the POST: the next poll's answer stands.
+    await waitFor(() => expect(screen.queryByText("Approve")).toBeNull(), { timeout: 4_500 });
+  });
 });
 
 describe("the notice poll", () => {
