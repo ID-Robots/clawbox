@@ -16,6 +16,13 @@ import { NO_KEY_PLACEHOLDER, externalEngineFromState, readExternalEngineKey } fr
  * OpenAI-compatible provider. The KEYS are written as literals at each call
  * site, so the harness contract (scripts/harness-contract) checks every one
  * against the pinned Hermes.
+ *
+ * Written beside it, `model_overrides.clawext._default` declares the engine's
+ * model as reasoning and tool-calling (Hermes' canonical capability schema,
+ * agent/models_dev.py). models.dev does not know `clawext`, and since v0.23
+ * Hermes reads capabilities from there before it offers the reasoning-effort
+ * picker (`/api/model/info`). `_default` because the provider serves the one
+ * model, and a model id with a dot would not survive the dotted key path.
  */
 export function hermesProviderValues(settings: ExternalEngineSettings, key: string | null) {
   return {
@@ -64,11 +71,15 @@ export async function reconcileExternalEngineWithHermes(opts: { force?: boolean 
     }
     const declared = await resolveHermesConfigValue("providers.clawext.base_url");
     if (declared.state === "unreadable") return false;
+    // A block saved before the capabilities were declared (an updated box)
+    // is written again, so its picker comes back without a re-save.
+    const caps = await resolveHermesConfigValue("model_overrides.clawext._default.supports_reasoning");
     // A block that names another endpoint is an older save's (a dual box that
     // saved again on OpenClaw): rewritten from the record. The selection
     // rewrites it in any case, so it never names a stale endpoint or key.
-    const inPlace = declared.state === "present"
-      || (declared.state === "value" && declared.value === record.baseUrl);
+    const inPlace = (declared.state === "present"
+      || (declared.state === "value" && declared.value === record.baseUrl))
+      && caps.state === "value" && caps.value === "true";
     if (inPlace && !opts.force) {
       hermesReconciled = true;
       return true;
@@ -83,6 +94,8 @@ export async function reconcileExternalEngineWithHermes(opts: { force?: boolean 
         "providers.clawext.models": v.models,
         "providers.clawext.name": v.name,
         "providers.clawext.context_length": v.contextLength,
+        "model_overrides.clawext._default.supports_reasoning": "true",
+        "model_overrides.clawext._default.supports_tools": "true",
       },
     });
     hermesReconciled = true;

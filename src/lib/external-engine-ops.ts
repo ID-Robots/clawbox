@@ -323,6 +323,8 @@ async function applyToHermes(
           "providers.clawext.models": v.models,
           "providers.clawext.name": v.name,
           "providers.clawext.context_length": v.contextLength,
+          "model_overrides.clawext._default.supports_reasoning": "true",
+          "model_overrides.clawext._default.supports_tools": "true",
           "model.provider": EXTERNAL_ENGINE_PROVIDER,
           "model.default": settings.modelId,
         },
@@ -365,7 +367,8 @@ async function removeFromHermes(record: ExternalEngineRecord): Promise<string | 
           unset: [
             "providers.clawext.base_url", "providers.clawext.api_key", "providers.clawext.api_mode",
             "providers.clawext.models", "providers.clawext.models_discovered", "providers.clawext.name",
-            "providers.clawext.context_length",
+            "providers.clawext.context_length", "model_overrides.clawext._default.supports_reasoning",
+            "model_overrides.clawext._default.supports_tools",
           ],
         });
       } else if (selection === EXTERNAL_ENGINE_PROVIDER) {
@@ -376,7 +379,8 @@ async function removeFromHermes(record: ExternalEngineRecord): Promise<string | 
           unset: [
             "providers.clawext.base_url", "providers.clawext.api_key", "providers.clawext.api_mode",
             "providers.clawext.models", "providers.clawext.models_discovered", "providers.clawext.name",
-            "providers.clawext.context_length", "model.provider", "model.default",
+            "providers.clawext.context_length", "model_overrides.clawext._default.supports_reasoning",
+            "model_overrides.clawext._default.supports_tools", "model.provider", "model.default",
           ],
         });
       } else {
@@ -384,7 +388,8 @@ async function removeFromHermes(record: ExternalEngineRecord): Promise<string | 
           unset: [
             "providers.clawext.base_url", "providers.clawext.api_key", "providers.clawext.api_mode",
             "providers.clawext.models", "providers.clawext.models_discovered", "providers.clawext.name",
-            "providers.clawext.context_length",
+            "providers.clawext.context_length", "model_overrides.clawext._default.supports_reasoning",
+            "model_overrides.clawext._default.supports_tools",
           ],
         });
       }
