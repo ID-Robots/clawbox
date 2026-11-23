@@ -20,7 +20,7 @@ specs depend on state set up by earlier ones:
 | `60-app-store.spec.ts`        | Live search against `clawbox.com`, install + uninstall one skill |
 | `70-browser.spec.ts`          | Real Chromium on Xvfb :99 via CDP; navigate to youtube.com, screenshot |
 | `80-chat.spec.ts`             | Gateway health + ws-config + real chat round-trip (needs AI key) |
-| `90-upgrade-main-to-beta.spec.ts` | In-app updater: pin `beta`, run, wait through restart, verify HEAD. When main's OpenClaw pin differs from the target's, main's core first gets a ChatGPT-style box (codex runtime armed, `@openclaw/codex` at main's pin), and the last case requires the core's own `migration_runs` record that codex's state migration was owed during the update and completed; equal pins are annotated "not exercised" |
+| `90-upgrade-main-to-beta.spec.ts` | In-app updater: pin `beta`, run, wait through restart, verify HEAD. When main's OpenClaw pin differs from the target's, main's core first gets a ChatGPT-style box (codex runtime armed, `@openclaw/codex` at main's pin, and a per-agent heartbeat key the target's core retired, while main's core still knows it), the last case requires the first doctor pass to have met that key and repaired it after codex's obligation was rewritten, and the core's own `migration_runs` record that codex's state migration was owed during the update and completed; equal pins are annotated "not exercised" |
 | `99-power.spec.ts`            | `/setup-api/system/power restart` — container exits, comes back with state |
 
 ## What it *doesn't* cover (and why)
