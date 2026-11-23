@@ -4928,7 +4928,7 @@ describe("updater", () => {
     });
 
     /**
-     * E2E-05, seen on an owner's box: "Updating OpenClaw" failed and the page
+     * Seen on an owner's box: "Updating OpenClaw" failed and the page
      * said "npm notice". On systemd up to 253 (the boxes' 249) `journalctl
      * --since T -n 40` is the FIRST 40 entries of the run, and the last line
      * the failure picker keeps there is the close of npm's update banner, two

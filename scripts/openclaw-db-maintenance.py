@@ -1317,11 +1317,18 @@ def _parse_time(value):
 
 
 def journal_lines(unit, since):
-    """(time, text) the gateway printed under `unit` since `since`; [] when
-    the journal cannot be read."""
+    """(time, text) the gateway printed under `unit` since `since`, oldest
+    first (`failures[-1]` is the newest refusal); [] when the journal cannot
+    be read.
+
+    The newest 20000 entries of the window: `--reverse` beside `-n`, put back
+    in order below. On systemd up to 253 (the boxes' 249) `--since T -n N`
+    alone is the window's FIRST N entries, which hid the newest `gateway ready`
+    of a chatty week."""
     try:
         proc = subprocess.run(
-            ["journalctl", "-u", unit, "--since", "@%d" % int(since), "-o", "json", "--no-pager", "-q", "-n", "20000"],
+            ["journalctl", "-u", unit, "--since", "@%d" % int(since), "-o", "json", "--no-pager", "-q",
+             "--reverse", "-n", "20000"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -1330,7 +1337,8 @@ def journal_lines(unit, since):
     except (OSError, subprocess.SubprocessError):
         return []
     out = []
-    for raw in proc.stdout.decode("utf-8", "replace").splitlines():
+    # `-o json` is one entry per line, so reversing lines reverses entries.
+    for raw in reversed(proc.stdout.decode("utf-8", "replace").splitlines()):
         try:
             entry = json.loads(raw)
         except ValueError:
