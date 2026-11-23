@@ -75,8 +75,14 @@ export function parseJsonOut(stdout: string): unknown {
   return JSON.parse(stdout.slice(stdout.indexOf("{"), stdout.lastIndexOf("}") + 1));
 }
 
-/** `2026.11.5-1` → `2026.11.5`: npm republishes share their base's runtime API. */
-export const baseVersion = (version: string) => version.split("-")[0];
+/**
+ * install.sh's rule for a managed plugin's version under a pin: the pin itself,
+ * or a correction pin's base (a trailing numeric -N or +N removed, the cohort
+ * the pinned core moves version-bound plugins to). A pre-release is not the
+ * stable pin, and a republished X.Y.Z-1 is not the pin X.Y.Z.
+ */
+export const atPinRelease = (version: string, pin: string) =>
+  version === pin || version === pin.replace(/[-+][0-9]+$/, "");
 
 export interface MigrationRow {
   status: string;
@@ -282,9 +288,11 @@ export function describePass(pass: DoctorPass, index: number): string {
 
 /**
  * What the installer's plugin refresh after doctor did, from its own rows in
- * the openclaw_install journal: codex's row (left "(already at <pin>)", or
- * reinstalled) and how many rows of each kind. Never a verdict: a refresh that
- * printed no rows, or another installer's wording, reads as such.
+ * the openclaw_install journal: codex's row and how many rows of each kind. A
+ * bare row is printed BEFORE the CLI runs, so it is an attempt; the line under
+ * it says how it ended (`updated`, or the installer's `WARN: not updated`).
+ * Never a verdict: a refresh that printed no rows, or another installer's
+ * wording, reads as such.
  */
 export function describeRefresh(lines: readonly JournalLine[]): string {
   const messages = lines.map((line) => line.message.trim());
@@ -294,14 +302,26 @@ export function describeRefresh(lines: readonly JournalLine[]): string {
       message === "No external plugins to refresh" || message.startsWith("CLAWBOX-WARN[openclaw-plugin-refresh-skipped]"));
     return other ?? "no refresh rows in the journal";
   }
-  const rows = messages.slice(start + 1).filter((message) => message.startsWith("- "));
-  const codex = rows.find((message) => message.startsWith("- @openclaw/codex@"));
-  const current = rows.filter((message) => message.includes(" (already at ")).length;
-  const reinstalled = rows.filter((message) => /^- \S+$/.test(message)).length;
+  const rows: { text: string; outcome: "left" | "attempted" | "reinstalled" | "failed" | "other" }[] = [];
+  for (const message of messages.slice(start + 1)) {
+    const last = rows[rows.length - 1];
+    if (message.startsWith("- ")) {
+      const text = message.slice(2);
+      rows.push({ text, outcome: text.includes(" (already at ") ? "left" : /^\S+$/.test(text) ? "attempted" : "other" });
+    } else if (last?.outcome === "attempted" && message === "updated") {
+      last.outcome = "reinstalled";
+    } else if (last?.outcome === "attempted" && message.startsWith("WARN: not updated")) {
+      last.outcome = "failed";
+    }
+  }
+  const count = (outcome: string) => rows.filter((row) => row.outcome === outcome).length;
+  const codex = rows.find((row) => row.text.startsWith("@openclaw/codex@"));
   const codexSaid = !codex ? "no row"
-    : codex.includes(" (already at ") ? `left: ${codex.slice(2)}`
-      : /^- \S+$/.test(codex) ? `reinstalled: ${codex.slice(2)}` : codex.slice(2);
-  return `codex ${codexSaid}; ${rows.length} rows: ${current} already at the release, ${reinstalled} reinstalled`;
+    : codex.outcome === "left" ? `left: ${codex.text}`
+      : codex.outcome === "attempted" ? `attempted, no outcome printed: ${codex.text}`
+        : `${codex.outcome}: ${codex.text}`;
+  return `codex ${codexSaid}; ${rows.length} rows: ${count("left")} already at the release, ` +
+    `${count("reinstalled")} reinstalled, ${count("failed")} failed, ${count("attempted")} with no outcome printed`;
 }
 
 /** The lines worth reading in the job log: every doctor phase and the lines the checks above read. */

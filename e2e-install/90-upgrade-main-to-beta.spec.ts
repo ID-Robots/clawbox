@@ -39,7 +39,7 @@ import { startUpdate, waitForUpdate } from "./helpers/setup-api";
 import { READY_ACTION_TIMEOUT, waitForAppReady, waitForGatewayReady } from "./helpers/readiness";
 import {
   KEY_LINE,
-  baseVersion,
+  atPinRelease,
   describePass,
   describeRefresh,
   journalAfter,
@@ -105,6 +105,9 @@ let triggeredAtMs = 0;
 let updateSeconds: number | null = null;
 let codexRowBefore: MigrationRowRead | null = null;
 
+/** The target branch's commit the pin above was read at (see readTargetPin). */
+let targetCommit = "";
+
 /** The first word of a pin file, as the updater reads it (readPinsAtBranch). */
 const firstWord = (text: string) => text.trim().split(/\s+/)[0] ?? "";
 
@@ -115,7 +118,7 @@ const firstWord = (text: string) => text.trim().split(/\s+/)[0] ?? "";
  * updater then finds there: a blob-less shallow clone in a scratch directory,
  * from the remote the updater fetches.
  */
-async function readTargetPin(branch: string): Promise<string> {
+async function readTargetPin(branch: string): Promise<{ pin: string; commit: string }> {
   if (!/^[A-Za-z0-9._\-/]+$/.test(branch)) throw new Error(`unsafe branch name: ${branch}`);
   const out = await dockerExec([
     "bash", "-c",
@@ -125,11 +128,13 @@ async function readTargetPin(branch: string): Promise<string> {
       "trap 'rm -rf \"$dir\"' EXIT",
       'url="$(git -c safe.directory=/home/clawbox/clawbox -C /home/clawbox/clawbox remote get-url origin)"',
       'git clone --quiet --filter=blob:none --depth=1 --no-checkout --single-branch --branch "$1" "$url" "$dir/pin"',
+      'git -C "$dir/pin" rev-parse HEAD',
       'git -C "$dir/pin" show HEAD:config/openclaw-target.txt',
     ].join("; "),
     "bash", branch,
   ], { user: "clawbox", timeoutMs: 120_000 });
-  return firstWord(out);
+  const [commit = "", ...pinFile] = out.trim().split("\n");
+  return { pin: firstWord(pinFile.join("\n")), commit: commit.trim() };
 }
 
 async function coreVersion(): Promise<string> {
@@ -370,7 +375,7 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
 
   test("a ChatGPT-style box with a heartbeat the new core retires", async () => {
     mainPin = firstWord(await dockerExec(["cat", "/home/clawbox/clawbox/config/openclaw-target.txt"]));
-    targetPin = await readTargetPin(UPGRADE_BRANCH);
+    ({ pin: targetPin, commit: targetCommit } = await readTargetPin(UPGRADE_BRANCH));
     expect(mainPin, "fixture: main's checkout has no OpenClaw pin").not.toBe("");
     expect(targetPin, `fixture: ${UPGRADE_BRANCH} has no OpenClaw pin`).not.toBe("");
     crossing = mainPin !== targetPin;
@@ -446,7 +451,7 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     expect(codex.row, "fixture: codex is not in `openclaw plugins list --json`").toBeDefined();
     expect(codex.row?.origin, "fixture: codex is the bundled copy, not the external plugin").not.toBe("bundled");
     expect(codex.row?.enabled, `fixture: codex is not enabled (status ${String(codex.row?.status)})`).toBe(true);
-    expect(baseVersion(codex.version), "fixture: codex is not at main's pin").toBe(baseVersion(mainPin));
+    expect(atPinRelease(codex.version, mainPin), `fixture: codex ${codex.version} is not at main's pin ${mainPin}`).toBe(true);
     const config = await readOpenclawJson();
     expect(
       config.agents?.defaults?.models?.[CODEX_ARM_MODEL]?.agentRuntime?.id,
@@ -522,6 +527,23 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
       expect(step.status).toBe("completed");
     }
     if (crossing) updateSeconds = Math.round((Date.now() - triggeredAtMs) / 1000);
+    // The crossing was decided on the pin read before the trigger, and the
+    // updater resolves the branch again when it fetches: hold the pin the update
+    // installed to that snapshot before anything relies on it. A move that left
+    // the pin alone changes nothing here, and is only said.
+    const installedPin = firstWord(await dockerExec(["cat", "/home/clawbox/clawbox/config/openclaw-target.txt"]));
+    const installedCommit = (await dockerExec(
+      ["git", "-c", "safe.directory=/home/clawbox/clawbox", "-C", "/home/clawbox/clawbox", "rev-parse", "HEAD"],
+      { user: "clawbox" },
+    )).trim();
+    if (installedCommit !== targetCommit) {
+      console.log(`[codex crossing] ${UPGRADE_BRANCH} moved after the snapshot: ${targetCommit} then, ${installedCommit} installed`);
+    }
+    expect(
+      installedPin,
+      `fixture: ${UPGRADE_BRANCH} moved between the snapshot and the update: pin ${targetPin} at ${targetCommit}, ` +
+      `the update installed pin ${installedPin} at ${installedCommit}; run the job again`,
+    ).toBe(targetPin);
   });
 
   test(`git HEAD is on ${UPGRADE_BRANCH}`, async () => {
@@ -694,14 +716,12 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
       ).toBeUndefined();
     }
 
-    // The box is on the target's core, and the pin it carries is the one the
-    // fixture compared against.
-    const onBox = firstWord(await dockerExec(["cat", "/home/clawbox/clawbox/config/openclaw-target.txt"]));
-    expect(onBox, `fixture: the pin read from ${UPGRADE_BRANCH} is not the one the update installed`).toBe(targetPin);
+    // The box is on the target's core (the pin it carries was held to the
+    // snapshot as soon as the update completed).
     expect(await coreVersion()).toBe(targetPin);
     const codex = await codexPlugin();
     expect(codex.row, "codex is gone from `openclaw plugins list --json` after the update").toBeDefined();
-    expect(baseVersion(codex.version), "codex did not follow the core").toBe(baseVersion(targetPin));
+    expect(atPinRelease(codex.version, targetPin), `codex ${codex.version} did not follow the core ${targetPin}`).toBe(true);
     const status = JSON.parse(await dockerExec(
       ["cat", "/home/clawbox/clawbox/data/openclaw-migration-status.json"],
       { user: "root" },
