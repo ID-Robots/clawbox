@@ -408,7 +408,7 @@ run_user_remove() {
 INSTALLER_STEPS="
 apt_update chromium_install clawkeep_install cloudflared_install ffmpeg_install fix_git_perms
 google_chrome_install llamacpp_install ollama_install openclaw_config openclaw_install openclaw_patch
-openclaw_setup vnc_install
+openclaw_setup vnc_install voice_kokoro_install voice_whisper_install
 "
 
 case "$step" in

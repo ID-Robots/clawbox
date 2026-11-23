@@ -107,6 +107,8 @@ let root: string;
  *   WARMUP_EXIT         the KPipeline pre-download status
  *   FAKE_ARCH           what `uname -m` reports
  *   WITH_CUDA           "1" puts an nvcc stub on PATH
+ *   NVCC_RELEASE        the release that stub reports (default 12.6, JetPack 6)
+ *   WITH_NVIDIA_SMI     "1" puts an nvidia-smi stub on PATH (a DGX Spark has one)
  *
  * `stamped` pre-writes the completion stamp a previous successful run leaves —
  * `true` for the current version, or a literal string for a stamp an older
@@ -210,7 +212,11 @@ function runTtsOnly(
   writeExec(path.join(bin, "chown"), [`printf '%s\\n' "$*" >> "${chownLog}"`, "exit 0"].join("\n"));
   writeExec(path.join(bin, "loginctl"), "exit 0");
   if (env.WITH_CUDA === "1") {
-    writeExec(path.join(bin, "nvcc"), 'echo "Cuda compilation tools, release 12.6, V12.6.68"');
+    const release = env.NVCC_RELEASE ?? "12.6";
+    writeExec(path.join(bin, "nvcc"), `echo "Cuda compilation tools, release ${release}, V${release}.68"`);
+  }
+  if (env.WITH_NVIDIA_SMI === "1") {
+    writeExec(path.join(bin, "nvidia-smi"), 'echo "12.1"');
   }
 
   // No second engine to pre-install: Kokoro is the only on-device voice, and
@@ -760,6 +766,47 @@ describe.skipIf(!hasBash)("install-voice.sh --kokoro on a fresh CUDA box", () =>
     expect(pip.some((c) => c.includes("kokoro"))).toBe(true);
     expect(res.su.join("\n"), "the Kokoro install pulled in the STT half").not.toContain("faster-whisper");
     expect(res.ttsStatus).toMatch(/^KOKORO=ready$/m);
+    // A Jetson's pip runs exactly as it always did (TASK-2501 changed only the Spark).
+    expect(pip.filter((c) => /break-system-packages|--no-index|whl\/cu130/.test(c))).toEqual([]);
+  });
+});
+
+// TASK-2501: a DGX Spark (SBSA aarch64, CUDA 13, Python 3.12, no tegra in its
+// device tree) passed both checks above and then got the cp310 JetPack wheel,
+// which pip refuses there: failed:torch, exit 12.
+describe.skipIf(!hasBash)("install-voice.sh --kokoro on a DGX Spark", () => {
+  const SPARK = { WITH_CUDA: "1", NVCC_RELEASE: "13.0", WITH_NVIDIA_SMI: "1", KOKORO_IMPORT_EXIT: "1" };
+
+  it("installs PyTorch's cu130 build for the box's Python, never the Jetson wheel, and reports ready", () => {
+    const res = runTtsOnly(SPARK, false, "--kokoro");
+    expect(res.status, res.stderr).toBe(0);
+    const pip = res.su.filter((c) => c.includes("pip3 install"));
+    expect(pip.some((c) => c.includes("--index-url https://download.pytorch.org/whl/cu130 torch"))).toBe(true);
+    expect(pip.some((c) => c.includes(shellConst("JETSON_TORCH_URL")))).toBe(false);
+    expect(pip.some((c) => c.includes("nvidia-cusparselt-cu12"))).toBe(false);
+    // Ubuntu 24.04's Python is externally managed (PEP 668).
+    expect(pip.every((c) => c.includes("--break-system-packages"))).toBe(true);
+    expect(pip.some((c) => c.includes("kokoro"))).toBe(true);
+    expect(res.ttsStatus).toMatch(/^KOKORO=ready$/m);
+  });
+
+  it("installs from the wheelhouse alone when it holds wheels — the box may have no internet egress", () => {
+    const wheels = path.join(root, "home", "clawbox", ".cache", "clawbox", "wheels");
+    mkdirSync(wheels, { recursive: true });
+    writeFileSync(path.join(wheels, "torch-2.9.1+cu130-cp312-cp312-manylinux_2_28_aarch64.whl"), "");
+    const res = runTtsOnly(SPARK, false, "--kokoro");
+    expect(res.status, res.stderr).toBe(0);
+    const pip = res.su.filter((c) => c.includes("pip3 install"));
+    expect(pip.length).toBeGreaterThan(0);
+    expect(pip.every((c) => c.includes(`--find-links '${wheels}' --no-index`))).toBe(true);
+  });
+
+  it("is still the Jetson path on CUDA 12, nvidia-smi or not", () => {
+    const res = runTtsOnly({ ...SPARK, NVCC_RELEASE: "12.6" }, false, "--kokoro");
+    expect(res.status, res.stderr).toBe(0);
+    const pip = res.su.filter((c) => c.includes("pip3 install"));
+    expect(pip.some((c) => c.includes(shellConst("JETSON_TORCH_URL")))).toBe(true);
+    expect(pip.some((c) => c.includes("--break-system-packages"))).toBe(false);
   });
 });
 
@@ -1835,16 +1882,19 @@ describe("install-voice.sh's reach", () => {
     expect(code(INSTALL_VOICE_SH).filter((l) => /\bchown\b/.test(l))).toEqual([]);
   });
 
-  it("is run by no x64 path, which this change leaves as it was", () => {
+  it("is run by no x64 migration script, and by install-x64.sh only out of root's own copy (TASK-2501)", () => {
     const migration = path.join(REPO, "scripts", "x64-migration");
-    const files = [
-      path.join(REPO, "install-x64.sh"),
-      ...readdirSync(migration, { recursive: true, encoding: "utf-8" })
-        .map((f) => path.join(migration, f))
-        .filter((f) => statSync(f).isFile()),
-    ];
+    const files = readdirSync(migration, { recursive: true, encoding: "utf-8" })
+      .map((f) => path.join(migration, f))
+      .filter((f) => statSync(f).isFile());
     for (const f of files) {
       expect(code(readFileSync(f, "utf-8")).filter((l) => l.includes("install-voice.sh")), f).toEqual([]);
     }
+    // Root never runs the install user's tree: the voice steps run the copy
+    // step_root_step_contract installs root-owned.
+    const x64 = code(readFileSync(path.join(REPO, "install-x64.sh"), "utf-8"));
+    expect(x64.filter((l) => /\bbash\b.*install-voice\.sh/.test(l))).toEqual([
+      '    bash "$ROOT_VOICE_DIR/install-voice.sh" "$mode" || rc=$?',
+    ]);
   });
 });

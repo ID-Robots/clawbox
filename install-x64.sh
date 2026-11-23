@@ -1249,6 +1249,75 @@ PY
   fi
 }
 
+# A Workstation's cluster runs its own ASR server and names it in .env as
+# ASR_BASE_URL (the OpenAI-compatible /v1 root; ASR_MODEL, when set, is the
+# model it serves). Settings → Speech's "own speech server" engine
+# (src/lib/stt-endpoint.ts) is pre-filled from it and made the transcription
+# engine, so speech is transcribed on the cluster without a hand-set OpenClaw
+# audio block; the app aligns channel voice notes with it at its next boot.
+# ONCE: `stt_endpoint_seeded` records it, so an owner who removes or changes
+# the server is never overruled by a later install or update. The app
+# re-validates the address when it reads it (loopback or private LAN only),
+# so a value it would refuse is simply no engine. Never fatal.
+seed_stt_endpoint_from_asr() {
+  local env_file="$1" url model
+  url="$(sed -n 's/^ASR_BASE_URL=//p' "$env_file" 2>/dev/null | tail -1 | tr -d '\r"'"'"'' || true)"
+  url="${url%/}"
+  [ -n "$url" ] || return 0
+  model="$(sed -n 's/^ASR_MODEL=//p' "$env_file" 2>/dev/null | tail -1 | tr -d '\r"'"'"'' || true)"
+  if ! as_user python3 -I - "$PROJECT_DIR/data/config.json" "$url" "$model" <<'PY'
+import json, os, sys, tempfile, urllib.request
+path, url, model = sys.argv[1:4]
+try:
+    with open(path) as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("not an object")
+except FileNotFoundError:
+    data = {}
+except (OSError, ValueError) as err:
+    print(f"  WARN: {path} could not be read ({err}); not pre-filling the speech server", file=sys.stderr)
+    sys.exit(0)
+if data.get("stt_endpoint_seeded") is True or data.get("stt_endpoint") is not None:
+    sys.exit(0)
+if not url.startswith(("http://", "https://")):
+    print("  WARN: ASR_BASE_URL is not an http(s) address; not pre-filling the speech server", file=sys.stderr)
+    sys.exit(0)
+# No ASR_MODEL: the model the server itself serves (an ASR server such as vLLM
+# refuses a name it does not serve), else the engine's own default.
+if not model:
+    try:
+        with urllib.request.urlopen(url + "/models", timeout=5) as res:
+            model = str(json.load(res)["data"][0]["id"])
+    except Exception:
+        model = "whisper-1"
+data["stt_endpoint"] = {"baseUrl": url, "model": model}
+data["stt_endpoint_seeded"] = True
+data.setdefault("stt_primary", "endpoint")
+tmp = None
+try:
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".config.json.")
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    tmp = None
+except OSError as err:
+    print(f"  WARN: {path} could not be written ({err}); not pre-filling the speech server", file=sys.stderr)
+    sys.exit(0)
+finally:
+    if tmp is not None:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+print(f"  Speech-to-text: pre-filled this Workstation's ASR server ({url}) as the transcription engine")
+PY
+  then
+    echo "  WARN: could not pre-fill the speech server from ASR_BASE_URL" >&2
+  fi
+}
+
 step_directories_permissions() {
   mkdir -p "$PROJECT_DIR/data"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data"
@@ -1281,6 +1350,9 @@ step_directories_permissions() {
   fi
   seed_llamacpp_env "$ENV_FILE"
   seed_network_interface "$ENV_FILE"
+  if [ "$HOST_ARCH" = aarch64 ]; then
+    seed_stt_endpoint_from_asr "$ENV_FILE"
+  fi
   record_owner_password
   echo "  Done"
 }
@@ -2082,6 +2154,9 @@ ROOT_STEP_DIR="/usr/local/libexec/clawbox"
 ROOT_STEP_CONF_DIR="/etc/clawbox"
 ROOT_STEP_CONF="$ROOT_STEP_CONF_DIR/x64.env"
 ROOT_INSTALLER_COPY="$ROOT_STEP_DIR/clawbox-x64-install.sh"
+# Root's copy of scripts/install-voice.sh and the scripts it deploys, for the
+# voice steps below (the same rule as the installer copy).
+ROOT_VOICE_DIR="$ROOT_STEP_DIR/voice"
 
 # A desktop install user normally arrives with a password of their own, and the
 # wizard's Security step can then never apply: src/app/setup-api/system/
@@ -2142,6 +2217,16 @@ step_root_step_contract() {
   # that tree belongs to the install user, so exec'ing it as root would make the
   # dispatcher a one-step local root (the appliance's TASK-445 / TASK-733).
   install -o root -g root -m 0755 "$0" "$ROOT_INSTALLER_COPY"
+  # The voice steps run install-voice.sh as root, so root runs its own copy of
+  # it and of the scripts it deploys, never the install user's tree.
+  local voice_src voice_f
+  voice_src="$(cd "$src/.." && pwd)"
+  install -d -o root -g root -m 0755 "$ROOT_VOICE_DIR" "$ROOT_VOICE_DIR/openclaw"
+  for voice_f in install-voice.sh kokoro-server.py kokoro-client.sh kokoro-tts.sh whisper-server.py stt-client.py stt.py openclaw/clawbox-tts.sh; do
+    if [ -f "$voice_src/$voice_f" ]; then
+      install -o root -g root -m 0755 "$voice_src/$voice_f" "$ROOT_VOICE_DIR/$voice_f"
+    fi
+  done
 
   printf 'CLAWBOX_USER=%s\nPROJECT_DIR=%s\nROOT_INSTALLER=%s\n' \
     "$CLAWBOX_USER" "$PROJECT_DIR" "$ROOT_INSTALLER_COPY" > "$ROOT_STEP_CONF"
@@ -2494,6 +2579,36 @@ step_clawkeep_install() {
   fi
 }
 
+# Settings → Local AI's Install for the box's own voice (Kokoro) and its
+# speech-to-text (faster-whisper). Opt-in: never part of the full install.
+# The contract of install.sh's step_voice_kokoro_install and
+# step_voice_whisper_install: 0 ready, 13 this box declines the engine, 12 it
+# was asked for and did not install, 14 the scripts did not deploy or the exit
+# is outside the contract. install-voice.sh tells a DGX Spark from a Jetson
+# itself.
+run_voice_install() {
+  local mode="$1" rc=0
+  if [ ! -f "$ROOT_VOICE_DIR/install-voice.sh" ]; then
+    echo "  ERROR: $ROOT_VOICE_DIR/install-voice.sh is missing — run: sudo bash install-x64.sh --step root_step_contract" >&2
+    return 12
+  fi
+  CLAWBOX_USER="$CLAWBOX_USER" CLAWBOX_HOME="$CLAWBOX_HOME" \
+    bash "$ROOT_VOICE_DIR/install-voice.sh" "$mode" || rc=$?
+  case "$rc" in
+    0|12|13) return "$rc" ;;
+    1) echo "  ERROR: the engine's verdict stands, but the voice scripts did not deploy to the workspace" >&2; return 14 ;;
+    *) echo "  ERROR: install-voice.sh $mode exited $rc, which is not in its contract" >&2; return 14 ;;
+  esac
+}
+
+step_voice_kokoro_install() {
+  run_voice_install --kokoro
+}
+
+step_voice_whisper_install() {
+  run_voice_install --whisper
+}
+
 step_start_ui() {
   systemctl restart "$UI_SERVICE"
   wait_for_http "http://127.0.0.1:$PORT" "ClawBox UI" "$UI_SERVICE"
@@ -2677,6 +2792,7 @@ DISPATCH_STEPS=(
   ollama_install llamacpp_install chromium_install google_chrome_install ai_tools_install
   vnc_install ffmpeg_install cloudflared_install fix_git_perms clawkeep_install
   systemd_services root_step_contract start_gateway start_ui
+  voice_kokoro_install voice_whisper_install
 )
 
 if [ "${1:-}" = "--step" ]; then

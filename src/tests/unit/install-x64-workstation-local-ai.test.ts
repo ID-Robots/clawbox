@@ -235,3 +235,126 @@ describe("install-x64.sh: the local model a workstation gets", () => {
     expect(sliceFunction("step_directories_permissions")).toContain('seed_llamacpp_env "$ENV_FILE"');
   });
 });
+
+/**
+ * TASK-2501: Settings → Local AI's voice Install on a Workstation. install-x64.sh
+ * had no voice step, so the root dispatcher refused `voice_kokoro_install`.
+ * The steps carry install.sh's contract (0 ready, 13 declined, 12 failed, 14
+ * the scripts did not deploy / an exit outside the contract), and root runs
+ * its own copy of install-voice.sh, never the install user's tree.
+ */
+describe("the voice steps a Workstation's Local AI tab starts", () => {
+  function voiceStep(step: string, exitCode: number) {
+    const voiceDir = path.join(dir, "voice");
+    mkdirSync(voiceDir, { recursive: true });
+    writeFileSync(path.join(voiceDir, "install-voice.sh"), `echo "ran $1 as $CLAWBOX_USER in $CLAWBOX_HOME"\nexit ${exitCode}\n`);
+    const script = [
+      "set -euo pipefail",
+      `ROOT_VOICE_DIR="${voiceDir}"`,
+      "CLAWBOX_USER=owner",
+      'CLAWBOX_HOME="/opt/owner-home"',
+      sliceFunction("run_voice_install"),
+      sliceFunction(`step_${step}`),
+      `rc=0; step_${step} 2>&1 || rc=$?; echo RC=$rc`,
+    ].join("\n");
+    return spawnSync("bash", ["-c", script], { encoding: "utf8" }).stdout;
+  }
+
+  it.each([
+    [0, 0], [12, 12], [13, 13], [1, 14], [7, 14],
+  ])("voice_kokoro_install: install-voice.sh exit %i is step exit %i", (code, want) => {
+    expect(voiceStep("voice_kokoro_install", code)).toContain(`RC=${want}`);
+  });
+
+  it("asks for the engine its button names, for the install user", () => {
+    expect(voiceStep("voice_kokoro_install", 0)).toContain("ran --kokoro as owner in /opt/owner-home");
+    expect(voiceStep("voice_whisper_install", 13)).toMatch(/ran --whisper as owner in \/opt\/owner-home[\s\S]*RC=13/);
+  });
+
+  it("is opt-in: dispatchable, never run by the full install", () => {
+    const dispatch = SOURCE.slice(SOURCE.indexOf("DISPATCH_STEPS=("), SOURCE.indexOf("\n)", SOURCE.indexOf("DISPATCH_STEPS=(")));
+    expect(dispatch).toContain("voice_kokoro_install voice_whisper_install");
+    expect(SOURCE.slice(SOURCE.indexOf("# ── Full Install Mode"))).not.toMatch(/step_voice_/);
+  });
+
+  it("runs root's own copy, which the root-step contract installs root-owned", () => {
+    expect(sliceFunction("run_voice_install")).not.toContain("PROJECT_DIR");
+    expect(sliceFunction("step_root_step_contract")).toContain(
+      'install -o root -g root -m 0755 "$voice_src/$voice_f" "$ROOT_VOICE_DIR/$voice_f"',
+    );
+  });
+});
+
+/**
+ * TASK-2501 option B: a Workstation's cluster runs its own ASR server, named in
+ * .env as ASR_BASE_URL. Install pre-fills Settings → Speech's "own speech
+ * server" engine from it, once, so the box transcribes on it from the start.
+ */
+describe("the cluster's ASR server becomes the transcription engine at install", () => {
+  const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
+  const config = () => path.join(dir, "data", "config.json");
+
+  function seed(env: string, before?: Record<string, unknown>) {
+    mkdirSync(path.join(dir, "data"), { recursive: true });
+    writeFileSync(path.join(dir, ".env"), env);
+    if (before) writeFileSync(config(), JSON.stringify(before));
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR="${dir}"`,
+      'as_user() { "$@"; }',
+      sliceFunction("seed_stt_endpoint_from_asr"),
+      `seed_stt_endpoint_from_asr "${dir}/.env"; echo RC=$?`,
+    ].join("\n");
+    const out = spawnSync("bash", ["-c", script], { encoding: "utf8" });
+    let after: Record<string, unknown> | null = null;
+    try {
+      after = JSON.parse(readFileSync(config(), "utf8"));
+    } catch {
+      after = null;
+    }
+    return { out: `${out.stdout}${out.stderr}`, after };
+  }
+
+  it.skipIf(!hasPython3)("pre-fills the server and makes it the engine, in the shape the app reads", async () => {
+    const r = seed('ASR_BASE_URL="http://127.0.0.1:8090/v1/"\nASR_MODEL=qwen3-asr\n', { password_configured: true });
+    expect(r.out).toContain("RC=0");
+    expect(r.after).toMatchObject({
+      password_configured: true,
+      stt_endpoint: { baseUrl: "http://127.0.0.1:8090/v1", model: "qwen3-asr" },
+      stt_endpoint_seeded: true,
+      stt_primary: "endpoint",
+    });
+    const { sttEndpointFromValue } = await import("@/lib/stt-endpoint");
+    expect(sttEndpointFromValue(r.after!.stt_endpoint)).toEqual({ baseUrl: "http://127.0.0.1:8090/v1", model: "qwen3-asr" });
+  });
+
+  it.skipIf(!hasPython3)("falls back to the engine's default model when the server cannot be asked", () => {
+    const r = seed("ASR_BASE_URL=http://127.0.0.1:9/v1\n");
+    expect(r.after).toMatchObject({ stt_endpoint: { baseUrl: "http://127.0.0.1:9/v1", model: "whisper-1" } });
+  });
+
+  it.skipIf(!hasPython3)("seeds once: a server the owner removed stays removed", () => {
+    const r = seed("ASR_BASE_URL=http://127.0.0.1:8090/v1\nASR_MODEL=m\n", { stt_endpoint_seeded: true, stt_primary: "cloud" });
+    expect(r.after).toEqual({ stt_endpoint_seeded: true, stt_primary: "cloud" });
+  });
+
+  it.skipIf(!hasPython3)("keeps the owner's own server, and an owner's own engine pick", () => {
+    const own = { stt_endpoint: { baseUrl: "http://127.0.0.1:9000/v1", model: "x" } };
+    expect(seed("ASR_BASE_URL=http://127.0.0.1:8090/v1\nASR_MODEL=m\n", own).after).toEqual(own);
+    rmSync(config());
+    const picked = seed("ASR_BASE_URL=http://127.0.0.1:8090/v1\nASR_MODEL=m\n", { stt_primary: "local" }).after;
+    expect(picked).toMatchObject({ stt_primary: "local", stt_endpoint: { baseUrl: "http://127.0.0.1:8090/v1" } });
+  });
+
+  it("does nothing on a box with no ASR server", () => {
+    const r = seed("LLAMACPP_MODEL=x\n");
+    expect(r.out).toContain("RC=0");
+    expect(r.after).toBeNull();
+  });
+
+  it("runs on an arm64 Workstation only", () => {
+    expect(sliceFunction("step_directories_permissions")).toMatch(
+      /if \[ "\$HOST_ARCH" = aarch64 \]; then\n\s+seed_stt_endpoint_from_asr "\$ENV_FILE"/,
+    );
+  });
+});

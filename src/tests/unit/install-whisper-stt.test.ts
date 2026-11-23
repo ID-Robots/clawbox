@@ -175,6 +175,19 @@ describe("the build is pinned to the board's own architecture", () => {
     expect(PIN).toContain("tegra194");  // Xavier
     expect(PIN).toContain("72");
   });
+
+  it("pins a DGX Spark's GB10 to 121, read from nvidia-smi (TASK-2501)", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "arch-pin-"));
+    try {
+      fs.writeFileSync(path.join(tmp, "nvidia-smi"), '#!/bin/sh\ncase "$*" in *compute_cap*) echo "12.1" ;; esac\n', { mode: 0o755 });
+      const out = execFileSync("bash", ["-c", `set -euo pipefail\n${extractShellFunction("cuda_arch_pin")}\n}\ncuda_arch_pin`], {
+        encoding: "utf8", env: { ...process.env, PATH: `${tmp}:/usr/bin:/bin` },
+      });
+      expect(out).toBe("121");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("one writer for whisper-server.service", () => {
@@ -232,13 +245,17 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
 
   function run({
     cuda = true, pipOk = true, importOk = true, buildOk = true,
-    skip = false, stamped = false, unitWritable = true,
+    skip = false, stamped = false, unitWritable = true, sbsa = false, ct2Wheel = false,
   } = {}) {
     if (stamped) fs.writeFileSync(stampPath(), "1\n");
     // A regular FILE where the unit directory should be: `mkdir -p` cannot
     // create it, which is the cheapest honest way to fail write_whisper_unit.
     const systemdDir = unitWritable ? path.join(tmp, "systemd") : path.join(tmp, "blocked", "systemd");
     if (!unitWritable) fs.writeFileSync(path.join(tmp, "blocked"), "not a directory");
+    if (ct2Wheel) {
+      fs.mkdirSync(path.join(tmp, "wheels"), { recursive: true });
+      fs.writeFileSync(path.join(tmp, "wheels", "ctranslate2-4.6.0-cp312-cp312-manylinux_2_28_aarch64.whl"), "");
+    }
     const log = path.join(tmp, "calls.log");
     fs.writeFileSync(log, "");
     const script = [
@@ -257,6 +274,10 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
       `pip_as_clawbox() { note "pip $1"; ${pipOk ? "return 0" : "return 1"}; }`,
       `clawbox_python() { note "py"; ${importOk ? "return 0" : "return 1"}; }`,
       'ctranslate2_cuda_present() { return 1; }',
+      // A DGX Spark (TASK-2501) and its wheelhouse.
+      `is_sbsa_cuda13() { ${sbsa ? "return 0" : "return 1"}; }`,
+      'sbsa_pip_sources() { note sbsa_pip_sources; }',
+      `VOICE_WHEELHOUSE="${tmp}/wheels"`,
       `build_ctranslate2_cuda() { note build; ${buildOk ? "return 0" : "return 1"}; }`,
       'whisper_predownload_model() { note predownload; return 0; }',
       'kokoro_ld_path() { printf "/x/lib"; }',
@@ -332,6 +353,24 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
     expect(r.out).toContain("RC=0");
     expect(r.unitWritten).toBe(true);
     expect(r.out).toMatch(/transcribe on the CPU/);
+  });
+
+  it("skips a DGX Spark with no prebuilt CTranslate2 CUDA wheel: skipped:no-ct2-cuda, not failed (TASK-2501)", () => {
+    const r = run({ sbsa: true });
+    expect(r.out).toContain("RC=13");
+    expect(r.out).toContain("skipped:no-ct2-cuda");
+    expect(r.calls.some((c) => c.startsWith("pip"))).toBe(false);
+    expect(r.calls).not.toContain("build");
+    expect(r.unitWritten).toBe(false);
+  });
+
+  it("installs a DGX Spark's faster-whisper on the wheelhouse's CTranslate2, never the Jetson source build", () => {
+    const r = run({ sbsa: true, ct2Wheel: true });
+    expect(r.out).toContain("RC=0");
+    expect(r.calls).toContain("sbsa_pip_sources");
+    expect(r.calls.some((c) => c.startsWith("pip") && c.includes("faster-whisper"))).toBe(true);
+    expect(r.calls).not.toContain("build");
+    expect(r.unitWritten).toBe(true);
   });
 
   it("skips a board with no CUDA rather than failing it", () => {

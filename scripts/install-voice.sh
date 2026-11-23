@@ -93,6 +93,14 @@ PIP="pip3"
 
 # JP v61 wheel works on JetPack 6.1+ (including 6.2.x).
 JETSON_TORCH_URL="https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl"
+# A DGX Spark (SBSA aarch64, CUDA 13, Python 3.12) cannot take that wheel: it
+# is cp310 and built for L4T's CUDA 12, so pip refuses it and Kokoro failed
+# with failed:torch. Its torch is PyTorch's own cu130 aarch64 build for the
+# box's Python (is_sbsa_cuda13).
+SBSA_TORCH_INDEX="https://download.pytorch.org/whl/cu130"
+# The install media / wheel cache. A Workstation may have no internet egress,
+# so on an SBSA box every pip install tries this first (sbsa_pip_sources).
+VOICE_WHEELHOUSE="$CLAWBOX_HOME/.cache/clawbox/wheels"
 SYSTEMD_USER="$CLAWBOX_HOME/.config/systemd/user"
 CUDA_HOME_DIR="${CLAWBOX_CUDA_HOME:-/usr/local/cuda}"
 # Written only after a COMPLETE Kokoro install, and read as the idempotence
@@ -285,13 +293,47 @@ detect_cuda() {
   [ -n "$NVCC" ]
 }
 
+# An SBSA aarch64 box on CUDA 13 or later (a DGX Spark), not a Jetson: no
+# tegra in the device tree (a Jetson Thor also has CUDA 13 and nvidia-smi, the
+# device tree is what tells them apart), nvidia-smi present, nvcc release 13+.
+is_sbsa_cuda13() {
+  local compat="" rel
+  [ "$(uname -m)" = "aarch64" ] || return 1
+  [ -r /proc/device-tree/compatible ] && compat=$(tr -d '\0' < /proc/device-tree/compatible 2>/dev/null || true)
+  case "$compat" in *tegra*) return 1 ;; esac
+  command -v nvidia-smi >/dev/null 2>&1 || return 1
+  [ -n "$NVCC" ] || detect_cuda || return 1
+  rel=$("$NVCC" --version 2>/dev/null | sed -n 's/.*release \([0-9][0-9]*\)\..*/\1/p' | tail -1)
+  [ "${rel:-0}" -ge 13 ]
+}
+
+# pip's sources on an SBSA box: Ubuntu 24.04 marks its Python externally
+# managed (PEP 668), so a --user install needs --break-system-packages there.
+# A wheelhouse that holds wheels is tried first and alone (--no-index), the
+# network beside it only when that try fails (PIP_NET_SRC). Both stay empty
+# on a Jetson, where pip runs exactly as before.
+PIP_SRC=""
+PIP_NET_SRC=""
+sbsa_pip_sources() {
+  PIP_SRC="--break-system-packages"
+  if as_clawbox sh -c 'ls -- "$1"/*.whl' sh "$VOICE_WHEELHOUSE" >/dev/null 2>&1; then
+    PIP_NET_SRC="$PIP_SRC --find-links '$VOICE_WHEELHOUSE'"
+    PIP_SRC="$PIP_NET_SRC --no-index"
+  fi
+}
+
 # pip as the clawbox user. The `| tail -3` the inline steps used swallowed the
 # exit status (pipefail reports the RIGHTMOST failure, and tail always
 # succeeds), which is how a failed install could still look like one that
 # worked. Capture, trim for the log, and return the real status.
 pip_as_clawbox() {
   local out rc=0
-  out=$(su - "$CLAWBOX_USER" -c "$PIP install --user $1" 2>&1) || rc=$?
+  out=$(su - "$CLAWBOX_USER" -c "$PIP install --user ${PIP_SRC:+$PIP_SRC }$1" 2>&1) || rc=$?
+  if [ "$rc" -ne 0 ] && [ -n "$PIP_NET_SRC" ]; then
+    echo "  The wheelhouse could not satisfy it - trying the network"
+    rc=0
+    out=$(su - "$CLAWBOX_USER" -c "$PIP install --user $PIP_NET_SRC $1" 2>&1) || rc=$?
+  fi
   printf '%s\n' "$out" | tail -3
   return "$rc"
 }
@@ -375,6 +417,12 @@ as_clawbox() {
 # where the filename says `nv24.08`, so the comparison stops before `.nv`.
 cuda_torch_present() {
   local pin
+  # An SBSA box's torch is not the pinned Jetson wheel: any CUDA 13 build is it.
+  if is_sbsa_cuda13; then
+    clawbox_python "import sys, torch
+sys.exit(0 if (torch.version.cuda or '').startswith('13') else 1)" >/dev/null 2>&1
+    return
+  fi
   pin="${JETSON_TORCH_URL##*/torch-}"
   pin="${pin%%.nv*}"
   [ -n "$pin" ] || return 1
@@ -385,6 +433,14 @@ sys.exit(0 if torch.version.cuda and torch.__version__.startswith('$pin') else 1
 install_cuda_torch() {
   if cuda_torch_present; then
     echo "  CUDA-enabled PyTorch already installed at the pinned version — not re-downloading"
+    ensure_cuda_bashrc_exports
+    return 0
+  fi
+  if is_sbsa_cuda13; then
+    # pip picks the wheel for the box's own Python, from the wheelhouse first
+    # (where --no-index leaves the index unused), else from the cu130 index.
+    echo "  Installing CUDA 13 PyTorch for this SBSA aarch64 box (cu130, several GB with its CUDA libraries)..."
+    pip_as_clawbox "--index-url $SBSA_TORCH_INDEX torch" || return 1
     ensure_cuda_bashrc_exports
     return 0
   fi
@@ -752,6 +808,9 @@ install_kokoro_tts() {
     return 13
   fi
   echo "  CUDA detected: $("$NVCC" --version 2>/dev/null | tail -1)"
+  if is_sbsa_cuda13; then
+    sbsa_pip_sources
+  fi
 
   if kokoro_stack_present; then
     echo "  Kokoro already installed by a previous run — skipping the GPU install"
@@ -907,6 +966,13 @@ cuda_arch_pin() {
     *tegra194*) printf '72' ;;   # Xavier
     *tegra186*) printf '62' ;;   # TX2
     *)
+      # A GPU nvidia-smi can see names its own: DGX Spark's GB10 answers 12.1.
+      local cap
+      cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -dc '0-9' || true)
+      if [ -n "$cap" ]; then
+        printf '%s' "$cap"
+        return 0
+      fi
       # Unknown board: ask torch if it is there, else emit nothing and let the
       # build decide for itself. Guessing an architecture the GPU does not have
       # produces a library that loads and then fails at the first kernel.
@@ -1394,6 +1460,19 @@ install_whisper_stt() {
     echo "  No CUDA on this board - skipping faster-whisper (speech is transcribed in the cloud)"
     return 13
   fi
+  # An SBSA box (DGX Spark) has no Jetson toolchain to build CTranslate2 for,
+  # and PyPI's aarch64 ctranslate2 wheel is CPU-only: only a prebuilt CUDA
+  # wheel on the install media makes the engine worth installing there.
+  local sbsa=false
+  if is_sbsa_cuda13; then
+    sbsa=true
+    sbsa_pip_sources
+    if ! as_clawbox sh -c 'ls -- "$1"/ctranslate2-*aarch64*.whl' sh "$VOICE_WHEELHOUSE" >/dev/null 2>&1; then
+      STT_SKIP_REASON="skipped:no-ct2-cuda"
+      echo "  No prebuilt CTranslate2 CUDA wheel in $VOICE_WHEELHOUSE - skipping faster-whisper ($STT_SKIP_REASON)"
+      return 13
+    fi
+  fi
 
   echo "  Installing faster-whisper..."
   # numpy floor for the same reason install_kokoro_packages carries one: an
@@ -1423,7 +1502,10 @@ install_whisper_stt() {
   # The CUDA library, replacing the CPU wheel pip just fetched. Non-fatal: the
   # CPU wheel transcribes, and both runtime scripts already fall back to
   # cpu/int8, so a failed build costs speed and not the feature.
-  if ctranslate2_cuda_present; then
+  if [ "$sbsa" = true ]; then
+    clawbox_python 'import sys, ctranslate2; sys.exit(0 if ctranslate2.get_cuda_device_count() > 0 else 1)' >/dev/null 2>&1 \
+      || echo "  Warning: the CTranslate2 wheel from $VOICE_WHEELHOUSE sees no CUDA device - faster-whisper will transcribe on the CPU" >&2
+  elif ctranslate2_cuda_present; then
     echo "  CTranslate2 CUDA build already present"
   elif ! build_ctranslate2_cuda; then
     echo "  Warning: the CTranslate2 CUDA build failed - faster-whisper will transcribe on the CPU" >&2
@@ -1540,7 +1622,7 @@ if [ "$VOICE_MODE" != "full" ]; then
     case "$STT_RC" in
       0) ;;
       13)
-        echo "=== faster-whisper does not apply to this board (no CUDA) — speech is transcribed in the cloud ===" >&2
+        echo "=== faster-whisper does not apply to this board (${STT_SKIP_REASON:-no CUDA}) — speech is transcribed in the cloud ===" >&2
         exit 13
         ;;
       *)

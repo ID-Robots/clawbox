@@ -184,6 +184,8 @@ export const X64_INSTALL_ROOT_STEPS: readonly string[] = [
   "user_add",
   "user_remove",
   "vnc_install",
+  "voice_kokoro_install",
+  "voice_whisper_install",
 ];
 
 /** Which x86 install a PC's root side is. */
