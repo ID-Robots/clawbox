@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { CLAWBOX_AGENTS_SECTIONS, withClawboxAgentsSections } from "@/lib/clawbox-agents-sections";
 
 /**
  * How the ClawBox guide reaches the OpenClaw workspace.
@@ -1214,7 +1215,8 @@ describe("gateway-pre-start puts the rule where the harness loads it", () => {
     // the failure whole-line matching was introduced to prevent, not cause.
     const existing = "# AGENTS\r\n\r\n## ClawBox integration\r\n\r\nSee `CLAWBOX.md`.\r\n"
       + "## System actions on this ClawBox\r\n\r\nMine.\r\n"
-      + "## Voice notes on this ClawBox\r\n\r\nMine too.\r\n";
+      + "## Voice notes on this ClawBox\r\n\r\nMine too.\r\n"
+      + "## Thinking level on this ClawBox\r\n\r\nMine as well.\r\n";
     writeFileSync(agents, existing);
 
     const { stdout } = run();
@@ -1356,12 +1358,162 @@ describe("gateway-pre-start tells the agent how speech-to-text is turned on", ()
   it("leaves an owner's own voice-notes section alone", () => {
     const existing = "# AGENTS\n\n## ClawBox integration\n\nSee `CLAWBOX.md`.\n\n"
       + "## System actions on this ClawBox\n\nMine.\n\n"
-      + `${VOICE_RULE}\n\nAnswer voice notes in Bulgarian.\n`;
+      + `${VOICE_RULE}\n\nAnswer voice notes in Bulgarian.\n\n`
+      + "## Thinking level on this ClawBox\n\nMine.\n";
     writeFileSync(agents, existing);
 
     const { stdout } = run();
 
     expect(stdout).not.toMatch(/Appended/);
     expect(readFileSync(agents, "utf-8")).toBe(existing);
+  });
+});
+
+/**
+ * What the agent says when asked how hard it is thinking.
+ *
+ * OpenClaw's system prompt carries `Reasoning=<level>` in its Runtime section,
+ * and that is reasoning VISIBILITY (`/reasoning on|off|stream`, off by default),
+ * not the thinking level, which the prompt never states. Asked what reasoning
+ * it used, the agent read that line and told an owner whose effort pill said
+ * High that reasoning was off, and to use `/reasoning`. The level is on the
+ * card of OpenClaw's own `session_status` tool; the rule sends the agent there.
+ */
+describe("gateway-pre-start tells the agent where its thinking level is", () => {
+  const THINKING_RULE = "## Thinking level on this ClawBox";
+  let agents: string;
+
+  beforeEach(() => {
+    agents = path.join(workspace, "AGENTS.md");
+    writeFileSync(guide, readFileSync(TEMPLATE, "utf-8"));
+  });
+
+  it("appends the thinking-level rule to an AGENTS.md that already carries the other three", () => {
+    const existing = "# AGENTS\n\n## ClawBox integration\n\nSee `CLAWBOX.md`.\n\n"
+      + "## System actions on this ClawBox\n\nMine.\n\n"
+      + "## Voice notes on this ClawBox\n\nMine too.\n";
+    writeFileSync(agents, existing);
+
+    const { stdout } = run();
+
+    expect(stdout).toContain("Appended the thinking-level rule to AGENTS.md");
+    expect(stdout).not.toContain("Appended the voice-notes rule");
+    const after = readFileSync(agents, "utf-8");
+    expect(after.startsWith(existing)).toBe(true);
+    expect(after.match(/^## Thinking level on this ClawBox$/gm)).toHaveLength(1);
+    const rule = after.slice(existing.length);
+    // The prompt line it must not read as its level, and what that line is.
+    expect(rule).toMatch(/Reasoning=/);
+    expect(rule).toMatch(/visibility/i);
+    expect(rule).toMatch(/says nothing about whether or how hard you think/i);
+    // Where the level is, and how to ask without changing the chat's model.
+    expect(rule).toMatch(/session_status/);
+    expect(rule).toMatch(/sessionKey: "current"/);
+    expect(rule).toMatch(/no `model`/);
+    // No guessing when the card cannot be read.
+    expect(rule).toMatch(/never name a level you did not read/i);
+    // The owner's own control, and never a typed level the picker would not show.
+    expect(rule).toMatch(/effort pill/i);
+    expect(rule).not.toMatch(/\/think [a-z]/);
+  });
+
+  it("appends it once, however many times the gateway starts", () => {
+    writeFileSync(agents, "# AGENTS\n");
+
+    run();
+    const afterFirst = readFileSync(agents, "utf-8");
+    const second = run();
+
+    expect(second.stdout).not.toContain("Appended the thinking-level rule");
+    expect(readFileSync(agents, "utf-8")).toBe(afterFirst);
+    expect(afterFirst.split(THINKING_RULE)).toHaveLength(2);
+  });
+
+  it("leaves an owner's own thinking-level section alone", () => {
+    const existing = "# AGENTS\n\n## ClawBox integration\n\nSee `CLAWBOX.md`.\n\n"
+      + "## System actions on this ClawBox\n\nMine.\n\n"
+      + "## Voice notes on this ClawBox\n\nMine too.\n\n"
+      + `${THINKING_RULE}\n\nAlways think at High.\n`;
+    writeFileSync(agents, existing);
+
+    const { stdout } = run();
+
+    expect(stdout).not.toMatch(/Appended/);
+    expect(readFileSync(agents, "utf-8")).toBe(existing);
+  });
+});
+
+/**
+ * The heartbeat appends what this block appends, byte for byte.
+ *
+ * OpenClaw creates AGENTS.md on the agent's first run, after this block's last
+ * run on a fresh box, so the five-minute heartbeat appends the same sections
+ * through the gateway (src/lib/clawbox-agents-sections.ts). Two writers that
+ * disagreed about the bytes, the order or what counts as "already there" would
+ * give a box a second copy of a rule, every tick or every boot. So both run on
+ * the same files here, and a section added to one copy only fails this.
+ */
+describe("the heartbeat's copy of the AGENTS.md sections", () => {
+  let agents: string;
+
+  beforeEach(() => {
+    agents = path.join(workspace, "AGENTS.md");
+    writeFileSync(guide, readFileSync(TEMPLATE, "utf-8"));
+  });
+
+  /** What the shipped block leaves in an AGENTS.md that held `text`. */
+  function preStart(text: string): string {
+    writeFileSync(agents, text);
+    run();
+    return readFileSync(agents, "utf-8");
+  }
+
+  const FIXTURES: Record<string, string> = {
+    "OpenClaw's template with no ClawBox section": "# AGENTS.md - Your Workspace\n\nThis folder is home.\n\n"
+      + "## Red Lines\n\n- Don't exfiltrate private data.\n\n## Related\n\n- Default AGENTS.md\n",
+    "an empty file": "",
+    "no trailing newline": "# AGENTS\n\nBe helpful.",
+    "CRLF, with some headings already there": "# AGENTS\r\n\r\n## ClawBox integration\r\n\r\nSee `CLAWBOX.md`.\r\n",
+    "a heading quoted inside a balanced fence": "# AGENTS\n\n```markdown\n## ClawBox integration\n```\n",
+    "an unbalanced fence, read as prose": "# AGENTS\n\n```\n## System actions on this ClawBox\n",
+    "``` and ~~~ mixed, with longer closers": "# AGENTS\n\n~~~\n```\n## ClawBox integration\n~~~~\n\n"
+      + "````text\n## Voice notes on this ClawBox\n`````\n",
+    "a closer carrying an info string": "# AGENTS\n\n```\n## ClawBox integration\n```text\n",
+    "a shorter closer, which closes nothing": "# AGENTS\n\n````\n## ClawBox integration\n```\n",
+    "a fence indented four spaces, which is not one": "# AGENTS\n\n    ```\n## ClawBox integration\n    ```\n",
+    "a fence indented three spaces": "# AGENTS\n\n   ```\n## ClawBox integration\n   ```\n",
+    "near-miss headings": "# AGENTS\n\n### ClawBox integration\n\n## ClawBox integration notes\n\n"
+      + " ## System actions on this ClawBox\n",
+    "headings with a trailing space or tab": "# AGENTS\n\n## ClawBox integration \n\n"
+      + "## System actions on this ClawBox\t\n",
+    "a heading with a trailing no-break space or form feed": "# AGENTS\n\n## ClawBox integration\u00a0\n\n"
+      + "## System actions on this ClawBox\f\n",
+    "an owner's own body under one heading": "# AGENTS\n\n## Voice notes on this ClawBox\n\n"
+      + "Answer voice notes in Bulgarian.\n",
+  };
+
+  for (const [name, text] of Object.entries(FIXTURES)) {
+    it(`appends the same bytes: ${name}`, () => {
+      const expected = preStart(text);
+      expect(withClawboxAgentsSections(text)).toBe(expected);
+      // And neither side appends again to what it produced.
+      expect(withClawboxAgentsSections(expected)).toBe(expected);
+    });
+  }
+
+  it("lists the same sections, in the same order, with the same journal lines", () => {
+    // Read off what the block DOES, not off its source: a section added to the
+    // script and not to the list shows up here.
+    agents = path.join(workspace, "AGENTS.md");
+    writeFileSync(agents, "# AGENTS\n");
+    const { stdout } = run();
+    const added = readFileSync(agents, "utf-8").slice("# AGENTS\n".length);
+
+    expect(added.split("\n").filter((line) => line.startsWith("## "))).toEqual(
+      CLAWBOX_AGENTS_SECTIONS.map((s) => s.heading),
+    );
+    const journal = stdout.split("\n").map((line) => line.trim()).filter((line) => line.endsWith("to AGENTS.md"));
+    expect(journal).toEqual(CLAWBOX_AGENTS_SECTIONS.map((s) => s.appendedLine));
+    expect(added).toBe(CLAWBOX_AGENTS_SECTIONS.map((s) => s.payload).join(""));
   });
 });

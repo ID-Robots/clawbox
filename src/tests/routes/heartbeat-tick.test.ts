@@ -8,6 +8,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 const routeAuth = { requireSession: vi.fn() };
 const internalToken = { isInternalRequest: vi.fn() };
@@ -22,9 +26,24 @@ const liveness = {
   mayRestart: vi.fn(),
   markRestarted: vi.fn(),
 };
-const persona = { applyDeferredLanguagePersona: vi.fn(), retireOnboardingRitual: vi.fn() };
+const persona = {
+  applyDeferredLanguagePersona: vi.fn(),
+  retireOnboardingRitual: vi.fn(),
+  openclawWorkspaceDir: vi.fn(),
+};
+const harness = { getActiveHarness: vi.fn() };
+const gatewayWs = { gatewayWsCall: vi.fn() };
 
 vi.mock("@/lib/language-persona", () => persona);
+vi.mock("@/lib/harness", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/harness")>()),
+  getActiveHarness: harness.getActiveHarness,
+}));
+// Partial, so the real error classes survive for the code's `instanceof`.
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>()),
+  gatewayWsCall: gatewayWs.gatewayWsCall,
+}));
 vi.mock("@/lib/cloudflared", () => cloudflared);
 vi.mock("@/lib/portal-heartbeat", () => heartbeat);
 vi.mock("@/lib/tunnel-liveness", () => liveness);
@@ -40,8 +59,17 @@ async function tick(req: Request = request()) {
   return mod.GET(req);
 }
 
+let scratch: string;
+
 beforeEach(() => {
   vi.resetModules();
+  // Every tick also looks at AGENTS.md. By default it is an OpenClaw box whose
+  // workspace has none, so that step returns before any gateway call; a call
+  // nobody set up fails loudly.
+  scratch = mkdtempSync(path.join(tmpdir(), "heartbeat-tick-"));
+  harness.getActiveHarness.mockResolvedValue("openclaw");
+  persona.openclawWorkspaceDir.mockReturnValue(path.join(scratch, "workspace"));
+  gatewayWs.gatewayWsCall.mockRejectedValue(new Error("unexpected gateway call"));
   liveness.mayRestart.mockReturnValue(true);
   cloudflared.startTunnelService.mockResolvedValue({ bootPersisted: true, bootPersistWarning: null });
   persona.applyDeferredLanguagePersona.mockResolvedValue(false);
@@ -60,9 +88,12 @@ afterEach(() => {
     ...Object.values(routeAuth),
     ...Object.values(internalToken),
     ...Object.values(persona),
+    ...Object.values(harness),
+    ...Object.values(gatewayWs),
   ]) {
     fn.mockReset();
   }
+  rmSync(scratch, { recursive: true, force: true });
 });
 
 /**
@@ -272,5 +303,98 @@ describe("the pending first-conversation ritual", () => {
     const res = await tick();
     expect(res.status).toBe(401);
     expect(persona.retireOnboardingRitual).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * ClawBox's AGENTS.md rules on a freshly set-up box. OpenClaw creates
+ * AGENTS.md on the agent's first run, which there comes after the gateway's
+ * last start, so the ExecStartPre that appends the rules found no file, and the
+ * box ran without them until something restarted its gateway. The tick is what
+ * runs in between.
+ */
+describe("ClawBox's AGENTS.md rules", () => {
+  // OpenClaw's own template, the way it lands on the first run: no ClawBox section.
+  const TEMPLATE = "# AGENTS.md - Your Workspace\n\nThis folder is home. Treat it that way.\n\n"
+    + "## Red Lines\n\n- Don't exfiltrate private data. Ever.\n\n## Related\n\n- Default AGENTS.md\n";
+  const savedHome = process.env.OPENCLAW_HOME;
+  let workspace: string;
+  let agentsMd: string;
+
+  const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+  const callsTo = (method: string) =>
+    gatewayWs.gatewayWsCall.mock.calls.filter(([m]) => m === method).map(([, params]) => params);
+
+  /** The gateway's side of `agents.files.get` / `set`, serving `content`. */
+  function gatewayServing(content: string) {
+    gatewayWs.gatewayWsCall.mockImplementation(async (method: string, params: Record<string, unknown>) => {
+      if (method === "agents.files.get") {
+        return {
+          agentId: params.agentId,
+          workspace,
+          file: { name: "AGENTS.md", path: agentsMd, missing: false, content, hash: sha256(content) },
+        };
+      }
+      if (method === "agents.files.set") return { ok: true, agentId: params.agentId, workspace };
+      throw new Error(`unexpected gateway call ${method}`);
+    });
+  }
+
+  beforeEach(() => {
+    cloudflared.readTunnelUrl.mockResolvedValue("https://alive.trycloudflare.com");
+    liveness.checkTunnelLiveness.mockResolvedValue("alive");
+    workspace = path.join(scratch, "workspace");
+    agentsMd = path.join(workspace, "AGENTS.md");
+    mkdirSync(workspace, { recursive: true });
+    writeFileSync(agentsMd, TEMPLATE);
+    // The box's one agent is called `default`, as on the TASK-2248 box: the
+    // gateway refuses an id its config does not name, so "main" would fail.
+    const home = path.join(scratch, "openclaw");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path.join(home, "openclaw.json"), JSON.stringify({ agents: { entries: { default: {} } } }));
+    process.env.OPENCLAW_HOME = home;
+  });
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.OPENCLAW_HOME;
+    else process.env.OPENCLAW_HOME = savedHome;
+  });
+
+  it("appends every missing section through the gateway's own file RPC", async () => {
+    gatewayServing(TEMPLATE);
+
+    const res = await tick();
+    expect(res.status).toBe(200);
+
+    // The step is not awaited by the tick, so wait for the write itself.
+    await vi.waitFor(() => expect(callsTo("agents.files.set")).toHaveLength(1));
+    expect(callsTo("agents.files.get")).toEqual([{ agentId: "default", name: "AGENTS.md" }]);
+    const [set] = callsTo("agents.files.set");
+    expect(set).toMatchObject({
+      agentId: "default",
+      name: "AGENTS.md",
+      expectedHash: sha256(TEMPLATE),
+      expectedWorkspace: workspace,
+    });
+    const content = String(set.content);
+    expect(content.startsWith(TEMPLATE)).toBe(true);
+    // Loaded only after the assertions above, so a tree without the module
+    // fails on them rather than on a missing import.
+    const { CLAWBOX_AGENTS_SECTIONS } = await import("@/lib/clawbox-agents-sections");
+    expect(CLAWBOX_AGENTS_SECTIONS.length).toBeGreaterThanOrEqual(3);
+    for (const { heading } of CLAWBOX_AGENTS_SECTIONS) {
+      expect(content.split("\n").filter((line) => line === heading), heading).toHaveLength(1);
+    }
+  });
+
+  it("answers the tick while the gateway has not answered", async () => {
+    // The unit's curl gives the tick 10 s, and gateway calls took seconds on
+    // a busy board.
+    gatewayWs.gatewayWsCall.mockImplementation(() => new Promise(() => {}));
+
+    const res = await tick();
+
+    expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(callsTo("agents.files.get")).toHaveLength(1));
   });
 });
