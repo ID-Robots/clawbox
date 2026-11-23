@@ -127,15 +127,22 @@ export function addRunWorktree(input: {
   protectedRoot: string;
   /** Fork from this branch (local, else `origin/<name>`) instead of the checkout's own. */
   baseBranch?: string | null;
+  /**
+   * Where the worktree goes, instead of `runWorktreePath` — a multi-folder
+   * run's copy of one of its repositories, side by side with the others in
+   * the run's own directory (TASK-2757, src/lib/project-folders.ts).
+   */
+  target?: string;
 }): Promise<RunWorktreeAdded | RunWorktreeRefused> {
   return withDirLock(input.projectDir, () => addRunWorktreeNow(input));
 }
 
-async function addRunWorktreeNow({ projectDir, runId, protectedRoot, baseBranch }: {
+async function addRunWorktreeNow({ projectDir, runId, protectedRoot, baseBranch, target: at }: {
   projectDir: string;
   runId: string;
   protectedRoot: string;
   baseBranch?: string | null;
+  target?: string;
 }): Promise<RunWorktreeAdded | RunWorktreeRefused> {
   const dir = path.resolve(projectDir);
   const top = await gitIn(dir, ["rev-parse", "--show-toplevel"]);
@@ -186,7 +193,7 @@ async function addRunWorktreeNow({ projectDir, runId, protectedRoot, baseBranch 
   if (!fork.ok) return { ok: false, reason: baseBranch ? "no_base_branch" : "failed", detail: fork.detail };
   const base = fork.base;
   const branch = runBranchName(runId);
-  const target = runWorktreePath(dir, runId);
+  const target = at ? path.resolve(at) : runWorktreePath(dir, runId);
   try {
     fs.mkdirSync(path.dirname(target), { recursive: true });
   } catch (err) {

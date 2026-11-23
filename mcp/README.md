@@ -149,7 +149,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Publishing to the ClawBox Store (`app_publish`) | when the owner switched the coding agent on | same |
-| Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`, `coding_project_import`) | when the owner switched the coding agent on | same |
+| Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`, `coding_project_import`, `coding_project_create`, `coding_project_folder_add`, `coding_project_folder_remove`, `coding_project_folders`) | when the owner switched the coding agent on | same |
 | The coding team's settings (`coding_settings_get`, `coding_settings_set`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
 | ClawBox Vault (`vault_list`, `vault_match`, `vault_fill`, `vault_save`, `vault_generate`, `vault_delete`, `vault_audit`) | yes, full profile | yes, full profile |
@@ -857,7 +857,8 @@ unnoticed is how a device ends up in a posture nobody chose.
 `coding_agent_run` · `coding_agent_status` · `coding_agent_stop` ·
 `coding_run_message` · `coding_run_list` · `coding_agent_resume` ·
 `coding_project_status` · `coding_project_import` · `coding_secret_list` ·
-`coding_settings_get` · `coding_settings_set`
+`coding_settings_get` · `coding_settings_set` · `coding_project_create` ·
+`coding_project_folder_add` · `coding_project_folder_remove` · `coding_project_folders`
 
 | Tool | What it does |
 |---|---|
@@ -870,6 +871,7 @@ unnoticed is how a device ends up in a posture nobody chose.
 | `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs. |
 | `coding_secret_list` | Names — never values — of the owner's stored secrets and whether runs get them. |
 | `coding_project_import` | Bring an EXISTING project into the owner's project folder, only when the user asks: clone one of their GitHub repositories (`github_repo`, owner/name) or copy a folder on the box (`directory`, under the owner's home; `node_modules` left behind). Nothing is merged or overwritten; the reply ends `project_id: <id>`. The route's refusals come back typed — `exists`, `no_gh`/`not_connected` (connect GitHub in Settings), `refused` (outside the home, a credential store, the checkout), `too_big`/`no_space`. This replaced the app's Import panel on 2026-10-30; the app carries no inputs. |
+| `coding_project_create` · `coding_project_folder_add` · `coding_project_folder_remove` · `coding_project_folders` | MULTI-FOLDER projects (TASK-2757): one project name for several git repositories of the owner's project folder, kept in `coding_agent_project_folders` (`src/lib/project-folders.ts`) through `GET`/`POST /setup-api/coding-agent/project-folders` (owner cookie or the MCP bearer). `coding_agent_run` with that name as `project_id` gives the run a worktree of EACH repository side by side and, with auto-PR on, one pull request per repository that changed, each naming the others. Create, add or remove only when the user asks. |
 | `coding_settings_get` | The owner's coding-TEAM settings in one readable block, each with its valid choices beside it: effort (`effortLevels`), every role's stored provider/model/effort and what it resolves to right now (`roleModelMap`, with NOT READY and why), the review pass, auto PR and merge, the PR body mode, the dynamic team, runs at once and this box's range, history retention, media, the commit identity — and the connected providers with the models a role may be pinned to on each. Call it before `coding_settings_set`. |
 | `coding_settings_set` | Change any subset of those settings — one optional parameter per field; a role's halves as `planner_provider` / `planner_model` / `planner_effort`, `worker_*`, `reviewer_*`, where `auto` or `default` puts a half back to the role's default. Posts only the fields given to `POST /setup-api/coding-agent/settings` and answers what changed plus the final values. The description tells the assistant these are the owner's preferences and to CONFIRM before changing cost-bearing ones (effort, a model, runs at once) unless the user just asked for exactly that. A refused value comes back as BAD_ARGUMENT in the route's own sentence; a field the owner keeps (below) as CONFLICT naming the Settings page. |
 

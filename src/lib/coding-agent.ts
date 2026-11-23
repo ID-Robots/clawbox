@@ -249,6 +249,7 @@ import { appendSecretAudit, SECRETS_AUDIT_FILE_NAME } from "@/lib/secrets-audit"
 import { forgetRunSecrets, redactForRun, registerRunSecrets } from "@/lib/secret-redact";
 import { CLAWBOX_READ_ONLY_TOOLS, RUN_READ_PROFILE } from "@/lib/clawbox-run-read-tools";
 import { CLAWBOX_READ_ONLY_ENTRY, resolveRunMcpPlan, type RunMcpPlan } from "@/lib/project-mcp-servers";
+import { listProjectFolders as listMultiFolderProjects, readProjectFolders as readMultiFolderList, type ProjectFolder } from "@/lib/project-folders";
 import {
   anotherAccountLikely,
   accountsSnapshot,
@@ -342,6 +343,7 @@ import {
   mergeRunBranch,
   removeRunWorktree,
   restoreRunWorktree,
+  runWorktreePath,
   worktreeHasChanges,
   type MergeHomeBlocker,
 } from "@/lib/coding-run-worktree";
@@ -2121,6 +2123,14 @@ export interface CodingRun {
    */
   worktree: RunWorktree | null;
   /**
+   * A run on a MULTI-FOLDER project (TASK-2757, src/lib/project-folders.ts):
+   * `directory` is then a plain folder, `<project>/.clawbox/worktrees/<runId>`,
+   * holding one git worktree per listed repository, side by side, and
+   * `worktree` is null. Absent on every other run, which is what keeps a
+   * single-folder run's record — and behaviour — exactly what it was.
+   */
+  multiFolder?: RunMultiFolder;
+  /**
    * What this run has to LEAVE BEHIND before the box calls it finished.
    *
    * `status: "completed"` used to mean one thing only: Claude Code emitted a
@@ -2283,6 +2293,34 @@ export interface RunWorktree {
    * the commits away from the request they are open as).
    */
   result?: RunWorktreeResult | null;
+}
+
+/** One repository of a multi-folder run: its worktree, and what came of it. */
+export interface RunFolder extends RunWorktree {
+  /** The folder's name in the owner's project folder — and the subfolder of the run's directory it is checked out in. */
+  name: string;
+  /** The newest commit on its branch once the run settled, or null when it left nothing there. */
+  commit: string | null;
+  /**
+   * The pull request opened for it, when its repository changed and pull
+   * requests are on. `behind`: the last push of new commits to it failed, so
+   * the request does not hold all of the branch.
+   */
+  pr: { number: number; url: string; behind?: boolean } | null;
+  /**
+   * Why this repository's work must not go out — set when the run committed
+   * on a branch of its own there that could not be brought onto `branch`:
+   * then the branch is not the work, and neither a pull request nor a merge
+   * home is made from it; the copy is kept.
+   */
+  held?: string;
+}
+
+/** A multi-folder run's copies: the project they belong to, and one entry per repository. */
+export interface RunMultiFolder {
+  /** The project's own folder — what `projectDirectoryOf` answers for this run. */
+  project: string;
+  folders: RunFolder[];
 }
 
 /**
@@ -3880,6 +3918,12 @@ export async function listProjects(): Promise<{ directory: string | null; projec
       if (first && !first.startsWith(".") && kinds.get(first)?.kind !== "worktree" && !parentByName.has(first)) workedIn.add(first);
     }
   }
+  // A multi-folder project's home (src/lib/project-folders.ts) is a project by
+  // its list, with or without a history of its own — it may be a plain folder
+  // made only to hold its runs.
+  for (const name of Object.keys(await listMultiFolderProjects().catch(() => ({})))) {
+    if (workedIn.size < MAX_PROJECT_FOLDERS && kinds.get(name)?.kind !== "worktree" && !parentByName.has(name)) workedIn.add(name);
+  }
   for (const folder of folders.names) {
     candidates.push({ base: folders.base, folder, kind: "folder", fromRun: workedIn.has(folder) });
   }
@@ -4885,6 +4929,9 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // worktree on it is no worktree at all and the run is read as one working
     // in its folder — which is what every record written before this is.
     worktree: parseRunWorktree((raw as { worktree?: unknown }).worktree),
+    // Only on a multi-folder run, and only as strict as the worktree above:
+    // every path in it reaches `git worktree remove`.
+    ...parseRunMultiFolder((raw as { multiFolder?: unknown }).multiFolder),
     // Only a deliverable this code could have written counts; anything else on
     // a hand-edited record is no deliverable at all, the way parsePauseReason
     // treats a reason it does not recognise. A record that loses its
@@ -4980,6 +5027,29 @@ function parseRunWorktree(raw: unknown): RunWorktree | null {
   };
 }
 
+/** A multi-folder run's copies off disk, as a spread: `{}` for every other run, so its record has no such key at all. */
+function parseRunMultiFolder(raw: unknown): { multiFolder?: RunMultiFolder } {
+  if (!raw || typeof raw !== "object") return {};
+  const m = raw as { project?: unknown; folders?: unknown };
+  if (typeof m.project !== "string" || !path.isAbsolute(m.project) || !Array.isArray(m.folders)) return {};
+  const folders: RunFolder[] = [];
+  for (const f of m.folders) {
+    const wt = parseRunWorktree(f);
+    const name = (f as { name?: unknown } | null)?.name;
+    if (!wt || typeof name !== "string" || !name) continue;
+    const commit = (f as { commit?: unknown }).commit;
+    const pr = (f as { pr?: { number?: unknown; url?: unknown } | null }).pr;
+    folders.push({
+      ...wt,
+      name,
+      commit: typeof commit === "string" && commit ? commit : null,
+      pr: pr && typeof pr.number === "number" && typeof pr.url === "string" ? { number: pr.number, url: pr.url, ...((pr as { behind?: unknown }).behind === true ? { behind: true } : {}) } : null,
+      ...(typeof (f as { held?: unknown }).held === "string" && (f as { held: string }).held ? { held: (f as { held: string }).held } : {}),
+    });
+  }
+  return folders.length ? { multiFolder: { project: m.project, folders } } : {};
+}
+
 /** Every blocker this box words a next step for; anything else off disk is not one. */
 const MERGE_HOME_BLOCKERS: readonly MergeHomeBlocker[] = ["not_on_base", "dirty", "conflict", "failed", "stopped"];
 
@@ -5014,8 +5084,8 @@ function parseWorktreeResult(raw: unknown): RunWorktreeResult | null {
  * question everywhere until a run could have a worktree, and a surface that
  * kept asking it would file every run under a folder named after the run.
  */
-export function projectDirectoryOf(run: Pick<CodingRun, "directory" | "worktree">): string {
-  return run.worktree?.project ?? run.directory;
+export function projectDirectoryOf(run: Pick<CodingRun, "directory" | "worktree" | "multiFolder">): string {
+  return run.worktree?.project ?? run.multiFolder?.project ?? run.directory;
 }
 
 function normalizeMedia(raw: unknown): RunMedia {
@@ -5955,6 +6025,7 @@ function cloneRun(run: CodingRun): CodingRun {
     // Nested, so it needs its own copy: a shared object here would let a route
     // holding a clone see the watcher's later writes — and mutate them.
     pr: run.pr ? { ...run.pr, checks: { ...run.pr.checks } } : null,
+    ...(run.multiFolder ? { multiFolder: { project: run.multiFolder.project, folders: run.multiFolder.folders.map((f) => ({ ...f, pr: f.pr ? { ...f.pr } : null })) } } : {}),
     // Nested for the same reason `pr` is: a route holding a clone must not see
     // — or be able to write — the loop's own later rounds.
     review: run.review ? { ...run.review, checks: run.review.checks.map((c) => ({ ...c })) } : null,
@@ -6328,6 +6399,13 @@ export async function resolveWorkingDirectory(input: {
   const home = path.resolve(homeDir());
 
   if (projectId) {
+    // A MULTI-FOLDER project (src/lib/project-folders.ts) is a folder project
+    // named by its id: its home is that folder in the owner's project folder.
+    // A code project of the same id still wins, so nothing that resolved before
+    // resolves differently now.
+    if (!(validateProjectId(projectId) && fs.existsSync(projectPath(projectId))) && (await readMultiFolderList(projectId))) {
+      return resolveWorkingDirectory({ directory: projectId });
+    }
     if (!validateProjectId(projectId)) throw new CodingAgentError("invalid", "Invalid project id.");
     const dir = path.resolve(projectPath(projectId));
     if (!dir.startsWith(projectsRoot + path.sep)) throw new CodingAgentError("invalid", "Invalid project id.");
@@ -8962,6 +9040,19 @@ export function folderListing(directory: string): string {
 }
 
 /**
+ * What a MULTI-FOLDER run is told beside the folder line (TASK-2757): which
+ * subfolders are its repositories, on which branch each one is, and that the
+ * folder itself is none — so it commits in each repository it changes and
+ * never runs `git init` where the box will not look. Empty for every other run.
+ */
+function multiFolderNote(run: CodingRun): string {
+  const folders = run.multiFolder?.folders;
+  if (!folders?.length) return "";
+  const each = folders.map((f) => `${f.name}/ (branch ${f.branch}, forked from ${f.base})`).join(", ");
+  return `This project has ${folders.length} git repositories, each a subfolder here with its own copy and branch: ${each}. This folder itself is not a repository: run git inside the subfolder you changed, and never git init here. The box commits what you leave in each repository when you finish. `;
+}
+
+/**
  * The working folder's top-level entries as `folderListing` names them —
  * `.git` left out, folders with a trailing slash, sorted — or null when the
  * folder cannot be read. Shared with the visual decision (`decideRunVisual`),
@@ -9651,9 +9742,83 @@ async function recordRunWork(run: CodingRun): Promise<void> {
   // A read-only run changed nothing and commits nothing: the only commit the
   // folder's log could answer with is somebody else's.
   if (run.readOnly) return;
+  if (run.multiFolder) {
+    await commitRunFolders(run, run.multiFolder);
+    return;
+  }
   await commitRunChanges(run);
   await healRunPaths(run);
   await noteCommittedFiles(run);
+}
+
+/**
+ * A multi-folder run's commits: one per repository, each in its own copy.
+ * Everything in a copy is the run's — nobody else works there — so each is
+ * committed whatever the tools reported, and its branch's newest commit is
+ * recorded on the folder when the branch holds anything (the run's own
+ * commits through its shell included). The run's folder itself is never a
+ * repository and is never committed: `commitRunWork` there would make one.
+ */
+async function commitRunFolders(run: CodingRun, multi: RunMultiFolder): Promise<void> {
+  const failed: string[] = [];
+  for (const f of multi.folders) {
+    if (f.removed || !fs.existsSync(f.path)) continue;
+    try {
+      // Committed on a branch of its own in this copy: brought onto the
+      // folder's branch first, as `adoptRunBranchWork` does for a single run.
+      // When it cannot be, it is said, and the settle keeps the copy.
+      const adopted = await adoptOwnBranchWork(f.path, f.branch);
+      if (!adopted.ok) {
+        // Its branch is not its work now: nothing of this repository goes out
+        // — no commit on whatever is checked out, no pull request, no merge.
+        f.held = `the run committed on a branch of its own, which could not be brought onto ${f.branch}: ${adopted.detail}`;
+        // Not the run's `commitError`: that keeps EVERY copy at settle, and
+        // only this repository's work is in doubt.
+        pushProgress(run, RUNNER_STEP.notCommitted(`${f.name}: ${f.held}`));
+        mirrorOntoOrigin(run, f);
+        continue;
+      }
+      delete f.held;
+      const outcome = await commitRunWork({ directory: f.path, runId: run.id, task: run.task, summary: run.summary });
+      if (outcome.committed) pushProgress(run, RUNNER_STEP.folderCommitted(f.name, outcome.sha));
+      else if (outcome.reason !== "no_changes") {
+        failed.push(`${f.name}: ${outcome.detail ?? outcome.reason}`);
+        pushProgress(run, RUNNER_STEP.notCommitted(`${f.name}: ${outcome.detail ?? outcome.reason}`));
+      }
+      const ahead = await commitsAhead(f.project, f.branch, f.base);
+      f.commit = ahead && ahead > 0 ? await headCommitShort(f.path) : null;
+      // What the branch changed, as the run's own files (`<folder>/<path>`):
+      // a run that wrote only through its shell has no tool-reported file,
+      // and an empty list reads as "changed nothing" to the review pass.
+      if (ahead && ahead > 0) {
+        const diff = await gitIn(f.path, ["diff", "--name-only", "-z", `${f.base}...HEAD`]);
+        if (diff.code === 0) for (const file of diff.stdout.split("\0").filter(Boolean).slice(0, MAX_COMMITTED_FILES)) noteFile(run, path.join(f.name, file));
+      }
+      mirrorOntoOrigin(run, f);
+    } catch (err) {
+      failed.push(`${f.name}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  // The run's own fields, so everything that reads them (the review pass, the
+  // project row, a team) sees that work was committed, or why it was not.
+  run.commit = multi.folders.find((f) => f.commit)?.commit ?? null;
+  run.commitError = failed.length ? failed.join("; ").slice(0, MAX_ERROR_CHARS) : null;
+  persist(true);
+}
+
+/**
+ * A review pass or review round works on copies of its ORIGIN's folder
+ * records; the pull request step and the deliverable gate read the origin's.
+ * What a follow-up's commit learned about a repository is written there too.
+ */
+function mirrorOntoOrigin(run: CodingRun, f: RunFolder): void {
+  const originId = run.reviewOf ?? run.reviewLoopOf;
+  if (!originId) return;
+  const twin = loadRuns().find((r) => r.id === originId)?.multiFolder?.folders.find((o) => o.name === f.name);
+  if (!twin) return;
+  twin.commit = f.commit ?? twin.commit;
+  if (f.held) twin.held = f.held;
+  else delete twin.held;
 }
 
 /** No run's commits are read past this many paths: the list is for the owner's page and the review's brief, not an index. */
@@ -9845,7 +10010,8 @@ async function drawProjectIcon(run: CodingRun): Promise<{ icon: string; favicon:
 
 /** The start-of-run hook: only when the owner left pictures on, never for a review, and never for a team's worker or reviewer — their folder is a worktree named after a task, not a project. */
 function startProjectIcon(run: CodingRun): void {
-  if (!run.media.images || run.reviewOf || (run.team && run.team.role !== "planner")) return;
+  // Nor for a multi-folder run: its folder holds its repositories, not pages to link a favicon from.
+  if (!run.media.images || run.reviewOf || (run.team && run.team.role !== "planner") || run.multiFolder) return;
   void drawProjectIcon(run).catch(() => {
     // ensureProjectIcon already logged; a missing icon never reaches the run.
   });
@@ -9869,7 +10035,48 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
   // review loop all work in this very tree, and `settleRunWorktree` steps
   // aside while any of them is live. Whichever record settles last is the one
   // that finds the tree idle and decides what becomes of it.
-  await settleRunWorktree(run);
+  await settleRunCopies(run);
+}
+
+/** The run's copies settled, whichever kind it has. */
+function settleRunCopies(run: CodingRun): Promise<void> {
+  return run.multiFolder ? settleRunFolders(run, run.multiFolder) : settleRunWorktree(run);
+}
+
+/**
+ * A multi-folder run's copies, settled one repository at a time by the same
+ * rule a single run's copy is (`settleRunWorktree`): nothing on a branch, the
+ * copy and the branch go; a pull request owns it, the copy goes and the
+ * branch stays; otherwise it is merged home into that repository's base.
+ * Then the run's folder goes too, once nothing is left in it. Never throws.
+ */
+async function settleRunFolders(run: CodingRun, multi: RunMultiFolder): Promise<void> {
+  try {
+    if (liveRunsIn(run.directory).length > 0) return;
+    // Settled lost at boot while nobody could say whether its scope was still
+    // up: none of the copies is this settle's to touch (`settleRunWorktree`).
+    if (store.keepTrees.delete(run.id)) {
+      pushProgress(run, RUNNER_STEP.worktreeKept("the box could not tell whether the run was still working in it"));
+      persist(true);
+      return;
+    }
+    // The pull requests are the ORIGIN's when this is its review pass.
+    const origin = run.reviewOf ?? run.reviewLoopOf;
+    const owner = origin ? loadRuns().find((r) => r.id === origin)?.multiFolder : undefined;
+    for (const f of multi.folders) {
+      if (f.held && !f.removed) {
+        pushProgress(run, `${f.name}: ${RUNNER_STEP.worktreeKept(f.held)}`);
+        continue;
+      }
+      const prOwned = !!(f.pr ?? owner?.folders.find((o) => o.name === f.name)?.pr);
+      await settleRunWorktree(run, f, { name: f.name, prOwned });
+    }
+    if (multi.folders.every((f) => f.removed)) {
+      try { fs.rmdirSync(run.directory); } catch { /* something else is in it: left for the owner */ }
+    }
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id} folders settle:`, err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -9935,7 +10142,8 @@ async function registerProjectApp(run: CodingRun): Promise<void> {
 }
 
 async function commitProjectAssets(run: CodingRun): Promise<void> {
-  if (!run.media.images || run.reviewOf || run.reviewLoopOf) return;
+  // Not a multi-folder run's: its folder is no repository to commit an icon in.
+  if (!run.media.images || run.reviewOf || run.reviewLoopOf || run.multiFolder) return;
   try {
     const drawn = await Promise.race([
       drawProjectIcon(run),
@@ -9991,6 +10199,12 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
 
     const origin = finished.reviewOf === null ? finished : loadRuns().find((r) => r.id === finished.reviewOf);
     if (!origin) return;
+
+    // A multi-folder run: one pull request per repository that changed.
+    if (origin.multiFolder) {
+      await openFolderPullRequests(origin, finished, ended);
+      return;
+    }
 
     // A run with NO pull request record of its own may still have opened one
     // itself, because its task said to. That is the defect this branch fixes:
@@ -10101,6 +10315,123 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     await beginPullRequestWatch(origin, { number, url, branch: prBranch, base, foundBy, reviewOk });
   } catch (err) {
     console.error(`[coding-agent] pull request for ${finished.id} not opened:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * A multi-folder run's pull requests as the deliverable gate reads one: its
+ * `pr` bar is met when EVERY repository it committed to has its pull request
+ * open. Null when one of them has none, when none was opened, or for every
+ * other run.
+ */
+async function folderPrForGate(run: CodingRun): Promise<PrState | null> {
+  const folders = run.multiFolder?.folders ?? [];
+  // Every repository whose branch holds the chain's work — asked of the branch
+  // itself, so a review pass's commits count — needs its request, holding all
+  // of it; one that changed nothing needs none; a held one fails the bar.
+  for (const x of folders) {
+    if (x.held) return null;
+    const ahead = await commitsAhead(x.project, x.branch, x.base);
+    if (ahead !== 0 && (!x.pr || x.pr.behind)) return null;
+  }
+  const f = folders.find((x) => x.pr);
+  if (!f?.pr) return null;
+  return {
+    phase: "waiting", number: f.pr.number, url: f.pr.url, branch: f.branch, base: f.base,
+    checks: emptyChecks(), detail: null, startedAt: run.startedAt, endedAt: null, reviewOk: true, foundBy: "opened",
+  };
+}
+
+/** The marked block a multi-folder run's pull requests name each other in: replaced, never duplicated, on a rewrite. */
+const RELATED_PRS_START = "<!-- clawbox:related-pull-requests -->";
+const RELATED_PRS_END = "<!-- /clawbox:related-pull-requests -->";
+
+export function withRelatedPullRequests(body: string, related: readonly { name: string; url: string }[]): string {
+  const block = [
+    RELATED_PRS_START,
+    "### Related pull requests",
+    "The same task, in the project's other repositories:",
+    ...related.map((r) => `- ${r.name}: ${r.url}`),
+    RELATED_PRS_END,
+  ].join("\n");
+  const at = body.indexOf(RELATED_PRS_START);
+  const end = body.indexOf(RELATED_PRS_END);
+  if (at >= 0 && end > at) return `${body.slice(0, at)}${block}${body.slice(end + RELATED_PRS_END.length)}`;
+  return `${body.trimEnd()}\n\n${block}\n`;
+}
+
+/**
+ * A multi-folder run's pull requests (TASK-2757): one per repository whose
+ * branch holds the run's work, each with the same title and task text, and —
+ * once more than one is open — each naming the others.
+ *
+ * Under the same rules as a single run's: only a chain that COMPLETED, never
+ * after the owner's Stop or Pause, never for a task that refuses one, and only
+ * while the auto-PR switch is on. Opened ready rather than as drafts: nothing
+ * watches these to ready them (the single run's watcher follows one request).
+ * A repository whose request could not be opened says why on the run and
+ * keeps its branch; the settle that follows parks the copies of the ones that
+ * did open and merges the rest home, exactly as for a single run.
+ */
+async function openFolderPullRequests(origin: CodingRun, finished: CodingRun, ended: "stop" | "pause" | null): Promise<void> {
+  const multi = origin.multiFolder;
+  if (!multi || ended !== null || origin.status !== "completed" || finished.status === "paused") return;
+  if (origin.readOnly || origin.team || goalRefusesPullRequest(origin.task) || !(await getAutoPr())) return;
+  const taskMode = await getPrBodyIncludesTask();
+  const title = pullRequestTitle(origin.task, { hostNames: boxHostNames() });
+  const where = (f: RunFolder) => (fs.existsSync(f.path) ? f.path : f.project);
+  const open: RunFolder[] = [];
+  for (const f of multi.folders) {
+    if (f.held) {
+      pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, f.held));
+      continue;
+    }
+    if (f.pr) {
+      // Already open (a resume, a review pass or a Fix CI went on in it):
+      // its branch goes up again, or the request never sees the new commits.
+      // A push that failed is kept on the request (`behind`), which the
+      // deliverable gate reads as a bar not met.
+      const pushed = await pushBranch(where(f), f.branch).catch((err: unknown) => ({ ok: false as const, detail: err instanceof Error ? err.message : String(err) }));
+      if (pushed.ok) delete f.pr.behind;
+      else {
+        f.pr.behind = true;
+        pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, `${f.branch} was not pushed to ${f.pr.url}: ${pushed.detail}`));
+      }
+      persist(true);
+      open.push(f);
+      continue;
+    }
+    const ahead = await commitsAhead(f.project, f.branch, f.base);
+    if (ahead === null) {
+      pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, "git could not say what is on its branch"));
+      continue;
+    }
+    if (ahead === 0) continue;
+    const mine = await findOpenPullRequestForBranch(where(f), f.branch);
+    if (mine?.url) {
+      f.pr = { number: mine.number, url: mine.url };
+    } else {
+      // The body names THIS repository's commit, not the first one the run made anywhere.
+      const commit = fs.existsSync(f.path) ? (await headCommitShort(f.path)) ?? f.commit : f.commit;
+      const body = prBody({ ...origin, commit }, finished, taskMode);
+      const created = await openPullRequest({ directory: where(f), branch: f.branch, base: f.base, title, body, draft: false });
+      if (!created.ok) {
+        pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, created.detail));
+        persist(true);
+        continue;
+      }
+      f.pr = { number: created.number, url: created.url };
+    }
+    pushProgress(origin, RUNNER_STEP.folderPullRequest(f.name, f.pr.url));
+    open.push(f);
+    persist(true);
+  }
+  if (open.length < 2) return;
+  for (const f of open) {
+    const related = open.filter((o) => o !== f).map((o) => ({ name: o.name, url: o.pr!.url }));
+    const edited = await updatePullRequestBody({ directory: where(f), number: f.pr!.number, rewrite: (body) => withRelatedPullRequests(body, related) })
+      .catch((err: unknown) => ({ ok: false as const, detail: err instanceof Error ? err.message : String(err) }));
+    if (!edited.ok) console.error(`[coding-agent] ${origin.id} ${f.name}: related pull requests not linked: ${edited.detail}`);
   }
 }
 
@@ -11493,7 +11824,7 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     }
 
     const verdict = await checkDeliverable(
-      { directory: origin.directory, pr: origin.pr },
+      { directory: origin.directory, pr: origin.pr ?? (await folderPrForGate(origin)) },
       deliverable,
       deliverable.kind === "command" ? await deliverableSandbox(origin) : null,
     );
@@ -13515,7 +13846,7 @@ function spawnRun(
   const inputsNote = runInputsNote(run);
   const firstTurn = stdinText ?? (resumeSessionId
     ? `${run.task}\n\n[ClawBox harness: this continuation is a NEW run. Its evidence folder is ${artifactsDir(run.id)} — save screenshots and report.md there, not in any previous run's folder. ${inputsNote}]`
-    : `${run.task}\n\n[ClawBox harness: ${folderListing(run.directory)} ${inputsNote}]`);
+    : `${run.task}\n\n[ClawBox harness: ${folderListing(run.directory)} ${multiFolderNote(run)}${inputsNote}]`);
   try {
     child.stdin?.on("error", () => {
       // EPIPE when the wrapper dies before reading the task; `exit` reports it.
@@ -13837,6 +14168,84 @@ async function attachRunWorktree(run: CodingRun, projectDir: string, baseBranch:
 }
 
 /**
+ * The folders a run in `directory` works on when that folder is a MULTI-FOLDER
+ * project's home (src/lib/project-folders.ts) — a folder directly inside the
+ * owner's project folder whose name the store lists. Null for every other
+ * folder, which then gets the single copy it always got.
+ */
+async function multiFolderListFor(directory: string): Promise<{ root: string; folders: ProjectFolder[] } | null> {
+  const root = await getDefaultDirectory();
+  const realRoot = await fs.promises.realpath(root).catch(() => path.resolve(root));
+  const dir = await fs.promises.realpath(directory).catch(() => path.resolve(directory));
+  if (path.dirname(dir) !== realRoot) return null;
+  const folders = await readMultiFolderList(path.basename(dir));
+  return folders && folders.length ? { root: realRoot, folders } : null;
+}
+
+/**
+ * The run's own copies, whichever kind it gets: one git worktree of EACH
+ * repository of a multi-folder project, side by side in one folder of its own
+ * (`<project>/.clawbox/worktrees/<runId>/<folder>`, each on `clawbox/<runId>`
+ * in its own repository, forked from the folder's base when the project names
+ * one, else from what its checkout is on — `addRunWorktree`'s own rule); or,
+ * for every other folder, the single worktree `attachRunWorktree` makes.
+ *
+ * All or nothing: a run that quietly lost one of its repositories would edit
+ * the others as if it had them all, so a copy that cannot be made refuses the
+ * start and takes back the ones already made.
+ */
+async function attachRunCopies(run: CodingRun, directory: string, baseBranch: string | null = null): Promise<void> {
+  const list = await multiFolderListFor(directory);
+  if (!list) return attachRunWorktree(run, directory, baseBranch);
+  const home = path.resolve(directory);
+  const dir = runWorktreePath(home, run.id);
+  const made: RunFolder[] = [];
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    for (const f of list.folders) {
+      const projectDir = path.join(list.root, f.folder);
+      const got = await addRunWorktree({ projectDir, runId: run.id, protectedRoot: protectedCheckout(), baseBranch: f.base ?? baseBranch, target: path.join(dir, f.folder) });
+      if (!got.ok) throw new CodingAgentError("invalid", `${f.folder}: ${got.detail}`);
+      made.push({ path: got.path, branch: got.branch, base: got.base, project: projectDir, removed: false, branchRemoved: false, result: null, name: f.folder, commit: null, pr: null });
+    }
+  } catch (err) {
+    for (const f of made) {
+      await removeRunWorktree(f.project, f.path).catch(() => false);
+      await deleteRunBranch(f.project, f.branch).catch(() => false);
+    }
+    try { fs.rmdirSync(dir); } catch { /* not empty, or never made: left as it is */ }
+    if (err instanceof CodingAgentError) throw err;
+    throw new CodingAgentError("invalid", `The project's folders could not be copied for this run: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  run.multiFolder = { project: home, folders: made };
+  run.directory = dir;
+  for (const f of made) pushProgress(run, RUNNER_STEP.folderWorktree(f.name, f.branch, f.base));
+}
+
+/** A multi-folder run's copies put back for a resume, each the way `reopenWorktree` puts back one. */
+async function reopenRunFolders(previous: CodingRun): Promise<RunMultiFolder | undefined> {
+  const multi = previous.multiFolder;
+  if (!multi) return undefined;
+  const folders: RunFolder[] = [];
+  const madeNow: RunFolder[] = [];
+  for (const f of multi.folders) {
+    const there = fs.existsSync(f.path);
+    const back = await restoreRunWorktree(f.project, f.path, f.branch, f.base).catch(() => false);
+    if (!back) {
+      // All or nothing, as at the start: a run carrying on without one of its
+      // repositories would work as if it had them all. The copies put back
+      // just now hold nothing their branches do not, so they go again.
+      for (const m of madeNow) await removeRunWorktree(m.project, m.path).catch(() => false);
+      throw new CodingAgentError("not_found", `${f.name}: the run's copy could not be put back from ${f.branch}, so it cannot carry on. Start a new run instead.`);
+    }
+    const entry = { ...f, removed: false, branchRemoved: false, result: null, pr: f.pr ? { ...f.pr } : null };
+    if (!there) madeNow.push(entry);
+    folders.push(entry);
+  }
+  return { project: multi.project, folders };
+}
+
+/**
  * The worktree a resumed run carries forward, put back on disk if a settle
  * took it away.
  *
@@ -13929,9 +14338,10 @@ function liveRunsIn(directory: string): CodingRun[] {
  * Never throws: this is the settle path, and a run whose tree could not be
  * tidied is still a run that finished.
  */
-async function settleRunWorktree(run: CodingRun): Promise<void> {
-  const wt = run.worktree;
+async function settleRunWorktree(run: CodingRun, wt: RunWorktree | null = run.worktree, folder?: { name: string; prOwned: boolean }): Promise<void> {
   if (!wt || wt.removed) return;
+  // One repository of a multi-folder run says which, on every line it adds.
+  const say = (line: string) => pushProgress(run, folder ? `${folder.name}: ${line}` : line);
   try {
     if (liveRunsIn(wt.path).length > 0) return;
     if (!fs.existsSync(wt.path)) {
@@ -13940,14 +14350,14 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       return;
     }
     if (run.status === "paused") {
-      pushProgress(run, RUNNER_STEP.worktreeKept("the run is paused, and Resume carries on in it"));
+      say(RUNNER_STEP.worktreeKept("the run is paused, and Resume carries on in it"));
       persist(true);
       return;
     }
     // Settled lost at boot while nobody could say whether its scope was still
     // up (reconcileAfterRestart): the tree is not this settle's to touch.
     if (store.keepTrees.delete(run.id)) {
-      pushProgress(run, RUNNER_STEP.worktreeKept("the box could not tell whether the run was still working in it"));
+      say(RUNNER_STEP.worktreeKept("the box could not tell whether the run was still working in it"));
       persist(true);
       return;
     }
@@ -13959,7 +14369,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
     const ahead = await commitsAhead(wt.project, wt.branch, wt.base);
     if (ahead === null) {
       // No answer is not permission to delete: keep it and say so.
-      pushProgress(run, RUNNER_STEP.worktreeKept("git could not say what is on its branch"));
+      say(RUNNER_STEP.worktreeKept("git could not say what is on its branch"));
       persist(true);
       return;
     }
@@ -13982,7 +14392,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
     if (ahead === 0) {
       const unsaved = (await unsavedWork()) ?? inUse;
       if (unsaved) {
-        pushProgress(run, RUNNER_STEP.worktreeKept(unsaved));
+        say(RUNNER_STEP.worktreeKept(unsaved));
         persist(true);
         return;
       }
@@ -13991,7 +14401,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       // copy had gone would leave the disk unreclaimed with nothing to retry
       // from — the owner's Remove returns early on exactly that flag.
       if (!(await removeRunWorktree(wt.project, wt.path))) {
-        pushProgress(run, RUNNER_STEP.worktreeKept("it could not be removed"));
+        say(RUNNER_STEP.worktreeKept("it could not be removed"));
         persist(true);
         return;
       }
@@ -14000,7 +14410,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       await deleteRunBranch(wt.project, wt.branch);
       wt.removed = true;
       wt.branchRemoved = true;
-      pushProgress(run, RUNNER_STEP.worktreeRemoved);
+      say(RUNNER_STEP.worktreeRemoved);
       persist(true);
       return;
     }
@@ -14010,17 +14420,17 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
     const park = async (reason: string): Promise<void> => {
       const unsaved = (await unsavedWork()) ?? inUse;
       if (unsaved) {
-        pushProgress(run, RUNNER_STEP.worktreeKept(`${unsaved}; ${reason}`));
+        say(RUNNER_STEP.worktreeKept(`${unsaved}; ${reason}`));
         persist(true);
         return;
       }
       if (!(await removeRunWorktree(wt.project, wt.path))) {
-        pushProgress(run, RUNNER_STEP.worktreeKept(`${reason}, and the copy could not be removed`));
+        say(RUNNER_STEP.worktreeKept(`${reason}, and the copy could not be removed`));
         persist(true);
         return;
       }
       wt.removed = true;
-      pushProgress(run, RUNNER_STEP.worktreeParked(wt.branch, reason));
+      say(RUNNER_STEP.worktreeParked(wt.branch, reason));
       persist(true);
     };
     if (run.status === "stopped") {
@@ -14033,7 +14443,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
     // from there took the branch away from the request it is open for.
     const origin = run.reviewOf ?? run.reviewLoopOf;
     const pr = run.pr ?? (origin ? loadRuns().find((r) => r.id === origin)?.pr ?? null : null);
-    if (pr && pr.phase !== "failed") {
+    if (folder ? folder.prOwned : pr && pr.phase !== "failed") {
       await park("it is open as a pull request");
       return;
     }
@@ -14052,23 +14462,23 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       return;
     }
     wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: merged.commit };
-    if (merged.returnedFrom) pushProgress(run, RUNNER_STEP.checkoutReturned(merged.returnedFrom, wt.base));
+    if (merged.returnedFrom) say(RUNNER_STEP.checkoutReturned(merged.returnedFrom, wt.base));
     // The merge took the branch home, not what the tree holds beside it.
     const unsaved = (await unsavedWork()) ?? inUse;
     if (unsaved) {
-      pushProgress(run, RUNNER_STEP.worktreeKept(`it was merged into ${wt.base}, but ${unsaved}`));
+      say(RUNNER_STEP.worktreeKept(`it was merged into ${wt.base}, but ${unsaved}`));
       persist(true);
       return;
     }
     if (!(await removeRunWorktree(wt.project, wt.path))) {
       // The work IS home — the merge landed — so this is only the copy left
       // behind, and the card's Remove is what answers it.
-      pushProgress(run, RUNNER_STEP.worktreeKept(`it was merged into ${wt.base} but could not be removed`));
+      say(RUNNER_STEP.worktreeKept(`it was merged into ${wt.base} but could not be removed`));
       persist(true);
       return;
     }
     wt.removed = true;
-    pushProgress(run, RUNNER_STEP.worktreeMerged(wt.base));
+    say(RUNNER_STEP.worktreeMerged(wt.base));
     persist(true);
   } catch (err) {
     console.error(`[coding-agent] ${run.id} worktree settle:`, err instanceof Error ? err.message : err);
@@ -14127,6 +14537,12 @@ export function markRunWorktreesRemoved(paths: readonly string[]): number {
     if (run.worktree && !run.worktree.removed && gone.has(path.resolve(run.worktree.path))) {
       run.worktree.removed = true;
       changed += 1;
+    }
+    for (const f of run.multiFolder?.folders ?? []) {
+      if (!f.removed && gone.has(path.resolve(f.path))) {
+        f.removed = true;
+        changed += 1;
+      }
     }
   }
   if (changed > 0) persist(true);
@@ -14191,6 +14607,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
    * settles last is the one that has to decide what becomes of it.
    */
   let inheritedWorktree: RunWorktree | null = null;
+  let inheritedMulti: RunMultiFolder | undefined;
 
   const resumeRunId = typeof input.resumeRunId === "string" ? input.resumeRunId.trim() : "";
   // A continuation of a run whose settle is still going — the commit after a
@@ -14254,6 +14671,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       // of a run that left nothing on its branch, so it is put back from that
       // branch first; the tree is the only thing that was removed.
       inheritedWorktree = await reopenWorktree(previous);
+      inheritedMulti = await reopenRunFolders(previous);
       directory = await realDirectory(previous.directory);
       releaseDirectory = assertDirectoryFree(directory, undefined, input.team ?? null, input.readOnly === true);
       projectId = previous.projectId;
@@ -14392,11 +14810,12 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // the folder it was asked to look at.
     if (resumeRunId) {
       run.worktree = inheritedWorktree;
+      if (inheritedMulti) run.multiFolder = inheritedMulti;
     } else if (!run.team && !run.readOnly) {
       stepCodingStart(run.id, "worktree");
-      await attachRunWorktree(run, directory, givenBase);
+      await attachRunCopies(run, directory, givenBase);
     }
-    if (givenBase && run.worktree?.base !== givenBase) {
+    if (givenBase && run.worktree?.base !== givenBase && !(run.multiFolder && !resumeRunId)) {
       throw new CodingAgentError("invalid", resumeRunId
         ? "base_branch is for a new run: a resumed run keeps the branch it already has."
         : "base_branch needs a run of its own copy of the project, and this folder does not get one (it is not a git repository's root, or it is ClawBox's own checkout).");
@@ -14419,7 +14838,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // A task that refuses a pull request ("do not open a PR") gets none, whatever
     // the owner's auto-PR switch says: the switch is the default for a task that
     // says nothing (goalRefusesPullRequest, shared with the team's goal).
-    if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && !goalRefusesPullRequest(run.task) && (await getAutoPr())) {
+    // A multi-folder run has no ONE branch: its pull requests, one per
+    // repository that changed, are opened at settle (`openFolderPullRequests`).
+    if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && !run.multiFolder && !goalRefusesPullRequest(run.task) && (await getAutoPr())) {
       if (run.worktree) {
         // The worktree IS the branch: `git worktree add -b clawbox/<runId>` has
         // already forked it, off the project's own branch, and the run is
@@ -14518,7 +14939,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     stepCodingStart(run.id, "launching");
     await prepareRunSecrets(run);
     // Where the folder stood as the run began — see CodingRun.headAtStart.
-    run.headAtStart = await headCommitShort(run.directory);
+    // A multi-folder run's folder is no repository (its copies are, one each).
+    run.headAtStart = run.multiFolder ? null : await headCommitShort(run.directory);
     // A start refused between here and the insert never reaches a settle, so it
     // gives back what it was just handed: the values out of memory, and the
     // one-run copies it claimed back out of the store.
@@ -15078,7 +15500,7 @@ export function stopRun(id: string): CodingRun {
     wakeWaiters(id);
     // The pause kept the worktree for its Resume; the stop is where its work
     // is parked on the branch, unmerged, like any stopped run's.
-    trackSettleWork(settleRunWorktree(run), run.id);
+    trackSettleWork(settleRunCopies(run), run.id);
     // A paused REVIEW PASS is what its origin's finish notice was held back
     // for (deliverableGateApplies), and the gate that releases it skipped the
     // pause. A running pass's Stop reaches it through finishRun; this one is
@@ -15304,6 +15726,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // so the tree is made again from it and the resume carries on in the folder
     // the session was opened in — which is what `--resume` needs.
     if (run.worktree) run.worktree = await reopenWorktree(run);
+    if (run.multiFolder) run.multiFolder = await reopenRunFolders(run);
     try {
       run.directory = await realDirectory(run.directory);
     } catch {
@@ -15520,7 +15943,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     // The copy of the project is made at START and not when the draft was
     // written: a draft may sit for days, and a worktree made for one that is
     // never started would be a branch and a folder nobody asked for.
-    if (!run.team && !run.readOnly && !run.worktree) await attachRunWorktree(run, run.directory);
+    if (!run.team && !run.readOnly && !run.worktree && !run.multiFolder) await attachRunCopies(run, run.directory);
     // Settings are read at START: a run keeps what it starts with.
     //
     // The provider and its model are deliberately NOT among them. They are the
@@ -15536,7 +15959,8 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     run.effort = settings.effort;
     run.maxTurns = settings.maxTurns;
     run.media = { images: settings.generateImages, audio: settings.generateAudio };
-    run.headAtStart = await headCommitShort(run.directory);
+    // A multi-folder run's folder is no repository (its copies are, one each).
+    run.headAtStart = run.multiFolder ? null : await headCommitShort(run.directory);
     run.status = "running";
     run.queued = null;
     run.startedAt = Date.now();
@@ -16202,7 +16626,7 @@ function spawnOrSettle(
     // …and neither does the aftermath run, which is where a run's copy of the
     // project is normally decided. A run that never started left nothing on
     // its branch, so this removes both.
-    trackSettleWork(settleRunWorktree(run), run.id);
+    trackSettleWork(settleRunCopies(run), run.id);
     // The branch made for its pull request is already on the record. Nothing
     // settles the run through finishRun on this path, so the pull request is
     // ended here too, or it stays "opening" — pending — for good.

@@ -286,6 +286,14 @@ const STATUS_RULES: ErrorRule[] = [
   },
 ];
 
+/** The project-folders route's typed refusals (`kind`, src/lib/project-folders.ts). */
+const PROJECT_FOLDER_RULES: ErrorRule[] = [
+  { status: 400, match: /"kind":\s*"not_a_repository"/, code: "BAD_ARGUMENT", message: "That folder is not a git repository directly inside the owner's project folder.", next: "Call coding_project_status for the folders that are, and ask the user which one they meant.", withRouteDetail: true },
+  { status: 409, match: /"kind":\s*"exists"/, code: "CONFLICT", message: "That project already lists folders.", next: "Nothing was changed. Use coding_project_folder_add or coding_project_folder_remove instead." },
+  { status: 404, code: "NOT_FOUND", message: "That project does not list that folder.", next: "Call coding_project_folders for what it lists." },
+  { status: 400, code: "BAD_ARGUMENT", message: "The request was refused as malformed.", next: "Names are folder names (letters, digits, - and _) and at most 8 folders; check them and call again.", withRouteDetail: true },
+];
+
 /** The import route's typed refusals (`kind`), as the next step the agent takes. */
 const IMPORT_RULES: ErrorRule[] = [
   { status: 409, match: /"kind":\s*"exists"/, code: "CONFLICT", message: "A project of that name is already in the owner's project folder.", next: "Nothing was changed. Tell the user; coding_project_status lists it. Do not retry." },
@@ -400,6 +408,11 @@ interface RunPayload {
     /** What the last attempt to bring the branch home came to. Absent until one was made. */
     result?: { kind?: "merged" | "unmerged"; reason?: string | null; detail?: string | null; base?: string | null } | null;
   } | null;
+  /** A MULTI-FOLDER run's copies (TASK-2757): one per repository, side by side in `directory`. Absent on every other run. */
+  multiFolder?: {
+    project: string;
+    folders: { name: string; branch: string; base: string; removed?: boolean; result?: { kind?: "merged" | "unmerged" } | null; pr?: { url: string } | null }[];
+  };
   /**
    * The systemd scope the run lives in, or null when it is an ordinary child of
    * the web server. Set means DETACHED: the run keeps working through a restart
@@ -605,6 +618,14 @@ function describeRun(run: RunPayload, tail: number): string {
     if (run.worktree.result?.kind === "unmerged" || (run.worktree.removed && !run.worktree.branchRemoved && run.worktree.result?.kind !== "merged")) {
       parts.push(ownerDecidesMerge(run.worktree.branch));
     }
+  }
+  // A multi-folder run: where each repository's copy and work is.
+  if (run.multiFolder?.folders.length) {
+    const each = run.multiFolder.folders.map((f) => {
+      const where = f.pr?.url ? `pull request ${f.pr.url}` : f.result?.kind === "merged" ? `merged into ${f.base}` : f.removed ? "copy removed" : "copy on disk";
+      return `${f.name} on ${f.branch} (from ${f.base}; ${where})`;
+    });
+    parts.push(`This run works on ${run.multiFolder.folders.length} repositories of ${run.multiFolder.project}, each in its own copy: ${each.join("; ")}.`);
   }
   const facts = [
     // Which account paid is said whenever it is not the box's own plan: the
@@ -1195,7 +1216,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
     "Use for any request to build or fix an app, site, script or tool bigger than one page; don't code it yourself or start servers. A coding session (Codex on openai) works in the background in one folder (project_id or directory); the task must stand alone. Returns a run id at once: say it is running, then STOP; no coding_agent_status until asked. Do not start a second run.",
     {
       task: zText(MAX_TASK_CHARS, "What to build or change, with enough detail to work unattended. Name the files or features involved."),
-      project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
+      project_id: zOptText(64, "A code project id from code_project_list, or a multi-folder project from coding_project_folders. Give this OR directory."),
       directory: zOptText(512, "A folder inside the owner's project folder to work in (its name, or its absolute path), when it is not a code project."),
       resume_run_id: zOptText(40, "A finished run's id, e.g. \"run-k3x9q2ab\", to continue that session with this task."),
       provider: zEnumOf(providers, runProviderDescription(providers)).optional(),
@@ -1841,6 +1862,82 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         `It is a coding project now — name it to coding_agent_run as project_id "${id}" (or by its directory). project_id: ${id}`,
       ].filter(Boolean);
       return text(redact(parts.join(" ")));
+    },
+  );
+
+  // ─── Multi-folder projects (TASK-2757) ────────────────────────────────────
+  //
+  // A project that lists several git repositories of the owner's project
+  // folder (src/lib/project-folders.ts). A run on it — coding_agent_run with
+  // its name as project_id — gets a copy of each, side by side, and opens one
+  // pull request per repository that changed. Backed by
+  // /setup-api/coding-agent/project-folders, which admits this process's bearer.
+  const folderList = (project: string, folders: { folder: string; base?: string }[]): string =>
+    folders.length
+      ? `${project}: ${folders.map((f) => (f.base ? `${f.folder} (from ${f.base})` : f.folder)).join(", ")}. Run it with coding_agent_run project_id "${project}".`
+      : `${project} lists no folders: it is a single-folder project.`;
+  const postFolders = (body: Record<string, unknown>) =>
+    apiPost<{ project?: string; folders?: { folder: string; base?: string }[] }>("/setup-api/coding-agent/project-folders", body, { timeoutMs: 15_000, rules: PROJECT_FOLDER_RULES });
+
+  reg.tool(
+    "coding_project_create",
+    "Create a multi-folder project: one name for several git repositories in the owner's project folder (e.g. a gateway and its dashboard). A run on it gets a copy of each and opens one pull request per repository that changed. Only when the USER asks.",
+    {
+      project: zText(64, "The new project's name: letters, digits, - and _."),
+      folders: z.array(zText(64, "A repository's folder name in the project folder.")).min(1).max(8).describe("The repositories' folder names, as coding_project_status lists them."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false },
+    async ({ project, folders }: { project: string; folders: string[] }) => {
+      const data = await postFolders({ project, action: "create", folders });
+      return text(redact(`Created ${folderList(data.project ?? project, data.folders ?? [])}`));
+    },
+  );
+
+  reg.tool(
+    "coding_project_folder_add",
+    "Add one git repository of the owner's project folder to a project, making it (or keeping it) a multi-folder project. Only when the USER asks.",
+    {
+      project: zText(64, "The project's name, as coding_project_status or coding_project_folders lists it."),
+      folder: zText(64, "The repository's folder name in the project folder."),
+      base_branch: zOptText(200, "The branch runs fork this repository from; leave out for the branch its checkout is on."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false },
+    async ({ project, folder, base_branch }: { project: string; folder: string; base_branch?: string }) => {
+      const data = await postFolders({ project, action: "add", folder, ...(base_branch?.trim() ? { base: base_branch.trim() } : {}) });
+      return text(redact(folderList(data.project ?? project, data.folders ?? [])));
+    },
+  );
+
+  reg.tool(
+    "coding_project_folder_remove",
+    "Take one repository off a multi-folder project's list. The repository itself is not touched. Only when the USER asks.",
+    {
+      project: zText(64, "The project's name."),
+      folder: zText(64, "The folder to take off its list."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false },
+    async ({ project, folder }: { project: string; folder: string }) => {
+      const data = await postFolders({ project, action: "remove", folder });
+      return text(redact(folderList(data.project ?? project, data.folders ?? [])));
+    },
+  );
+
+  reg.tool(
+    "coding_project_folders",
+    "List the multi-folder projects and the repositories each one's runs work on; name one project for its list alone.",
+    {
+      project: zOptText(64, "A project's name, for its folders alone. Leave it out for every multi-folder project."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: LIST_MAX_CHARS },
+    async ({ project }: { project?: string }) => {
+      const wanted = project?.trim();
+      if (wanted) {
+        const data = await apiGet<{ project?: string; folders?: { folder: string; base?: string }[] }>("/setup-api/coding-agent/project-folders", { query: { project: wanted }, timeoutMs: 15_000, rules: PROJECT_FOLDER_RULES });
+        return text(redact(folderList(data.project ?? wanted, data.folders ?? [])));
+      }
+      const data = await apiGet<{ projects?: { project: string; folders: { folder: string; base?: string }[] }[] }>("/setup-api/coding-agent/project-folders", { timeoutMs: 15_000, rules: PROJECT_FOLDER_RULES });
+      const rows = Array.isArray(data.projects) ? data.projects : [];
+      return text(redact(rows.length ? rows.map((r) => folderList(r.project, r.folders)).join("\n") : "There are no multi-folder projects on this ClawBox; coding_project_create makes one."));
     },
   );
 

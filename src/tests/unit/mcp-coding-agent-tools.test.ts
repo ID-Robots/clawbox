@@ -55,6 +55,8 @@ const NAMES = [
   "coding_project_import",
   // 2026-10-30: the coding team's settings (src/tests/unit/mcp-coding-settings-tools.test.ts).
   "coding_settings_get", "coding_settings_set",
+  // TASK-2757: multi-folder projects (src/tests/unit/mcp-coding-project-folders.test.ts).
+  "coding_project_create", "coding_project_folder_add", "coding_project_folder_remove", "coding_project_folders",
 ];
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {

@@ -298,6 +298,11 @@ export const RUNNER_STEP = {
   workingOnBranch: (branch: string, base: string) => `Working on ${branch}, for a pull request into ${base}`,
   /** The run has a working tree of its own — which is what lets another run work in this project at the same time. */
   worktree: (branch: string, base: string) => `Working in its own copy of the project on ${branch}, forked from ${base}`,
+  /** One repository of a multi-folder project (TASK-2757): its copy, side by side with the others in the run's folder. */
+  folderWorktree: (folder: string, branch: string, base: string) => `Working in its own copy of ${folder} on ${branch}, forked from ${base}`,
+  folderCommitted: (folder: string, sha: string) => `${folder}: committed as ${sha}`,
+  folderPullRequest: (folder: string, url: string) => `${folder}: pull request ${url}`,
+  folderNoPullRequest: (folder: string, reason: string) => `${folder}: no pull request: ${reason}`,
   worktreeMerged: (base: string) => `Merged into ${base} and the run's copy of the project removed`,
   worktreeRemoved: "The run's copy of the project was removed; it left nothing on its branch",
   /** Why the copy is still on disk: it could not be removed, or git could not say what is on its branch. */
