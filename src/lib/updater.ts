@@ -903,22 +903,27 @@ async function getRootStepResult(stepId: string): Promise<string | null> {
   }
 }
 
-/**
- * False only when systemd positively reports the unit as settled. An unanswered
- * query is not "stopped": never move the tree under a possible build.
- */
-async function rootStepStillRunning(stepId: string): Promise<boolean> {
+/** `systemctl show <unit> -p ActiveState --value`, or null if unqueryable. */
+async function getRootStepActiveState(stepId: string): Promise<string | null> {
   try {
     const { stdout } = await execFile(
       "/usr/bin/systemctl",
       ["show", rootStepUnit(stepId), "-p", "ActiveState", "--value"],
       { timeout: 10_000 },
     );
-    const state = stdout.trim();
-    return !/^(?:inactive|failed)$/.test(state);
+    return stdout.trim() || null;
   } catch {
-    return true;
+    return null;
   }
+}
+
+/**
+ * False only when systemd positively reports the unit as settled. An unanswered
+ * query is not "stopped": never move the tree under a possible build.
+ */
+async function rootStepStillRunning(stepId: string): Promise<boolean> {
+  const state = await getRootStepActiveState(stepId);
+  return state === null || !/^(?:inactive|failed)$/.test(state);
 }
 
 function rootStepResultFailed(result: string | null): boolean {
@@ -1022,6 +1027,15 @@ async function rebuildKeptBuild(buildId: string, dispatched: unknown): Promise<b
   }
   const match = /^([A-Za-z0-9_-]+) ([0-9a-f-]+) ([0-9]+(?:\.[0-9]+)?)$/.exec(note);
   return !!match && match[1] === buildId && match[2] === boot && Number(match[3]) >= uptime;
+}
+
+/**
+ * The wall-clock moment this run dispatched its rebuild step, from its record,
+ * or null for a record that does not carry one (an older updater's).
+ */
+function rebuildDispatchedWallClock(dispatched: unknown): number | null {
+  const at = dispatched && typeof dispatched === "object" ? (dispatched as { at?: unknown }).at : undefined;
+  return typeof at === "number" && Number.isFinite(at) && at > 0 ? at : null;
 }
 
 /**
@@ -1251,11 +1265,11 @@ async function collectRootStepWarnings(stepId: string, sinceMs: number): Promise
  * FIRST attempt's `Error:` line — `getStepFailureLine` takes the newest error
  * line in what it is given, and unbounded that is not necessarily this run's.
  *
- * `sinceMs: null` is the one caller that cannot know: the post-reboot
- * continuation check runs in a process that did not dispatch the rebuild, so
- * no start time survives to it. It reads the unit's history as it always has
- * — bounding it needs a dispatch epoch persisted across the restart, which is
- * a change to what the update records, not to how it reads.
+ * The post-restart continuation runs in a process that did not dispatch the
+ * rebuild, so it takes the moment from the rebuild's dispatch record.
+ * `sinceMs: null` is a record that carries none (an older updater wrote it): it
+ * reads the unit's history as it always has, where only the `failed` gate keeps
+ * it to the latest run.
  */
 async function readRootStepFailure(stepId: string, sinceMs: number | null): Promise<string | null> {
   const unit = rootStepUnit(stepId);
@@ -2027,22 +2041,24 @@ async function updateClawBoxAndReboot(): Promise<void> {
 
   await syncCheckoutForRebuild();
 
+  // Captured before the dispatch, so the failure read below cannot miss a line
+  // the unit wrote in its first moments — nor pick up the previous attempt's.
+  // Wall clock on purpose, like every journal `--since` here: the journal
+  // stamps its lines with it. Deadlines use `monotonicNow()`.
+  const rebuildDispatchedAt = Date.now();
   // Record the pre-rebuild build identity in the flag: BUILD_ID changes on
   // every successful `next build`, so the continuation can demand positive
   // evidence the rebuild actually happened. Without it, a power cycle in the
   // few seconds between unit failure and our watcher noticing would reset the
   // unit's systemd state and let the continuation fake a completed update.
   // …and when it dispatched the step, on the boot's own count, so the
-  // continuation can tell this run's "kept the build" note from an older one.
+  // continuation can tell this run's "kept the build" note from an older one —
+  // and on the wall clock above, which keeps the continuation's read of the
+  // unit's journal to this run (readRootStepFailure).
   await setMany({
     update_needs_continuation: (await readBuildId()) || "no-previous-build",
-    [UPDATE_REBUILD_DISPATCHED_KEY]: (await bootMoment()) ?? undefined,
+    [UPDATE_REBUILD_DISPATCHED_KEY]: { ...(await bootMoment()), at: rebuildDispatchedAt },
   });
-  // Captured before the dispatch, so the failure read below cannot miss a line
-  // the unit wrote in its first moments — nor pick up the previous attempt's.
-  // Wall clock on purpose, like every journal `--since` here: the journal
-  // stamps its lines with it. Deadlines use `monotonicNow()`.
-  const rebuildDispatchedAt = Date.now();
   await startRootServiceFireAndForget(REBUILD_ROOT_STEP);
   await waitForRebuildToTakeOver(rebuildDispatchedAt);
 }
@@ -6470,17 +6486,6 @@ async function resumeContinuation(): Promise<boolean> {
   // Read before the flags go: when this run dispatched its rebuild step.
   const rebuildDispatchedAt = await get(UPDATE_REBUILD_DISPATCHED_KEY);
 
-  // The restart this is resuming is the one the update ASKED FOR: the flag is
-  // written by the rebuild step itself. So anything a reader stamped while that
-  // replacement was under way describes the update's own normal path, and goes
-  // with the flag rather than outliving it.
-  await setMany({
-    update_needs_continuation: undefined,
-    [UPDATE_REBUILD_DISPATCHED_KEY]: undefined,
-    [UPDATE_INTERRUPTED_KEY]: undefined,
-    [UPDATE_INTERRUPTED_DETAIL_KEY]: undefined,
-  });
-
   // Resolve the list ONCE and reuse it for the state, the resume index and the
   // runner. The edition is stable across the reboot (post_update re-bakes the
   // same value), so this matches the list the pre-restart half ran.
@@ -6522,12 +6527,41 @@ async function resumeContinuation(): Promise<boolean> {
   // then resumed and stamped itself complete. Measured on the OpenClaw dev box
   // 2026-09-04, TASK-709.
   const buildMissing = currentBuildId === "";
+
+  // NOT YET while the rebuild unit is still running. A failed build restores
+  // the previous one and restarts this server (install.sh restore_previous_build)
+  // before its unit has ended, and a oneshot still running answers
+  // `Result=success`: judged now, the failure read as "no new build", a fixed
+  // sentence over the `Error:` line already in the unit's journal, and the
+  // checkout rollback below stood aside for a unit "still running". The next
+  // status poll asks again, as the handover above does. Nothing here blocks:
+  // each poll asks systemd and returns. Only a positive answer waits — a unit
+  // systemd cannot be asked about is judged now, as before — and the wait ends
+  // with the unit (its TimeoutStartSec caps it). Not on the owner's path, where
+  // that unit is never this run's.
+  if (!ownerRebuilt && !unitFailed && (buildUnchanged || buildMissing)
+    && /^(?:activating|active|deactivating|reloading)$/.test((await getRootStepActiveState(REBUILD_ROOT_STEP)) ?? "")) {
+    return false;
+  }
+
+  // The restart this is resuming is the one the update ASKED FOR: the flag is
+  // written by the rebuild step itself. So anything a reader stamped while that
+  // replacement was under way describes the update's own normal path, and goes
+  // with the flag rather than outliving it.
+  await setMany({
+    update_needs_continuation: undefined,
+    [UPDATE_REBUILD_DISPATCHED_KEY]: undefined,
+    [UPDATE_INTERRUPTED_KEY]: undefined,
+    [UPDATE_INTERRUPTED_DETAIL_KEY]: undefined,
+  });
+
   if (unitFailed || buildUnchanged || buildMissing) {
     const logs = ownerRebuilt ? "the clawbox-setup service log" : "clawbox-root-update@rebuild_reboot logs";
     const message = unitFailed
-      // No start time survives the restart this check runs after — see
+      // This run's lines only, from the moment its record carries — see
       // readRootStepFailure.
-      ? (await readRootStepFailure(REBUILD_ROOT_STEP, null)) ?? "Rebuild failed before the restart"
+      ? (await readRootStepFailure(REBUILD_ROOT_STEP, rebuildDispatchedWallClock(rebuildDispatchedAt)))
+        ?? "Rebuild failed before the restart"
       : buildMissing
         ? `ClawBox restarted with no build at all (.next/BUILD_ID is missing) — see ${logs}`
         : `ClawBox restarted without producing a new build — see ${logs}`;
