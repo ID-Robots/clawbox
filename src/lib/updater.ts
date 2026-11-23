@@ -7087,8 +7087,8 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     // A run started over an INTERRUPTED one continues from the step that died,
     // not from the top. Every step is an idempotent root unit, and a box that
     // died inside `openclaw_install` has no runnable core until that step runs
-    // again — so "Try again" is a resume, and the verdict's own sentence says
-    // so. Read AFTER the lock (the first disk write, the one durable record
+    // again — so the card's "Resume update" is a resume, and the verdict's own
+    // sentence says so. Read AFTER the lock (the first disk write, the one durable record
     // that a run exists) and BEFORE the clear below takes the record; only the
     // owner's fresh full run asks for it, the continuation and the OpenClaw-only
     // flow pass their own start.

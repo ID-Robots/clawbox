@@ -305,8 +305,8 @@ export function runStatus(state: UpdateState | null, error: string | null): RunS
 /**
  * A run the box lost (a restart, a power cut, a replaced web server) is
  * RESUMED from the step it died on by a fresh run — the verdict's own sentence
- * says so. Any other failure starts over from step 1, so it is not offered as
- * a "resume": Dismiss, then update again.
+ * says so. Any other failure is not offered as a "resume": its card offers Try
+ * again (`onTryAgain`), which runs the update again.
  */
 export function canResume(state: UpdateState | null): boolean {
   return !!state?.error?.startsWith(INTERRUPTED_MESSAGE_PREFIX);
@@ -378,7 +378,7 @@ export interface UpdateRun {
   busy: { coding: number; agents: number; total: number } | null;
   clearBusy: () => void;
   /**
-   * Start a run (Update, Resume); `allowDowngrade` is the owner's "Back up and
+   * Start a run (Update, Resume, Try again); `allowDowngrade` is the owner's "Back up and
    * update anyway", `ignoreBusy` their "Update anyway" over running agent work.
    */
   trigger: (allowDowngrade?: boolean, ignoreBusy?: boolean) => Promise<void>;
@@ -924,6 +924,7 @@ export function UpdateRunView({
   dismissError,
   onDismiss,
   onResume,
+  onTryAgain,
   onOverrideDowngrade,
   fill = false,
   screen = null,
@@ -949,6 +950,15 @@ export function UpdateRunView({
   onDismiss: () => void;
   /** Present only for an interrupted run: starts the fresh run that resumes it. */
   onResume?: () => void;
+  /**
+   * Runs the full update again over a failed, non-interrupted run of it: from
+   * step 1, or, when the box still holds a lost run's position (a Resume refused
+   * for want of a network), from where that run stopped. Drawn from the run's own
+   * verdict only: never beside Resume, over a refused harness downgrade (its
+   * notice has the override), beside a Dismiss the box did not take, or under the
+   * OpenClaw-only run.
+   */
+  onTryAgain?: () => void;
   /** "Back up and update anyway", offered on a run refused for installing an older harness. */
   onOverrideDowngrade?: () => void;
   /** /updating: a live or finished run fills a computer's screen (see UPDATE_SCREEN_CSS). */
@@ -989,6 +999,15 @@ export function UpdateRunView({
     && (state?.errorCode === HARNESS_DOWNGRADE_CODE || state?.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE)
     ? readHarnessDowngradeDetail(state.downgrade)
     : null;
+  // Read from the run's own verdict, never from `failed`: that is this screen's
+  // own refused start or Dismiss too, whose card says "Try again in a moment".
+  // Keyed on the code, not on `downgrade`, which is null when the detail is unreadable.
+  // Only over the full update (its steps have the restart step): the press starts
+  // that, never the much smaller OpenClaw-only run, which shares this state.
+  const tryAgain = !!onTryAgain && !onResume && state?.phase === "failed"
+    && state.steps.some((s) => s.id === RESTART_STEP_ID)
+    && state.errorCode !== HARNESS_DOWNGRADE_CODE && state.errorCode !== HARNESS_DOWNGRADE_BACKUP_FAILED_CODE
+    && !dismissError;
   // Non-fatal problems the update found and worked around — build drift, a
   // missing update pin it wrote for the owner. The ruling is that these
   // warn rather than block, which only means anything if they are visible;
@@ -1228,6 +1247,16 @@ export function UpdateRunView({
                     {failure.step
                       ? tr("update.resume", "Resume update")
                       : tr("update.startAgain", "Start the update again")}
+                  </button>
+                )}
+                {tryAgain && (
+                  <button
+                    type="button"
+                    onClick={onTryAgain}
+                    className="inline-flex items-center gap-2 rounded-[var(--r-1)] bg-[var(--coral-bright)] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[var(--coral-mid)] cursor-pointer"
+                  >
+                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>refresh</span>
+                    {tr("update.tryAgain", "Try again")}
                   </button>
                 )}
                 {dismissButton}

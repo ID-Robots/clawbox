@@ -51,10 +51,13 @@ import {
  *     NOT offer a link to the desktop, because the middleware would redirect
  *     such a navigation straight back here. The same hint replaces "returning
  *     to the desktop" on a finished run whose lock is never released, and the
- *     clock starts again for a run the owner resumes from here. A run that
+ *     clock starts again for a run the owner starts from here. A run that
  *     stops says so with its step and reason, Resume where the box can resume
- *     it, and Dismiss, which clears the verdict and goes back to the desktop —
- *     or, when the box does not take it, keeps the verdict and says why.
+ *     it, Try again (the update run again; a run the box lost continues where
+ *     it stopped) on any other failure of the full update but a refused
+ *     downgrade, which has its own override, and Dismiss, which clears
+ *     the verdict and goes back to the desktop — or, when the box does not
+ *     take it, keeps the verdict and says why (with no Try again beside it).
  *  3. LEAVE WHEN THE LOCK DOES. The lock is the middleware's to release, and
  *     the middleware marks every /setup-api answer while it is set
  *     (UPDATE_LOCK_HEADER). A finished run — or none — on an answer without
@@ -99,7 +102,7 @@ function UpdatingScreen() {
   const [versions, setVersions] = useState<VersionInfo | null>(null);
   const [channel, setChannel] = useState<string | null>(null);
   // The run this page is timing: bumped when the owner starts one from here
-  // (Resume, or "Back up and update anyway"), so a verdict that sat on screen
+  // (Resume, Try again, or "Back up and update anyway"), so a verdict that sat on screen
   // for half an hour does not greet the run after it with "restart it".
   const [runEpoch, setRunEpoch] = useState(0);
   const [stuckEpoch, setStuckEpoch] = useState<number | null>(null);
@@ -250,8 +253,12 @@ function UpdatingScreen() {
                 });
               }}
               // Resume starts the fresh run that continues an interrupted one,
-              // and this screen follows it like the first.
+              // and Try again runs the update again over any other failure (a
+              // run the box lost still continues where it stopped); this screen
+              // follows either like the first. Like Resume, it does not ask
+              // about agent work: the hook sends `ignoreBusy` here.
               onResume={canResume(run.state) ? () => startRun() : undefined}
+              onTryAgain={() => startRun()}
               onOverrideDowngrade={() => startRun(true)}
             />
           </div>
