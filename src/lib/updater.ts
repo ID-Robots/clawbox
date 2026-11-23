@@ -1270,15 +1270,18 @@ async function collectRootStepWarnings(stepId: string, sinceMs: number): Promise
  * `sinceMs: null` is a record that carries none (an older updater wrote it): it
  * reads the unit's history as it always has, where only the `failed` gate keeps
  * it to the latest run.
+ *
+ * `lines` is how much of THIS run's tail is searched; the unbounded read keeps
+ * its 40, since a wider one reaches further into earlier runs.
  */
-async function readRootStepFailure(stepId: string, sinceMs: number | null): Promise<string | null> {
+async function readRootStepFailure(stepId: string, sinceMs: number | null, lines = 40): Promise<string | null> {
   const unit = rootStepUnit(stepId);
   try {
     // Without `--since`, `-n 40` IS the unit's last 40 entries on every
     // journalctl; with it, only the tail reader is (root-step-journal.ts).
     const stdout = sinceMs === null
       ? (await execFile("/usr/bin/journalctl", ["-u", unit, "-n", "40", "--no-pager", "-o", "cat"], { timeout: 10_000 })).stdout
-      : await readRootStepJournalTail(stepId, { sinceMs, lines: 40, timeoutMs: 10_000 });
+      : await readRootStepJournalTail(stepId, { sinceMs, lines, timeoutMs: 10_000 });
     return getStepFailureLine(stdout, unit);
   } catch {
     return null;
@@ -6508,6 +6511,11 @@ async function resumeContinuation(): Promise<boolean> {
   // rebuild_reboot Result on such a PC is an older updater's attempt, never
   // this run's — so only the build identity is evidence there.
   const ownerRebuilt = rebuiltByOwner();
+  // Asked BEFORE the Result (see "NOT YET" below): a unit that ends between the
+  // two questions is then "running" with a settled Result, never "settled" with
+  // the `success` it answered while it still ran.
+  const unitRunning = !ownerRebuilt
+    && /^(?:activating|active|deactivating|reloading)$/.test((await getRootStepActiveState(REBUILD_ROOT_STEP)) ?? "");
   const unitFailed = !ownerRebuilt && rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP));
   const recordedBuildId = typeof needsContinuation === "string" ? needsContinuation : null;
   const currentBuildId = await readBuildId();
@@ -6539,10 +6547,7 @@ async function resumeContinuation(): Promise<boolean> {
   // systemd cannot be asked about is judged now, as before — and the wait ends
   // with the unit (its TimeoutStartSec caps it). Not on the owner's path, where
   // that unit is never this run's.
-  if (!ownerRebuilt && !unitFailed && (buildUnchanged || buildMissing)
-    && /^(?:activating|active|deactivating|reloading)$/.test((await getRootStepActiveState(REBUILD_ROOT_STEP)) ?? "")) {
-    return false;
-  }
+  if (unitRunning && !unitFailed && (buildUnchanged || buildMissing)) return false;
 
   // The restart this is resuming is the one the update ASKED FOR: the flag is
   // written by the rebuild step itself. So anything a reader stamped while that
@@ -6559,8 +6564,11 @@ async function resumeContinuation(): Promise<boolean> {
     const logs = ownerRebuilt ? "the clawbox-setup service log" : "clawbox-root-update@rebuild_reboot logs";
     const message = unitFailed
       // This run's lines only, from the moment its record carries — see
-      // readRootStepFailure.
-      ? (await readRootStepFailure(REBUILD_ROOT_STEP, rebuildDispatchedWallClock(rebuildDispatchedAt)))
+      // readRootStepFailure. A longer tail than the other readers': this one
+      // comes after everything the unit did once the server was back (engines,
+      // node-pty, exit traps, every sudo's session lines — 16 entries after the
+      // `Error:` line on a board, more when node-pty is rebuilt).
+      ? (await readRootStepFailure(REBUILD_ROOT_STEP, rebuildDispatchedWallClock(rebuildDispatchedAt), 200))
         ?? "Rebuild failed before the restart"
       : buildMissing
         ? `ClawBox restarted with no build at all (.next/BUILD_ID is missing) — see ${logs}`
