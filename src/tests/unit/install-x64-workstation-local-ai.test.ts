@@ -266,6 +266,20 @@ describe("the voice steps a Workstation's Local AI tab starts", () => {
     expect(voiceStep("voice_kokoro_install", code)).toContain(`RC=${want}`);
   });
 
+  it("is 14, a deploy failure, when root's copy of install-voice.sh is missing", () => {
+    const script = [
+      "set -euo pipefail",
+      `ROOT_VOICE_DIR="${dir}/no-voice"`,
+      "CLAWBOX_USER=owner",
+      sliceFunction("run_voice_install"),
+      sliceFunction("step_voice_kokoro_install"),
+      "rc=0; step_voice_kokoro_install 2>&1 || rc=$?; echo RC=$rc",
+    ].join("\n");
+    const out = spawnSync("bash", ["-c", script], { encoding: "utf8" }).stdout;
+    expect(out).toContain("RC=14");
+    expect(out).toContain("--step root_step_contract");
+  });
+
   it("asks for the engine its button names, for the install user", () => {
     expect(voiceStep("voice_kokoro_install", 0)).toContain("ran --kokoro as owner in /opt/owner-home");
     expect(voiceStep("voice_whisper_install", 13)).toMatch(/ran --whisper as owner in \/opt\/owner-home[\s\S]*RC=13/);
@@ -346,7 +360,11 @@ describe("the cluster's ASR server becomes the transcription engine at install",
 
   it.skipIf(!hasPython3)("keeps the owner's own server, and an engine the owner pinned", () => {
     const own = { stt_endpoint: { baseUrl: "http://127.0.0.1:9000/v1", model: "x" } };
-    expect(seed("ASR_BASE_URL=http://127.0.0.1:8090/v1\nASR_MODEL=m\n", own).after).toEqual(own);
+    const kept = seed("ASR_BASE_URL=http://127.0.0.1:8090/v1\nASR_MODEL=m\n", own).after;
+    expect(kept).toEqual({ ...own, stt_endpoint_seeded: true });
+    // …and the owner then removing it is final: the next install does not put it back.
+    const removed = { stt_endpoint_seeded: true };
+    expect(seed("ASR_BASE_URL=http://127.0.0.1:8090/v1\nASR_MODEL=m\n", removed).after).toEqual(removed);
     rmSync(config());
     const pinned = seed("ASR_BASE_URL=http://127.0.0.1:8090/v1\nASR_MODEL=m\n", { stt_primary: "local", stt_choice_source: "owner" }).after;
     expect(pinned).toMatchObject({ stt_primary: "local", stt_endpoint: { baseUrl: "http://127.0.0.1:8090/v1" } });

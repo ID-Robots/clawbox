@@ -1279,24 +1279,28 @@ except FileNotFoundError:
 except (OSError, ValueError) as err:
     print(f"  WARN: {path} could not be read ({err}); not pre-filling the speech server", file=sys.stderr)
     sys.exit(0)
-if data.get("stt_endpoint_seeded") is True or data.get("stt_endpoint") is not None:
+if data.get("stt_endpoint_seeded") is True:
     sys.exit(0)
-if not url.startswith(("http://", "https://")) or any(c.isspace() for c in url):
-    print("  WARN: ASR_BASE_URL is not an http(s) address; not pre-filling the speech server", file=sys.stderr)
-    sys.exit(0)
-# No ASR_MODEL: the model the server itself serves (an ASR server such as vLLM
-# refuses a name it does not serve), else the engine's own default.
-if not model:
-    try:
-        with urllib.request.urlopen(url + "/models", timeout=5) as res:
-            model = str(json.load(res)["data"][0]["id"])
-    except Exception:
-        model = "whisper-1"
-data["stt_endpoint"] = {"baseUrl": url, "model": model}
+# A server already saved is the owner's: kept as it is, and the seed is
+# recorded as decided so a later removal is never undone.
+seeding = data.get("stt_endpoint") is None
+if seeding:
+    if not url.startswith(("http://", "https://")) or any(c.isspace() for c in url):
+        print("  WARN: ASR_BASE_URL is not an http(s) address; not pre-filling the speech server", file=sys.stderr)
+        sys.exit(0)
+    # No ASR_MODEL: the model the server itself serves (an ASR server such as
+    # vLLM refuses a name it does not serve), else the engine's own default.
+    if not model:
+        try:
+            with urllib.request.urlopen(url + "/models", timeout=5) as res:
+                model = str(json.load(res)["data"][0]["id"])
+        except Exception:
+            model = "whisper-1"
+    data["stt_endpoint"] = {"baseUrl": url, "model": model}
+    # The engine, unless the owner pinned one (src/lib/clawai-cloud-choice.ts).
+    if data.get("stt_choice_source") != "owner":
+        data["stt_primary"] = "endpoint"
 data["stt_endpoint_seeded"] = True
-# The engine, unless the owner pinned one (src/lib/clawai-cloud-choice.ts).
-if data.get("stt_choice_source") != "owner":
-    data["stt_primary"] = "endpoint"
 tmp = None
 try:
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".config.json.")
@@ -1314,7 +1318,8 @@ finally:
             os.unlink(tmp)
         except OSError:
             pass
-print(f"  Speech-to-text: pre-filled this Workstation's ASR server ({url}) as the transcription engine")
+if seeding:
+    print(f"  Speech-to-text: pre-filled this Workstation's ASR server ({url}) as the transcription engine")
 PY
   then
     echo "  WARN: could not pre-fill the speech server from ASR_BASE_URL" >&2
@@ -2593,7 +2598,7 @@ run_voice_install() {
   local mode="$1" rc=0
   if [ ! -f "$ROOT_VOICE_DIR/install-voice.sh" ]; then
     echo "  ERROR: $ROOT_VOICE_DIR/install-voice.sh is missing — run: sudo bash install-x64.sh --step root_step_contract" >&2
-    return 12
+    return 14
   fi
   CLAWBOX_USER="$CLAWBOX_USER" CLAWBOX_HOME="$CLAWBOX_HOME" \
     bash "$ROOT_VOICE_DIR/install-voice.sh" "$mode" || rc=$?

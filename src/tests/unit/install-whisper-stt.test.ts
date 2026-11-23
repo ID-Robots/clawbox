@@ -368,7 +368,11 @@ describe("install_whisper_stt — behaviour, driven against stubs", () => {
     const r = run({ sbsa: true, ct2Wheel: true });
     expect(r.out).toContain("RC=0");
     expect(r.calls).toContain("sbsa_pip_sources");
-    expect(r.calls.some((c) => c.startsWith("pip") && c.includes("faster-whisper"))).toBe(true);
+    // The wheelhouse's wheel by its file, over any CPU ctranslate2, BEFORE faster-whisper resolves.
+    const ct2 = r.calls.findIndex((c) => c.startsWith("pip --force-reinstall --no-deps") && c.includes("/wheels/ctranslate2-"));
+    const fw = r.calls.findIndex((c) => c.startsWith("pip") && c.includes("faster-whisper"));
+    expect(ct2).toBeGreaterThan(-1);
+    expect(fw).toBeGreaterThan(ct2);
     expect(r.calls).not.toContain("build");
     expect(r.unitWritten).toBe(true);
   });
