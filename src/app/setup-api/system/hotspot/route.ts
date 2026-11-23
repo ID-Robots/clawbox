@@ -22,9 +22,10 @@ let saveGeneration = 0;
  *  * `restarted` — the AP was bounced, so this connection has just dropped.
  *  * `deferred`  — deliberately not bounced (the radio is a client right now);
  *                  the saved settings apply at the next AP start.
- *  * `stopped`   — the owner turned the hotspot off and nmcli, read back after
- *                  the stop, shows no ClawBox-Setup AP (also after a stop that
- *                  failed with nothing to stop).
+ *  * `stopped`   — the owner turned the hotspot off and no ClawBox-Setup AP is
+ *                  up: stop-ap.sh succeeded and the read-back shows none (or
+ *                  cannot read, as GET then shows none), or stop-ap.sh failed
+ *                  and the read-back did read none.
  *  * `failed`    — the toggle threw; the settings are saved, the radio is not
  *                  (or may not be) in the state the owner asked for, and
  *                  `warning` says so.
@@ -209,7 +210,9 @@ export async function POST(request: Request) {
         // its own to stop, and fails also before it looked (the web account
         // has no radio lock on a box whose AP unit has not run since boot).
         // "stopped" is claimed only for what GET reads back, and after a
-        // failed stop only when nmcli could read it.
+        // failed stop only when nmcli could read it. A successful stop already
+        // read NetworkManager itself (it deleted the AP it owns, or found
+        // none), so an unreadable read-back after it is not a warning.
         const ap = await readSetupAp(iface);
         if (stopErr && ap !== "down") throw stopErr;
         if (ap === "up") {
