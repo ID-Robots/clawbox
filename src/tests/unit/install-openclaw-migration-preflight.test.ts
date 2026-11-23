@@ -436,7 +436,7 @@ describe.skipIf(!hasPython3)("step_openclaw_install: a second doctor pass for a 
     "",
   ].join("\n");
   const PREFIX = "Error: OpenClaw migration did not complete; leaving the gateway stopped.";
-  // Past any pipe buffer, so a `printf | grep -q` blocker check would read SIGPIPE as "no blocker".
+  // Past any pipe buffer: a `printf | grep -q` check misses a phrase before it under pipefail (SIGPIPE).
   const FILLER = Array.from({ length: 6000 }, (_, i) => `Doctor: check ${i} of the agent state ${"·".repeat(40)}`).join("\n");
 
   const doctorCalls = () => calls().filter((c) => c.startsWith("doctor "));
@@ -507,11 +507,28 @@ describe.skipIf(!hasPython3)("step_openclaw_install: a second doctor pass for a 
     });
   }
 
-  // Only a line doctor is known to print, never its free last line: the sentence reaches the UI.
+  // A recognised doctor line, or the exit code; never doctor's free last line: the sentence reaches the UI.
   for (const [name, pass, reason] of ONE_PASS) {
     it(`names doctor's recognised reason on the Error line after ${name}`, () => {
       const r = run([pass]);
       expect(lastLine(r.stdout)).toBe(`${PREFIX} Doctor: ${reason}`);
     });
   }
+
+  // Every verdict stays openclaw_migration_complete's, as before this change. Its
+  // `printf | grep -q` misses this phrase under pipefail, so the exit-0 pass is
+  // recorded complete, as it was before (measured); changing that is its own decision.
+  it("leaves an exit-0 pass's verdict as it was, with one doctor call, though the gate sees a blocker phrase", () => {
+    const r = run([{ out: `Agent identity migration requires stopped-writer maintenance\n${FILLER}\n${COMPLETE_PASS}`, rc: 0 }]);
+    expect(doctorCalls()).toHaveLength(1);
+    expect(verdicts()).toEqual(["verdict complete"]);
+    expect(r.status).toBe(0);
+  });
+
+  it("reads the same blocker phrases as openclaw_migration_complete", () => {
+    const verdictPhrases = /grep -qiE '([^']+)'/.exec(shellFunction("openclaw_migration_complete"))?.[1];
+    const gatePhrases = /_oc_doctor_blockers='([^']+)'/.exec(shellFunction("step_openclaw_install"))?.[1];
+    expect(verdictPhrases).toBeTruthy();
+    expect(gatePhrases).toBe(verdictPhrases);
+  });
 });
