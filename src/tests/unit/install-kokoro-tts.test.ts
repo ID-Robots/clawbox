@@ -198,6 +198,8 @@ function runTtsOnly(
       // WHEELHOUSE_CPU_TORCH=1: the wheelhouse holds a CPU torch, so only a
       // network (no --no-index) install of it lands a CUDA 13 build.
       `    case "$full" in *whl/cu130*) if [ "\${CU130_LANDS:-1}" = 1 ]; then case "\${WHEELHOUSE_CPU_TORCH:-0}:$full" in 1:*--no-index*) ;; *) touch "${root}/cu130-torch" ;; esac; fi ;; esac`,
+      // PIP_NO_INDEX_EXIT: what a wheelhouse-only (--no-index) install exits with.
+      '    case "$full" in *--no-index*) [ -n "${PIP_NO_INDEX_EXIT:-}" ] && exit "$PIP_NO_INDEX_EXIT" ;; esac',
       '    echo "Successfully installed"; exit "${PIP_EXIT:-0}" ;;',
       "esac",
       "exit 0",
@@ -835,6 +837,18 @@ describe.skipIf(!hasBash)("install-voice.sh --kokoro on a DGX Spark", () => {
     const pip = res.su.filter((c) => c.includes("pip3 install") && !c.includes("pip3 install --user ."));
     expect(pip.some((c) => c.includes("faster-whisper"))).toBe(true);
     expect(pip.filter((c) => !c.includes("--break-system-packages")), "a pip step without PEP 668's flag").toEqual([]);
+  });
+
+  it("the full pipeline's faster-whisper step falls back to the network when the wheelhouse cannot satisfy it", () => {
+    const wheels = path.join(root, "home", "clawbox", ".cache", "clawbox", "wheels");
+    mkdirSync(wheels, { recursive: true });
+    writeFileSync(path.join(wheels, "torch-2.9.1+cu130-cp312-cp312-manylinux_2_28_aarch64.whl"), "");
+    const res = runTtsOnly({ ...SPARK, PIP_NO_INDEX_EXIT: "1" }, false, "");
+    const fw = res.su.filter((c) => c.includes("pip3 install") && c.includes("faster-whisper"));
+    expect(fw.length).toBe(2);
+    expect(fw[0]).toContain("--no-index");
+    expect(fw[1]).not.toContain("--no-index");
+    expect(fw[1]).toContain(`--find-links '${wheels}'`);
   });
 
   it("is still the Jetson path on CUDA 12, nvidia-smi or not", () => {

@@ -1761,7 +1761,9 @@ echo "[2/7] Installing faster-whisper (STT)..."
 # The command install_whisper_stt runs, which the board resolved on its pip
 # 22.0.2: without huggingface-hub<1 that pip cannot resolve the hub 1.x graph,
 # and the numpy floor keeps the Jetson torch wheel from step 1 working.
-su - "$CLAWBOX_USER" -c "$PIP install --user ${PIP_SRC:+$PIP_SRC }'numpy>=1.24,<2' faster-whisper 'huggingface-hub<1'" 2>&1 | tail -3
+# pip_as_clawbox: on a Jetson the same command and output, on an SBSA box the
+# wheelhouse first and then the network.
+pip_as_clawbox "'numpy>=1.24,<2' faster-whisper 'huggingface-hub<1'"
 
 # ── Step 3: Build CTranslate2 with CUDA (if available) ──────────────────────
 
