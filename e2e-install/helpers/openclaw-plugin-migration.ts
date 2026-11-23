@@ -163,7 +163,8 @@ function parseJournalJson(out: string): JournalLine[] {
     const message = typeof entry.MESSAGE === "string"
       ? entry.MESSAGE
       : Array.isArray(entry.MESSAGE) ? Buffer.from(entry.MESSAGE as number[]).toString("utf8") : "";
-    lines.push({ atUs: Number(entry.__REALTIME_TIMESTAMP ?? 0), message });
+    // Doctor colours its notes; the escapes would split the phrases matched below.
+    lines.push({ atUs: Number(entry.__REALTIME_TIMESTAMP ?? 0), message: message.replace(/\x1b\[[0-9;]*m/g, "") });
   }
   return lines;
 }
@@ -177,39 +178,108 @@ export async function journalAfter(unit: string, cursor: string): Promise<Journa
   return parseJournalJson(out);
 }
 
-export interface DoctorSummary {
-  entries: number;
-  /** "Running openclaw doctor --fix …": every installer prints one per pass it starts. */
-  runLines: number;
-  /** "openclaw doctor --fix pass N ended with exit R": only an installer that numbers its passes. */
-  passEnds: string[];
-  passes: number;
-  conflict: boolean;
-  /** First to last entry: the step's own wall time. */
-  spanSeconds: number | null;
-  /** Index of the first doctor line, or -1. */
-  doctorStart: number;
+/** Every installer prints this once per doctor pass it starts ("…again (pass 2 of 2)" too). */
+const PASS_START = /Running openclaw doctor --fix/;
+
+/** One doctor pass, read from its output (offsets are into the pass's joined text; -1 is absent). */
+export interface DoctorPass {
+  /** From the installer's "pass N ended with exit R"; null when this installer does not print it. */
+  exit: number | null;
+  /** The config held a key this core does not know (pinned 2026.11.5 retired every heartbeat key). */
+  retiredKey: boolean;
+  /** Doctor refreshed the stale codex package itself, in plugin convergence. */
+  refreshed: boolean;
+  /** Doctor rewrote codex's obligation to "has not confirmed …" (its plugin-migration step). */
+  rewriteAt: number;
+  /** Doctor committed the automatic legacy-config repair planned from its earlier snapshot. */
+  automaticRepairAt: number;
+  migratedLegacyKeys: boolean;
+  /** Doctor deferred the heartbeat repair because the cron partition was not ready. */
+  cronDeferral: boolean;
+  /** "migration input publication", "migration settlement", …, or null. */
+  conflictPhase: string | null;
+  conflictLine: string | null;
+  complete: boolean;
 }
 
-export function summarizeDoctor(lines: JournalLine[]): DoctorSummary {
-  const passEnds: string[] = [];
-  let runLines = 0;
-  let doctorStart = -1;
-  lines.forEach((line, index) => {
-    if (/Running openclaw doctor --fix/.test(line.message)) {
-      runLines += 1;
-      if (doctorStart < 0) doctorStart = index;
-    }
-    const end = /openclaw doctor --fix pass (\d+) ended with exit (\d+)/.exec(line.message);
-    if (end) passEnds.push(`pass ${end[1]} exit ${end[2]}`);
-  });
+export interface DoctorSummary {
+  entries: number;
+  passes: DoctorPass[];
+  /** First to last entry: the step's own wall time. */
+  spanSeconds: number | null;
+}
+
+function readPass(lines: JournalLine[]): DoctorPass {
+  // Doctor frames its notes and wraps them: with the frame and the line breaks
+  // taken out, a wrapped sentence reads whole.
+  const text = lines
+    .map((line) => line.message.replace(/^[\s─-╿■-◿]+|[\s─-╿■-◿]+$/g, ""))
+    .join(" ")
+    .replace(/\s+/g, " ");
+  const exit = /openclaw doctor --fix pass \d+ ended with exit (\d+)/.exec(text);
+  const conflict = /Plugin migration obligations changed during ([^.]+)\./.exec(text);
   return {
-    entries: lines.length,
-    runLines,
-    passEnds,
-    passes: passEnds.length || runLines,
-    conflict: lines.some((line) => line.message.includes(DOCTOR_CONFLICT)),
-    spanSeconds: lines.length > 1 ? Math.round((lines[lines.length - 1].atUs - lines[0].atUs) / 1e6) : null,
-    doctorStart,
+    exit: exit ? Number(exit[1]) : null,
+    retiredKey: /Unrecognized key: "heartbeat"/.test(text),
+    refreshed: /Refreshed stale configured plugin "codex"/.test(text),
+    rewriteAt: text.search(/"codex" data\/settings upgrade is unfinished: The installed plugin has not confirmed/),
+    automaticRepairAt: text.indexOf("Doctor: automatic config repair"),
+    migratedLegacyKeys: text.includes("Migrated legacy config keys in the active openclaw.json"),
+    cronDeferral: /select the cron partition and migrate heartbeat settings|cron and heartbeat data migration is deferred/
+      .test(text),
+    conflictPhase: conflict ? conflict[1] : null,
+    conflictLine: lines.find((line) => line.message.includes(DOCTOR_CONFLICT))?.message.trim() ?? null,
+    complete: text.includes("Doctor complete."),
   };
 }
+
+/** The bounded journal, split at each pass's start line (which is not part of the pass). */
+export function summarizeDoctor(lines: JournalLine[]): DoctorSummary {
+  const passes: JournalLine[][] = [];
+  for (const line of lines) {
+    if (PASS_START.test(line.message)) passes.push([]);
+    else if (passes.length > 0) passes[passes.length - 1].push(line);
+  }
+  return {
+    entries: lines.length,
+    passes: passes.map(readPass),
+    spanSeconds: lines.length > 1 ? Math.round((lines[lines.length - 1].atUs - lines[0].atUs) / 1e6) : null,
+  };
+}
+
+/**
+ * Why the first pass did NOT exercise the path a retired config key opens, or
+ * null when it did. The path, in the pinned core's order: the config holds a
+ * key the new core does not know, so doctor plans an automatic repair from a
+ * snapshot; it refreshes the stale codex and records its obligation; it then
+ * rewrites that obligation; and only after that commits the repair, carrying
+ * the obligation list of the earlier snapshot.
+ */
+export function retiredKeyPathMissed(pass: DoctorPass | undefined): string | null {
+  if (!pass) return "fixture: no doctor pass in openclaw_install's journal after the trigger";
+  if (pass.cronDeferral) {
+    return "fixture: the container's cron partition is not ready; doctor deferred the heartbeat repair";
+  }
+  if (!pass.retiredKey || pass.automaticRepairAt < 0) {
+    return "fixture: the config held no key the new core retires; the conflict path was not exercised";
+  }
+  if (!pass.refreshed) return "fixture: doctor did not refresh the stale codex plugin in its first pass";
+  if (pass.rewriteAt < 0 || pass.automaticRepairAt < pass.rewriteAt) {
+    return "fixture: the config repair did not follow codex's obligation rewrite; the conflict path was not exercised";
+  }
+  return null;
+}
+
+/** One line per pass, for the job log and the annotations. */
+export function describePass(pass: DoctorPass, index: number): string {
+  const yes = (value: boolean) => (value ? "yes" : "no");
+  return `pass ${index + 1}: exit ${pass.exit ?? "not printed by this installer"}; ` +
+    `retired key at start ${yes(pass.retiredKey)}; codex refreshed ${yes(pass.refreshed)}; ` +
+    `obligation rewrite ${yes(pass.rewriteAt >= 0)}; automatic config repair ${yes(pass.automaticRepairAt >= 0)}; ` +
+    `legacy keys migrated ${yes(pass.migratedLegacyKeys)}; cron deferral ${yes(pass.cronDeferral)}; ` +
+    `conflict ${pass.conflictPhase ? `during ${pass.conflictPhase}` : "none"}; doctor complete ${yes(pass.complete)}`;
+}
+
+/** The lines worth reading in the job log: every doctor phase and the lines the checks above read. */
+export const KEY_LINE =
+  /Doctor[: ]|\[state-migrations\]|Config warnings|Unrecognized key|Migrated legacy config keys|Retired heartbeat|Refreshed stale|Plugin migration obligations changed|ended with exit|Running openclaw doctor|\[db-maintenance\]|cron partition|heartbeat data migration/;
