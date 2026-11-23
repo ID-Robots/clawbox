@@ -7726,7 +7726,7 @@ step_edition_select() {
 # `printf | grep`: on output past the pipe buffer, grep leaving at an early
 # match is SIGPIPE to printf, which pipefail reads as "no blocker".
 openclaw_migration_complete() {
-  OPENCLAW_MIGRATION_BLOCKER="$(grep -m 1 -oiE 'requires stopped-writer maintenance|Legacy session store requires migration|startup migrations did not complete|Skipped historical transcript directive migration' <<<"$2" || true)"
+  OPENCLAW_MIGRATION_BLOCKER="$(grep -a -m 1 -oiE 'requires stopped-writer maintenance|Legacy session store requires migration|startup migrations did not complete|Skipped historical transcript directive migration' <<<"$2" || true)"
   OPENCLAW_MIGRATION_BLOCKER="${OPENCLAW_MIGRATION_BLOCKER%%$'\n'*}"
   [ "$1" -eq 0 ] && [ -z "$OPENCLAW_MIGRATION_BLOCKER" ]
 }

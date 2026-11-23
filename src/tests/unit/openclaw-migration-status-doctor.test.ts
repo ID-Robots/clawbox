@@ -190,7 +190,7 @@ describe("doctorRunCompleted", () => {
   const installShPhrases = (): string[] => {
     const start = INSTALL_SH.indexOf("\nopenclaw_migration_complete() {");
     const body = INSTALL_SH.slice(start, INSTALL_SH.indexOf("\n}", start + 1));
-    const pattern = /grep -m 1 -oiE '([^']+)'/.exec(body)?.[1] ?? "";
+    const pattern = /grep -a -m 1 -oiE '([^']+)'/.exec(body)?.[1] ?? "";
     return pattern.split("|").filter(Boolean);
   };
 

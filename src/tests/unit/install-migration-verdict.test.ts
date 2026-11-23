@@ -20,6 +20,11 @@ describe("required OpenClaw migration verdict",()=>{
   const r=spawnSync("bash",["-c",`set -o pipefail\n${fn}\nopenclaw_migration_complete 0 "$(cat)"`],{input:output});
   expect(r.status).toBe(1);
  });
+ it("finds a blocker phrase on a line that is not valid UTF-8 in a UTF-8 locale",()=>{
+  const output=Buffer.concat([Buffer.from("Agent identity migration requires stopped-writer maintenance "),Buffer.from([0xff]),Buffer.from("\n")]);
+  const r=spawnSync("bash",["-c",`${fn}\nopenclaw_migration_complete 0 "$(cat)"`],{input:output,env:{...process.env,LC_ALL:"C.UTF-8"}});
+  expect(r.status).toBe(1);
+ });
  it("does not confuse optional maintenance notices with migration failures",()=>{
   expect(verdict(0,"Session SQLite: Legacy entries 8; SQLite entries 8.\n5 dead-lettered ingress events.\nNo successful backup is recorded.\nDoctor complete.")).toBe(0);
  });
