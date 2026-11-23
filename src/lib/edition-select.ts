@@ -27,7 +27,7 @@ import { promisify } from "util";
 import { editionLockDir, readEditionSource, type EditionHint, type EditionName } from "@/lib/edition-source";
 import type { Harness } from "@/lib/harness";
 import { readEditionRequestFile, writeEditionRequestFile, type SwapRequest } from "@/lib/harness-swap";
-import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
+import { readRootStepJournalTail, rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
 
 const execFile = promisify(execFileCb);
 
@@ -240,11 +240,14 @@ export async function latestSelectPhase(sinceMs: number): Promise<SelectPhase | 
     ));
   } catch {
     try {
-      ({ stdout } = await execFile(
-        "/usr/bin/journalctl",
-        rootStepJournalArgs(EDITION_SELECT_STEP, { sinceMs, lines: SELECT_JOURNAL_SCAN_LINES }),
-        { timeout: 10_000 },
-      ));
+      // The run's NEWEST lines, so a long run answers its latest phase
+      // (root-step-journal.ts says why `--since T -n N` alone would not).
+      stdout = await readRootStepJournalTail(EDITION_SELECT_STEP, {
+        sinceMs,
+        lines: SELECT_JOURNAL_SCAN_LINES,
+        timeoutMs: 10_000,
+        maxBuffer: 4 * 1024 * 1024,
+      });
     } catch {
       return null;
     }

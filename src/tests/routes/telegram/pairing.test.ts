@@ -85,9 +85,9 @@ describe("/setup-api/telegram/pairing", () => {
   // Same blind spot as /telegram/status: the credential belongs to OpenClaw
   // (channels.telegram.botToken in openclaw.json), and ClawBox's copy is written
   // only by /setup-api/telegram/configure. This route answers an EMPTY pairing
-  // state when it thinks there is no bot, and page.tsx polls it every 20 s for
-  // the "someone wants to talk to your bot" popup — so on a natively-paired box
-  // a household member's request was never shown to anyone.
+  // state when it thinks there is no bot, and page.tsx polls it (3 s with a bot,
+  // 20 s without) for the "someone wants to talk to your bot" popup — so on a
+  // natively-paired box a household member's request was never shown to anyone.
   it("GET reports configured from OpenClaw's own store when ClawBox has no copy", async () => {
     mockGet.mockResolvedValue(null);
     mockReadConfigStrict.mockResolvedValue({

@@ -28,6 +28,7 @@ import { promisify } from "util";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { readHermesConfigTopLevelScalar } from "@/lib/hermes-config-yaml";
 import { getHermesEnvValue } from "@/lib/hermes-env";
+import { failureLog } from "@/lib/log-once";
 import { PAIRING_TOKEN_RE, normalizePairingToken } from "@/lib/telegram-pairing-token";
 
 const execFileAsync = promisify(execFile);
@@ -76,7 +77,7 @@ export interface HermesApprovedUser {
   name?: string;
 }
 
-// ── Pairing store reads (no CLI — cheap enough for the 20 s desktop poll) ────
+// ── Pairing store reads (no CLI — cheap enough for the 3 s desktop poll) ─────
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -103,7 +104,7 @@ function optionalString(value: unknown): string | undefined {
 /**
  * Pending Telegram access requests, read straight from Hermes' pairing store —
  * no CLI, so the desktop popup can poll it on a timer without spawning a
- * process every 20 s.
+ * process every 3 s (20 s on a box with no bot).
  *
  * The store key IS the request id `hermes pairing approve` accepts. The code the
  * bot DM'd is only ever persisted as a salted hash, so it cannot be recovered
@@ -463,6 +464,9 @@ export interface HermesTelegramToken {
   known: boolean;
 }
 
+/** An unreadable ~/.hermes/.env, logged once per failure (`log-once.ts`). */
+const envUnreadableLog = failureLog();
+
 /**
  * ~/.hermes/.env's answer, tri-state like the whole of this reader.
  *
@@ -474,7 +478,9 @@ export interface HermesTelegramToken {
  */
 async function envToken(): Promise<{ value: string | null; known: boolean }> {
   try {
-    return { value: await getHermesEnvValue(HERMES_TELEGRAM_TOKEN_KEY), known: true };
+    const value = await getHermesEnvValue(HERMES_TELEGRAM_TOKEN_KEY);
+    envUnreadableLog.clear();
+    return { value, known: true };
   } catch (err) {
     // An unreadable .env — EACCES after a root-owned write, EIO on a failing
     // eMMC, a directory where the file should be. Reporting "no bot" here is
@@ -483,11 +489,12 @@ async function envToken(): Promise<{ value: string | null; known: boolean }> {
     // a real fault, the routes above it answer a permanent 503, and without
     // this line the service log holds nothing to explain either. The MESSAGE
     // only: an fs error carries the path, and a rethrown reader error can carry
-    // a window of the file it failed on.
-    console.error(
-      "[telegram] ~/.hermes/.env could not be read; Hermes' bot is unknown:",
-      err instanceof Error ? err.message : err,
-    );
+    // a window of the file it failed on. Once per failure: the desktop's
+    // pairing poll reads this every 3 s (`log-once.ts`).
+    const message = err instanceof Error ? err.message : err;
+    if (envUnreadableLog.isNew(String(message))) {
+      console.error("[telegram] ~/.hermes/.env could not be read; Hermes' bot is unknown:", message);
+    }
     return { value: null, known: false };
   }
 }

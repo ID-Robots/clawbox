@@ -157,7 +157,7 @@ describe("/setup-api/telegram/pairing on Hermes", () => {
   });
 
   // A store this box could not read is not a box with nothing to show. The
-  // desktop polls this route every 20 s for the pairing popup, and an empty
+  // desktop polls this route every 3 s for the pairing popup, and an empty
   // `pending` is what clears it — so a `sudo hermes config set` that left
   // ~/.hermes/.env root-owned hid a household member's request from every
   // screen while the gateway, which loaded the token at start, went on writing

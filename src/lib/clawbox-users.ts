@@ -35,7 +35,7 @@ import { promisify } from "util";
 import path from "@/lib/runtime-path";
 import { DATA_DIR, get, getKnown, set } from "@/lib/config-store";
 import { getSystemUsername, isSafePasswordChars } from "@/lib/auth";
-import { DISPATCH_VERDICT_LINE, rootStepJournalArgs } from "@/lib/root-step-journal";
+import { DISPATCH_VERDICT_LINE, readRootStepJournalTail } from "@/lib/root-step-journal";
 import { rootStepRepairCommand, startRootStep } from "@/lib/root-step-runner";
 import { createSerialLock } from "@/lib/serial-lock";
 import { USERS_CONFIG_KEY, parseUserRegistry, type ClawboxUserRecord } from "@/lib/session-identity";
@@ -112,7 +112,7 @@ export class UserAdminError extends Error {
   }
 }
 
-/** How much of the step's journal is read for its reason: the step prints one "Error:" line and exits. */
+/** How much of the step's journal is read for its reason, from its end: the step prints one "Error:" line and exits. */
 const STEP_JOURNAL_LINES = 80;
 /** A reason longer than this is cut: it is one line under a form, not a log viewer. */
 const DETAIL_MAX = 300;
@@ -127,11 +127,12 @@ const DETAIL_MAX = 300;
 export async function rootStepReason(step: string, sinceMs: number): Promise<string | null> {
   let out: string;
   try {
-    ({ stdout: out } = await execFile(
-      "/usr/bin/journalctl",
-      rootStepJournalArgs(step, { sinceMs, lines: STEP_JOURNAL_LINES }),
-      { timeout: 5_000, maxBuffer: 256 * 1024 },
-    ));
+    out = await readRootStepJournalTail(step, {
+      sinceMs,
+      lines: STEP_JOURNAL_LINES,
+      timeoutMs: 5_000,
+      maxBuffer: 256 * 1024,
+    });
   } catch {
     return null;
   }

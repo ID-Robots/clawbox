@@ -58,10 +58,11 @@ export function statePath(home: string = OPENCLAW_HOME_DEFAULT): string | null {
 
 /**
  * The last failure logged per operation. The desktop polls the pairing store
- * every 20 s, so a store that stays unreadable (schema drift, corruption)
- * would otherwise repeat the same line ~4000 times a day and bury the one
- * that matters; a failure is logged when it first appears or changes, and the
- * slate is wiped by the next success so a relapse is logged again.
+ * every 3 s while a bot is configured, so a store that stays unreadable (schema
+ * drift, corruption) would otherwise repeat the same line ~29 000 times a day
+ * per open desktop and bury the one that matters; a failure is logged when it
+ * first appears or changes, and the slate is wiped by the next success so a
+ * relapse is logged again.
  */
 const lastFailure = new Map<string, string>();
 

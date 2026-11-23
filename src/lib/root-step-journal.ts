@@ -55,6 +55,9 @@
  * "still running".
  */
 
+import { execFile } from "child_process";
+import { promisify } from "util";
+
 /**
  * install.sh's `--step` EXIT trap ends a run that recorded failures with a
  * banner and two `[provision-…]` markers; none of them is the reason a step
@@ -68,18 +71,21 @@ export function rootStepUnit(step: string): string {
 }
 
 /**
- * `journalctl` arguments for what THIS dispatch of `step` wrote.
+ * `journalctl` arguments for EVERYTHING this dispatch of `step` wrote, oldest
+ * first: for a reader that needs every line wherever it sits (a marker, the
+ * fast-path line), or that filters with `--grep` itself.
+ *
+ * No `-n` here, and none may be added: beside `--since` it does not mean "the
+ * window's last N" on the boxes. systemd up to 253 (JetPack 6 and Ubuntu 22.04
+ * ship 249.11) seeks to `--since`, reads FORWARD and stops after N entries, so
+ * `--since T -n 40` is the FIRST 40 entries of the run; only 254 and later
+ * read the last N. A failed update once reported npm's "npm notice" banner,
+ * from the start of the step, instead of the installer's `Error:` line at its
+ * end. A tail of the window is {@link readRootStepJournalTail}'s job.
  *
  * @param sinceMs when the caller started the step, `Date.now()`-style.
- * @param lines   how much of the window's tail to read; left out, the whole
- *                window — for a `--grep` read, which an older journalctl
- *                (systemd 249) would otherwise cut to the window's last N
- *                entries BEFORE matching.
  */
-export function rootStepJournalArgs(
-  step: string,
-  { sinceMs, lines }: { sinceMs: number; lines?: number },
-): string[] {
+export function rootStepJournalArgs(step: string, { sinceMs }: { sinceMs: number }): string[] {
   return [
     "-u",
     rootStepUnit(step),
@@ -92,9 +98,44 @@ export function rootStepJournalArgs(
     // 1 ms after a marker excludes it and 1 ms before includes it.
     "--since",
     `@${(sinceMs / 1000).toFixed(3)}`,
-    ...(lines === undefined ? [] : ["-n", String(lines)]),
     "--no-pager",
     "-o",
     "cat",
   ];
+}
+
+/**
+ * `journalctl` arguments for the newest `lines` entries of this dispatch's
+ * window, NEWEST FIRST. `--reverse` seeks to the journal's tail and walks
+ * back until it leaves the window, on 249 as on 255, so `-n` counts from the
+ * end on every journalctl the fleet runs. {@link readRootStepJournalTail}
+ * turns the answer back into journal order.
+ */
+export function rootStepJournalTailArgs(
+  step: string,
+  { sinceMs, lines }: { sinceMs: number; lines: number },
+): string[] {
+  return [...rootStepJournalArgs(step, { sinceMs }), "--reverse", "-n", String(lines)];
+}
+
+/**
+ * The newest `lines` entries this dispatch of `step` wrote, oldest first, as
+ * `journalctl -o cat` prints them (one line per entry: a unit's stdout reaches
+ * the journal a line at a time). Rejects as `execFile` does; each caller keeps
+ * its own answer for a journal it cannot read.
+ */
+export async function readRootStepJournalTail(
+  step: string,
+  { sinceMs, lines, timeoutMs, maxBuffer }: { sinceMs: number; lines: number; timeoutMs: number; maxBuffer?: number },
+): Promise<string> {
+  // Resolved per call, not at import: modules that only want `rootStepUnit`
+  // load this one under test mocks of child_process that have no execFile.
+  const { stdout } = await promisify(execFile)(
+    "/usr/bin/journalctl",
+    rootStepJournalTailArgs(step, { sinceMs, lines }),
+    { timeout: timeoutMs, ...(maxBuffer === undefined ? {} : { maxBuffer }) },
+  );
+  const newestFirst = String(stdout ?? "").split("\n");
+  if (newestFirst.at(-1) === "") newestFirst.pop();
+  return newestFirst.length === 0 ? "" : `${newestFirst.reverse().join("\n")}\n`;
 }
