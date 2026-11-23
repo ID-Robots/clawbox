@@ -412,23 +412,35 @@ describe.skipIf(!hasPython3)("step_openclaw_install: a core older than the datab
  * (docs/gateway/doctor/state-and-sessions.md), and on a box the next pass
  * finished it. The step used to give up after one pass with the gateway stopped.
  *
- * One more pass, under exactly that gate: exit 1, the conflict line, no blocker
- * phrase. The verdict is the last pass's, recorded once. Run as install.sh
+ * The sentence is a template, "Plugin migration obligations changed during
+ * <phase>.", built by one error class for each phase the core can meet it in.
+ *
+ * One more pass, under exactly that gate: exit 1, the conflict line (any phase),
+ * no blocker phrase. The verdict is the last pass's, recorded once. Run as install.sh
  * dispatches the step (`set -euo pipefail`), with stderr folded into stdout so
  * "the `Error:` line comes last" is about the whole output.
  */
 describe.skipIf(!hasPython3)("step_openclaw_install: a second doctor pass for a plugin obligation that changed under the first", () => {
   const CONFLICT = "Plugin migration obligations changed during migration input publication";
+  // Every phase the pinned core builds that sentence for (one error class, the same advice).
+  const PHASES = [
+    "migration input publication",
+    "migration settlement",
+    "session archive publication",
+    "session source retirement",
+    "config include publication",
+  ];
   // Doctor's own lines, cut down, from a pass that converged a plugin under its own obligation.
-  const CONFLICT_PASS = [
+  const conflictPass = (phase = "migration input publication") => [
     "◇  Doctor changes",
     '  - Refreshed stale configured plugin "codex" from @openclaw/codex@2026.11.5.',
     '[state-migrations] Plugin "codex" data/settings upgrade is unfinished: The installed plugin has not confirmed that its saved data and settings are ready for this version. Run "openclaw doctor --fix" to retry the upgrade.',
     "Doctor could not complete maintenance. Check the reported service state and resolve the failure.",
     "Doctor: maintenance release",
-    `${CONFLICT}. expected=[codex], current=[codex], changed=[codex:command, codex:reason]. Retained inputs remain protected; run "openclaw doctor --fix" after the other repair finishes.`,
+    `Plugin migration obligations changed during ${phase}. expected=[codex], current=[codex], changed=[codex:command, codex:reason]. Retained inputs remain protected; run "openclaw doctor --fix" after the other repair finishes.`,
     "",
   ].join("\n");
+  const CONFLICT_PASS = conflictPass();
   const COMPLETE_PASS = [
     '[state-migrations] Deferred state migration completed for plugin "codex".',
     "Doctor: maintenance release",
@@ -468,6 +480,37 @@ describe.skipIf(!hasPython3)("step_openclaw_install: a second doctor pass for a 
     expect(header).toMatch(new RegExp(`^  Running openclaw doctor --fix again \\(pass 2 of 2\\) after: ${CONFLICT}; \\d+s into the step$`));
     expect(r.stdout).not.toMatch(/^(Error|Fatal)\b|CLAWBOX-WARN/m);
     expect(calls().some((c) => c.startsWith("npm "))).toBe(true);
+  });
+
+  for (const phase of PHASES) {
+    it(`runs doctor once more after the conflict in ${phase}, and records the second pass complete`, () => {
+      const r = run([{ out: conflictPass(phase), rc: 1 }, { out: COMPLETE_PASS, rc: 0 }]);
+      expect(r.status, r.stdout).toBe(0);
+      expect(doctorCalls()).toHaveLength(2);
+      expect(verdicts()).toEqual(["verdict complete"]);
+      expect(r.stdout).toContain(`  Running openclaw doctor --fix again (pass 2 of 2) after: Plugin migration obligations changed during ${phase}; `);
+    });
+  }
+
+  it("names the phase doctor printed on the Error line after two conflicts", () => {
+    const pass = { out: conflictPass("session archive publication"), rc: 1 };
+    const r = run([pass, pass]);
+    expect(doctorCalls()).toHaveLength(2);
+    expect(lastLine(r.stdout)).toBe(`${PREFIX} Doctor: Plugin migration obligations changed during session archive publication`);
+  });
+
+  it("does not run doctor again on a line that only resembles the conflict", () => {
+    const out = [
+      "Plugin migration obligations unchanged during migration settlement.",
+      "Plugin migration obligations changed.",
+      "Doctor could not complete maintenance. Check the reported service state and resolve the failure.",
+      "",
+    ].join("\n");
+    const r = run([{ out, rc: 1 }, { out: COMPLETE_PASS, rc: 0 }]);
+    expect(r.status).toBe(1);
+    expect(doctorCalls()).toHaveLength(1);
+    expect(verdicts()).toEqual(["verdict incomplete"]);
+    expect(lastLine(r.stdout)).toBe(`${PREFIX} Doctor: Doctor could not complete maintenance`);
   });
 
   it("stops after two passes that both end on the conflict, records incomplete once and leaves the gateway stopped", () => {
@@ -515,14 +558,17 @@ describe.skipIf(!hasPython3)("step_openclaw_install: a second doctor pass for a 
     });
   }
 
-  // Every verdict stays openclaw_migration_complete's, as before this change. Its
-  // `printf | grep -q` misses this phrase under pipefail, so the exit-0 pass is
-  // recorded complete, as it was before (measured); changing that is its own decision.
-  it("leaves an exit-0 pass's verdict as it was, with one doctor call, though the gate sees a blocker phrase", () => {
+  // Pins that this change does not alter the exit-0 verdict: it stays openclaw_migration_complete's.
+  // KNOWN DEFECT of that verdict check, deliberately left as it is here: under pipefail its
+  // `printf | grep -q` loses a blocker phrase early in long output to SIGPIPE, so this run is
+  // recorded complete. Repairing it changes the outcome of updates that pass today, so it is a
+  // separate change with its own tests. That change flips the two lines marked below (to
+  // "verdict incomplete" and status 1); it does not delete this case.
+  it("does not alter the exit-0 verdict (known defect: the verdict check loses an early blocker phrase in long output)", () => {
     const r = run([{ out: `Agent identity migration requires stopped-writer maintenance\n${FILLER}\n${COMPLETE_PASS}`, rc: 0 }]);
     expect(doctorCalls()).toHaveLength(1);
-    expect(verdicts()).toEqual(["verdict complete"]);
-    expect(r.status).toBe(0);
+    expect(verdicts()).toEqual(["verdict complete"]); // known defect: flips to "verdict incomplete"
+    expect(r.status).toBe(0); // known defect: flips to 1
   });
 
   it("reads the same blocker phrases as openclaw_migration_complete", () => {

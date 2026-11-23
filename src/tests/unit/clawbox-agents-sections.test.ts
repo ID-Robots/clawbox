@@ -130,6 +130,47 @@ describe("ensureClawboxAgentsSections", () => {
     );
   });
 
+  it("reads and writes the default agent's own workspace when its roster entry names one", async () => {
+    // OpenClaw resolves an agent's workspace from its own roster entry first,
+    // and from agents.defaults.workspace only when the entry names none.
+    const own = path.join(scratch, "own-workspace");
+    mkdirSync(own, { recursive: true });
+    writeFileSync(path.join(own, "AGENTS.md"), TEMPLATE);
+    writeFileSync(
+      path.join(scratch, "openclaw", "openclaw.json"),
+      JSON.stringify({ agents: { entries: { default: { workspace: own } } } }),
+    );
+    const { ensureClawboxAgentsSections, withClawboxAgentsSections } = await load();
+    // The defaults workspace already carries every section, as pre-start leaves it.
+    writeFileSync(agentsMd, withClawboxAgentsSections(TEMPLATE));
+    const file = { name: "AGENTS.md", path: path.join(own, "AGENTS.md"), missing: false };
+    gateway({ workspace: own, file: { ...file, content: TEMPLATE, hash: sha256(TEMPLATE) } });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await ensureClawboxAgentsSections();
+
+    expect(callsTo("agents.files.set")).toEqual([{
+      agentId: "default",
+      name: "AGENTS.md",
+      content: withClawboxAgentsSections(TEMPLATE),
+      expectedHash: sha256(TEMPLATE),
+      expectedWorkspace: own,
+    }]);
+  });
+
+  it("leaves something that is not a regular file in AGENTS.md's place alone, and says so once", async () => {
+    mkdirSync(agentsMd);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { ensureClawboxAgentsSections } = await load();
+
+    await ensureClawboxAgentsSections();
+    await ensureClawboxAgentsSections();
+
+    expect(gatewayWs.gatewayWsCall).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(/not a regular file/);
+  });
+
   it("creates nothing and calls nothing when there is no AGENTS.md yet", async () => {
     const { ensureClawboxAgentsSections } = await load();
 

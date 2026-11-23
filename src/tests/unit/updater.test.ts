@@ -4975,6 +4975,15 @@ describe("updater", () => {
         expect(step?.error).toBe("[db-maintenance] recorded the migration as incomplete (degraded)");
         expect(runError).toBe("[db-maintenance] recorded the migration as incomplete (degraded)");
       });
+
+      it("keeps the launcher's own error when the run wrote nothing", async () => {
+        // `-o cat` is quiet by itself, so an empty window prints nothing at
+        // all: never a "-- No entries --" banner for the picker to report.
+        const { step, runError } = await failFullStep([]);
+
+        expect(step?.error).toBe("systemctl failed");
+        expect(runError).toBe("systemctl failed");
+      });
     });
   });
 

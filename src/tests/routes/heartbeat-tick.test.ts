@@ -343,7 +343,10 @@ describe("ClawBox's AGENTS.md rules", () => {
   beforeEach(() => {
     cloudflared.readTunnelUrl.mockResolvedValue("https://alive.trycloudflare.com");
     liveness.checkTunnelLiveness.mockResolvedValue("alive");
-    workspace = path.join(scratch, "workspace");
+    // The agent's own workspace, pinned in its roster entry. Not the persona
+    // mock's directory: an earlier case's un-awaited run may still be going,
+    // and it reads that mock's CURRENT value, so it stays an empty directory.
+    workspace = path.join(scratch, "agent-workspace");
     agentsMd = path.join(workspace, "AGENTS.md");
     mkdirSync(workspace, { recursive: true });
     writeFileSync(agentsMd, TEMPLATE);
@@ -351,7 +354,8 @@ describe("ClawBox's AGENTS.md rules", () => {
     // gateway refuses an id its config does not name, so "main" would fail.
     const home = path.join(scratch, "openclaw");
     mkdirSync(home, { recursive: true });
-    writeFileSync(path.join(home, "openclaw.json"), JSON.stringify({ agents: { entries: { default: {} } } }));
+    const config = { agents: { entries: { default: { workspace } } } };
+    writeFileSync(path.join(home, "openclaw.json"), JSON.stringify(config));
     process.env.OPENCLAW_HOME = home;
   });
 

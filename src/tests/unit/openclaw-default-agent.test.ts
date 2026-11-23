@@ -8,6 +8,7 @@ import {
   normalizeAgentId,
   openclawDefaultAgentId,
   resolveDefaultAgentId,
+  rosterWorkspace,
 } from "@/lib/openclaw-default-agent";
 
 /**
@@ -110,6 +111,23 @@ describe("the default agent a config names", () => {
     expect(normalizeAgentId("../etc")).toBe("etc");
     expect(normalizeAgentId("!!!")).toBe("main");
     expect(normalizeAgentId(42)).toBe("main");
+  });
+});
+
+describe("the workspace an agent's own roster entry names", () => {
+  // The core reads it before agents.defaults.workspace.
+  it("is read from keyed entries and from a legacy list, by the normalised id", () => {
+    const keyed = { agents: { entries: { Default: { workspace: " /srv/ws " } } } };
+    expect(rosterWorkspace(keyed, "default")).toBe("/srv/ws");
+    expect(rosterWorkspace({ agents: { list: [{ id: "main", workspace: "~/ws" }] } }, "main")).toBe("~/ws");
+  });
+
+  it("is undefined when the entry names none, or the agent is not in the roster", () => {
+    const defaultsOnly = { agents: { entries: { main: {} }, defaults: { workspace: "/srv/ws" } } };
+    expect(rosterWorkspace(defaultsOnly, "main")).toBeUndefined();
+    expect(rosterWorkspace({ agents: { entries: { main: { workspace: "  " } } } }, "main")).toBeUndefined();
+    expect(rosterWorkspace({ agents: { entries: { other: { workspace: "/srv/ws" } } } }, "main")).toBeUndefined();
+    expect(rosterWorkspace({}, "main")).toBeUndefined();
   });
 });
 

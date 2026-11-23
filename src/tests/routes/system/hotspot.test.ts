@@ -553,6 +553,20 @@ describe("/setup-api/system/hotspot", () => {
         expect(body.warning).toMatch(/still be broadcasting/i);
       });
 
+      it("a clean stop with an unreadable read-back is stopped: stop-ap.sh read NetworkManager itself", async () => {
+        // Its own nmcli calls deleted the AP it owns (or found none); a read-back
+        // that times out right after is no sign of a live AP, and GET shows none.
+        setupExecFileMock({
+          bash: { stdout: "[AP] Access point stopped.\n", stderr: "" },
+          nmcli: new Error("nmcli timed out"),
+        });
+
+        const body = await (await hotspotPost(jsonRequest({ ssid: "MyHotspot", enabled: false }))).json();
+
+        expect(body.apAction).toBe("stopped");
+        expect(body.warning).toBeUndefined();
+      });
+
       it.each([
         ["gave up waiting on another radio owner", { code: 1, stderr: `${RADIO_LOCK_TIMEOUT}\n` }],
         ["was killed by this route's own timeout", { code: null, killed: true, signal: "SIGTERM", stderr: "" }],
