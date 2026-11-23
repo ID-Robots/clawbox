@@ -558,14 +558,17 @@ describe.skipIf(!hasPython3)("step_openclaw_install: a second doctor pass for a 
     });
   }
 
-  // Every verdict stays openclaw_migration_complete's, as before this change. Its
-  // `printf | grep -q` misses this phrase under pipefail, so the exit-0 pass is
-  // recorded complete, as it was before (measured); changing that is its own decision.
-  it("leaves an exit-0 pass's verdict as it was, with one doctor call, though the gate sees a blocker phrase", () => {
+  // Pins that this change does not alter the exit-0 verdict: it stays openclaw_migration_complete's.
+  // KNOWN DEFECT of that verdict check, deliberately left as it is here: under pipefail its
+  // `printf | grep -q` loses a blocker phrase early in long output to SIGPIPE, so this run is
+  // recorded complete. Repairing it changes the outcome of updates that pass today, so it is a
+  // separate change with its own tests. That change flips the two lines marked below (to
+  // "verdict incomplete" and status 1); it does not delete this case.
+  it("does not alter the exit-0 verdict (known defect: the verdict check loses an early blocker phrase in long output)", () => {
     const r = run([{ out: `Agent identity migration requires stopped-writer maintenance\n${FILLER}\n${COMPLETE_PASS}`, rc: 0 }]);
     expect(doctorCalls()).toHaveLength(1);
-    expect(verdicts()).toEqual(["verdict complete"]);
-    expect(r.status).toBe(0);
+    expect(verdicts()).toEqual(["verdict complete"]); // known defect: flips to "verdict incomplete"
+    expect(r.status).toBe(0); // known defect: flips to 1
   });
 
   it("reads the same blocker phrases as openclaw_migration_complete", () => {
