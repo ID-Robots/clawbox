@@ -8724,7 +8724,10 @@ step_openclaw_install() {
   #            stripped on both sides (a correction release runs the plugins of
   #            its base cohort, docs/install/updating.md), that the core reports
   #            healthy: no error, no missing dependency, no error or consent
-  #            diagnostic, no repair on record;
+  #            diagnostic, no repair on record. The five ids ClawBox manages
+  #            must be at $TARGET itself or a correction's base, the versions
+  #            the fast path accepts: a republished -N left in place would
+  #            hold every later update on this path;
   #   foreign  a payload from another package: the owner's, left as installed,
   #            as OpenClaw's own update leaves it. Never an id ClawBox manages:
   #            the fast path refuses those from another package, so leaving one
@@ -8893,7 +8896,13 @@ for plugin in plugins:
         and str(plugin.get("status") or "").lower() != "error"
         and not (isinstance(deps, dict) and deps.get("requiredInstalled") is False)
     )
-    if name.startswith("@openclaw/") and version and release(version) == release(target) and healthy:
+    # The ids ClawBox manages are held to what the fast path checks them
+    # against: the target itself, or a correction release base.
+    if key in MANAGED:
+        at_release = version in (target, release(target))
+    else:
+        at_release = release(version) == release(target)
+    if name.startswith("@openclaw/") and version and at_release and healthy:
         print("current\t%s@%s" % (name, version))
         continue
     if name and not name.startswith("@openclaw/") and key not in MANAGED:

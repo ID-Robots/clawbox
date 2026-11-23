@@ -916,6 +916,20 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     expect(installs(beta)).toContain(`@openclaw/codex@${pre}`);
   });
 
+  it("holds the plugins ClawBox manages to the version the fast path accepts", () => {
+    // A republished X.Y.Z-1 under an X.Y.Z pin is the same release, and left
+    // for any other official plugin; the fast path refuses it for a managed
+    // one, so leaving that would keep every later update on the full path.
+    const box = makeBox({ core: OLDER });
+    box.plugins[0].rootDir = box.payload("npm/projects/republished/node_modules/@openclaw/codex", { name: "@openclaw/codex", version: `${TARGET}-1` });
+    official(box, "example", `${TARGET}-1`);
+    box.publish();
+    const r = run(box);
+    expect(r.status, r.stderr).toBe(0);
+    expect(installs(r)).toEqual([`@openclaw/codex@${TARGET}`]);
+    expect(r.stdout).toContain(`    - @openclaw/example@${TARGET}-1 (already at ${TARGET})\n`);
+  });
+
   it("still reinstalls a plugin at the release that the core or a repair record doubts", () => {
     const box = makeBox({ core: OLDER });
     box.plugins[0].dependencyStatus = { requiredInstalled: false };
