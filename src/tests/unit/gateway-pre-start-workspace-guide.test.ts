@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { CLAWBOX_AGENTS_SECTIONS, withClawboxAgentsSections } from "@/lib/clawbox-agents-sections";
 
 /**
  * How the ClawBox guide reaches the OpenClaw workspace.
@@ -1363,5 +1364,80 @@ describe("gateway-pre-start tells the agent how speech-to-text is turned on", ()
 
     expect(stdout).not.toMatch(/Appended/);
     expect(readFileSync(agents, "utf-8")).toBe(existing);
+  });
+});
+
+/**
+ * The heartbeat appends what this block appends, byte for byte (E2E-04).
+ *
+ * OpenClaw creates AGENTS.md on the agent's first run, after this block's last
+ * run on a fresh box, so the five-minute heartbeat appends the same sections
+ * through the gateway (src/lib/clawbox-agents-sections.ts). Two writers that
+ * disagreed about the bytes, the order or what counts as "already there" would
+ * give a box a second copy of a rule, every tick or every boot. So both run on
+ * the same files here, and a section added to one copy only fails this.
+ */
+describe("the heartbeat's copy of the AGENTS.md sections", () => {
+  let agents: string;
+
+  beforeEach(() => {
+    agents = path.join(workspace, "AGENTS.md");
+    writeFileSync(guide, readFileSync(TEMPLATE, "utf-8"));
+  });
+
+  /** What the shipped block leaves in an AGENTS.md that held `text`. */
+  function preStart(text: string): string {
+    writeFileSync(agents, text);
+    run();
+    return readFileSync(agents, "utf-8");
+  }
+
+  const FIXTURES: Record<string, string> = {
+    "OpenClaw's template with no ClawBox section": "# AGENTS.md - Your Workspace\n\nThis folder is home.\n\n"
+      + "## Red Lines\n\n- Don't exfiltrate private data.\n\n## Related\n\n- Default AGENTS.md\n",
+    "an empty file": "",
+    "no trailing newline": "# AGENTS\n\nBe helpful.",
+    "CRLF, with some headings already there": "# AGENTS\r\n\r\n## ClawBox integration\r\n\r\nSee `CLAWBOX.md`.\r\n",
+    "a heading quoted inside a balanced fence": "# AGENTS\n\n```markdown\n## ClawBox integration\n```\n",
+    "an unbalanced fence, read as prose": "# AGENTS\n\n```\n## System actions on this ClawBox\n",
+    "``` and ~~~ mixed, with longer closers": "# AGENTS\n\n~~~\n```\n## ClawBox integration\n~~~~\n\n"
+      + "````text\n## Voice notes on this ClawBox\n`````\n",
+    "a closer carrying an info string": "# AGENTS\n\n```\n## ClawBox integration\n```text\n",
+    "a shorter closer, which closes nothing": "# AGENTS\n\n````\n## ClawBox integration\n```\n",
+    "a fence indented four spaces, which is not one": "# AGENTS\n\n    ```\n## ClawBox integration\n    ```\n",
+    "a fence indented three spaces": "# AGENTS\n\n   ```\n## ClawBox integration\n   ```\n",
+    "near-miss headings": "# AGENTS\n\n### ClawBox integration\n\n## ClawBox integration notes\n\n"
+      + " ## System actions on this ClawBox\n",
+    "headings with a trailing space or tab": "# AGENTS\n\n## ClawBox integration \n\n"
+      + "## System actions on this ClawBox\t\n",
+    "a heading with a trailing no-break space or form feed": "# AGENTS\n\n## ClawBox integration\u00a0\n\n"
+      + "## System actions on this ClawBox\f\n",
+    "an owner's own body under one heading": "# AGENTS\n\n## Voice notes on this ClawBox\n\n"
+      + "Answer voice notes in Bulgarian.\n",
+  };
+
+  for (const [name, text] of Object.entries(FIXTURES)) {
+    it(`appends the same bytes: ${name}`, () => {
+      const expected = preStart(text);
+      expect(withClawboxAgentsSections(text)).toBe(expected);
+      // And neither side appends again to what it produced.
+      expect(withClawboxAgentsSections(expected)).toBe(expected);
+    });
+  }
+
+  it("lists the same sections, in the same order, with the same journal lines", () => {
+    // Read off what the block DOES, not off its source: a section added to the
+    // script and not to the list shows up here.
+    agents = path.join(workspace, "AGENTS.md");
+    writeFileSync(agents, "# AGENTS\n");
+    const { stdout } = run();
+    const added = readFileSync(agents, "utf-8").slice("# AGENTS\n".length);
+
+    expect(added.split("\n").filter((line) => line.startsWith("## "))).toEqual(
+      CLAWBOX_AGENTS_SECTIONS.map((s) => s.heading),
+    );
+    const journal = stdout.split("\n").map((line) => line.trim()).filter((line) => line.endsWith("to AGENTS.md"));
+    expect(journal).toEqual(CLAWBOX_AGENTS_SECTIONS.map((s) => s.appendedLine));
+    expect(added).toBe(CLAWBOX_AGENTS_SECTIONS.map((s) => s.payload).join(""));
   });
 });

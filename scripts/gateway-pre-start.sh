@@ -11030,6 +11030,12 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   # Nothing here creates AGENTS.md — the harness owns that — so there is no seed
   # arm and no dangling-symlink case to answer: `-e` is false for a dangling
   # link, which lands on "no AGENTS.md yet", which is correct.
+  #
+  # OpenClaw creates it on the agent's first run, which on a fresh box comes
+  # after this script's last run, so the five-minute heartbeat appends the same
+  # sections through the gateway (src/lib/clawbox-agents-sections.ts). Change a
+  # section's heading, text or order in BOTH places: the workspace-guide test
+  # compares the bytes the two append.
   if [ -e "$CLAWBOX_AGENTS_MD" ] && [ ! -f "$CLAWBOX_AGENTS_MD" ]; then
     # A directory, socket or FIFO in AGENTS.md's place: `-f` alone reads that as
     # "there is no AGENTS.md" and both blocks below are skipped in silence, boot
