@@ -18,7 +18,7 @@
  * Numbered late on purpose: it reloads systemd and writes 20,000 journal
  * lines, which the setup wizard and the UI specs should not run right after.
  *
- * `getStepFailureLine` and `readRootStepFailure` are private to updater.ts, so
+ * `readRootStepFailure` is private to updater.ts, so
  * the reader script loads a copy of the shipped file with one export line
  * added, written beside it so every import resolves as it does in the product,
  * and deletes it once loaded. Nothing in the product changes for the test.
@@ -110,7 +110,7 @@ function readerScript(sinceMs: number, error: string): string {
   const read = entries(await journal.readRootStepJournalTail(step, { sinceMs, lines: 40, timeoutMs: 10000 }));
 
   writeFileSync(${JSON.stringify(UPDATER_COPY)}, readFileSync(${JSON.stringify(`${LIB_DIR}/updater.ts`)}, "utf8")
-    + "\\nexport { getStepFailureLine as e2ePick, readRootStepFailure as e2eReport };\\n");
+    + "\\nexport { readRootStepFailure as e2eReport };\\n");
   let updater;
   try {
     updater = await import(${JSON.stringify(UPDATER_COPY)});
@@ -122,7 +122,6 @@ function readerScript(sinceMs: number, error: string): string {
     waitedMs,
     whole,
     read: { count: read.length, first: read[0] ?? null, last: read.at(-1) ?? null },
-    picked: updater.e2ePick(read.join("\\n"), journal.rootStepUnit(step)),
     reported: await updater.e2eReport(step, sinceMs),
   }));
   process.exit(0);
@@ -140,7 +139,6 @@ interface UpdaterRead {
   waitedMs: number;
   whole: string[];
   read: ReadSummary;
-  picked: string | null;
   reported: string | null;
 }
 
@@ -178,7 +176,7 @@ test.describe("a failed root step, read through the real journalctl", () => {
     console.log(`[root-step journal] whole window: ${probe.whole.length} entries, waited ${probe.waitedMs} ms`);
     console.log(
       `[root-step journal] the updater's read: ${probe.read.count} entries, first ${JSON.stringify(probe.read.first)}, `
-      + `last ${JSON.stringify(probe.read.last)}; picked ${JSON.stringify(probe.picked)}`,
+      + `last ${JSON.stringify(probe.read.last)}`,
     );
     console.log(`[root-step journal] readRootStepFailure: ${JSON.stringify(probe.reported)}`);
 
@@ -205,7 +203,8 @@ test.describe("a failed root step, read through the real journalctl", () => {
 
     const script = `${PROJECT_DIR}/scripts/openclaw-db-maintenance.py`;
     const out = await dockerExec(
-      ["python3", "-I", "-c", PRESTART_READ, script, UNIT, String(sinceMs / 1000)],
+      // -B: an import as root must not leave a compiled copy beside the shipped script.
+      ["python3", "-I", "-B", "-c", PRESTART_READ, script, UNIT, String(sinceMs / 1000)],
       { user: "root", timeoutMs: 120_000 },
     );
     const read = JSON.parse(out.trim().split("\n").pop() ?? "{}") as ReadSummary;
