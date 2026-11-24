@@ -5263,7 +5263,7 @@ const table: Record<string, string> = {
   "whatsNew.vaultBody": "Ein in ClawBox eingebauter Passwort-Manager, den der Besitzer über sein Symbol auf dem Desktop öffnet. Sobald Sie eine Tresor-PIN gewählt haben, bietet der Browser der ClawBox an, Ihre Anmeldedaten zu speichern, und füllt sie aus. Der Assistent kann sich für Sie auf einer Website anmelden, ohne das Passwort je zu sehen.",
   "whatsNew.vaultSummary": "Ein in ClawBox eingebauter Passwort-Manager: Der Browser speichert und füllt Ihre Anmeldedaten, der Assistent meldet sich an, ohne ein Passwort zu sehen.",
   "whatsNew.vaultTitle": "ClawBox Vault: Passwörter, direkt eingebaut",
-  "whatsNew.weeklyUpdateBody": "Jeden Montagvormittag sucht die ClawBox nach einer neueren Version und meldet jede Version einmal: über Telegram mit einer Schaltfläche zum Aktualisieren, wenn ein Bot verbunden ist, sonst auf dem Desktop. Sie können dem Bot jederzeit /update schicken, und das Update wartet weiterhin, bis Sie es auf dem Desktop bestätigen.",
+  "whatsNew.weeklyUpdateBody": "Jeden Montagvormittag sucht die ClawBox nach einer neueren Version und meldet jede Version einmal: über Telegram mit einer Schaltfläche zum Aktualisieren, wenn ein Bot verbunden ist, sonst auf dem Desktop. Sie können dem Bot jederzeit /update schicken, und das Update wartet weiterhin, bis Sie es auf dem Desktop bestätigen oder, wo einer eingerichtet ist, beim Freigabe-Bot.",
   "whatsNew.weeklyUpdateSummary": "Jeden Montag sucht die ClawBox nach einer neueren Version und meldet sie, über Telegram mit Update-Schaltfläche, wenn ein Bot verbunden ist.",
   "whatsNew.weeklyUpdateTitle": "Wöchentliche Update-Prüfung, auch über Telegram",
   "wifi.availableNetworks": "Verfügbare Netzwerke",

@@ -1717,7 +1717,7 @@ export const zh: Record<string, string> = {
   "whatsNew.externalEngineTitle": "把你自己的 AI 引擎用作本地 AI",
   "whatsNew.externalEngineBody": "设置 → 本地 AI → 外部引擎让聊天运行在你网络中自己运行的 OpenAI 兼容服务器上，例如 vLLM、SGLang 或 llama.cpp，而不是本机的模型。没有登录 ClawBox AI 时，Prime Radiant、图片描述和 Memory Shard 的索引也会使用它。",
   "whatsNew.weeklyUpdateTitle": "每周检查更新，也能通过 Telegram 通知",
-  "whatsNew.weeklyUpdateBody": "每周一上午 ClawBox 会查找更新的版本，每个版本只通知一次：连接了机器人时通过 Telegram 发送，并附一个更新按钮，否则显示在桌面上。你随时可以给机器人发送 /update，而更新仍会等你在桌面上确认后才开始。",
+  "whatsNew.weeklyUpdateBody": "每周一上午 ClawBox 会查找更新的版本，每个版本只通知一次：连接了机器人时通过 Telegram 发送，并附一个更新按钮，否则显示在桌面上。你随时可以给机器人发送 /update，而更新仍会等你在桌面上（如已设置审批机器人，也可在机器人中）确认后才开始。",
   "whatsNew.clawaiModelTitle": "ClawBox AI 只有一个模型",
   "whatsNew.clawaiModelBody": "ClawBox AI 在所有套餐中都是 DeepSeek V4 Flash，聊天和图片都用它。更新会把所有指向已停用 ClawBox AI 模型的设置，例如 Max 套餐专用的模型，改为 deepseek-v4-flash。你在其他提供商那里选的模型保持不变。",
   "whatsNew.openclawMoveTitle": "OpenClaw 2026.11.5：无法回退的迁移",

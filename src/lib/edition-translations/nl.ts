@@ -1709,7 +1709,7 @@ export const nl: Record<string, string> = {
   "whatsNew.externalEngineTitle": "Je eigen AI-engine als lokale AI",
   "whatsNew.externalEngineBody": "Instellingen → Lokale AI → Externe engine laat de chat draaien op een OpenAI-compatibele server die je op je eigen netwerk draait, zoals vLLM, SGLang of llama.cpp, in plaats van op het model van de ClawBox. Zonder aanmelding bij ClawBox AI gebruiken ook Prime Radiant, beeldbeschrijvingen en de index van Memory Shard die engine.",
   "whatsNew.weeklyUpdateTitle": "Een wekelijkse updatecontrole, ook via Telegram",
-  "whatsNew.weeklyUpdateBody": "Elke maandagochtend zoekt de ClawBox naar een nieuwere versie en meldt hij elke versie één keer: via Telegram, met een knop om bij te werken, als er een bot is gekoppeld, anders op het bureaublad. Je kunt de bot altijd /update sturen, en de update wacht nog steeds tot je hem op het bureaublad bevestigt.",
+  "whatsNew.weeklyUpdateBody": "Elke maandagochtend zoekt de ClawBox naar een nieuwere versie en meldt hij elke versie één keer: via Telegram, met een knop om bij te werken, als er een bot is gekoppeld, anders op het bureaublad. Je kunt de bot altijd /update sturen, en de update wacht nog steeds tot je hem bevestigt op het bureaublad of, als die er is, in de goedkeuringsbot.",
   "whatsNew.clawaiModelTitle": "Eén model voor ClawBox AI",
   "whatsNew.clawaiModelBody": "ClawBox AI is DeepSeek V4 Flash in elk abonnement, voor de chat en voor afbeeldingen. De update zet elke instelling die een uitgefaseerd model van ClawBox AI noemde, zoals het eigen model van het Max-abonnement, over op deepseek-v4-flash. Een model dat je bij een andere aanbieder koos, blijft staan.",
   "whatsNew.openclawMoveTitle": "OpenClaw 2026.11.5, een stap zonder weg terug",

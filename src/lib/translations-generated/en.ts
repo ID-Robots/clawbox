@@ -5263,7 +5263,7 @@ const table: Record<string, string> = {
   "whatsNew.vaultBody": "A password manager built into ClawBox, opened by the owner from its desktop icon. Once you choose a vault PIN, the box's browser offers to save your logins and fills them in, and the assistant can log in to a site for you without ever seeing the password.",
   "whatsNew.vaultSummary": "A password manager built into ClawBox: the browser saves and fills your logins, and the assistant logs in without seeing a password.",
   "whatsNew.vaultTitle": "ClawBox Vault, passwords built in",
-  "whatsNew.weeklyUpdateBody": "Every Monday morning the box looks for a newer ClawBox and tells you once per version: on Telegram, with an Update button, when a bot is connected, otherwise on the desktop. You can send /update to the bot at any time, and the update still waits for you to confirm it on the desktop.",
+  "whatsNew.weeklyUpdateBody": "Every Monday morning the box looks for a newer ClawBox and tells you once per version: on Telegram, with an Update button, when a bot is connected, otherwise on the desktop. You can send /update to the bot at any time, and the update still waits for you to confirm it on the desktop or, where one is set up, in the approvals bot.",
   "whatsNew.weeklyUpdateSummary": "Every Monday the box looks for a newer ClawBox and tells you, on Telegram with an Update button when a bot is connected.",
   "whatsNew.weeklyUpdateTitle": "A weekly update check, on Telegram too",
   "wifi.availableNetworks": "Available Networks",

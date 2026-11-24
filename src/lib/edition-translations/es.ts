@@ -1704,7 +1704,7 @@ export const es: Record<string, string> = {
   "whatsNew.externalEngineTitle": "Tu propio motor de IA como IA local",
   "whatsNew.externalEngineBody": "Ajustes → IA local → Motor externo hace funcionar el chat en un servidor compatible con OpenAI que tengas en tu red, como vLLM, SGLang o llama.cpp, en lugar del modelo de la ClawBox. Sin una sesión de ClawBox AI, Prime Radiant, las descripciones de imágenes y el índice de Memory Shard también lo usan.",
   "whatsNew.weeklyUpdateTitle": "Comprobación semanal de actualizaciones, también en Telegram",
-  "whatsNew.weeklyUpdateBody": "Cada lunes por la mañana la ClawBox busca una versión más nueva y te avisa una vez por versión: en Telegram, con un botón para actualizar, si hay un bot conectado, y si no en el escritorio. Puedes enviar /update al bot cuando quieras, y la actualización sigue esperando a que la confirmes en el escritorio.",
+  "whatsNew.weeklyUpdateBody": "Cada lunes por la mañana la ClawBox busca una versión más nueva y te avisa una vez por versión: en Telegram, con un botón para actualizar, si hay un bot conectado, y si no en el escritorio. Puedes enviar /update al bot cuando quieras, y la actualización sigue esperando a que la confirmes en el escritorio o, si lo hay, en el bot de aprobaciones.",
   "whatsNew.clawaiModelTitle": "Un solo modelo de ClawBox AI",
   "whatsNew.clawaiModelBody": "ClawBox AI es DeepSeek V4 Flash en todos los planes, para el chat y para las imágenes. La actualización pasa a deepseek-v4-flash cada ajuste que nombraba un modelo retirado de ClawBox AI, como el modelo propio del plan Max. Un modelo que elegiste de otro proveedor se queda como está.",
   "whatsNew.openclawMoveTitle": "OpenClaw 2026.11.5, un paso sin vuelta atrás",

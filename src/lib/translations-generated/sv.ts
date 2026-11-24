@@ -5263,7 +5263,7 @@ const table: Record<string, string> = {
   "whatsNew.vaultBody": "En lösenordshanterare inbyggd i ClawBox, som ägaren öppnar från dess ikon på skrivbordet. När du har valt en PIN-kod för valvet erbjuder ClawBoxens webbläsare att spara dina inloggningar och fyller i dem, och assistenten kan logga in på en webbplats åt dig utan att någonsin se lösenordet.",
   "whatsNew.vaultSummary": "En lösenordshanterare inbyggd i ClawBox: webbläsaren sparar och fyller i dina inloggningar, och assistenten loggar in utan att se något lösenord.",
   "whatsNew.vaultTitle": "ClawBox Vault, lösenord inbyggda",
-  "whatsNew.weeklyUpdateBody": "Varje måndag förmiddag letar ClawBoxen efter en nyare version och säger till en gång per version: på Telegram, med en knapp för att uppdatera, när en bot är ansluten, annars på skrivbordet. Du kan skicka /update till boten när som helst, och uppdateringen väntar fortfarande på att du bekräftar den på skrivbordet.",
+  "whatsNew.weeklyUpdateBody": "Varje måndag förmiddag letar ClawBoxen efter en nyare version och säger till en gång per version: på Telegram, med en knapp för att uppdatera, när en bot är ansluten, annars på skrivbordet. Du kan skicka /update till boten när som helst, och uppdateringen väntar fortfarande på att du bekräftar den på skrivbordet eller, där en sådan finns, i godkännandeboten.",
   "whatsNew.weeklyUpdateSummary": "Varje måndag letar ClawBoxen efter en nyare version och säger till, på Telegram med en uppdateringsknapp när en bot är ansluten.",
   "whatsNew.weeklyUpdateTitle": "En veckovis uppdateringskontroll, även på Telegram",
   "wifi.availableNetworks": "Tillgängliga nätverk",

@@ -31,7 +31,7 @@ export const whatsNewEn: Record<string, string> = {
     "Settings → Local AI → External engine runs the chat on an OpenAI-compatible server you run on your network, such as vLLM, SGLang or llama.cpp, instead of the model on the box. Without a ClawBox AI sign-in, Prime Radiant, picture descriptions and the Memory Shard index use it too.",
   "whatsNew.weeklyUpdateTitle": "A weekly update check, on Telegram too",
   "whatsNew.weeklyUpdateBody":
-    "Every Monday morning the box looks for a newer ClawBox and tells you once per version: on Telegram, with an Update button, when a bot is connected, otherwise on the desktop. You can send /update to the bot at any time, and the update still waits for you to confirm it on the desktop.",
+    "Every Monday morning the box looks for a newer ClawBox and tells you once per version: on Telegram, with an Update button, when a bot is connected, otherwise on the desktop. You can send /update to the bot at any time, and the update still waits for you to confirm it on the desktop or, where one is set up, in the approvals bot.",
   "whatsNew.clawaiModelTitle": "One ClawBox AI model",
   "whatsNew.clawaiModelBody":
     "ClawBox AI is DeepSeek V4 Flash on every plan, for chat and for pictures. The update moves every setting that named a retired ClawBox AI model, such as the Max plan's own model, to deepseek-v4-flash. A model you chose from another provider stays.",

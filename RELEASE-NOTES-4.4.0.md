@@ -43,7 +43,7 @@ get a long list of fixes.
   looks for a newer ClawBox and tells you once per version: on Telegram, with
   an Update button, when a bot is connected, otherwise on the desktop. You can
   send /update to the bot at any time, and the update still waits for you to
-  confirm it on the desktop.
+  confirm it on the desktop or, where one is set up, in the approvals bot.
 
 ## New features
 
@@ -129,7 +129,8 @@ get a long list of fixes.
   otherwise with a notice on the desktop.
 - The owner can send **/update** to the bot in a private chat at any time. A
   tap on **Update** only asks: the update starts once you confirm it on the
-  ClawBox desktop, and not while agents are working.
+  ClawBox desktop, or with the button the approvals bot sends where one is set
+  up, and not while agents are working.
 
 ### ClawBox AI
 

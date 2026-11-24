@@ -5263,7 +5263,7 @@ const table: Record<string, string> = {
   "whatsNew.vaultBody": "ClawBox 内置的密码管理器，由所有者从桌面图标打开。设置保险库 PIN 后，ClawBox 的浏览器会提出保存你的登录信息并自动填写，助手也能替你登录网站，却从不会看到密码。",
   "whatsNew.vaultSummary": "ClawBox 内置密码管理器：浏览器保存并填写你的登录信息，助手登录时看不到任何密码。",
   "whatsNew.vaultTitle": "ClawBox Vault：内置密码管理",
-  "whatsNew.weeklyUpdateBody": "每周一上午 ClawBox 会查找更新的版本，每个版本只通知一次：连接了机器人时通过 Telegram 发送，并附一个更新按钮，否则显示在桌面上。你随时可以给机器人发送 /update，而更新仍会等你在桌面上确认后才开始。",
+  "whatsNew.weeklyUpdateBody": "每周一上午 ClawBox 会查找更新的版本，每个版本只通知一次：连接了机器人时通过 Telegram 发送，并附一个更新按钮，否则显示在桌面上。你随时可以给机器人发送 /update，而更新仍会等你在桌面上（如已设置审批机器人，也可在机器人中）确认后才开始。",
   "whatsNew.weeklyUpdateSummary": "每周一 ClawBox 都会查找更新的版本并通知你；连接了机器人时通过 Telegram 发送，附带更新按钮。",
   "whatsNew.weeklyUpdateTitle": "每周检查更新，也能通过 Telegram 通知",
   "wifi.availableNetworks": "可用网络",
