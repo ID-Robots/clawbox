@@ -16,10 +16,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const versionInfo = vi.fn();
 const invalidateVersionCache = vi.fn();
 const getUpdateState = vi.fn(() => ({ phase: "idle", steps: [] }));
+// The updater's own answer to "is an update in flight?" (pinned in updater.test.ts).
+const updateInFlight = vi.fn(async () => false);
 vi.mock("@/lib/updater", () => ({
   getVersionInfo: (...a: unknown[]) => versionInfo(...a),
   invalidateVersionCache: () => invalidateVersionCache(),
   getUpdateState: () => getUpdateState(),
+  startWouldOverlapUpdate: () => updateInFlight(),
 }));
 const readUpdateWhatsNew = vi.fn();
 vi.mock("@/lib/update-whats-new-server", () => ({ readUpdateWhatsNew: () => readUpdateWhatsNew() }));
@@ -90,6 +93,7 @@ beforeEach(async () => {
   sendOwnerTelegramButtons.mockResolvedValue(true);
   sendOwnerTelegramText.mockResolvedValue(true);
   getUpdateState.mockReturnValue({ phase: "idle", steps: [] });
+  updateInFlight.mockResolvedValue(false);
   activeAgentWork.mockResolvedValue({ coding: 0, agents: 0, total: 0 });
   config = await import("@/lib/config-store");
   notice = await import("@/lib/update-notice");
@@ -259,7 +263,7 @@ describe("the weekly run", () => {
 
   it("does not announce anything while an update is already running", async () => {
     await writeState({ lastCheckedWeek: "2026-11-02" });
-    getUpdateState.mockReturnValue({ phase: "running", steps: [] });
+    updateInFlight.mockResolvedValue(true);
     expect((await notice.runWeeklyUpdateCheck(monday(10, 30))).outcome).toBe("updating");
     expect(versionInfo).not.toHaveBeenCalled();
   });
@@ -490,7 +494,17 @@ describe("the chat: /update and the Update button", () => {
   });
 
   it("does not ask while an update is running", async () => {
-    getUpdateState.mockReturnValue({ phase: "running", steps: [] });
+    updateInFlight.mockResolvedValue(true);
+    await (await notice.claimUpdateChatCommand({ senderId: "6001", text: "clawbox-update", harness: "openclaw" })).run?.();
+    expect(requestPowerApproval).not.toHaveBeenCalled();
+    expect(sendOwnerTelegramText.mock.calls[0][1]).toContain("already running");
+  });
+
+  it("does not ask while an update is in flight that the screen does not show as running", async () => {
+    // A restarted server before its first ask, or the legacy handover's wait:
+    // the state still reads idle.
+    getUpdateState.mockReturnValue({ phase: "idle", steps: [] });
+    updateInFlight.mockResolvedValue(true);
     await (await notice.claimUpdateChatCommand({ senderId: "6001", text: "clawbox-update", harness: "openclaw" })).run?.();
     expect(requestPowerApproval).not.toHaveBeenCalled();
     expect(sendOwnerTelegramText.mock.calls[0][1]).toContain("already running");

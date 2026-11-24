@@ -48,6 +48,11 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   // spinning on "Connecting…" forever with the recommended button disabled.
   const [cableStuck, setCableStuck] = useState(false);
   const controllerRef = useRef<AbortController | null>(null);
+  // Set once the owner leaves the first screen for the WiFi list. The look
+  // below for an earlier failure answers whenever it answers; after the owner
+  // has gone on to choose a network, reopening the form on the failed one
+  // would put its name over theirs and its failure over their form.
+  const ownerChoosingRef = useRef(false);
 
   // Abort any in-flight WiFi connect/poll when the step unmounts. (Kept separate
   // from the ethernet poll so the eth effect re-running never aborts a connect.)
@@ -63,7 +68,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     fetch("/setup-api/wifi/connect-status", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((s) => {
-        if (cancelled || !s || s.phase !== "failed" || !s.ssid) return;
+        if (cancelled || ownerChoosingRef.current || !s || s.phase !== "failed" || !s.ssid) return;
         // Only act on a recent failure so a stale verdict from a much earlier
         // session doesn't hijack a fresh setup attempt.
         if (typeof s.at === "number" && Date.now() - s.at > 10 * 60_000) return;
@@ -365,7 +370,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
               {eth?.connected !== true && (
                 <button
                   type="button"
-                  onClick={() => { setShowWifiList(true); fetchNetworks(); }}
+                  onClick={() => { ownerChoosingRef.current = true; setShowWifiList(true); fetchNetworks(); }}
                   className="w-full py-2.5 bg-transparent border border-[#fb923c]/40 text-[#fb923c] rounded-lg text-sm font-semibold cursor-pointer hover:border-[#fb923c] hover:bg-[#fb923c]/10 active:scale-[0.98] transition"
                 >
                   {t("wifi.useWifiInstead")}

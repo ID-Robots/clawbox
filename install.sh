@@ -8848,7 +8848,10 @@ def filled(path):
 # The files the core loads from an installed package: the declared runtime
 # entries, else the source entries, a TypeScript one by the first of its built
 # peers that exists, under dist/ (flattened, then keeping src/) and then beside
-# it. Every one must be there, not empty.
+# it, each location in the order of listBuiltRuntimeEntryCandidates in the
+# pinned core, the extension read in any case. The path is normalised first,
+# so the order is the same for a plain relative entry and can differ for one
+# through "..". Every one must be there, not empty.
 def entries_present(root, pkg):
     meta = pkg.get("openclaw") if isinstance(pkg.get("openclaw"), dict) else {}
     runtime = meta.get("runtimeExtensions")
@@ -8860,9 +8863,10 @@ def entries_present(root, pkg):
         if rel.startswith("..") or os.path.isabs(rel):
             return False
         stem, ext = os.path.splitext(rel)
+        ext = ext.lower()
         candidates = [rel]
         if not runtime and ext in (".ts", ".tsx", ".mts", ".cts"):
-            peers = {".mts": (".mjs",), ".cts": (".cjs",)}.get(ext, (".js", ".mjs", ".cjs"))
+            peers = {".mts": (".mjs", ".js", ".cjs"), ".cts": (".cjs", ".js", ".mjs")}.get(ext, (".js", ".mjs", ".cjs"))
             flat = stem[len("src/"):] if stem.startswith("src/") else stem
             candidates = [base + peer for base in ("dist/" + flat, "dist/" + stem, stem) for peer in peers]
         # The first that exists is the one the core loads: a later candidate

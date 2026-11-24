@@ -1731,3 +1731,31 @@ describe("device_status — nothing read is reported as unknown", () => {
     expect(ai.device_default).toMatchObject({ provider: "unknown", model: "unknown" });
   });
 });
+
+// ── update_run ───────────────────────────────────────────────────────────────
+
+describe("update_run — the device's own reason for not asking the owner", () => {
+  /**
+   * update/request answers 409 when it refuses to raise the owner's question
+   * (an update already in flight, another power question waiting, the owner's
+   * recent "no"), with a sentence that says which. The generic 409 told the
+   * agent to have the user "finish the setup in Settings", untrue for all three.
+   */
+  for (const edition of ["openclaw", "hermes"] as const) {
+    it(`passes the route's sentence on, not unfinished setup, on ${edition}`, async () => {
+      const h = captureRegistrar(edition);
+      registerSystemTools(h.reg, ctx(edition));
+      apiPost.mockRejectedValue(new ApiError(409, JSON.stringify({
+        error: "An update is already running; the desktop shows how it ends.",
+      })));
+
+      const out = await h.call("update_run", { confirm: true, reason: "The user asked to update." });
+      expect(out.isError).toBe(true);
+      if (!out.isError) return;
+      expect(out.error.code).toBe("CONFLICT");
+      expect(out.error.message).toContain("An update is already running; the desktop shows how it ends.");
+      expect(out.error.next).toMatch(/do not retry/i);
+      expect(out.error.next).not.toMatch(/settings/i);
+    });
+  }
+});

@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { startUpdate, isUpdateCompleted } from "@/lib/updater";
+import { startUpdate, isUpdateCompleted, startWouldOverlapUpdate } from "@/lib/updater";
 import { requireSession } from "@/lib/route-auth";
 import { auditActorOf, recordAudit } from "@/lib/audit-log";
 import { hasPersonSession } from "@/lib/owner-session";
@@ -37,6 +37,13 @@ export async function POST(request: Request) {
   }
 
   try {
+    // An update already in flight answers every click, as startUpdate would —
+    // the update screen then shows that run from the status route. Asked here
+    // because startUpdate cannot: a server the update restarted owns nothing
+    // until its first ask, and a start then would run beside the rebuild unit.
+    if (await startWouldOverlapUpdate()) {
+      return NextResponse.json({ started: false, error: "Update already in progress" });
+    }
     let force = false;
     // The owner's explicit "Back up and update anyway" for an update that would
     // install an older harness than the one that wrote the box's data. Only a
