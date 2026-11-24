@@ -18,8 +18,8 @@ import {
 import UpdateHandover from "@/components/UpdateHandover";
 import WeeklyUpdateCheckCard from "@/components/WeeklyUpdateCheckCard";
 import { cleanVersion, shipsOpenclaw } from "@/lib/version-utils";
-import { LINKED_BOXES_FLAG_EVENT, LINKED_BOXES_FLAG_PREF } from "@/lib/box-switcher";
-import { useLinkedBoxesFlag } from "@/lib/use-box-switcher";
+import { LINKED_BOXES_FLAG_EVENT, LINKED_BOXES_FLAG_PREF, VIEWER_SCREENS_FLAG_EVENT, VIEWER_SCREENS_FLAG_PREF } from "@/lib/box-switcher";
+import { useLinkedBoxesFlag, useViewerScreensFlag } from "@/lib/use-box-switcher";
 import {
   HARNESS_DOWNGRADE_CODE,
   HARNESS_DOWNGRADE_OVERRIDE_FLAG,
@@ -175,6 +175,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   const betaLabelId = useId();
   const branchInputId = useId();
   const linkedBoxesLabelId = useId();
+  const viewerScreensLabelId = useId();
   const [versions, setVersions] = useState<VersionInfo | null>(null);
   const [versionsError, setVersionsError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -191,6 +192,8 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   const [forceConfirm, setForceConfirm] = useState(false);
   const linkedBoxesOn = useLinkedBoxesFlag(true);
   const [linkedBoxesSaving, setLinkedBoxesSaving] = useState(false);
+  const viewerScreensOn = useViewerScreensFlag(true);
+  const [viewerScreensSaving, setViewerScreensSaving] = useState(false);
 
   // Fetched once on mount, from the same endpoint the About screen uses, so
   // the two surfaces cannot disagree about whether this box is running its own
@@ -306,6 +309,23 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       /* The switch stays where it was. */
     } finally {
       setLinkedBoxesSaving(false);
+    }
+  }, []);
+
+  // The second experiment's switch (TASK-2771), saved the same way.
+  const saveViewerScreens = useCallback(async (on: boolean) => {
+    setViewerScreensSaving(true);
+    try {
+      const res = await fetch("/setup-api/preferences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [VIEWER_SCREENS_FLAG_PREF]: on }),
+      });
+      if (res.ok) window.dispatchEvent(new CustomEvent(VIEWER_SCREENS_FLAG_EVENT, { detail: on }));
+    } catch {
+      /* The switch stays where it was. */
+    } finally {
+      setViewerScreensSaving(false);
     }
   }, []);
 
@@ -706,6 +726,21 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                       labelledBy={linkedBoxesLabelId}
                       onEnable={() => void saveLinkedBoxes(true)}
                       onDisable={() => void saveLinkedBoxes(false)}
+                    />
+                  </div>
+
+                  {/* Linked ClawBoxes on this kiosk's monitors — a second experiment */}
+                  <div className="border-t border-[var(--border-subtle)] pt-4 flex items-start justify-between gap-4">
+                    <div id={viewerScreensLabelId} className="text-sm text-gray-100 inline-flex items-center gap-2">
+                      <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">desktop_windows</span>
+                      {tr("update.linkedBoxesScreensExperimental", "Linked ClawBoxes follow this screen's monitors (experimental)")}
+                    </div>
+                    <BetaToggle
+                      enabled={viewerScreensOn === true}
+                      saving={viewerScreensSaving}
+                      labelledBy={viewerScreensLabelId}
+                      onEnable={() => void saveViewerScreens(true)}
+                      onDisable={() => void saveViewerScreens(false)}
                     />
                   </div>
 

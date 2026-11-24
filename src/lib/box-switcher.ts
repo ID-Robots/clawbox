@@ -49,6 +49,21 @@ export const LINKED_BOXES_FLAG_PREF = "ui_linked_boxes";
 /** Fired on `window`, with the new value as `detail`, after that switch is saved. */
 export const LINKED_BOXES_FLAG_EVENT = "clawbox:linked-boxes-flag";
 
+/**
+ * The second experiment (TASK-2771), on top of Linked ClawBoxes: a linked box's
+ * desktop shown in this kiosk is laid out by THIS kiosk's monitors. Box
+ * preference `pref:ui_linked_boxes_screens`, same place, same event; off by default.
+ */
+export const VIEWER_SCREENS_FLAG_PREF = "ui_linked_boxes_screens";
+export const VIEWER_SCREENS_FLAG_EVENT = "clawbox:linked-boxes-screens-flag";
+
+/**
+ * On <html> of a page shown in a kiosk whose switch is on: the monitors of the
+ * kiosk the page is SHOWN on (JSON, geometry only), put there by the kiosk
+ * extension and read by `useViewerMonitors` (use-monitor-layout.ts).
+ */
+export const VIEWER_SCREENS_ATTR = "data-clawbox-viewer-screens";
+
 /** The fragment that carries the numbering to the next box. */
 export const CARRY_PREFIX = "#clawbox-boxes=";
 /** sessionStorage: the numbering this tab arrived with (this origin's copy). */

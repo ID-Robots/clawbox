@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import { MONITOR_POLL_MS, MONITOR_SOON_MS, useMonitorLayoutSync } from "@/lib/use-monitor-layout";
+import { MONITOR_POLL_MS, MONITOR_SOON_MS, parseViewerScreens, useMonitorLayoutSync } from "@/lib/use-monitor-layout";
 import {
   MONITORS_CHANGED_EVENT,
   getDeskScreens,
@@ -370,5 +370,189 @@ describe("useMonitorLayoutSync — the page learns it is the session's window", 
     await advance(MONITOR_POLL_MS);
     expect(f.fetchMock).not.toHaveBeenCalled();
     expect(isMonitorSessionWindow()).toBe(false);
+  });
+});
+
+/**
+ * Another box's desktop SHOWN in a kiosk whose Linked ClawBoxes monitors switch
+ * is on (TASK-2771): the box that serves the page answers for ITS monitors, the
+ * wrong ones, so the page is laid out by the kiosk's — which the kiosk
+ * extension keeps on <html> — and reads its own at no time.
+ */
+describe("useMonitorLayoutSync — shown on another box's kiosk", () => {
+  const ATTR = "data-clawbox-viewer-screens";
+  /** What the extension leaves: the kiosk's two monitors, geometry only. */
+  const KIOSK = {
+    available: true,
+    main: "HDMI-A-1",
+    box: { width: W, height: H },
+    mirror: false,
+    monitors: [
+      { id: "DP-1", enabled: true, rect: { x: 0, y: 0, width: 1920, height: 1440 } },
+      { id: "HDMI-A-1", enabled: true, rect: { x: 1920, y: 0, width: 3200, height: 1440 } },
+    ],
+  };
+  const mark = (value: unknown) => document.documentElement.setAttribute(ATTR, typeof value === "string" ? value : JSON.stringify(value));
+  const ids = () => getDeskScreens()?.map((s) => `${s.id}${s.main ? "*" : ""}@${s.x}+${s.width}`);
+
+  beforeEach(() => {
+    // What /updating recalls is this window's, and earlier tests kept answers.
+    window.sessionStorage.clear();
+  });
+  afterEach(() => {
+    document.documentElement.removeAttribute(ATTR);
+  });
+
+  it("lays the page out by the kiosk's monitors and never reads this box's own", async () => {
+    const f = manualFetch();
+    mark(KIOSK);
+    renderHook(() => useMonitorLayoutSync(true));
+    await advance(MONITOR_POLL_MS * 3);
+    expect(ids()).toEqual(["DP-1@0+1920", "HDMI-A-1*@1920+3200"]);
+    expect(f.fetchMock).not.toHaveBeenCalled();
+    // The page is not the box's own session window.
+    expect(isMonitorSessionWindow()).toBe(false);
+  });
+
+  it("takes the layout over from the box's own read when the mark arrives, and follows it as it changes", async () => {
+    const f = manualFetch();
+    renderHook(() => useMonitorLayoutSync(true));
+    await f.answer(ROW);
+    expect(ids()).toEqual(["a*@0+2560", "b@2560+2560"]);
+    expect(isMonitorSessionWindow()).toBe(true);
+    await act(async () => { mark(KIOSK); });
+    expect(ids()).toEqual(["DP-1@0+1920", "HDMI-A-1*@1920+3200"]);
+    expect(isMonitorSessionWindow()).toBe(false);
+    // The box's own chain is over: no read, a resize included.
+    const reads = f.fetchMock.mock.calls.length;
+    act(() => { window.dispatchEvent(new Event("resize")); });
+    await advance(MONITOR_POLL_MS * 3);
+    expect(f.fetchMock).toHaveBeenCalledTimes(reads);
+    // The kiosk's layout changes (main moved, a monitor plugged in): the page follows.
+    await act(async () => { mark({ ...KIOSK, main: "DP-1" }); });
+    expect(ids()).toEqual(["DP-1*@0+1920", "HDMI-A-1@1920+3200"]);
+    await act(async () => {
+      mark({ ...KIOSK, main: "DP-1", monitors: [{ id: "DP-1", enabled: true, rect: { x: 0, y: 0, width: 1920, height: 1440 } }, { id: "DP-3", enabled: true, rect: { x: 1920, y: 0, width: 1600, height: 1440 } }, { id: "HDMI-A-1", enabled: true, rect: { x: 3520, y: 0, width: 1600, height: 1440 } }] });
+    });
+    expect(ids()).toEqual(["DP-1*@0+1920", "DP-3@1920+1600", "HDMI-A-1@3520+1600"]);
+  });
+
+  it("is one screen when the kiosk has no layout, a window that is not the row, or one monitor — and still never this box's own", async () => {
+    const f = manualFetch();
+    mark({ available: false });
+    renderHook(() => useMonitorLayoutSync(true));
+    await advance(MONITOR_POLL_MS * 3);
+    expect(getDeskScreens()).toBeNull();
+    expect(f.fetchMock).not.toHaveBeenCalled();
+    // A window the row's proportions do not fit (here: half as wide) is one screen.
+    await act(async () => { mark(KIOSK); });
+    expect(getDeskScreens()).not.toBeNull();
+    Object.defineProperty(window, "innerWidth", { value: W / 2, configurable: true });
+    act(() => { window.dispatchEvent(new Event("resize")); });
+    expect(getDeskScreens()).toBeNull();
+    Object.defineProperty(window, "innerWidth", { value: W, configurable: true });
+    act(() => { window.dispatchEvent(new Event("resize")); });
+    expect(getDeskScreens()).not.toBeNull();
+    await act(async () => { mark({ ...KIOSK, monitors: [KIOSK.monitors[0]] }); });
+    expect(getDeskScreens()).toBeNull();
+    expect(f.fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("applies in a browser-mode window too — the extension is the proof — and clears with the page", async () => {
+    vi.stubGlobal("matchMedia", (q: string) => ({ matches: q === "(display-mode: browser)" }));
+    mark(KIOSK);
+    const { unmount } = renderHook(() => useMonitorLayoutSync(true));
+    expect(getDeskScreens()).not.toBeNull();
+    unmount();
+    expect(getDeskScreens()).toBeNull();
+  });
+
+  it("goes back to this box's own monitors the moment the mark is taken off", async () => {
+    const f = manualFetch();
+    mark(KIOSK);
+    renderHook(() => useMonitorLayoutSync(true));
+    expect(f.fetchMock).not.toHaveBeenCalled();
+    await act(async () => { document.documentElement.removeAttribute(ATTR); });
+    expect(getDeskScreens()).toBeNull();
+    expect(f.inFlight).toBe(1);
+    await f.answer(ROW);
+    expect(ids()).toEqual(["a*@0+2560", "b@2560+2560"]);
+  });
+
+  it("ignores a mark that is not the extension's shape: this box's own layout stands", async () => {
+    const f = manualFetch();
+    renderHook(() => useMonitorLayoutSync(true));
+    await f.answer(ROW);
+    for (const forged of ["not json", "[]", "null", "42", JSON.stringify({ available: true }), JSON.stringify({ ...KIOSK, box: { width: -1, height: H } }), JSON.stringify({ ...KIOSK, monitors: [] })]) {
+      await act(async () => { mark(forged); });
+      expect(ids(), forged).toEqual(["a*@0+2560", "b@2560+2560"]);
+      expect(isMonitorSessionWindow(), forged).toBe(true);
+    }
+  });
+
+  it("leaves /updating's recall, and a page that is not enabled, to their own rules", async () => {
+    const f = manualFetch();
+    mark(KIOSK);
+    renderHook(() => useMonitorLayoutSync(true, { recall: true }));
+    expect(f.inFlight).toBe(1);
+    expect(getDeskScreens()).toBeNull();
+    renderHook(() => useMonitorLayoutSync(false));
+    expect(getDeskScreens()).toBeNull();
+  });
+});
+
+describe("parseViewerScreens", () => {
+  const good = {
+    available: true,
+    main: "DP-1",
+    box: { width: 3840, height: 1080 },
+    mirror: true,
+    monitors: [
+      { id: "DP-1", enabled: true, rect: { x: 0, y: 0, width: 1920, height: 1080 }, builtIn: true },
+      { id: "HDMI-A-1", enabled: true, rect: { x: 1920, y: 0, width: 1920, height: 1080 } },
+    ],
+  };
+
+  it("rebuilds what it takes, from the values alone: nothing else passes through", () => {
+    const parsed = parseViewerScreens(JSON.stringify({ ...good, secret: "x", monitors: [{ ...good.monitors[0], label: "AOC Q27B3MA", serial: "123" }, good.monitors[1]] }));
+    expect(parsed).toEqual({
+      available: true,
+      main: "DP-1",
+      box: { width: 3840, height: 1080 },
+      mirror: true,
+      monitors: [
+        { id: "DP-1", label: "DP-1", enabled: true, rect: { x: 0, y: 0, width: 1920, height: 1080 }, builtIn: true },
+        { id: "HDMI-A-1", label: "HDMI-A-1", enabled: true, rect: { x: 1920, y: 0, width: 1920, height: 1080 } },
+      ],
+    });
+  });
+
+  it("reads no mark as undefined and a kiosk with no monitor session as null", () => {
+    expect(parseViewerScreens(null)).toBeUndefined();
+    expect(parseViewerScreens(JSON.stringify({ available: false }))).toBeNull();
+  });
+
+  it("refuses what recallMonitorStatus refuses, and more: bounds, finiteness, ids, counts, size", () => {
+    const refused: string[] = [
+      "", "{", "[]", "null", "true", JSON.stringify({}), JSON.stringify({ available: "true" }),
+      { ...good, monitors: "x" }, { ...good, monitors: [] }, { ...good, box: null }, { ...good, box: { width: "3840", height: 1080 } },
+      { ...good, box: { width: 0, height: 1080 } }, { ...good, box: { width: 3840, height: 1e6 } },
+      { ...good, main: 7 }, { ...good, main: "has a space" },
+      { ...good, monitors: [{ ...good.monitors[0], id: 3 }] },
+      { ...good, monitors: [{ ...good.monitors[0], id: "" }] },
+      { ...good, monitors: [{ ...good.monitors[0], id: "x".repeat(65) }] },
+      { ...good, monitors: [{ ...good.monitors[0], id: "line\nbreak" }] },
+      { ...good, monitors: [{ ...good.monitors[0], rect: undefined }] },
+      { ...good, monitors: [{ ...good.monitors[0], rect: { x: "0", y: 0, width: 1, height: 1 } }] },
+      { ...good, monitors: [{ ...good.monitors[0], rect: { x: 0, y: 0, width: 0, height: 1080 } }] },
+      { ...good, monitors: [{ ...good.monitors[0], rect: { x: 0, y: 0, width: 1920, height: -5 } }] },
+      { ...good, monitors: [{ ...good.monitors[0], rect: { x: 1e9, y: 0, width: 1920, height: 1080 } }] },
+      { ...good, monitors: [null] },
+      { ...good, monitors: Array.from({ length: 17 }, (_, i) => ({ id: `M${i}`, enabled: true, rect: { x: i * 100, y: 0, width: 100, height: 100 } })) },
+    ].map((x) => (typeof x === "string" ? x : JSON.stringify(x)));
+    for (const raw of refused) expect(parseViewerScreens(raw), raw).toBeUndefined();
+    expect(parseViewerScreens(JSON.stringify({ ...good, pad: "x".repeat(9000) }))).toBeUndefined();
+    // …and a monitor whose number is not one JSON can say (NaN/Infinity become null).
+    expect(parseViewerScreens(JSON.stringify({ ...good, box: { width: Infinity, height: 1080 } }))).toBeUndefined();
   });
 });

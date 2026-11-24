@@ -221,3 +221,76 @@ describe("SettingsApp — a deep link to Monitors", () => {
     expect(fetchMock).toHaveBeenCalled();
   });
 });
+
+// This box's desktop SHOWN in another box's kiosk whose Linked ClawBoxes
+// monitors switch is on (TASK-2771): the monitors this screen is laid out by
+// are the kiosk's — arranged on the box that runs it. This box's own outputs
+// are not this screen's, so Settings → Monitors only reports the kiosk's.
+describe("SettingsApp — Monitors on a box shown in another box's kiosk", () => {
+  const ATTR = "data-clawbox-viewer-screens";
+  const KIOSK = {
+    available: true,
+    main: "DP-1",
+    box: { width: 3840, height: 1080 },
+    monitors: [
+      { id: "DP-1", enabled: true, rect: { x: 0, y: 0, width: 1920, height: 1080 } },
+      { id: "DP-2", enabled: true, rect: { x: 1920, y: 0, width: 1920, height: 1080 } },
+    ],
+  };
+  afterEach(() => {
+    document.documentElement.removeAttribute(ATTR);
+  });
+
+  it("shows the kiosk's monitors read-only under one line, and never this box's own", async () => {
+    document.documentElement.setAttribute(ATTR, JSON.stringify(KIOSK));
+    const fetchMock = installFetch({ ok: true, status: 200, body: AVAILABLE });
+    render(<SettingsApp ui={ui} />);
+    await waitFor(() => expect(monitorsRow()).not.toBeNull());
+    fireEvent.click(monitorsRow()!);
+    const viewed = await screen.findByTestId("monitors-viewed");
+    expect(viewed).toHaveTextContent("settings.monitors.viewedElsewhere");
+    const items = screen.getAllByRole("listitem");
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent(/DP-1.*1920×1080.*settings\.monitors\.main/);
+    expect(items[1]).toHaveTextContent(/DP-2.*1920×1080/);
+    expect(items[1]).not.toHaveTextContent("settings.monitors.main");
+    // Nothing of this box's own: no panel, no block with its connector, no write, no brightness.
+    expect(screen.queryByTestId("monitors-panel")).toBeNull();
+    expect(screen.queryByText(MONITOR.name)).toBeNull();
+    expect(screen.queryByRole("button", { name: /settings\.monitors\.(apply|identify|undo|keep|revert)/ })).toBeNull();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u) === "/setup-api/monitors")).toHaveLength(1);
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes("brightness"))).toBe(false);
+    expect((fetchMock.mock.calls as unknown[][]).some(([, init]) => (init as RequestInit | undefined)?.method === "POST")).toBe(false);
+  });
+
+  it("says the same when the kiosk has no layout of its own, with nothing listed", async () => {
+    document.documentElement.setAttribute(ATTR, JSON.stringify({ available: false }));
+    installFetch({ ok: true, status: 200, body: AVAILABLE });
+    render(<SettingsApp ui={ui} />);
+    await waitFor(() => expect(monitorsRow()).not.toBeNull());
+    fireEvent.click(monitorsRow()!);
+    expect(await screen.findByTestId("monitors-viewed")).toHaveTextContent("settings.monitors.viewedElsewhere");
+    expect(screen.queryByTestId("monitors-viewed-list")).toBeNull();
+    expect(screen.queryByTestId("monitors-panel")).toBeNull();
+  });
+
+  it("follows the mark: an open panel gives way to the kiosk's monitors, and comes back without it", async () => {
+    installFetch({ ok: true, status: 200, body: AVAILABLE });
+    render(<SettingsApp ui={ui} />);
+    await waitFor(() => expect(monitorsRow()).not.toBeNull());
+    fireEvent.click(monitorsRow()!);
+    expect(await screen.findByTestId("monitors-panel")).toBeInTheDocument();
+    await act(async () => { document.documentElement.setAttribute(ATTR, JSON.stringify(KIOSK)); });
+    expect(await screen.findByTestId("monitors-viewed")).toBeInTheDocument();
+    expect(screen.queryByTestId("monitors-panel")).toBeNull();
+    await act(async () => { document.documentElement.removeAttribute(ATTR); });
+    expect(await screen.findByTestId("monitors-panel")).toBeInTheDocument();
+  });
+
+  it("a box with no monitor session of its own still has no Monitors row", async () => {
+    document.documentElement.setAttribute(ATTR, JSON.stringify(KIOSK));
+    const fetchMock = installFetch({ ok: true, status: 200, body: UNAVAILABLE });
+    await mountAndAsk(fetchMock);
+    expect(monitorsRow()).toBeNull();
+  });
+});
