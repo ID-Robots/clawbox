@@ -13,12 +13,12 @@ import {
   type WhatsNewState,
 } from "@/lib/whats-new";
 
-/** TASK-1059, TASK-1195: the pure half of the "What's new in 4.3" card. */
+/** TASK-1059, TASK-1195: the pure half of the "What's new in 4.4" card. */
 
 const VALID: WhatsNewState = {
   show: true,
-  release: "4.3",
-  version: "4.3.0",
+  release: "4.4",
+  version: "4.4.0",
   edition: "openclaw",
   cta: { paidFeatures: true, editionSwitch: "hermes" },
   freeMonthCode: null,
@@ -27,14 +27,14 @@ const VALID: WhatsNewState = {
 describe("the card's links", () => {
   it("tags the portal's plans page with this release's campaign, before the fragment", () => {
     expect(WHATS_NEW_PLANS_URL).toBe(
-      "https://clawbox.com/portal/dashboard?utm_source=box&utm_medium=update_card&utm_campaign=v4.3#subscription",
+      "https://clawbox.com/portal/dashboard?utm_source=box&utm_medium=update_card&utm_campaign=v4.4#subscription",
     );
     const url = new URL(WHATS_NEW_PLANS_URL);
     expect(`${url.origin}${url.pathname}${url.hash}`).toBe(PORTAL_PLANS_URL);
     expect(Object.fromEntries(url.searchParams)).toEqual({
       utm_source: "box",
       utm_medium: "update_card",
-      utm_campaign: "v4.3",
+      utm_campaign: "v4.4",
     });
   });
 
@@ -50,15 +50,15 @@ describe("the card's links", () => {
 
 describe("which versions the card is about", () => {
   it.each([
-    ["4.3.0", [4, 3]],
-    ["v4.3.0", [4, 3]],
-    ["4.3.2", [4, 3]],
-    ["v4.3.0-12-gabc1234", [4, 3]],
-    ["4.3", [4, 3]],
+    ["4.4.0", [4, 4]],
+    ["v4.4.0", [4, 4]],
+    ["4.4.2", [4, 4]],
+    ["v4.4.0-12-gabc1234", [4, 4]],
+    ["4.4", [4, 4]],
     ["3.9.0", [3, 9]],
     ["4.30.0", [4, 30]],
     ["10.0.0", [10, 0]],
-    [" 4.3.0 ", [4, 3]],
+    [" 4.4.0 ", [4, 4]],
   ])("releaseLineOf(%j) is %j", (version, line) => {
     expect(releaseLineOf(version)).toEqual(line);
   });
@@ -67,14 +67,14 @@ describe("which versions the card is about", () => {
     expect(releaseLineOf(version)).toBeNull();
   });
 
-  it.each(["4.3.0", "4.3.9", "v4.3.0", "v4.3.0-12-gabc1234"])("is about %j, on the 4.3 line", (version) => {
+  it.each(["4.4.0", "4.4.9", "v4.4.0", "v4.4.0-12-gabc1234"])("is about %j, on the 4.4 line", (version) => {
     expect(isWhatsNewVersion(version)).toBe(true);
   });
 
-  // 4.2.x is the release a box that already dismissed the 4.2 card may still
-  // report (4.1.x and 4.0.x the ones before it); 4.30 is not 4.3; a later
-  // release waits for a card of its own.
-  it.each(["4.2.0", "4.2.3", "v4.2.0-12-gabc1234", "4.1.0", "4.0.0", "4.30.0", "4.4.0", "3.9.0", "5.3.0", "unknown"])(
+  // 4.3.x is the release a box that already dismissed the 4.3 card may still
+  // report (4.2.x, 4.1.x and 4.0.x the ones before it); 4.40 is not 4.4; a
+  // later release waits for a card of its own.
+  it.each(["4.3.0", "4.3.3", "v4.3.0-12-gabc1234", "4.2.0", "4.1.0", "4.0.0", "4.40.0", "4.5.0", "3.9.0", "5.4.0", "unknown"])(
     "is not about %j",
     (version) => {
       expect(isWhatsNewVersion(version)).toBe(false);
@@ -86,13 +86,13 @@ describe("which versions the card is about", () => {
     expect(isWhatsNewVersion(undefined)).toBe(false);
   });
 
-  it("announces release 4.3, not 4.2", () => {
-    expect(WHATS_NEW_RELEASE).toBe("4.3");
+  it("announces release 4.4, not 4.3", () => {
+    expect(WHATS_NEW_RELEASE).toBe("4.4");
   });
 
   it("prints the version without its tag prefix", () => {
-    expect(displayVersion("v4.3.0")).toBe("4.3.0");
-    expect(displayVersion("4.3.0")).toBe("4.3.0");
+    expect(displayVersion("v4.4.0")).toBe("4.4.0");
+    expect(displayVersion("4.4.0")).toBe("4.4.0");
     expect(displayVersion(null)).toBeNull();
     expect(displayVersion("v")).toBeNull();
   });

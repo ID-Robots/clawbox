@@ -1,10 +1,14 @@
 /**
- * English copy for the desktop's "What's new in 4.3" card (TASK-1059, TASK-1195).
+ * English copy for the desktop's "What's new in 4.4" card (TASK-1059, TASK-1195).
  *
- * The highlights are taken from RELEASE-NOTES-4.3.0.md. They name only what
+ * The highlights are taken from RELEASE-NOTES-4.4.0.md. They name only what
  * the release shipped. When the release notes change, change this too. Each
  * has a full body (the /updating screen's panel) and a short summary (one
  * slide of the desktop card).
+ *
+ * The 4.3 highlights below them are no longer on the card. They stay because
+ * the /updating screen's showcase still carries the live demos made for them,
+ * keyed by their title keys, and its tests run those demos on this copy.
  *
  * WHERE THE EDITIONS DIFFER: the plan section's edition-switch line. An
  * OpenClaw box can be switched to Hermes, and a Hermes box can be switched
@@ -12,10 +16,50 @@
  * picks between them. The catalogue never branches on the edition.
  */
 export const whatsNewEn: Record<string, string> = {
-  "whatsNew.title": "What's new in 4.3",
+  "whatsNew.title": "What's new in 4.4",
   "whatsNew.subtitle": "This box now runs ClawBox {version}.",
-  "whatsNew.highlightsLabel": "Highlights of ClawBox 4.3",
+  "whatsNew.highlightsLabel": "Highlights of ClawBox 4.4",
 
+  "whatsNew.vaultTitle": "ClawBox Vault, passwords built in",
+  "whatsNew.vaultBody":
+    "A password manager on every box, opened by the owner from its desktop icon. Once you choose a vault PIN, the box's browser offers to save your logins and fills them in, and the assistant can log in to a site for you without ever seeing the password.",
+  "whatsNew.orgModeTitle": "Organisation mode, for a company's staff",
+  "whatsNew.orgModeBody":
+    "A switch in Settings → System → Users gives other users only Chat, Files and their own settings, each with a limited assistant and a memory of their own. The owner picks the tools staff may use, sets upload, storage and chat limits, and reads an audit log.",
+  "whatsNew.externalEngineTitle": "Your own AI engine as Local AI",
+  "whatsNew.externalEngineBody":
+    "Settings → Local AI → External engine runs the chat on an OpenAI-compatible server you run on your network, such as vLLM, SGLang or llama.cpp, instead of the model on the box. Without a ClawBox AI sign-in, Prime Radiant, picture descriptions and the Memory Shard index use it too.",
+  "whatsNew.weeklyUpdateTitle": "A weekly update check, on Telegram too",
+  "whatsNew.weeklyUpdateBody":
+    "Every Monday morning the box looks for a newer ClawBox and tells you once per version: on Telegram, with an Update button, when a bot is connected, otherwise on the desktop. You can send /update to the bot at any time, and the update still waits for you to confirm it on the desktop.",
+  "whatsNew.clawaiModelTitle": "One ClawBox AI model",
+  "whatsNew.clawaiModelBody":
+    "ClawBox AI is DeepSeek V4 Flash on every plan, for chat and for pictures. The update moves every setting that named a retired ClawBox AI model, such as the Max plan's own model, to deepseek-v4-flash. A model you chose from another provider stays.",
+  "whatsNew.openclawMoveTitle": "OpenClaw 2026.11.5, a one-way move",
+  "whatsNew.openclawMoveBody":
+    "On the OpenClaw edition the update takes OpenClaw from 2026.10.9 to 2026.11.5 and moves the assistant's data to its newer format. The move is one-way: after the update an older OpenClaw core cannot open the data any more.",
+  "whatsNew.checkInsJobTitle": "Check-ins become an automation job",
+  "whatsNew.checkInsJobBody":
+    "On OpenClaw 2026.11.5 the assistant's periodic check-in is an ordinary automation job. The update converts the check-in you had, on or off as it was, and Unprompted check-ins in Settings → Harness switches that job without restarting the assistant.",
+
+  // The card's slides: one highlight each, so each gets a one- or two-line
+  // summary. The bodies above stay whole for the /updating screen's panel.
+  "whatsNew.vaultSummary":
+    "A password manager on every box: the browser saves and fills your logins, and the assistant logs in without seeing a password.",
+  "whatsNew.orgModeSummary":
+    "Give a company's staff only Chat, Files and their own settings, each with a limited assistant and a memory of their own.",
+  "whatsNew.externalEngineSummary":
+    "Run the chat on an OpenAI-compatible AI server on your own network, such as vLLM, SGLang or llama.cpp.",
+  "whatsNew.weeklyUpdateSummary":
+    "Every Monday the box looks for a newer ClawBox and tells you, on Telegram with an Update button when a bot is connected.",
+  "whatsNew.clawaiModelSummary":
+    "ClawBox AI is DeepSeek V4 Flash on every plan. Settings that named a retired model now use deepseek-v4-flash.",
+  "whatsNew.openclawMoveSummary":
+    "On OpenClaw, the assistant's data moved to OpenClaw 2026.11.5's format. An older OpenClaw cannot open it any more.",
+  "whatsNew.checkInsJobSummary":
+    "On OpenClaw, the periodic check-in is an automation job now, switched by Unprompted check-ins in Settings → Harness.",
+
+  // 4.3's highlights, kept for the /updating showcase's demos (see above).
   "whatsNew.screenshotTitle": "Screenshots, built in",
   "whatsNew.screenshotBody":
     "The new Screenshot app captures the whole screen, an area or one window, and lets you mark the picture up before it is saved to the Screenshots folder in Files. Print Screen, Ctrl+Shift+S or the Screenshot button beside the clock takes one in a single step.",
@@ -82,7 +126,7 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.previousScreenshot": "Previous screenshot",
   "whatsNew.nextScreenshot": "Next screenshot",
 
-  "whatsNew.readMore": "Read what's new in 4.3",
+  "whatsNew.readMore": "Read what's new in 4.4",
 
   // The plan section: only the lines the box's plan does not cover yet.
   "whatsNew.planTitle": "Unlock with a ClawBox AI plan",
@@ -93,5 +137,5 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.seePlans": "See plans",
 
   "whatsNew.gotIt": "Got it",
-  "whatsNew.dismiss": "Dismiss What's new in 4.3",
+  "whatsNew.dismiss": "Dismiss What's new in 4.4",
 };

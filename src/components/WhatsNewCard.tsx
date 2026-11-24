@@ -29,8 +29,8 @@ interface WhatsNewCardProps {
 const SWIPE_PX = 40;
 
 /**
- * "What's new in 4.3": a dialog over the desktop, shown after a box lands on
- * 4.3 until the owner dismisses it (TASK-1059, TASK-1195).
+ * "What's new in 4.4": a dialog over the desktop, shown after a box lands on
+ * 4.4 until the owner dismisses it (TASK-1059, TASK-1195).
  *
  * A carousel, one highlight per slide: a screenshot of the feature, its title
  * and a line or two about it. The owner pages through with Back and Next, the

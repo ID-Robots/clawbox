@@ -14,6 +14,40 @@ import { translations } from "@/lib/translations";
 import { releasePageUrl, updateWhatsNewPanel } from "@/lib/update-whats-new";
 import { WHATS_NEW_HIGHLIGHTS, WHATS_NEW_RELEASE } from "@/lib/whats-new";
 
+/*
+ * The live demos were made for the 4.3 highlights and are keyed by their title
+ * keys. 4.4's highlights have no demo yet, so the showcase draws them as still
+ * pictures (see "shows a highlight with no demo yet"); the demos are run here
+ * on the list they were made for, 4.3's, which the catalogue still carries.
+ */
+const DEMO_HIGHLIGHTS = vi.hoisted(() =>
+  ([
+    ["screenshot_monitor", "screenshot", "screenshot"],
+    ["travel_explore", "sharedBrowser", "agent-browser"],
+    ["add_link", "publicLinks", "public-link"],
+    ["smart_toy", "grok", "model-picker"],
+    ["mic", "holdToTalk", "hold-to-talk"],
+    ["account_tree", "agentChart", "agent-chart"],
+    ["menu_book", "primeRadiant", "prime-radiant"],
+    ["forum", "runReports", "run-reports"],
+    ["pending_actions", "updateAsks", "update-asks"],
+    ["downloading", "installQueue", "install-queue"],
+    ["notification_important", "jobAlerts", "job-alerts"],
+  ] as const).map(([icon, key, file]) => ({
+    icon,
+    title: `whatsNew.${key}Title`,
+    body: `whatsNew.${key}Body`,
+    summary: `whatsNew.${key}Summary`,
+    image: `/whats-new/4.3/${file}.webp`,
+    fullImage: `/whats-new/4.3/${file}-full.webp`,
+  })),
+);
+
+vi.mock("@/lib/whats-new", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/whats-new")>()),
+  WHATS_NEW_HIGHLIGHTS: DEMO_HIGHLIGHTS,
+}));
+
 /**
  * The System Update window's "What's new" showcase (TASK-2121): every
  * highlight of the release, ONE at a time — its title typed in beside its
@@ -365,8 +399,9 @@ describe("UpdateWhatsNewShowcase", () => {
     expect(screen.queryByTestId("whats-new-showcase")).toBeNull();
   });
 
-  it("has a demo for every highlight of the catalogue, and its words in every language", () => {
+  it("has a demo for every highlight it was made for, and its words in every language", () => {
     for (const item of WHATS_NEW_HIGHLIGHTS) expect(SHOWCASE_FEATURES[item.title], item.title).toBeDefined();
+    for (const item of WHATS_NEW_HIGHLIGHTS) expect(whatsNewEn[item.title], item.title).toBeTruthy();
     const keys = Object.keys(translations.en).filter((key) => key.startsWith("update.showcase."));
     expect(keys.length).toBeGreaterThan(30);
     for (const [locale, table] of Object.entries(translations)) {

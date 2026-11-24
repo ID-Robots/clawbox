@@ -1,5 +1,5 @@
 /**
- * The "What's new in 4.3" card (TASK-1059, re-keyed for each minor release
+ * The "What's new in 4.4" card (TASK-1059, re-keyed for each minor release
  * since TASK-1195) — the pure half.
  *
  * Client-safe on purpose: the desktop card, its hook and the route all read
@@ -8,10 +8,10 @@
  * disk or the plan on record is in `@/lib/whats-new-server`.
  *
  * WHEN THE CARD SHOWS. A box whose running version is on the release line the
- * card announces (4.3.0, 4.3.3), until the owner dismisses it. The dismissal is
+ * card announces (4.4.0, 4.4.3), until the owner dismisses it. The dismissal is
  * stored in the box's config store, not the browser, so a card dismissed on the
  * laptop does not come back on the phone. It is keyed by
- * {@link WHATS_NEW_RELEASE}, so a box that dismissed the 4.2 card (or an older
+ * {@link WHATS_NEW_RELEASE}, so a box that dismissed the 4.3 card (or an older
  * one) is shown this one, and a later "What's new" card is a new constant here
  * and shows again on every box.
  */
@@ -23,12 +23,21 @@ import { PORTAL_PLANS_URL } from "@/lib/clawai-usage";
  * `major.minor` of package.json's version; release-identity.test.ts holds the
  * two together, so a minor bump without a new card fails there.
  */
-export const WHATS_NEW_RELEASE = "4.3";
+export const WHATS_NEW_RELEASE = "4.4";
+
+/**
+ * The picture a highlight shows until it has a screenshot of its own: the
+ * ClawBox wallpaper already in `public/`, which pictures no feature at all.
+ * None of the 4.4 highlights has a screenshot yet, and a 4.3 screenshot would
+ * show the owner a different feature; the card and the showcase have no slide
+ * without a picture.
+ */
+export const WHATS_NEW_GENERIC_IMAGE = "/clawbox-wallpaper.jpeg";
 
 /**
  * The highlights of the release {@link WHATS_NEW_RELEASE} names, in the order
  * its release notes list them — catalogue keys, so they read in the owner's
- * language. The copy is taken from RELEASE-NOTES-4.3.0.md, so this list should
+ * language. The copy is taken from RELEASE-NOTES-4.4.0.md, so this list should
  * only change when the release notes do. Every icon is a glyph the bundled
  * Material Symbols subset carries; a name it lacks renders as its literal text.
  *
@@ -38,113 +47,71 @@ export const WHATS_NEW_RELEASE = "4.3";
  * highlight per slide, so it shows the `summary` (one or two lines) under a
  * screenshot of the feature itself, `image`, served from `public/`. The
  * slide's full-screen view shows the same picture at full resolution,
- * `fullImage` (up to 1920x1200), fitted to the screen.
+ * `fullImage` (up to 1920x1200), fitted to the screen. A highlight with no
+ * screenshot yet shows {@link WHATS_NEW_GENERIC_IMAGE} in both.
  */
 export const WHATS_NEW_HIGHLIGHTS = [
   {
-    icon: "screenshot_monitor",
-    title: "whatsNew.screenshotTitle",
-    body: "whatsNew.screenshotBody",
-    summary: "whatsNew.screenshotSummary",
-    image: "/whats-new/4.3/screenshot.webp",
-
-    fullImage: "/whats-new/4.3/screenshot-full.webp",
+    icon: "password",
+    title: "whatsNew.vaultTitle",
+    body: "whatsNew.vaultBody",
+    summary: "whatsNew.vaultSummary",
+    image: WHATS_NEW_GENERIC_IMAGE,
+    fullImage: WHATS_NEW_GENERIC_IMAGE,
   },
   {
-    icon: "travel_explore",
-    title: "whatsNew.sharedBrowserTitle",
-    body: "whatsNew.sharedBrowserBody",
-    summary: "whatsNew.sharedBrowserSummary",
-    image: "/whats-new/4.3/agent-browser.webp",
-
-    fullImage: "/whats-new/4.3/agent-browser-full.webp",
+    icon: "corporate_fare",
+    title: "whatsNew.orgModeTitle",
+    body: "whatsNew.orgModeBody",
+    summary: "whatsNew.orgModeSummary",
+    image: WHATS_NEW_GENERIC_IMAGE,
+    fullImage: WHATS_NEW_GENERIC_IMAGE,
   },
   {
-    icon: "add_link",
-    title: "whatsNew.publicLinksTitle",
-    body: "whatsNew.publicLinksBody",
-    summary: "whatsNew.publicLinksSummary",
-    image: "/whats-new/4.3/public-link.webp",
-
-    fullImage: "/whats-new/4.3/public-link-full.webp",
+    icon: "dns",
+    title: "whatsNew.externalEngineTitle",
+    body: "whatsNew.externalEngineBody",
+    summary: "whatsNew.externalEngineSummary",
+    image: WHATS_NEW_GENERIC_IMAGE,
+    fullImage: WHATS_NEW_GENERIC_IMAGE,
+  },
+  {
+    icon: "event_repeat",
+    title: "whatsNew.weeklyUpdateTitle",
+    body: "whatsNew.weeklyUpdateBody",
+    summary: "whatsNew.weeklyUpdateSummary",
+    image: WHATS_NEW_GENERIC_IMAGE,
+    fullImage: WHATS_NEW_GENERIC_IMAGE,
   },
   {
     icon: "smart_toy",
-    title: "whatsNew.grokTitle",
-    body: "whatsNew.grokBody",
-    summary: "whatsNew.grokSummary",
-    image: "/whats-new/4.3/model-picker.webp",
-
-    fullImage: "/whats-new/4.3/model-picker-full.webp",
+    title: "whatsNew.clawaiModelTitle",
+    body: "whatsNew.clawaiModelBody",
+    summary: "whatsNew.clawaiModelSummary",
+    image: WHATS_NEW_GENERIC_IMAGE,
+    fullImage: WHATS_NEW_GENERIC_IMAGE,
   },
   {
-    icon: "mic",
-    title: "whatsNew.holdToTalkTitle",
-    body: "whatsNew.holdToTalkBody",
-    summary: "whatsNew.holdToTalkSummary",
-    image: "/whats-new/4.3/hold-to-talk.webp",
-
-    fullImage: "/whats-new/4.3/hold-to-talk-full.webp",
+    icon: "upgrade",
+    title: "whatsNew.openclawMoveTitle",
+    body: "whatsNew.openclawMoveBody",
+    summary: "whatsNew.openclawMoveSummary",
+    image: WHATS_NEW_GENERIC_IMAGE,
+    fullImage: WHATS_NEW_GENERIC_IMAGE,
   },
   {
-    icon: "account_tree",
-    title: "whatsNew.agentChartTitle",
-    body: "whatsNew.agentChartBody",
-    summary: "whatsNew.agentChartSummary",
-    image: "/whats-new/4.3/agent-chart.webp",
-
-    fullImage: "/whats-new/4.3/agent-chart-full.webp",
-  },
-  {
-    icon: "menu_book",
-    title: "whatsNew.primeRadiantTitle",
-    body: "whatsNew.primeRadiantBody",
-    summary: "whatsNew.primeRadiantSummary",
-    image: "/whats-new/4.3/prime-radiant.webp",
-
-    fullImage: "/whats-new/4.3/prime-radiant-full.webp",
-  },
-  {
-    icon: "forum",
-    title: "whatsNew.runReportsTitle",
-    body: "whatsNew.runReportsBody",
-    summary: "whatsNew.runReportsSummary",
-    image: "/whats-new/4.3/run-reports.webp",
-
-    fullImage: "/whats-new/4.3/run-reports-full.webp",
-  },
-  {
-    icon: "pending_actions",
-    title: "whatsNew.updateAsksTitle",
-    body: "whatsNew.updateAsksBody",
-    summary: "whatsNew.updateAsksSummary",
-    image: "/whats-new/4.3/update-asks.webp",
-
-    fullImage: "/whats-new/4.3/update-asks-full.webp",
-  },
-  {
-    icon: "downloading",
-    title: "whatsNew.installQueueTitle",
-    body: "whatsNew.installQueueBody",
-    summary: "whatsNew.installQueueSummary",
-    image: "/whats-new/4.3/install-queue.webp",
-
-    fullImage: "/whats-new/4.3/install-queue-full.webp",
-  },
-  {
-    icon: "notification_important",
-    title: "whatsNew.jobAlertsTitle",
-    body: "whatsNew.jobAlertsBody",
-    summary: "whatsNew.jobAlertsSummary",
-    image: "/whats-new/4.3/job-alerts.webp",
-
-    fullImage: "/whats-new/4.3/job-alerts-full.webp",
+    icon: "schedule",
+    title: "whatsNew.checkInsJobTitle",
+    body: "whatsNew.checkInsJobBody",
+    summary: "whatsNew.checkInsJobSummary",
+    image: WHATS_NEW_GENERIC_IMAGE,
+    fullImage: WHATS_NEW_GENERIC_IMAGE,
   },
 ] as const;
 
 /**
  * The docs page the card links to: `docs-site/whats-new.mdx`, whose newest
- * section is "ClawBox 4.3". ONE constant, so a page that moves is one edit.
+ * section is "ClawBox 4.4". ONE constant, so a page that moves is one edit.
  */
 export const WHATS_NEW_DOCS_URL = "https://docs.clawbox.com/whats-new";
 
@@ -176,8 +143,8 @@ export const WHATS_NEW_PLANS_URL = withUtm(PORTAL_PLANS_URL, WHATS_NEW_UTM);
  * The release line of a ClawBox version string, `[major, minor]`, or null when
  * there is none.
  *
- * Takes what the box actually reports: package.json's `4.3.0`, a `v4.3.0` tag,
- * `git describe` output (`v4.3.0-12-gabc123`), and the card's own `4.3`.
+ * Takes what the box actually reports: package.json's `4.4.0`, a `v4.4.0` tag,
+ * `git describe` output (`v4.4.0-12-gabc123`), and the card's own `4.4`.
  */
 export function releaseLineOf(version: string | null | undefined): readonly [major: number, minor: number] | null {
   if (typeof version !== "string") return null;
@@ -187,10 +154,10 @@ export function releaseLineOf(version: string | null | undefined): readonly [maj
 
 /**
  * Is this the running version the card is about? Only the release line it
- * announces: 4.3.0 and 4.3.3, not 4.2.x and not 4.4.0.
+ * announces: 4.4.0 and 4.4.3, not 4.3.x and not 4.5.0.
  *
  * Not "anything on 4.x", which it was while the card announced 4.0. The card
- * says "What's new in 4.3" above "This box now runs ClawBox {version}", so on
+ * says "What's new in 4.4" above "This box now runs ClawBox {version}", so on
  * any other line those two lines would name different releases. A later release
  * shows no card until it has one of its own.
  */
@@ -279,7 +246,7 @@ export function hasPlanCta(cta: WhatsNewPlanCta): boolean {
   return cta.paidFeatures || cta.editionSwitch !== null;
 }
 
-/** Strip a leading `v` so the card prints `4.3.0`, the way the release notes do. */
+/** Strip a leading `v` so the card prints `4.4.0`, the way the release notes do. */
 export function displayVersion(version: string | null): string | null {
   if (!version) return null;
   return version.trim().replace(/^v/i, "") || null;
