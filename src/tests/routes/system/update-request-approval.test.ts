@@ -5,7 +5,7 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
-const startUpdate = vi.hoisted(() => vi.fn(() => ({ started: true })));
+const startUpdate = vi.hoisted(() => vi.fn((): { started: boolean; error?: string } => ({ started: true })));
 // Whether an update is already in flight (the updater's own answer is pinned in updater.test.ts).
 const inFlight = vi.hoisted(() => vi.fn(async () => false));
 vi.mock("@/lib/updater", () => ({ startUpdate, startWouldOverlapUpdate: inFlight }));
@@ -78,8 +78,19 @@ describe("update from chat", () => {
     // restarted server's update that it has not asked about yet counts too.
     const prompt = await (await request(req({ reason: "update please" }))).json();
     inFlight.mockResolvedValue(true);
-    await decide(req({ id: prompt.id, action: "update", approve: true }, session.cookie));
+    const confirmed = await decide(req({ id: prompt.id, action: "update", approve: true }, session.cookie));
     expect(startUpdate).not.toHaveBeenCalled();
+    // The desktop card shows this sentence; it is not "the power command failed".
+    expect(confirmed.status).toBe(409);
+    expect(await confirmed.json()).toEqual({ error: "An update is already running; the desktop shows how it ends." });
+  });
+
+  it("keeps every other failure of the owner's Confirm as it was", async () => {
+    const prompt = await (await request(req({ reason: "update please" }))).json();
+    startUpdate.mockReturnValueOnce({ started: false, error: "OpenClaw database maintenance is running" });
+    const confirmed = await decide(req({ id: prompt.id, action: "update", approve: true }, session.cookie));
+    expect(confirmed.status).toBe(500);
+    expect(await confirmed.json()).toEqual({ error: "Power command failed; request it again to retry" });
   });
 
   it("the power route still refuses action=update", async () => {
