@@ -287,19 +287,32 @@ fi
 TILE_MEM=()
 
 # The most tile memory the GPU can spare, in MB: half a card's own memory
-# where the kernel names it in one file (amdgpu's mem_info_vram_total); a
-# quarter of the box's memory for an Intel GPU, which has none of its own and
-# draws from that; else 2048, twice what Chrome takes for a 4K screen.
-# CLAWBOX_DESKTOP_SYS_ROOT is the root /sys and /proc are read under (tests).
+# where it can be read cheaply — amdgpu names it in one file
+# (mem_info_vram_total), an NVIDIA card (vendor 0x10de) through the
+# proprietary driver's nvidia-smi, asked once under a 2 s timeout (the
+# largest card's MiB; failing, timing out or printing anything but a number
+# counts as unread, and nouveau has no nvidia-smi); a quarter of the box's
+# memory for an Intel GPU, which has none of its own and draws from that;
+# else 2048, twice what Chrome takes for a 4K screen.
+# CLAWBOX_DESKTOP_SYS_ROOT is the root /sys and /proc are read under, and
+# nvidia-smi is the one on PATH (tests).
 gpu_mem_cap_mb() {
-  local root="${CLAWBOX_DESKTOP_SYS_ROOT:-}" card v vram=0 intel=0 kb
+  local root="${CLAWBOX_DESKTOP_SYS_ROOT:-}" card v vram=0 intel=0 nvidia=0 kb out
   for card in "$root"/sys/class/drm/card*; do
     case "${card##*/}" in *-*) continue ;; esac # a connector, not a card
     if { read -r v < "$card/device/mem_info_vram_total"; } 2>/dev/null && [[ $v =~ ^[0-9]+$ ]] && [ ${#v} -le 15 ] && [ $((10#$v >> 20)) -gt "$vram" ]; then
       vram=$((10#$v >> 20))
     fi
-    { read -r v < "$card/device/vendor"; } 2>/dev/null && [ "$v" = 0x8086 ] && intel=1
+    { read -r v < "$card/device/vendor"; } 2>/dev/null || continue
+    [ "$v" = 0x8086 ] && intel=1
+    [ "$v" = 0x10de ] && nvidia=1
   done
+  if [ "$nvidia" -eq 1 ] && command -v nvidia-smi >/dev/null 2>&1 \
+    && out="$(timeout -k 1 2 nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null)"; then
+    while read -r v; do
+      [[ $v =~ ^[0-9]+$ ]] && [ ${#v} -le 7 ] && [ $((10#$v)) -gt "$vram" ] && vram=$((10#$v))
+    done <<< "$out"
+  fi
   if [ "$vram" -gt 0 ]; then
     echo $((vram / 2))
   elif [ "$intel" -eq 1 ] && kb="$(awk '$1 == "MemTotal:" { print $2 }' "$root/proc/meminfo" 2>/dev/null)" && [[ $kb =~ ^[0-9]+$ ]] && [ ${#kb} -le 12 ]; then

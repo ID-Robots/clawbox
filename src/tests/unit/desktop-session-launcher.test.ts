@@ -34,7 +34,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Every case runs the launcher as a real bash process (test-timeout-hygiene).
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -391,7 +391,37 @@ describe.skipIf(!usable)("clawbox-desktop-browser in a session", { timeout: 30_0
    * The row comes from clawbox-desktop-span.mjs `--device-row` (a stand-in
    * here), the GPU's memory from a fake /sys and /proc.
    */
-  function tileMemEnv(pid: number, row: string, gpu: { vramMb?: number; intel?: boolean; memTotalKb?: number } = {}) {
+  /**
+   * The host's PATH as one folder of links, minus `nvidia-smi`: a host with an
+   * NVIDIA card has a real one, and a tile-memory case must never read the
+   * real GPU. A case that wants one puts a fake first on PATH (`nvidiaSmi`).
+   */
+  let hostPathNoSmi = "";
+  function pathWithoutNvidiaSmi(): string {
+    if (hostPathNoSmi) return hostPathNoSmi;
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-launcher-path-"));
+    const seen = new Set(["nvidia-smi"]);
+    for (const d of (process.env.PATH ?? "/usr/bin:/bin").split(":")) {
+      let names: string[] = [];
+      try {
+        names = fs.readdirSync(d);
+      } catch {
+        continue;
+      }
+      for (const n of names) {
+        if (seen.has(n)) continue;
+        seen.add(n);
+        fs.symlinkSync(path.join(d, n), path.join(dir, n));
+      }
+    }
+    hostPathNoSmi = dir;
+    return dir;
+  }
+  afterAll(() => {
+    if (hostPathNoSmi) fs.rmSync(hostPathNoSmi, { recursive: true, force: true });
+  });
+
+  function tileMemEnv(pid: number, row: string, gpu: { vramMb?: number; intel?: boolean; memTotalKb?: number; nvidiaSmi?: string } = {}) {
     const sys = path.join(tmp, "sysroot");
     const card = path.join(sys, "sys/class/drm/card0/device");
     fs.mkdirSync(card, { recursive: true });
@@ -404,7 +434,14 @@ describe.skipIf(!usable)("clawbox-desktop-browser in a session", { timeout: 30_0
     fs.writeFileSync(path.join(sys, "proc/meminfo"), `MemTotal:       ${gpu.memTotalKb ?? 32 * 2 ** 20} kB\nMemFree:         1000 kB\n`);
     const span = path.join(tmp, "span");
     writeExec(span, '#!/bin/sh\n[ "$1" = --device-row ] && [ -n "$FAKE_ROW" ] && echo "$FAKE_ROW"\nexit 0\n');
-    return env(pid, { CLAWBOX_KIOSK_NODE: which("sh"), CLAWBOX_DESKTOP_SPAN: span, CLAWBOX_DESKTOP_SYS_ROOT: sys, FAKE_ROW: row });
+    if (gpu.nvidiaSmi) writeExec(path.join(tmp, "bin", "nvidia-smi"), gpu.nvidiaSmi);
+    return env(pid, {
+      CLAWBOX_KIOSK_NODE: which("sh"),
+      CLAWBOX_DESKTOP_SPAN: span,
+      CLAWBOX_DESKTOP_SYS_ROOT: sys,
+      FAKE_ROW: row,
+      PATH: `${path.join(tmp, "bin")}:${pathWithoutNvidiaSmi()}`,
+    });
   }
   const tileFlags = (launch: string) => launch.split(" ").filter((a) => a.startsWith("--force-gpu-mem-available-mb"));
 
@@ -442,6 +479,29 @@ describe.skipIf(!usable)("clawbox-desktop-browser in a session", { timeout: 30_0
     expect(await finished(done)).toBe(0);
     expect(tileFlags(chromeLaunches()[0])).toEqual(flags);
     expect(readText(log).includes("is not a whole number of MB; ignored")).toBe(value === "lots");
+  });
+
+  // An NVIDIA card (vendor 0x10de, the fixture's default card): its memory
+  // from `nvidia-smi` under a 2 s timeout, the cap half of it as for amdgpu.
+  // The fake records how it was asked.
+  const smi = (body: string) => `#!/bin/sh\necho "$*" >> "$FAKE/nvidia-smi.txt"\n${body}\n`;
+  const QUERY = "--query-gpu=memory.total --format=csv,noheader,nounits";
+  it.each([
+    ["an 8 GB card: half of it", { nvidiaSmi: smi("echo 8192") }, "7680 2160 2", 4096, 1],
+    ["two cards: the larger one", { nvidiaSmi: smi("printf '4096\\n16384\\n'") }, "11520 2160 3", 6144, 1],
+    ["no nvidia-smi (the nouveau driver): the fallback", {}, "7680 2160 2", 2048, 0],
+    ["nvidia-smi failing: the fallback, even with a number printed", { nvidiaSmi: smi("echo 8192; exit 9") }, "7680 2160 2", 2048, 1],
+    ["nvidia-smi printing anything else: the fallback", { nvidiaSmi: smi("echo '[N/A]'; echo 'No devices were found'; echo '8192 MiB'") }, "7680 2160 2", 2048, 1],
+    ["nvidia-smi hanging: the fallback once its 2 s are up", { nvidiaSmi: smi(`exec ${REAL_SLEEP} 30`) }, "7680 2160 2", 2048, 1],
+    ["an Intel GPU beside an nvidia-smi: its own rule, nvidia-smi never asked", { intel: true, memTotalKb: 8 * 2 ** 20, nvidiaSmi: smi("echo 8192") }, "7680 2160 2", 2048, 0],
+  ])("reads an NVIDIA card's memory through nvidia-smi: %s", async (_what, gpu, row, mb, asked) => {
+    const labwc = compositor();
+    const started = Date.now();
+    const { done } = startLauncher(tileMemEnv(labwc.pid!, row, gpu));
+    expect(await finished(done)).toBe(0);
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(tileFlags(chromeLaunches()[0])).toEqual([`--force-gpu-mem-available-mb=${mb}`]);
+    expect(lines(path.join(fake, "nvidia-smi.txt"))).toEqual(Array(asked).fill(QUERY));
   });
 
   it("asks the running Chrome for the desktop window again with the tile memory it started with", async () => {
