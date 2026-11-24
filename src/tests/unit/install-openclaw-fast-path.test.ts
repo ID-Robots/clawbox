@@ -1070,6 +1070,11 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     ["a .cts entry built to .js, an empty .mjs after it", "./src/index.cts",
       { "dist/index.js": "export default {};\n", "dist/index.mjs": "" }, false],
     ["an .MTS entry built to .mjs", "./src/index.MTS", { "dist/index.mjs": "export default {};\n" }, false],
+    // An installed package's TypeScript source is never a fallback: with no
+    // built peer the core reports the compiled entry missing and loads nothing
+    // (resolvePackageRuntimeEntrySource), whatever the extension's case.
+    ["an .MTS entry with its source alone and no built peer", "./src/index.MTS",
+      { "src/index.MTS": "export default {};\n" }, true],
   ])("judges %s by the peer the core would load", (_what, entry, files: Record<string, string>, reinstalled) => {
     const box = makeBox({ core: OLDER });
     const root = box.payload("npm/projects/ts/node_modules/@openclaw/example",
