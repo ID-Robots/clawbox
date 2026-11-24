@@ -92,21 +92,29 @@ export const MIN_WINDOW_HEIGHT = 200;
 
 /**
  * A window's left, top, width or height — or a drag's step — on the nearest
- * WHOLE DEVICE PIXEL. At a fractional devicePixelRatio (a 4K monitor at scale
- * 1.5) a whole CSS pixel is not a whole device pixel: a window centred at
- * `left: 347.5px`, or moved an odd number of CSS pixels, stood between two,
- * and Chrome drew it differently on the layer a drag moves it on and back in
- * the page after the drop. Every place a window's geometry is made (centring,
+ * point that is a WHOLE CSS PIXEL AND A WHOLE DEVICE PIXEL: a multiple of
+ * `step` CSS px, the smallest whole number from 1 to 4 that is a whole number
+ * of device pixels (1 at devicePixelRatio 1 and 2, 2 at 1.5 and 2.5, 4 at
+ * 1.25 and 1.75), and plain whole CSS pixels where none is (1.1, 1.125,
+ * 1.331). Measured in Chrome at 1.5: a window at 400 or 402 CSS px drew the
+ * same, one at 400.6667 — a whole device pixel, not a whole CSS pixel — drew
+ * thousands of pixels differently, and a window dropped off the lattice was
+ * redrawn after a drag. Every place a window's geometry is made (centring,
  * clamp, fit, snap rects, drag, resize) goes through this one rounding; at
- * devicePixelRatio 1 it only takes away half pixels. `atLeast`: the nearest
- * one at or above `v`, for a minimum — the resize's 300 x 200 is what a saved
- * size is checked against (`getSavedSize`), and at 1.331 the nearest device
- * pixel to 300 is 299.8.
+ * devicePixelRatio 1 it only takes away fractions. `atLeast`: the lattice
+ * point at or above `v`, for a minimum — the resize's 300 x 200 is what a
+ * saved size is checked against (`getSavedSize`).
  */
 export function devicePx(v: number, atLeast = false): number {
   const dpr = typeof window !== "undefined" && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
-  const n = Math.round(v * dpr);
-  return (atLeast && n / dpr < v ? n + 1 : n) / dpr;
+  let step = 1;
+  for (let k = 1; k <= 4; k++) {
+    if (Math.abs(k * dpr - Math.round(k * dpr)) < 1e-6) {
+      step = k;
+      break;
+    }
+  }
+  return (atLeast ? Math.ceil(v / step) : Math.round(v / step)) * step;
 }
 
 /**
@@ -156,9 +164,10 @@ export function workArea(screen: DeskScreen, rInset = 0): DeskRect {
 /** Where a maximized window on the screen under `at` stands (the main screen's work area without `at`). */
 export function maximizedRect(rInset = 0, at?: { x: number; y: number }): DeskRect {
   const a = workArea(at ? screenAt(at.x, at.y) : mainScreen(), rInset);
-  // Its edges on whole device pixels (`devicePx`).
+  // Its left and top on the lattice (`devicePx`); its far edges the work
+  // area's own, never rounded short of them.
   const x = devicePx(a.x), y = devicePx(a.y);
-  return { x, y, width: devicePx(a.x + a.width) - x, height: devicePx(a.y + a.height) - y };
+  return { x, y, width: a.x + a.width - x, height: a.y + a.height - y };
 }
 
 export function getSnapZone(clientX: number, clientY: number, rInset = 0): SnapZone {
@@ -373,9 +382,11 @@ export function getSnapRect(zone: SnapZone, rInset = 0, at?: { x: number; y: num
   // The strip between the kiosk bar (0 without one) and the shelf, on the
   // main screen; another monitor of the row is all window space.
   const a = workArea(at ? screenAt(at.x, at.y) : mainScreen(), rInset);
-  // Every EDGE on whole device pixels (`devicePx`), the middle ones too, so
-  // the halves and quarters still meet without a gap or an overlap.
-  const l = devicePx(a.x), t = devicePx(a.y), r = devicePx(a.x + a.width), b = devicePx(a.y + a.height);
+  // The near and middle EDGES on the lattice (`devicePx`), so the halves and
+  // quarters still meet without a gap or an overlap; the far edges are the
+  // work area's own — a lattice coarser than a device pixel would otherwise
+  // round them short of the screen or the shelf.
+  const l = devicePx(a.x), t = devicePx(a.y), r = a.x + a.width, b = a.y + a.height;
   const mx = devicePx(a.x + a.width / 2), my = devicePx(a.y + a.height / 2);
   switch (zone) {
     case "left": return { x: l, y: t, width: mx - l, height: b - t };

@@ -223,15 +223,15 @@ describe("dragging a window", () => {
 });
 
 /**
- * At devicePixelRatio 1.5 (a 4K monitor at scale 1.5) every odd CSS pixel is
- * half a device pixel: a window centred at `left: 347.5px`, or dragged or
- * resized by a whole number of CSS pixels, stood between device pixels and was
- * redrawn differently once the drag let it go. Centring, the drag and its
- * offset, and the resize all land on whole device pixels.
+ * At devicePixelRatio 1.5 (a 4K monitor at scale 1.5) Chrome draws a window
+ * the same on the drag's layer and back in the page only where its position is
+ * a whole CSS pixel AND a whole device pixel — measured: 400 and 402 drew the
+ * same, 400.6667 (a whole device pixel) did not. Centring, the drag and its
+ * offset, and the resize all land on that lattice: even CSS pixels at 1.5.
  */
-describe("on the device pixel grid", () => {
+describe("on the CSS-and-device pixel lattice", () => {
   const DPR = 1.5;
-  const onGrid = (v: number) => Math.abs(v * DPR - Math.round(v * DPR)) < 0.01;
+  const onGrid = (v: number, step = 2) => Math.abs(v / step - Math.round(v / step)) < 1e-9;
   const px = (v: string) => v.split(" ").map((part) => parseFloat(part));
   const box = () => [el().style.left, el().style.top, el().style.width, el().style.height].map((v) => parseFloat(v));
   beforeEach(() => {
@@ -241,10 +241,9 @@ describe("on the device pixel grid", () => {
     Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
   });
 
-  it("centres a new window on whole device pixels", () => {
-    // A size already on the grid (806 x 602 is 1209 x 903 device px), centred
-    // at (1440 - 806) / 2 = 317 and (844 - 602) / 2 = 121 CSS px: 475.5 and
-    // 181.5 device px. Read at the FIRST commit, by the app inside the window,
+  it("centres a new window on the lattice", () => {
+    // A size already on the lattice (806 x 602), centred at (1440 - 806) / 2 =
+    // 317 and (844 - 602) / 2 = 121 CSS px: odd, so off it. Read at the FIRST commit, by the app inside the window,
     // before the window's own effects run: the frame it opens with.
     const first: number[] = [];
     function App() {
@@ -261,34 +260,38 @@ describe("on the device pixel grid", () => {
         <App />
       </ChromeWindow>,
     );
-    expect(first.length === 2 && first.every(onGrid), `${first}`).toBe(true);
+    expect(first.length === 2 && first.every((v) => onGrid(v)), `${first}`).toBe(true);
     const [left, top] = box();
     expect(onGrid(left) && onGrid(top), `${left}, ${top}`).toBe(true);
   });
 
-  it("drags it by whole device pixels, and drops it where the drag showed it", () => {
+  it.each([
+    [1.5, 2],
+    [1.25, 4],
+  ])("drags it by multiples of the lattice step (at %s, %s CSS px), and drops it where the drag showed it", (dpr, step) => {
+    Object.defineProperty(window, "devicePixelRatio", { value: dpr, configurable: true });
     const onGeometryChange = vi.fn();
     win({ onGeometryChange });
     fireEvent.mouseDown(titleBar(), { clientX: 700, clientY: 210 });
     fireEvent.mouseMove(window, { clientX: 801, clientY: 301 });
     const [dx, dy] = px(el().style.translate);
-    expect(onGrid(dx) && onGrid(dy), el().style.translate).toBe(true);
+    expect(onGrid(dx, step) && onGrid(dy, step), el().style.translate).toBe(true);
     fireEvent.mouseUp(window, { clientX: 801, clientY: 301 });
     const [left, top] = box();
-    expect(onGrid(left) && onGrid(top), `${left}, ${top}`).toBe(true);
+    expect(onGrid(left, step) && onGrid(top, step), `${left}, ${top}`).toBe(true);
     expect(left).toBeCloseTo(400 + dx, 6);
     expect(top).toBeCloseTo(200 + dy, 6);
     expect(onGeometryChange).toHaveBeenCalledWith({ x: expect.closeTo(left, 6), y: expect.closeTo(top, 6), width: 600, height: 400 });
   });
 
-  it("resizes it by whole device pixels, the opposite edge staying where it was", () => {
+  it("resizes it to even CSS pixels, the opposite edge staying where it was", () => {
     win();
     const handle = (cursor: string) => el().querySelector<HTMLElement>(`.${cursor}`)!;
     fireEvent.mouseDown(handle("cursor-se-resize"), { clientX: 1000, clientY: 600 });
     fireEvent.mouseMove(window, { clientX: 1101, clientY: 701 });
     fireEvent.mouseUp(window, { clientX: 1101, clientY: 701 });
     let [left, top, width, height] = box();
-    expect([width, height].every(onGrid), `${width} x ${height}`).toBe(true);
+    expect([width, height].every((v) => onGrid(v)), `${width} x ${height}`).toBe(true);
     expect([left, top]).toEqual([400, 200]);
 
     const right = left + width;
@@ -297,16 +300,17 @@ describe("on the device pixel grid", () => {
     fireEvent.mouseMove(window, { clientX: 301, clientY: 101 });
     fireEvent.mouseUp(window, { clientX: 301, clientY: 101 });
     [left, top, width, height] = box();
-    expect([left, top, width, height].every(onGrid), `${left}, ${top} ${width} x ${height}`).toBe(true);
+    expect([left, top, width, height].every((v) => onGrid(v)), `${left}, ${top} ${width} x ${height}`).toBe(true);
     expect(left + width).toBeCloseTo(right, 6);
     expect(top + height).toBeCloseTo(bottom, 6);
   });
 
-  it("holds a resize at the minimum size on whole device pixels too", () => {
-    // At devicePixelRatio 1.125 the 300 px minimum width is 337.5 device px.
+  it("holds a resize at the minimum size on whole CSS pixels where no lattice step up to 4 fits", () => {
+    // At devicePixelRatio 1.125 a whole device pixel needs 8 CSS px: the
+    // lattice is plain whole CSS pixels, and the minimum stays 300.
     const dpr = 1.125;
     Object.defineProperty(window, "devicePixelRatio", { value: dpr, configurable: true });
-    const aligned = (v: number) => Math.abs(v * dpr - Math.round(v * dpr)) < 0.01;
+    const aligned = (v: number) => Number.isInteger(v);
     win();
     // The left edge dragged far right: held at the minimum, the right edge where it was.
     fireEvent.mouseDown(el().querySelector<HTMLElement>(".cursor-w-resize")!, { clientX: 400, clientY: 400 });
@@ -314,17 +318,16 @@ describe("on the device pixel grid", () => {
     fireEvent.mouseUp(window, { clientX: 900, clientY: 400 });
     const [left, , width] = box();
     expect(aligned(left) && aligned(width), `${left} + ${width}`).toBe(true);
-    expect(width).toBeGreaterThanOrEqual(300);
-    expect(width - 300).toBeLessThan(1 / dpr);
+    expect(width).toBe(300);
     expect(left + width).toBeCloseTo(1000, 6);
   });
 
-  it("saves a size held at the minimum that the next window still takes, where the nearest device pixel is under it", () => {
-    // At 1.331 the nearest device pixel to 300 is 299.8 CSS px, and a saved
-    // size under 300 x 200 is refused: the window reopened at its default.
+  it("saves a size held at the minimum on whole CSS pixels that the next window still takes", () => {
+    // A saved size under 300 x 200 is refused: the window reopened at its
+    // default. At 1.331 the lattice is plain whole CSS pixels.
     const dpr = 1.331;
     Object.defineProperty(window, "devicePixelRatio", { value: dpr, configurable: true });
-    const aligned = (v: number) => Math.abs(v * dpr - Math.round(v * dpr)) < 0.01;
+    const aligned = (v: number) => Number.isInteger(v);
     const { unmount } = win();
     fireEvent.mouseDown(el().querySelector<HTMLElement>(".cursor-se-resize")!, { clientX: 1000, clientY: 600 });
     fireEvent.mouseMove(window, { clientX: 300, clientY: 100 });
@@ -345,8 +348,8 @@ describe("on the device pixel grid", () => {
     // Opened at the minimum width; only the bottom edge moves.
     ["width", { width: 300, height: 400 }, "cursor-s-resize", [550, 600], [550, 650]],
   ] as const)("saves a FITTED %s at the minimum that the next window still takes, when the resize moves only the other edge", (_, initialSize, handle, from, to) => {
-    // At 1.331 the nearest device pixel to 300 x 200 is 299.8 x 199.8 CSS px;
-    // the edge the resize leaves alone is saved as it was fitted.
+    // The edge the resize leaves alone is saved as it was fitted, and a
+    // fitted minimum must stay one getSavedSize takes back.
     const dpr = 1.331;
     Object.defineProperty(window, "devicePixelRatio", { value: dpr, configurable: true });
     const { unmount } = win({ initialSize });
