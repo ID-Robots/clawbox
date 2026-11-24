@@ -111,7 +111,7 @@ const RELEASES: readonly { version: string; files: string }[] = [
   // A switch answer that comes back after a newer one was kept is ignored: it no longer has the list revoked.
   { version: "1.7.1", files: "f74920a9b3c8761a3e215e4a6741905dbb6c732c2ee77f4066beb82de1da27ca" },
   // A linked box's page is laid out by this kiosk's monitors (second experiment): the worker hands it the geometry, the kiosk's desktop reads it.
-  { version: "1.8.0", files: "5da75014b1134c512678237c59c60fdf4631ec4de81fa0a6420af9f2cd190b03" },
+  { version: "1.8.0", files: "03b81586d20de9309f725bed41173c8d5b2fb1bfac2ace25ab877e437cc969dd" },
 ];
 
 /**
@@ -657,7 +657,7 @@ describe("kiosk extension", () => {
     // Chrome gives for it, and asks the kiosk's own desktop to read them.
     expect(bg).toContain('case "viewerScreens":\n        return viewerScreens(sender);');
     expect(bg).toContain("const url = sender.url || (sender.tab && sender.tab.url);");
-    expect(bg).toContain("if (!list || !cleanBoxes(list.boxes).some((b) => webOrigin(b.url) === origin)) return");
+    expect(bg).toContain("return !!list && cleanBoxes(list.boxes).some((b) => webOrigin(b.url) === origin);");
     expect(bg).toContain('chrome.tabs.sendMessage(desk.id, { type: "readMonitors" })');
     expect(ws).toContain('if (msg.type === "readMonitors" && isDesktop) {');
     expect(ws).toContain("root.setAttribute(VIEWER_ATTR, value);");

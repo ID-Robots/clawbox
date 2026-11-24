@@ -264,10 +264,15 @@ function withDeadline(promise, ms) {
   return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 }
 
+/** The kiosk's own desktop tab ("/" of a desktop origin), if it is open. */
+async function desktopTab() {
+  const all = await normalTabs();
+  return all.find((t) => t.id != null && isDesktop(t.url) && webOrigin(t.url) && new URL(t.url).pathname === "/");
+}
+
 async function askDesktopForBoxes() {
   const asked = listGeneration;
-  const all = await normalTabs();
-  const desk = all.find((t) => t.id != null && isDesktop(t.url) && webOrigin(t.url) && new URL(t.url).pathname === "/");
+  const desk = await desktopTab();
   if (!desk) return null;
   try {
     const list = await withDeadline(chrome.tabs.sendMessage(desk.id, { type: "readBoxes" }), ASK_DESKTOP_MS);
@@ -337,8 +342,7 @@ function cleanScreens(raw) {
 
 /** The kiosk's monitors from its own desktop tab, or undefined when that tab did not answer in time. */
 async function askDesktopForScreens() {
-  const all = await normalTabs();
-  const desk = all.find((t) => t.id != null && isDesktop(t.url) && webOrigin(t.url) && new URL(t.url).pathname === "/");
+  const desk = await desktopTab();
   if (!desk) return undefined;
   try {
     return cleanScreens(await withDeadline(chrome.tabs.sendMessage(desk.id, { type: "readMonitors" }), ASK_DESKTOP_MS));
@@ -353,12 +357,16 @@ async function viewerScreens(sender) {
   const origin = url && !isDesktop(url) ? webOrigin(url) : null;
   if (!origin) return { ok: false, error: "not a web page" };
   const switchedOn = (await chrome.storage.local.get(SCREENS_FLAG_KEY))[SCREENS_FLAG_KEY] === true;
-  const list = switchedOn ? await storedBoxes() : null;
-  if (!list || !cleanBoxes(list.boxes).some((b) => webOrigin(b.url) === origin)) return { ok: false, error: "not a linked box" };
+  const linked = async () => {
+    const list = switchedOn ? await storedBoxes() : null;
+    return !!list && cleanBoxes(list.boxes).some((b) => webOrigin(b.url) === origin);
+  };
+  if (!(await linked())) return { ok: false, error: "not a linked box" };
   const revoked = revocations;
   const screens = await askDesktopForScreens();
-  // The owner's list forgotten, or its session ended, while the desktop read them: nothing leaves.
-  if (revocations !== revoked || !(list.validUntil > Date.now())) return { ok: false, error: "the list was forgotten" };
+  // The list forgotten, its session ended or this box taken off it while the
+  // desktop read the monitors: nothing leaves.
+  if (revocations !== revoked || !(await linked())) return { ok: false, error: "the list was forgotten" };
   return screens ? { ok: true, screens } : { ok: true };
 }
 

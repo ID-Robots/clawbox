@@ -294,38 +294,22 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
     }
   }, []);
 
-  // The experiment's switch is a box preference; Settings and the desktop hear
-  // it from the event once the box has stored it.
-  const saveLinkedBoxes = useCallback(async (on: boolean) => {
-    setLinkedBoxesSaving(true);
+  // The experiments' switches (Linked ClawBoxes, and its monitors switch,
+  // TASK-2771) are box preferences; Settings and the desktop hear each from its
+  // event once the box has stored it.
+  const saveFlag = useCallback(async (pref: string, event: string, setSaving: (saving: boolean) => void, on: boolean) => {
+    setSaving(true);
     try {
       const res = await fetch("/setup-api/preferences", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [LINKED_BOXES_FLAG_PREF]: on }),
+        body: JSON.stringify({ [pref]: on }),
       });
-      if (res.ok) window.dispatchEvent(new CustomEvent(LINKED_BOXES_FLAG_EVENT, { detail: on }));
+      if (res.ok) window.dispatchEvent(new CustomEvent(event, { detail: on }));
     } catch {
       /* The switch stays where it was. */
     } finally {
-      setLinkedBoxesSaving(false);
-    }
-  }, []);
-
-  // The second experiment's switch (TASK-2771), saved the same way.
-  const saveViewerScreens = useCallback(async (on: boolean) => {
-    setViewerScreensSaving(true);
-    try {
-      const res = await fetch("/setup-api/preferences", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ [VIEWER_SCREENS_FLAG_PREF]: on }),
-      });
-      if (res.ok) window.dispatchEvent(new CustomEvent(VIEWER_SCREENS_FLAG_EVENT, { detail: on }));
-    } catch {
-      /* The switch stays where it was. */
-    } finally {
-      setViewerScreensSaving(false);
+      setSaving(false);
     }
   }, []);
 
@@ -724,8 +708,8 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                       enabled={linkedBoxesOn === true}
                       saving={linkedBoxesSaving}
                       labelledBy={linkedBoxesLabelId}
-                      onEnable={() => void saveLinkedBoxes(true)}
-                      onDisable={() => void saveLinkedBoxes(false)}
+                      onEnable={() => void saveFlag(LINKED_BOXES_FLAG_PREF, LINKED_BOXES_FLAG_EVENT, setLinkedBoxesSaving, true)}
+                      onDisable={() => void saveFlag(LINKED_BOXES_FLAG_PREF, LINKED_BOXES_FLAG_EVENT, setLinkedBoxesSaving, false)}
                     />
                   </div>
 
@@ -733,14 +717,14 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                   <div className="border-t border-[var(--border-subtle)] pt-4 flex items-start justify-between gap-4">
                     <div id={viewerScreensLabelId} className="text-sm text-gray-100 inline-flex items-center gap-2">
                       <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">desktop_windows</span>
-                      {tr("update.linkedBoxesScreensExperimental", "Linked ClawBoxes follow this screen's monitors (experimental)")}
+                      {tr("update.linkedBoxesScreensExperimental", "Linked ClawBoxes use this ClawBox's monitors (experimental)")}
                     </div>
                     <BetaToggle
                       enabled={viewerScreensOn === true}
                       saving={viewerScreensSaving}
                       labelledBy={viewerScreensLabelId}
-                      onEnable={() => void saveViewerScreens(true)}
-                      onDisable={() => void saveViewerScreens(false)}
+                      onEnable={() => void saveFlag(VIEWER_SCREENS_FLAG_PREF, VIEWER_SCREENS_FLAG_EVENT, setViewerScreensSaving, true)}
+                      onDisable={() => void saveFlag(VIEWER_SCREENS_FLAG_PREF, VIEWER_SCREENS_FLAG_EVENT, setViewerScreensSaving, false)}
                     />
                   </div>
 

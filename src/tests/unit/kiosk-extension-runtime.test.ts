@@ -1478,7 +1478,7 @@ describe("background.js: switching linked ClawBoxes", () => {
       const { screens } = (await w.call({ type: "viewerScreens" }, 2)) as { screens: unknown };
       const read = parseViewerScreens(JSON.stringify(screens));
       expect(read).toMatchObject({ available: true, main: "DP-1" });
-      expect(screensFromStatus(read, 3840, 1080)?.map((m) => [m.id, m.main, m.x, m.width])).toEqual([["DP-1", true, 0, 1920], ["HDMI-A-1", false, 1920, 1920]]);
+      expect(screensFromStatus(read ?? null, 3840, 1080)?.map((m) => [m.id, m.main, m.x, m.width])).toEqual([["DP-1", true, 0, 1920], ["HDMI-A-1", false, 1920, 1920]]);
       // A kiosk with no layout is no layout for the page too, never "no mark".
       const none = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => ({ available: false }) });
       const { screens: off } = (await none.call({ type: "viewerScreens" }, 2)) as { screens: unknown };
@@ -1569,6 +1569,17 @@ describe("background.js: switching linked ClawBoxes", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       release(boxAnswer());
       expect(await ending).toMatchObject({ ok: false });
+    });
+
+    it("answers nothing when this box is taken off the list while the desktop is reading", async () => {
+      let release: (v: unknown) => void = () => {};
+      const w = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => new Promise((resolve) => { release = resolve; }) });
+      const pending = w.call({ type: "viewerScreens" }, 2);
+      await vi.advanceTimersByTimeAsync(0);
+      // Settings saved a list without it; the desktop hands the worker the new one.
+      await w.call({ type: "boxes", selfName: "laptop", boxes: [{ name: "NAS", url: "http://nas.example.net:3005/" }], validUntil: Date.now() + 3_600_000 }, 1);
+      release(boxAnswer());
+      expect(await pending).toMatchObject({ ok: false });
     });
 
     it("says nothing about the monitors when the desktop tab is gone or does not answer in time", async () => {

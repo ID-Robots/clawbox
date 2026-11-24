@@ -99,8 +99,10 @@ export function parseViewerScreens(raw: string | null): MonitorStatusLike | null
   if (!box || !sized(box.width) || !sized(box.height) || monitors.length < 1 || monitors.length > VIEWER_MAX_MONITORS) return undefined;
   if (main !== null && main !== undefined && !(typeof main === "string" && VIEWER_ID.test(main))) return undefined;
   const clean: NonNullable<MonitorStatusLike["monitors"]> = [];
+  const ids = new Set<string>();
   for (const m of monitors) {
-    if (!VIEWER_ID.test(m.id)) return undefined;
+    if (!VIEWER_ID.test(m.id) || ids.has(m.id)) return undefined;
+    ids.add(m.id);
     const r = m.rect;
     if (r !== null && !(placed(r.x) && placed(r.y) && sized(r.width) && sized(r.height))) return undefined;
     clean.push({

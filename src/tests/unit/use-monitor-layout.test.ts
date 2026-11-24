@@ -496,8 +496,10 @@ describe("useMonitorLayoutSync — shown on another box's kiosk", () => {
     renderHook(() => useMonitorLayoutSync(true, { recall: true }));
     expect(f.inFlight).toBe(1);
     expect(getDeskScreens()).toBeNull();
+    const reads = f.fetchMock.mock.calls.length;
     renderHook(() => useMonitorLayoutSync(false));
     expect(getDeskScreens()).toBeNull();
+    expect(f.fetchMock).toHaveBeenCalledTimes(reads);
   });
 });
 
@@ -548,6 +550,7 @@ describe("parseViewerScreens", () => {
       { ...good, monitors: [{ ...good.monitors[0], rect: { x: 0, y: 0, width: 1920, height: -5 } }] },
       { ...good, monitors: [{ ...good.monitors[0], rect: { x: 1e9, y: 0, width: 1920, height: 1080 } }] },
       { ...good, monitors: [null] },
+      { ...good, monitors: [good.monitors[0], { ...good.monitors[1], id: "DP-1" }] },
       { ...good, monitors: Array.from({ length: 17 }, (_, i) => ({ id: `M${i}`, enabled: true, rect: { x: i * 100, y: 0, width: 100, height: 100 } })) },
     ].map((x) => (typeof x === "string" ? x : JSON.stringify(x)));
     for (const raw of refused) expect(parseViewerScreens(raw), raw).toBeUndefined();
