@@ -237,6 +237,13 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   // still hold exactly what was saved, the button is Continue instead. Any
   // edit makes it a save again.
   const [warnedSubmissionKey, setWarnedSubmissionKey] = useState<string | null>(null);
+  // The controls the mount-time reads below also fill, once the owner has set
+  // them. The hotspot read probes the radio and can answer seconds late, with
+  // the box as it was before the owner chose: landing after the switch was
+  // turned off, it turned it back on and held Save & Continue for a hotspot
+  // password the owner had just made unnecessary. A read fills only what the
+  // owner has not touched.
+  const ownerSetRef = useRef({ hostname: false, hotspotName: false, hotspotEnabled: false });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -244,8 +251,10 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data && !controller.signal.aborted) {
-          if (data.ssid) setHotspotName(data.ssid);
-          if (typeof data.enabled === "boolean") setHotspotEnabled(data.enabled);
+          if (data.ssid && !ownerSetRef.current.hotspotName) setHotspotName(data.ssid);
+          if (typeof data.enabled === "boolean" && !ownerSetRef.current.hotspotEnabled) {
+            setHotspotEnabled(data.enabled);
+          }
           if (typeof data.active === "boolean") {
             apStateRef.current = {
               active: data.active,
@@ -259,7 +268,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.hostname && !controller.signal.aborted) {
-          setHostname(data.hostname);
+          if (!ownerSetRef.current.hostname) setHostname(data.hostname);
           if (typeof data.hostname === "string") {
             deviceNameRef.current = data.hostname.trim().toLowerCase().replace(/\.local$/, "");
           }
@@ -756,7 +765,10 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                   id="cred-hostname"
                   type="text"
                   value={hostname}
-                  onChange={(e) => setHostname(e.target.value)}
+                  onChange={(e) => {
+                    ownerSetRef.current.hostname = true;
+                    setHostname(e.target.value);
+                  }}
                   onKeyDown={(e) => { if (e.key === "Enter") requestSave(); }}
                   maxLength={63}
                   placeholder="clawbox"
@@ -890,7 +902,10 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
               role="switch"
               aria-checked={hotspotEnabled}
               aria-label={t("credentials.enableHotspot")}
-              onClick={() => setHotspotEnabled((v) => !v)}
+              onClick={() => {
+                ownerSetRef.current.hotspotEnabled = true;
+                setHotspotEnabled((v) => !v);
+              }}
               className="grid place-items-center shrink-0 h-12 px-[var(--s-1)] bg-transparent border-none cursor-pointer"
             >
               <span
@@ -921,7 +936,10 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                 id="hotspot-name"
                 type="text"
                 value={hotspotName}
-                onChange={(e) => setHotspotName(e.target.value)}
+                onChange={(e) => {
+                  ownerSetRef.current.hotspotName = true;
+                  setHotspotName(e.target.value);
+                }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") requestSave();
                 }}
