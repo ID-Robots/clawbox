@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { describeRefresh } from "../../../e2e-install/helpers/openclaw-plugin-migration";
 
 /**
  * The fast path of `step_openclaw_install`.
@@ -92,7 +93,17 @@ interface Box {
 
 const boxes: string[] = [];
 afterEach(() => {
-  while (boxes.length) rmSync(boxes.pop()!, { recursive: true, force: true });
+  while (boxes.length) {
+    const dir = boxes.pop()!;
+    // The child a stand-in CLI left behind (INSTALL_LEAVES_CHILD), ended
+    // whatever the case asserted. Never pid 0 or 1: 0 is this process group.
+    const straggler = path.join(dir, "straggler");
+    const pid = existsSync(straggler) ? Number(readFileSync(straggler, "utf8")) : 0;
+    if (Number.isInteger(pid) && pid > 1) {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 function makeBox(opts: {
@@ -178,7 +189,9 @@ function makeBox(opts: {
 // logs its spec (PLUGIN_INSTALL) and its argv from the spec on
 // (PLUGIN_INSTALL_ARGS), and a clock laid on any call, which the installers may
 // not lay, as PLUGIN_INSTALL_BOUND; INSTALL_FAILS names specs the CLI refuses,
-// with exit INSTALL_RC (1 unless set).
+// with exit INSTALL_RC (1 unless set), saying INSTALL_SAYS (nothing when it is
+// empty). INSTALL_LEAVES_CHILD names specs whose install answers but leaves a
+// child holding its output, its pid in $BOX/straggler.
 const AS_CLAWBOX = `as_clawbox() {
   while [ "\${1:-}" = "-H" ]; do shift; done
   local bound=""
@@ -207,7 +220,14 @@ const AS_CLAWBOX = `as_clawbox() {
       event "PLUGIN_INSTALL $spec"
       event "PLUGIN_INSTALL_ARGS $args"
       [ -z "$bound" ] || event "PLUGIN_INSTALL_BOUND $bound"
-      case " \${INSTALL_FAILS:-} " in *" $spec "*) echo "example failure cause" >&2; return "\${INSTALL_RC:-1}" ;; esac
+      # sleep itself, not a subshell, as a real CLI leaves a process of its
+      # own: it holds the call's stdout and stderr, never the run's own pipes.
+      case " \${INSTALL_LEAVES_CHILD:-} " in *" $spec "*) sleep 600 & echo "$!" > "$BOX/straggler" ;; esac
+      case " \${INSTALL_FAILS:-} " in *" $spec "*)
+        local says="\${INSTALL_SAYS-example failure cause}"
+        [ -z "$says" ] || printf '%s\\n' "$says" >&2
+        return "\${INSTALL_RC:-1}" ;;
+      esac
       return 0 ;;
     *"doctor --fix"*)
       event DOCTOR
@@ -890,6 +910,12 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     return r.stdout.split("\n").filter((l) => /^CLAWBOX-WARN\[/.test(l.trim())).map((l) => l.trim());
   }
 
+  /**
+   * The step's lines as the upgrade spec reads them off the journal, so its
+   * reader (describeRefresh) is held to the words this file prints.
+   */
+  const journal = (r: Run) => r.stdout.split("\n").map((message, atUs) => ({ atUs, message }));
+
   /** A box crossing a pin whose doctor left codex and one more official plugin below it, and discord orphaned. */
   function leftBehind(): Box {
     const box = makeBox({ core: OLDER });
@@ -918,6 +944,8 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
       "      (not a ClawBox-managed plugin: refreshed without accepting new capabilities)",
       "      updated\n",
     ].join("\n"));
+    expect(describeRefresh(journal(r))).toBe(`codex reinstalled: @openclaw/codex@${TARGET}; `
+      + "7 rows: 2 already at the release, 3 reinstalled, 0 failed, 0 with no outcome printed");
     expect(cards(r)).toEqual([]);
     expect(r.marker).toMatch(new RegExp(`^target=${TARGET.replace(/\./g, "\\.")}\\n`));
     expect(r.events.at(-1)).toBe("START clawbox-gateway.service");
@@ -1031,6 +1059,32 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     expect(installs(r)).toEqual([`@openclaw/example@${TARGET}`]);
   });
 
+  it.each([
+    // The core's own lists (listBuiltRuntimeEntryCandidates): at each location
+    // .mts tries .mjs, .js, .cjs and .cts tries .cjs, .js, .mjs, the source
+    // extension read in any case.
+    ["an .mts entry whose .js the core reaches, empty, before a filled .mjs beside the source",
+      "./src/index.mts", { "dist/index.js": "", "src/index.mjs": "export default {};\n" }, true],
+    ["an .mts entry built to .js, an empty .cjs after it", "./src/index.mts",
+      { "dist/index.js": "export default {};\n", "dist/index.cjs": "" }, false],
+    ["a .cts entry built to .js, an empty .mjs after it", "./src/index.cts",
+      { "dist/index.js": "export default {};\n", "dist/index.mjs": "" }, false],
+    ["an .MTS entry built to .mjs", "./src/index.MTS", { "dist/index.mjs": "export default {};\n" }, false],
+  ])("judges %s by the peer the core would load", (_what, entry, files: Record<string, string>, reinstalled) => {
+    const box = makeBox({ core: OLDER });
+    const root = box.payload("npm/projects/ts/node_modules/@openclaw/example",
+      { name: "@openclaw/example", version: TARGET, openclaw: { extensions: [entry] } });
+    for (const [rel, text] of Object.entries(files)) {
+      mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
+      writeFileSync(path.join(root, rel), text);
+    }
+    box.plugins.push({ id: "example", origin: "global", status: "loaded", rootDir: root });
+    box.publish();
+    const r = run(box);
+    expect(r.status, r.stderr).toBe(0);
+    expect(installs(r)).toEqual(reinstalled ? [`@openclaw/example@${TARGET}`] : []);
+  });
+
   it("raises one card for a plugin ClawBox did not install that the core reports broken, and leaves it", () => {
     // The fast path refuses any plugin in an error state, so until it is fixed
     // every update takes the full path: the owner must be told why.
@@ -1137,12 +1191,43 @@ describe.skipIf(!hasPython3)("step_openclaw_install: the plugin refresh after do
     ].join("\n"));
     expect(r.stdout).not.toContain("will retry on next boot");
     expect(r.stdout).not.toMatch(/deadline|killed at/);
+    expect(describeRefresh(journal(r))).toBe(`codex failed: @openclaw/codex@${TARGET}; `
+      + "7 rows: 2 already at the release, 1 reinstalled, 2 failed, 0 with no outcome printed");
     expect(cards(r)).toEqual([
       `CLAWBOX-WARN[openclaw-plugin-refresh]: 2 plugin(s) were not updated to OpenClaw ${TARGET}: codex, example. The next update that moves OpenClaw tries them again.`,
     ]);
     // A failed reinstall is not a failed refresh: the full path finished.
     expect(r.marker).toMatch(new RegExp(`^target=${TARGET.replace(/\./g, "\\.")}\\n`));
     expect(r.events.at(-1)).toBe("START clawbox-gateway.service");
+  });
+
+  const LONG_CAUSE = `npm error ${"z".repeat(200)}`;
+  it.each([
+    ["said nothing", "", "The OpenClaw plugin install exited 1 and said nothing."],
+    ["said more than a line holds", LONG_CAUSE, `The OpenClaw plugin install exited 1: ${LONG_CAUSE.slice(0, 159)}…`],
+  ])("names a failed reinstall that %s", (_what, says, cause) => {
+    const r = run(leftBehind(), "step_openclaw_install", { INSTALL_FAILS: `@openclaw/example@${TARGET}`, INSTALL_SAYS: says });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(
+      `      WARN: not updated (non-fatal; the next update that moves OpenClaw retries it). ${cause}\n`);
+  });
+
+  it("reads a reinstall's output through a file, which a child the CLI leaves behind cannot hold", () => {
+    // A CLI that answers but leaves a child holding its stdout. Read through
+    // `$(…)`, bash would wait for that child, with the gateway quiesced. The
+    // child outlives the run's own cap, so the step returning at all, with the
+    // child still there, is the proof; afterEach ends it.
+    const box = leftBehind();
+    const r = run(box, "step_openclaw_install", { INSTALL_LEAVES_CHILD: `@openclaw/example@${TARGET}` });
+    // null: the run's cap ended a step that was still waiting.
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain([
+      `    - @openclaw/example@${TARGET}`,
+      "      (not a ClawBox-managed plugin: refreshed without accepting new capabilities)",
+      "      updated\n",
+    ].join("\n"));
+    const pid = Number(readFileSync(path.join(box.dir, "straggler"), "utf8"));
+    expect(() => process.kill(pid, 0), "the child the stand-in CLI left is still running").not.toThrow();
   });
 
   it("cannot print a journal line of its own from an id, a package name or a version", () => {
