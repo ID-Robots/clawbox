@@ -46,12 +46,15 @@ let newSha: string;
 const OLD_PIN = "2026.10.9";
 const NEW_PIN = "2026.11.5";
 
-/** The line install.sh defines `has_openclaw_harness` on, lifted as it is. */
-const HAS_OPENCLAW_HARNESS = (() => {
-  const m = /^has_openclaw_harness\(\) \{.*\}$/m.exec(INSTALL_SH);
-  if (!m) throw new Error("has_openclaw_harness not found in install.sh");
+/** A one-line function of install.sh, lifted as it is. */
+function lineFn(name: string): string {
+  const m = new RegExp(`^${name}\\(\\) \\{.*\\}$`, "m").exec(INSTALL_SH);
+  if (!m) throw new Error(`${name} not found in install.sh`);
   return m[0];
-})();
+}
+
+/** The edition predicates the checkout rule asks, as install.sh defines them. */
+const EDITION_PREDICATES = ["is_hermes_edition", "has_openclaw_harness", "installs_openclaw_harness"].map(lineFn).join("\n");
 
 /** The OpenClaw core installed in the fixture's npm prefix, as npm leaves its package.json. */
 function core(version: string): void {
@@ -89,7 +92,7 @@ function runStep(
     `PROJECT_DIR=${JSON.stringify(proj)}`,
     `NPM_PREFIX=${JSON.stringify(npmPrefix)}`,
     `CLAWBOX_EDITION=${JSON.stringify(edition)}`,
-    HAS_OPENCLAW_HARNESS,
+    EDITION_PREDICATES,
     "as_clawbox() { \"$@\"; }",
     "is_test_mode() { return 0; }",
     "for s in step_directories_permissions step_systemd_services step_ollama_install step_openclaw_patch step_openclaw_config step_clawkeep_install step_polkit_rules; do eval \"$s() { :; }\"; done",
@@ -105,6 +108,7 @@ function runStep(
     fn("rebuild_checkout_guard"),
     fn("served_build_commit"),
     shellFunctionIfPresent(INSTALL_SH, "openclaw_core_ahead_of_commit"),
+    shellFunctionIfPresent(INSTALL_SH, "keep_checkout_with_installed_core"),
     fn("restore_checkout_to_served_build"),
     // The rebuild skip (TASK-2517) has its own suite: here the build is never current.
     "forget_rebuild_kept_build() { :; }",
@@ -287,6 +291,13 @@ d("step_rebuild_reboot: never puts the checkout behind the installed OpenClaw co
     expect(git("rev-parse", "HEAD")).toBe(oldSha);
   });
 
+  it("keeps the checkout on the unified image's `unselected` lock, whose disk carries the core the update moved", () => {
+    core(NEW_PIN);
+    stamp(oldSha);
+    expect(runStep(3, undefined, { edition: "unselected" }).status).toBe(3);
+    expect(git("rev-parse", "HEAD")).toBe(newSha);
+  });
+
   it("still moves the checkout back on the Hermes edition, which runs no OpenClaw core", () => {
     core(NEW_PIN);
     stamp(oldSha);
@@ -319,7 +330,7 @@ d("keep_checkout_with_installed_core: the in-app updater's rollback target", () 
       `PROJECT_DIR=${JSON.stringify(proj)}`,
       `NPM_PREFIX=${JSON.stringify(npmPrefix)}`,
       "CLAWBOX_EDITION=openclaw",
-      HAS_OPENCLAW_HARNESS,
+      EDITION_PREDICATES,
       asClawbox,
       fn("served_build_commit"),
       shellFunctionIfPresent(INSTALL_SH, "openclaw_core_ahead_of_commit"),
@@ -376,9 +387,11 @@ d("keep_checkout_with_installed_core: the in-app updater's rollback target", () 
     expect(fs.readdirSync(path.dirname(configPath()))).toEqual(["config.json"]);
   });
 
-  it("never replaces a write the dashboard made between its read and its rename", () => {
+  it("keeps a store write that lands before the re-read, and the target with it", () => {
     // The store rewrites data/config.json without a lock. Here a write lands
-    // right after the new copy is written and before it would be renamed in.
+    // right after the new copy is written, before the re-read ahead of the
+    // rename. (One that lands between that re-read and the rename is replaced:
+    // install.sh's comment names that window.)
     const preload = path.join(tmp, "store-writes-meanwhile.cjs");
     fs.writeFileSync(preload, [
       "const fs = require(\"fs\");",
@@ -428,5 +441,17 @@ d("keep_checkout_with_installed_core: the in-app updater's rollback target", () 
     expect(r.status, r.err).toBe(0);
     expect(r.out).toContain("REACHED_END");
     expect(r.err).toMatch(/Warning: .*rollback target/);
+  });
+
+  it("drops a target a straddling store write put back, once more before the rebuild", () => {
+    // The record is in data/config.json again when the rebuild step starts,
+    // as a store write that read the file before an earlier drop leaves it.
+    writeConfig({ setup_complete: true, [UPDATE_ROLLBACK_KEY]: target() });
+    core(NEW_PIN);
+    stamp(oldSha);
+    const r = runStep(3);
+    expect(JSON.parse(fs.readFileSync(configPath(), "utf-8"))).toEqual({ setup_complete: true });
+    expect(r.status).toBe(3);
+    expect(git("rev-parse", "HEAD")).toBe(newSha);
   });
 });

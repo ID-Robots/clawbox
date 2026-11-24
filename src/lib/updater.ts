@@ -6824,7 +6824,8 @@ async function resumeContinuation(): Promise<boolean> {
     // The rebuild failed and the previous build is what came back up: move the
     // checkout back to it rather than leave new code beside an old build —
     // unless install.sh dropped the record because the update had already moved
-    // the OpenClaw core past that build's pin (update-checkout-rollback.ts).
+    // the OpenClaw core past that build's pin (update-checkout-rollback.ts; not
+    // on an x64 PC, whose core step keeps the record).
     await rollBackCheckoutIfStranded();
     await clearUpdateLock();
     return false;

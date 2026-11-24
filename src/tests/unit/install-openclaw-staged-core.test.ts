@@ -697,6 +697,8 @@ exit 0
     /** The real functions in place of the harness's stub, on the fixture checkout. */
     const realKeep = (project: string, extra = "") => [
       `PROJECT_DIR=${JSON.stringify(project)}`,
+      // One line in install.sh; the harness's is_hermes_edition says openclaw.
+      /^installs_openclaw_harness\(\) \{.*\}$/m.exec(INSTALL_SH)?.[0] ?? "",
       shellFunction("served_build_commit"),
       shellFunctionIfPresent(INSTALL_SH, "openclaw_core_ahead_of_commit"),
       shellFunctionIfPresent(INSTALL_SH, "keep_checkout_with_installed_core"),
@@ -748,6 +750,34 @@ exit 0
         expect(r.status, r.stderr + r.stdout).toBe(0);
         expect(r.stdout).toContain("OpenClaw refresh: fast path");
         expect(p.calls().some((c) => c.startsWith("npm "))).toBe(false);
+      } finally {
+        rmSync(p.dir, { recursive: true, force: true });
+      }
+    });
+
+    it("drops it once more after doctor when a straddling store write put it back after the promote", () => {
+      // The drop right after the promote is followed, here, by the record
+      // coming back, as a store write that read data/config.json before that
+      // drop leaves it. Doctor then does not finish, so the step fails.
+      const p = makePrefix({});
+      try {
+        const { project, config } = served(p);
+        const straddle = [
+          "openclaw_version_is_v2() { return 0; }",
+          "openclaw_migration_complete() { return 1; }",
+          'eval "$(declare -f keep_checkout_with_installed_core | sed \'1s/^keep_checkout_with_installed_core /__real_keep /\')"',
+          "__keeps=0",
+          "keep_checkout_with_installed_core() {",
+          "  __real_keep",
+          "  __keeps=$((__keeps + 1))",
+          // The second call is the one after the promote.
+          `  [ "$__keeps" -ne 2 ] || python3 -I -c 'import json, sys; f = sys.argv[1]; c = json.load(open(f)); c["${TARGET_KEY}"] = "{}"; json.dump(c, open(f, "w"))' ${JSON.stringify(config)}`,
+          "}",
+        ].join("\n");
+        const r = runStep(p, { npm: "ok", errexit: true, prelude: realKeep(project, straddle) });
+        expect(targetOf(config)).toBeUndefined();
+        expect(r.status).toBe(1);
+        expect(r.stderr).toMatch(/OpenClaw migration did not complete/);
       } finally {
         rmSync(p.dir, { recursive: true, force: true });
       }

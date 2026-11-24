@@ -8687,6 +8687,10 @@ step_openclaw_install() {
       fi
       echo "  Running openclaw doctor --fix again (pass 2 of 2) after: $_oc_doctor_conflict; $((SECONDS - _oc_step_started))s into the step"
     done
+    # Once more, whatever doctor answered: a dashboard write that straddled the
+    # drop after the promote can have put the record back (see
+    # keep_checkout_with_installed_core).
+    keep_checkout_with_installed_core
     if ! openclaw_migration_complete "$_oc_doctor_rc" "$_oc_doctor_out"; then
       openclaw_record_migration_verdict incomplete "$_oc_live_pkg"
       # A recognised doctor line, or the exit code; never doctor's free last
@@ -15898,14 +15902,16 @@ served_build_commit() {
 # --fix, step_openclaw_install), and the core it replaced is gone by then. A
 # checkout put back on such a commit runs that commit's gateway pre-start,
 # plugin pins and dashboard against a core it was never released with, until
-# the next update. Prints "<installed> <pin>" on proof only: a box whose
-# gateway runs OpenClaw, both versions read, both plain release numbers (a
-# dist-tag or a prerelease is not compared), the installed one higher. Every
-# other answer is no, which leaves the caller's move as it was.
+# the next update. Prints "<installed> <pin>" on proof only: an edition whose
+# disk carries the OpenClaw core step_openclaw_install promotes (every one but
+# Hermes, the unified image's `unselected` lock included), both versions read,
+# both plain release numbers (a dist-tag or a prerelease is not compared), the
+# installed one higher. Every other answer is no, which leaves the caller's
+# move as it was.
 openclaw_core_ahead_of_commit() {
   local commit="${1:-}" installed pin release='^[0-9]+(\.[0-9]+)*(-[0-9]+)?$'
   case "$commit" in ""|*[!0-9a-f]*) return 1 ;; esac
-  has_openclaw_harness || return 1
+  installs_openclaw_harness || return 1
   installed="$(as_clawbox python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("version") or "")' \
     "$NPM_PREFIX/lib/node_modules/openclaw/package.json" 2>/dev/null || true)"
   pin="$(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" show "$commit:config/openclaw-target.txt" 2>/dev/null \
@@ -15926,11 +15932,17 @@ openclaw_core_ahead_of_commit() {
 # account, whose file it is, under a name of its own (the store renames
 # config.json.tmp into place), in the bytes and mode the store's own delete
 # leaves. The store rewrites the file without a lock, and nothing here can take
-# one the older release's store would honour: a write that lands before the
-# re-read just ahead of the rename is kept, and so is the record, as it was; one
-# that lands between that re-read and the rename is replaced. Never fails the
-# step: the core is in place either way, and a record that stays only brings
-# the old move back.
+# one the older release's store would honour, so two windows stay open: a
+# store write that lands between the re-read just ahead of the rename and the
+# rename itself is replaced (one that lands before the re-read is kept, and so
+# is the record); and a store write that read the file before the rename and
+# lands after it puts the record back. The second is why the record is asked
+# for again after doctor and before the rebuild: a pass that finds no record
+# writes nothing, so only a pass that dropped one can be straddled. Never
+# fails the step: the core is in place either way, and a record that stays
+# only brings the old move back. install.sh's own boxes only: the x64 paths
+# (install-x64.sh, the desktop integration) move their core elsewhere and keep
+# the dashboard's move.
 keep_checkout_with_installed_core() {
   local built ahead rc=0
   built="$(served_build_commit)"
@@ -16032,6 +16044,9 @@ _REBUILD_PREV_EXIT_TRAP=""
 _rebuild_trap_cmd() { printf '%s' "${2:-}"; }
 arm_rebuild_checkout_guard() {
   local prev
+  # The dashboard's half of the guard, asked once more before the build: a
+  # store write that straddled an earlier drop can have put its record back.
+  keep_checkout_with_installed_core
   prev="$(trap -p EXIT)"
   _REBUILD_PREV_EXIT_TRAP=""
   if [ -n "$prev" ]; then _REBUILD_PREV_EXIT_TRAP="$(eval "_rebuild_trap_cmd ${prev#trap }")"; fi
