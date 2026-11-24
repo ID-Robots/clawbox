@@ -673,6 +673,18 @@ describe("over a row of monitors", () => {
       setDeskScreens([scr("a", 0, 0, 200, 150, true), scr("b", 200, 0, 200, 150)]);
       expect(fitPlacedWindow({ x: 0, y: 0, width: 800, height: 600 })).toEqual({ width: 400, height: MIN_WINDOW_HEIGHT });
       expect(fitPlacedWindow({ x: 0, y: 0, width: 100, height: 100 })).toEqual({ width: MIN_WINDOW_WIDTH, height: MIN_WINDOW_HEIGHT });
+      // Not even by rounding: at devicePixelRatio 1.331 the nearest device
+      // pixel to 300 x 200 is under it, and a saved size under it is refused.
+      Object.defineProperty(window, "devicePixelRatio", { value: 1.331, configurable: true });
+      try {
+        const fitted = fitPlacedWindow({ x: 0, y: 0, width: 100, height: 100 });
+        expect(fitted.width).toBeGreaterThanOrEqual(MIN_WINDOW_WIDTH);
+        expect(fitted.height).toBeGreaterThanOrEqual(MIN_WINDOW_HEIGHT);
+        expect(fitted.width - MIN_WINDOW_WIDTH).toBeLessThan(1 / 1.331);
+        expect(fitted.height - MIN_WINDOW_HEIGHT).toBeLessThan(1 / 1.331);
+      } finally {
+        Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
+      }
     });
   });
 
