@@ -277,6 +277,8 @@ function program(box: Box, entry: string, lift: string[] = []): string {
     "ensure_clawbox_bashrc_path() { event BASHRC; }",
     "ensure_openclaw_node_engine() { event NODE_ENGINE; }",
     "remove_shadowing_system_openclaw() { event SHADOW_CLEANUP; }",
+    // Its own suite: install-rebuild-checkout-rollback.test.ts.
+    "keep_checkout_with_installed_core() { :; }",
     "chown() { :; }",
     shellFunction("hand_over_home_path"),
     "flush_core_to_disk() { :; }",

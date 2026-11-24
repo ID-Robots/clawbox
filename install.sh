@@ -7873,8 +7873,8 @@ promote_staged_openclaw_core() {
   local live="$NPM_PREFIX/lib/node_modules/openclaw"
   local previous="$NPM_PREFIX/lib/node_modules/.openclaw-previous"
   local entry name
-  # This is called as `promote … || return 1`, which switches errexit OFF for
-  # its whole body: every step below that can fail is checked by hand.
+  # This is called as `promote … || …`, which switches errexit OFF for its
+  # whole body: every step below that can fail is checked by hand.
   # THE FLUSH IS THE POINT. npm's writes sit in the page cache until the kernel
   # gets round to them (ext4's delayed allocation, seconds to tens of seconds):
   # on 2026-09-16 npm exited 0 at 21:31:02, the box stopped at ~21:31:07-35,
@@ -8472,6 +8472,11 @@ step_openclaw_install() {
   # A core an earlier swap parked is a core, not an absence.
   recover_parked_openclaw_core
 
+  # A core an earlier update already moved past the pin of the served build's
+  # commit, on the fast path too: see keep_checkout_with_installed_core. Asked
+  # again after this run's own promote, below.
+  keep_checkout_with_installed_core
+
   if [ -x "$OPENCLAW_BIN" ]; then
     local INSTALLED INSTALLED_VER
     # `openclaw --version` prints "OpenClaw X.Y.Z (hash)"; extract field 2 so
@@ -8605,7 +8610,12 @@ step_openclaw_install() {
       echo "Error: ${OPENCLAW_MIGRATION_REFUSAL:-OpenClaw $TARGET cannot take over the databases on this box (too old for them, or not enough free disk for their migration); the core on the box is untouched}" >&2
       return 1
     fi
-    promote_staged_openclaw_core "$_oc_stage" || return 1
+    # Asked again whatever the promote answered: it can fail after the new tree
+    # went live.
+    local _oc_promote_rc=0
+    promote_staged_openclaw_core "$_oc_stage" || _oc_promote_rc=$?
+    keep_checkout_with_installed_core
+    [ "$_oc_promote_rc" -eq 0 ] || return 1
     echo "  OpenClaw installed: $_oc_version_out"
   fi
 
@@ -15883,6 +15893,91 @@ served_build_commit() {
   printf '%s' "$built"
 }
 
+# Is the OpenClaw core installed now NEWER than the one commit $1 pins? An
+# update that moves the core forward migrates its databases on the way (doctor
+# --fix, step_openclaw_install), and the core it replaced is gone by then. A
+# checkout put back on such a commit runs that commit's gateway pre-start,
+# plugin pins and dashboard against a core it was never released with, until
+# the next update. Prints "<installed> <pin>" on proof only: a box whose
+# gateway runs OpenClaw, both versions read, both plain release numbers (a
+# dist-tag or a prerelease is not compared), the installed one higher. Every
+# other answer is no, which leaves the caller's move as it was.
+openclaw_core_ahead_of_commit() {
+  local commit="${1:-}" installed pin release='^[0-9]+(\.[0-9]+)*(-[0-9]+)?$'
+  case "$commit" in ""|*[!0-9a-f]*) return 1 ;; esac
+  has_openclaw_harness || return 1
+  installed="$(as_clawbox python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("version") or "")' \
+    "$NPM_PREFIX/lib/node_modules/openclaw/package.json" 2>/dev/null || true)"
+  pin="$(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" show "$commit:config/openclaw-target.txt" 2>/dev/null \
+    | head -n 1 | awk '{print $1}' || true)"
+  [[ "$installed" =~ $release && "$pin" =~ $release ]] || return 1
+  [ "$installed" != "$pin" ] || return 1
+  [ "$(printf '%s\n' "$pin" "$installed" | sort -V | tail -n 1)" = "$installed" ] || return 1
+  printf '%s %s\n' "$installed" "$pin"
+}
+
+# The in-app updater's half of the same rule. Before step 1 it records the
+# commit a failed run puts the checkout back on (update_rollback_target in
+# data/config.json, src/lib/update-checkout-rollback.ts), and on the first
+# update from an older release it is THAT release's code that acts on the
+# record, which nothing in this tree can change. So the record goes once the
+# core installed now is newer than the served build's commit pins: with none,
+# the updater leaves the checkout on this tree. Written as the service
+# account, whose file it is, under a name of its own (the store renames
+# config.json.tmp into place), in the bytes and mode the store's own delete
+# leaves. The store rewrites the file without a lock, so the rename only ever
+# replaces the bytes that were read: a write that landed in between is kept,
+# and so is the record, as it was. Never fails the step: the core is in place
+# either way, and a record that stays only brings the old move back.
+keep_checkout_with_installed_core() {
+  local built ahead rc=0
+  built="$(served_build_commit)"
+  ahead="$(openclaw_core_ahead_of_commit "$built")" || return 0
+  if [ -f "$PROJECT_DIR/data/config.json" ]; then
+    as_clawbox env CLAWBOX_CFG="$PROJECT_DIR/data/config.json" node - <<'NODE' || rc=$?
+  const fs = require("fs");
+  const path = require("path");
+  const file = process.env.CLAWBOX_CFG;
+  const key = "update_rollback_target";
+  // Named by class only: this file holds the box's tokens.
+  const fail = (what, err) => {
+    process.stderr.write(`  Warning: could not ${what} ${file} (${(err && (err.code || err.name)) || "error"})\n`);
+    process.exit(1);
+  };
+  let raw;
+  let config;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+    config = JSON.parse(raw);
+  } catch (err) {
+    fail("read", err);
+  }
+  if (!config || typeof config !== "object" || Array.isArray(config)) fail("use", { name: "not a JSON object" });
+  if (!Object.prototype.hasOwnProperty.call(config, key)) {
+    process.stdout.write("  No checkout rollback target is recorded in data/config.json\n");
+    process.exit(0);
+  }
+  delete config[key];
+  const tmp = path.join(path.dirname(file), `.config.json.${process.pid}.rollback`);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600, flag: "wx" });
+    if (fs.readFileSync(file, "utf8") !== raw) throw Object.assign(new Error(), { name: "it changed meanwhile" });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* never written */ }
+    fail("rewrite", err);
+  }
+  process.stdout.write("  Dropped the updater's checkout rollback target from data/config.json\n");
+NODE
+  fi
+  if [ "$rc" -eq 0 ]; then
+    echo "  OpenClaw ${ahead% *} is in place, newer than the ${ahead#* } that ${built:0:7} (the served build's commit) pins: from here a failed update leaves the checkout where it is"
+  else
+    echo "  Warning: could not check or drop the updater's checkout rollback target in data/config.json; a failed update may move the checkout back behind OpenClaw ${ahead% *}" >&2
+  fi
+  return 0
+}
+
 # Put the checkout back on the commit the served build was made from, after a
 # rebuild failed and do_rebuild restored the previous build (TASK-1427).
 #
@@ -15894,11 +15989,14 @@ served_build_commit() {
 # This runs in the NEW code's own shell, so it does not depend on the running
 # build. Same rule as the dashboard's and as scripts/force-update.sh: only a
 # commit the served build's own stamp names, only when HEAD has moved off it,
-# only when git still has that commit. Never fatal — the caller is failing
-# already and this must not mask its exit code.
+# only when git still has that commit. And never a commit that pins an older
+# OpenClaw than the one installed now (openclaw_core_ahead_of_commit), the rule
+# the dashboard's rollback gets from keep_checkout_with_installed_core dropping
+# its record. Never fatal — the caller is failing already and this must not
+# mask its exit code.
 restore_checkout_to_served_build() {
   [ -d "$PROJECT_DIR/.git" ] || return 0
-  local built head
+  local built head ahead
   built="$(served_build_commit)"
   case "$built" in
     ""|*[!0-9a-f]*) echo "  Checkout left as is: the served build carries no commit stamp"; return 0 ;;
@@ -15910,6 +16008,12 @@ restore_checkout_to_served_build() {
   if [ "$head" = "$built" ]; then return 0; fi
   if ! as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" cat-file -e "$built^{commit}" 2>/dev/null; then
     echo "  Warning: the served build's commit ${built:0:7} is not in this checkout; the checkout stays on ${head:0:7}" >&2
+    return 0
+  fi
+  # The box then serves the old build over this checkout: drift the dashboard
+  # reports, and the next update repairs by building this checkout.
+  if ahead="$(openclaw_core_ahead_of_commit "$built")"; then
+    echo "  Checkout left on ${head:0:7}: OpenClaw ${ahead% *} is installed and ${built:0:7}, the commit the restored build was made from, pins the older ${ahead#* }. Run the update again to finish it"
     return 0
   fi
   echo "  Moving the checkout back from ${head:0:7} to ${built:0:7}, the commit the restored build was made from"

@@ -133,6 +133,8 @@ ${fn("promote_staged_openclaw_core")}
 # Stubbed, never lifted: the step calls it with no arguments, which means the
 # REAL /usr and /usr/local (install-shadowing-system-openclaw.test.ts).
 remove_shadowing_system_openclaw() { :; }
+# Its own suite: install-rebuild-checkout-rollback.test.ts.
+keep_checkout_with_installed_core() { :; }
 openclaw_migration_disk_preflight() { return 0; }
 openclaw_record_migration_verdict() { :; }
 ${fn("step_openclaw_install")}

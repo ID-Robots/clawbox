@@ -18,6 +18,12 @@
 #      must be left working: the dashboard serves /login, the gateway settles,
 #      the build it serves names the commit it has checked out (no drift: the
 #      rollback put back both, or neither), and a chat turn answers.
+#      One exception, by design: an update that had already moved the OpenClaw
+#      core past the pin of the restored build's commit keeps the checkout on
+#      the branch (install.sh openclaw_core_ahead_of_commit), so the release's
+#      build is served over the branch's checkout until the next update. In
+#      every case the checkout must never pin an older core than the one
+#      installed.
 #
 # Skipped without NANO_BRANCH. The board is left on the release (or wherever
 # the rollback left it); 90-upgrade-from-release updates it from there.
@@ -78,11 +84,33 @@ LOGIN=$(board 'for _ in $(seq 1 24); do c=$(curl -sS -o /dev/null -w "%{http_cod
 if [ "$LOGIN" = 200 ]; then ok "dashboard still serves /login"; else not_ok "dashboard answered /login with ${LOGIN:-nothing} after the rollback"; fi
 HEAD1=$(board_head)
 note "checkout after the failed update: ${HEAD1:0:12} (was ${HEAD0:0:12})"
+# The installed OpenClaw core, the commit the served build names, and the pins
+# of that commit and of the checkout ("-" for what cannot be read).
+# shellcheck disable=SC2016  # expanded on the board
+read -r CORE BUILT BUILT_PIN HEAD_PIN <<<"$(board '
+  built=$(sed -n "s/.*\"commit\"[[:space:]]*:[[:space:]]*\"\([0-9a-f]*\)\".*/\1/p" "$REPO/.next/standalone/.next/build-info.json" 2>/dev/null | head -n 1)
+  core=$("$HOME/.npm-global/bin/openclaw" --version 2>/dev/null | awk "NR == 1 {print \$2}")
+  pin_of() { [ -n "$1" ] && git -C "$REPO" show "$1:config/openclaw-target.txt" 2>/dev/null | head -n 1 | awk "{print \$1}"; }
+  bp=$(pin_of "$built" || true); hp=$(pin_of HEAD || true)
+  echo "${core:--} ${built:--} ${bp:--} ${hp:--}"
+' | tail -n 1)"
+note "OpenClaw core ${CORE:--}; served build ${BUILT:0:12} pins ${BUILT_PIN:--}; checkout pins ${HEAD_PIN:--}"
+# Is $1 a plain release number strictly newer than $2?
+core_newer() {
+  local release='^[0-9]+(\.[0-9]+)*(-[0-9]+)?$'
+  [[ $1 =~ $release && $2 =~ $release ]] && [ "$1" != "$2" ] \
+    && [ "$(printf '%s\n' "$2" "$1" | sort -V | tail -n 1)" = "$1" ]
+}
 IDENT=$(build_identity_ok); rc=$?
 if [ "$rc" -eq 0 ]; then
   ok "the served build names the checked-out commit: $(tail -n 1 <<<"$IDENT")"
+elif core_newer "$CORE" "$BUILT_PIN" && [ "$HEAD1" != "$BUILT" ] && [ "$HEAD1" != "$HEAD0" ]; then
+  ok "checkout kept on ${HEAD1:0:12} with OpenClaw $CORE, newer than the $BUILT_PIN the restored build's commit ${BUILT:0:12} pins: the old build over the new checkout until the next update, by design"
 else
   not_ok "drift after the rollback: the served build is not the checked-out commit ${HEAD1:0:12}: $(tr '\n' ' ' <<<"$IDENT" | cut -c1-200)"
+fi
+if core_newer "$CORE" "$HEAD_PIN"; then
+  not_ok "the checkout ${HEAD1:0:12} pins OpenClaw $HEAD_PIN, older than the $CORE installed: it was moved back behind the core"
 fi
 runtime_chat_turn
 finish

@@ -373,6 +373,9 @@ exit 0
       'openclaw_refresh_fast_path_check() { OPENCLAW_REFRESH_WHY="fixture: full path"; return 1; }',
       "openclaw_refresh_marker_clear() { :; }",
       "openclaw_refresh_marker_write() { :; }",
+      // The checkout half of a core move: the cases at the bottom of this file
+      // run the real one through `prelude`.
+      "keep_checkout_with_installed_core() { :; }",
       shellFunction("step_openclaw_install").replace(/\n  # The plugin refresh after doctor[\s\S]*$/, "\n}"),
       opts.prelude ?? "",
       ...(opts.account ? ["__ao_lock"] : []),
@@ -651,5 +654,115 @@ exit 0
     } finally {
       rmSync(p.dir, { recursive: true, force: true });
     }
+  });
+
+  /**
+   * From the promote on, the core is newer than the one the served build's
+   * commit pins, and a failed update must not put the checkout back on that
+   * commit. The in-app updater does that from the target it recorded in
+   * data/config.json before step 1, so the step drops it (the rest is in
+   * install-rebuild-checkout-rollback.test.ts).
+   */
+  describe("keeps the checkout with a promoted core", () => {
+    const TARGET_KEY = "update_rollback_target";
+
+    /** A checkout whose one commit pins `pin` (the core on the box now, by default), served by a build stamped with it. */
+    function served(p: Prefix, pin = "2026.7.1"): { project: string; config: string } {
+      const project = path.join(p.dir, "clawbox");
+      mkdirSync(path.join(project, "config"), { recursive: true });
+      writeFileSync(path.join(project, "config", "openclaw-target.txt"), `${pin}\n`);
+      const git = (...args: string[]) => {
+        const r = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-C", project, ...args], {
+          encoding: "utf-8",
+          env: { ...process.env, HOME: p.dir, GIT_CONFIG_NOSYSTEM: "1" },
+        });
+        if (r.status !== 0) throw new Error(`git ${args.join(" ")}: ${r.stderr}`);
+        return r.stdout.trim();
+      };
+      git("init", "-q");
+      git("add", "-A");
+      git("commit", "-q", "-m", "served");
+      const commit = git("rev-parse", "HEAD");
+      mkdirSync(path.join(project, ".next", "standalone", ".next"), { recursive: true });
+      writeFileSync(path.join(project, ".next", "standalone", ".next", "build-info.json"), JSON.stringify({ commit }));
+      const config = path.join(project, "data", "config.json");
+      mkdirSync(path.dirname(config), { recursive: true });
+      writeFileSync(config, JSON.stringify({
+        setup_complete: true,
+        [TARGET_KEY]: JSON.stringify({ commit, branch: "main", recordedAt: "2026-11-01T00:00:00.000Z" }),
+      }, null, 2), { mode: 0o600 });
+      return { project, config };
+    }
+
+    /** The real functions in place of the harness's stub, on the fixture checkout. */
+    const realKeep = (project: string, extra = "") => [
+      `PROJECT_DIR=${JSON.stringify(project)}`,
+      shellFunction("served_build_commit"),
+      shellFunctionIfPresent(INSTALL_SH, "openclaw_core_ahead_of_commit"),
+      shellFunctionIfPresent(INSTALL_SH, "keep_checkout_with_installed_core"),
+      extra,
+    ].join("\n");
+
+    /** The promote, reporting a failure after it ran (`real`) or without running at all. */
+    const failingPromote = (real: boolean) => [
+      'eval "$(declare -f promote_staged_openclaw_core | sed \'1s/^promote_staged_openclaw_core /__real_promote /\')"',
+      `promote_staged_openclaw_core() { ${real ? "__real_promote \"$@\"; " : ""}return 1; }`,
+    ].join("\n");
+
+    const targetOf = (config: string) => (JSON.parse(readFileSync(config, "utf-8")) as Record<string, unknown>)[TARGET_KEY];
+
+    it("drops the in-app updater's rollback target once the promoted core is newer than the served build's pin, under errexit", () => {
+      const p = makePrefix({});
+      try {
+        const { project, config } = served(p);
+        const r = runStep(p, { npm: "ok", errexit: true, prelude: realKeep(project) });
+        expect(targetOf(config)).toBeUndefined();
+        expect(r.status, r.stderr + r.stdout).toBe(0);
+        expect(JSON.parse(readFileSync(config, "utf-8"))).toEqual({ setup_complete: true });
+      } finally {
+        rmSync(p.dir, { recursive: true, force: true });
+      }
+    });
+
+    it("drops it too when the promote fails after the new core went live", () => {
+      const p = makePrefix({});
+      try {
+        const { project, config } = served(p);
+        const r = runStep(p, { npm: "ok", errexit: true, prelude: realKeep(project, failingPromote(true)) });
+        expect(targetOf(config)).toBeUndefined();
+        expect(r.status).toBe(1);
+      } finally {
+        rmSync(p.dir, { recursive: true, force: true });
+      }
+    });
+
+    it("drops it on the fast path when an earlier update already moved the core past the served build's pin", () => {
+      // The core is at this checkout's pin (2026.7.1), so nothing is installed
+      // and the fast path returns early; the served build's commit pins older.
+      const p = makePrefix({});
+      try {
+        const { project, config } = served(p, "2026.6.1");
+        const fastPath = 'openclaw_refresh_fast_path_check() { OPENCLAW_REFRESH_WHY="fixture: fast path"; return 0; }';
+        const r = runStep(p, { npm: "ok", pin: "2026.7.1", errexit: true, prelude: realKeep(project, fastPath) });
+        expect(targetOf(config)).toBeUndefined();
+        expect(r.status, r.stderr + r.stdout).toBe(0);
+        expect(r.stdout).toContain("OpenClaw refresh: fast path");
+        expect(p.calls().some((c) => c.startsWith("npm "))).toBe(false);
+      } finally {
+        rmSync(p.dir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps it when the promote failed with the previous core still in place", () => {
+      const p = makePrefix({});
+      try {
+        const { project, config } = served(p);
+        const r = runStep(p, { npm: "ok", errexit: true, prelude: realKeep(project, failingPromote(false)) });
+        expect(r.status).toBe(1);
+        expect(targetOf(config)).toBeDefined();
+      } finally {
+        rmSync(p.dir, { recursive: true, force: true });
+      }
+    });
   });
 });

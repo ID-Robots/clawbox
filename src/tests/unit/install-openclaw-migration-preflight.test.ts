@@ -197,6 +197,8 @@ ln -s ../lib/node_modules/openclaw/openclaw.mjs "$stage/bin/openclaw"
     // The probes install.sh asks as the service account (runuser -u … -- cmd…).
     'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; "$@"; }',
     "remove_shadowing_system_openclaw() { :; }",
+    // Its own suite: install-rebuild-checkout-rollback.test.ts.
+    "keep_checkout_with_installed_core() { :; }",
     shellFunction("recover_parked_openclaw_core"),
     shellFunction("promote_staged_openclaw_core"),
     shellFunction("openclaw_migration_complete"),

@@ -18,6 +18,12 @@
  * When a new build is in place (the failure came after the rebuild) nothing
  * moves: build and checkout already agree.
  *
+ * Nor once the update has moved the OpenClaw core past the pin of the recorded
+ * commit: install.sh drops the record then (keep_checkout_with_installed_core),
+ * because that commit's code would run against a core it was never released
+ * with. The box keeps the new checkout beside the old build, which the next
+ * update rebuilds.
+ *
  * Dependencies are injected so the decision logic is testable without git.
  */
 
