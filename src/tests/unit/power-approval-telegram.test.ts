@@ -18,7 +18,9 @@ vi.mock("@/lib/email-approval-telegram", () => ({
 // Only the update action reaches the updater.
 const startUpdate = vi.hoisted(() => vi.fn(() => ({ started: true })));
 const inFlight = vi.hoisted(() => vi.fn(async () => false));
-vi.mock("@/lib/updater", () => ({ startUpdate, startWouldOverlapUpdate: inFlight }));
+vi.mock("@/lib/updater", () => ({
+  startUpdate, startWouldOverlapUpdate: inFlight, UPDATE_ALREADY_IN_PROGRESS: "Update already in progress",
+}));
 vi.mock("@/lib/update-whats-new-server", () => ({ prefetchUpdateWhatsNew: async () => undefined }));
 import { requestPowerApproval, pendingPowerApproval, resolvePowerApproval, applyPowerApprovalCallback } from "@/lib/power-approval";
 

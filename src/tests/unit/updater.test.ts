@@ -51,9 +51,14 @@ vi.mock("@/lib/openclaw-maintenance", async (importOriginal) => {
 // through the link `postbuild` writes for the NESTED standalone layout, so a
 // mock without it would make every case that reaches the entry throw inside
 // readBuildId's `try` and answer "" — i.e. pass for the wrong reason.
+// `rm` so a case can see what the updater removes, and when (the handover
+// marker). It throws as the absent function it replaces did unless a case
+// says otherwise: runs that other cases leave going end where they always did,
+// instead of dispatching root steps into the cases after them.
 vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
   realpath: vi.fn(),
+  rm: vi.fn(() => { throw new TypeError("rm is not a function"); }),
 }));
 
 // `existsSync` is how readBuildId decides WHICH tree the server runs from — the
@@ -255,6 +260,7 @@ const mockExec = vi.mocked(childProcess.exec);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockReadFile = vi.mocked(fs.readFile);
 const mockRealpath = vi.mocked(fs.realpath);
+const mockRm = vi.mocked(fs.rm);
 const mockExists = vi.mocked(existsSync);
 const mockGatewayUp = vi.mocked(waitForPortOpen);
 const mockSpawn = vi.mocked(childProcess.spawn);
@@ -5979,6 +5985,8 @@ describe("updater", () => {
     const THIS_RUN_ERROR = "Error: rebuild failed (exit 137) — bun run build was killed by signal 9 "
       + "(no OOM kill in the kernel log; a stop, a timeout or an operator looks the same).";
     const NO_NEW_BUILD = "ClawBox restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
+    /** A unit's `active` when systemd does not answer the ActiveState question at all. */
+    const NO_ANSWER = "(systemd did not answer)";
     interface RestoredBox {
       /** The rebuild unit, which a case moves on; still running unless it says otherwise. */
       unit?: { active: string; result: string };
@@ -6007,7 +6015,9 @@ describe("updater", () => {
       });
       setupExecFileMock({
         ...options.exec,
-        [`show ${REBUILD_UNIT} -p ActiveState`]: () => ({ stdout: `${unit.active}\n`, stderr: "" }),
+        [`show ${REBUILD_UNIT} -p ActiveState`]: () => (unit.active === NO_ANSWER
+          ? new Error("Failed to connect to bus: Connection timed out")
+          : { stdout: `${unit.active}\n`, stderr: "" }),
         [`show ${REBUILD_UNIT} -p Result`]: () => ({ stdout: `${unit.result}\n`, stderr: "" }),
         "/usr/bin/journalctl": journalctlModel({ [REBUILD_UNIT]: journal }),
         ping: { stdout: "", stderr: "" },
@@ -6389,28 +6399,54 @@ describe("updater", () => {
       }
     });
 
-    it("still lets a run this process saw fail start again, though it left its flag on disk", async () => {
-      // Its rebuild step could not be dispatched: the flag was written and
-      // nothing clears it, and the failed card offers Try again — which must
-      // start, as it always could. Only a restarted process, which shows "idle"
-      // until its first ask, reads that flag as an update in flight.
-      setupExecFileMock({
-        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
-          stderr: "sudo: a password is required\n",
-        }),
-        ping: { stdout: "", stderr: "" },
-        systemctl: { stdout: "", stderr: "" },
+    /** The rebuild dispatch, answered as a case says; the run settles when it fails. */
+    const failedDispatch = (error: Error) => setupExecFileMock({
+      "--no-block rebuild_reboot": error,
+      ping: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+    });
+    const flagWrites = () => mockSetMany.mock.calls
+      .map(([entries]) => entries as Record<string, unknown>)
+      .filter((entries) => "update_needs_continuation" in entries)
+      .map((entries) => entries.update_needs_continuation);
+
+    it("clears its flag when the rebuild step was refused before systemd could queue it, and keeps the refusal as the reason", async () => {
+      // Nothing will restart this server, so the flag would only hold every later
+      // start and every background job off until it did.
+      failedDispatch(Object.assign(new Error("sudo: a password is required"), { stderr: "sudo: a password is required\n" }));
+      // The clear itself cannot be written: the step still says why it failed.
+      mockSetMany.mockImplementation(async (entries: Record<string, unknown>) => {
+        if ("update_needs_continuation" in entries && entries.update_needs_continuation === undefined) {
+          throw new Error("ENOSPC: no space left on device, write");
+        }
       });
       try {
         updater.resetUpdateState();
         updater.startUpdate();
         await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
-        const flagWrites = mockSetMany.mock.calls
-          .map(([entries]) => entries as Record<string, unknown>)
-          .filter((entries) => "update_needs_continuation" in entries)
-          .map((entries) => entries.update_needs_continuation);
-        expect(flagWrites).toEqual([expect.any(String)]);
-        mockGet.mockImplementation(async (key: string) => (key === "update_needs_continuation" ? flagWrites[0] : undefined));
+        expect(flagWrites()).toEqual([expect.any(String), undefined]);
+        const restart = updater.getUpdateState().steps.find((step) => step.id === "restart");
+        expect(restart?.error).toMatch(/not allowed to start root steps/);
+        expect(restart?.error).not.toMatch(/ENOSPC/);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("still lets a run this process saw fail start again when its rebuild dispatch may have queued the unit", async () => {
+      // Cut off by its own timeout, the dispatch may have reached systemd: the
+      // flag stays for the server that unit would restart. The failed card
+      // offers Try again, which must start, as it always could; only a
+      // restarted process, which shows "idle" until its first ask, reads that
+      // flag as an update in flight.
+      failedDispatch(Object.assign(new Error("Command failed: timed out"), { killed: true, signal: "SIGTERM" }));
+      try {
+        updater.resetUpdateState();
+        updater.startUpdate();
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        const written = flagWrites();
+        expect(written).toEqual([expect.any(String)]);
+        mockGet.mockImplementation(async (key: string) => (key === "update_needs_continuation" ? written[0] : undefined));
 
         expect(await updater.startWouldOverlapUpdate()).toBe(false);
         // The same disk, read by a restarted server before its first ask.
@@ -6418,6 +6454,106 @@ describe("updater", () => {
         expect(await updater.startWouldOverlapUpdate()).toBe(true);
       } finally {
         updater.resetUpdateState();
+      }
+    });
+
+    it("lets nothing start while a legacy updater's handover marker is on disk, before the first ask too", async () => {
+      // install.sh's handover writes only its marker, no continuation flag, and
+      // restarts this server while its root bootstrap still runs.
+      const actual = await vi.importActual<typeof import("fs")>("fs");
+      mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
+      try {
+        updater.resetUpdateState();
+        expect(await updater.startWouldOverlapUpdate()).toBe(true);
+      } finally {
+        mockExists.mockImplementation(actual.existsSync);
+        updater.resetUpdateState();
+      }
+    });
+
+    it("asks again by itself when the first ask cannot write its verdict, with no page open", async () => {
+      // The boot hook's first ask finds the unit already ended, and the
+      // verdict's first write fails (a full disk). No wait was ever entered, and
+      // the flag on disk holds every start off until somebody asks again.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const warn = vi.spyOn(console, "warn");
+      try {
+        updater.resetUpdateState();
+        restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }], { unit: { active: "failed", result: "exit-code" } });
+        mockSetMany.mockRejectedValueOnce(new Error("ENOSPC: no space left on device, write"));
+        await expect(updater.checkContinuation()).rejects.toThrow(/ENOSPC/);
+        expect(waitLog(warn, "judge the update")).toHaveLength(1);
+        expect(updater.startUpdate().started).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        const writes = mockSetMany.mock.calls.map(([entries]) => entries as Record<string, unknown>);
+        const clears = writes.flatMap((e, i) => ("update_needs_continuation" in e && e.update_needs_continuation === undefined ? [i] : []));
+        expect(clears).toHaveLength(2);
+        expect(writes.slice(clears[1]).some((e) => "update_in_progress" in e && e.update_in_progress === undefined)).toBe(true);
+      } finally {
+        warn.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("takes nothing when an ask fails with no update on disk", async () => {
+      // A box with no continuation flag and no handover marker: a failed ask is
+      // the caller's to report, not a wait that holds the box.
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        updater.resetUpdateState();
+        // A lock with nothing to resume: the ask stamps an interruption, and that write fails.
+        mockGet.mockImplementation(async (key: string) => (key === "update_in_progress" ? true : undefined));
+        mockSet.mockRejectedValue(new Error("ENOSPC: no space left on device, write"));
+        await expect(updater.checkContinuation()).rejects.toThrow(/ENOSPC/);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(updater.startUpdate().started).toBe(true);
+      } finally {
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a legacy updater's handover marker until the resume's own write has landed", async () => {
+      // A failed write that took the marker with it would leave the next ask no
+      // handover to resume: it would find a lock and nothing to resume, and
+      // report an interruption instead of running the update from step 1.
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const actual = await vi.importActual<typeof import("fs")>("fs");
+      mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
+      mockRm.mockImplementation(async () => undefined);
+      try {
+        updater.resetUpdateState();
+        mockReadFile.mockImplementation(async (file) => {
+          const f = String(file);
+          if (f.endsWith("updater-handover.json")) return JSON.stringify({ version: 1, previousBuildId: "build-old" });
+          if (f.endsWith("BUILD_ID")) return "build-new\n";
+          throw new Error("ENOENT");
+        });
+        setupExecFileMock({
+          "show clawbox-root-update@bootstrap_updater.service -p ActiveState": { stdout: "inactive\n", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+        // Only this marker's removals: a run another case left going may remove files of its own.
+        const markerRemovals = () => mockRm.mock.calls.flatMap(([file], i) =>
+          (String(file).endsWith("updater-handover.json") ? [mockRm.mock.invocationCallOrder[i]] : []));
+        mockSetMany.mockRejectedValueOnce(new Error("ENOSPC: no space left on device, write"));
+        await expect(updater.checkContinuation()).rejects.toThrow(/ENOSPC/);
+        expect(markerRemovals()).toEqual([]);
+
+        // The next ask, its own, finds the same handover and resumes it.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(markerRemovals()).toHaveLength(1);
+        const resumeWrite = mockSetMany.mock.calls.findLastIndex(([entries]) => "update_needs_continuation" in (entries as Record<string, unknown>));
+        expect(mockSetMany.mock.invocationCallOrder[resumeWrite]).toBeLessThan(markerRemovals()[0]);
+      } finally {
+        mockExists.mockImplementation(actual.existsSync);
+        updater.resetUpdateState();
+        vi.useRealTimers();
       }
     });
 

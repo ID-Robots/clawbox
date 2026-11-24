@@ -145,22 +145,23 @@ export function powerKeyboardPending(): boolean {
  * includes a server the update restarted that has not yet asked about it,
  * which `startUpdate` alone would not refuse.
  */
+const UPDATE_ALREADY_RUNNING = "An update is already running; the desktop shows how it ends.";
+
 async function refuseUpdateInFlight(): Promise<void> {
   // Lazy: the updater is a large module the power path never needs.
   const { startWouldOverlapUpdate } = await import("@/lib/updater");
-  if (await startWouldOverlapUpdate()) {
-    throw new PowerApprovalConflict("An update is already running; the desktop shows how it ends.");
-  }
+  if (await startWouldOverlapUpdate()) throw new PowerApprovalConflict(UPDATE_ALREADY_RUNNING);
 }
 
 export async function dispatchPowerAction(action: PowerAction): Promise<void> {
   if (action === "update") {
     await refuseUpdateInFlight();
-    const { startUpdate } = await import("@/lib/updater");
+    const { startUpdate, UPDATE_ALREADY_IN_PROGRESS } = await import("@/lib/updater");
     const result = startUpdate();
     if (!result.started) {
-      // One that claimed the box since the check above: the same answer.
-      await refuseUpdateInFlight();
+      // One that claimed the box since the check above, told by the refusal
+      // itself: a second look could miss an owner that came and went.
+      if (result.error === UPDATE_ALREADY_IN_PROGRESS) throw new PowerApprovalConflict(UPDATE_ALREADY_RUNNING);
       throw new Error(result.error ?? "The update did not start");
     }
     const { prefetchUpdateWhatsNew } = await import("@/lib/update-whats-new-server");

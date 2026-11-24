@@ -8,7 +8,9 @@ import { installSessionFixture, type SessionFixture } from "@/tests/helpers/sess
 const startUpdate = vi.hoisted(() => vi.fn((): { started: boolean; error?: string } => ({ started: true })));
 // Whether an update is already in flight (the updater's own answer is pinned in updater.test.ts).
 const inFlight = vi.hoisted(() => vi.fn(async () => false));
-vi.mock("@/lib/updater", () => ({ startUpdate, startWouldOverlapUpdate: inFlight }));
+vi.mock("@/lib/updater", () => ({
+  startUpdate, startWouldOverlapUpdate: inFlight, UPDATE_ALREADY_IN_PROGRESS: "Update already in progress",
+}));
 vi.mock("@/lib/update-whats-new-server", () => ({ prefetchUpdateWhatsNew: async () => undefined }));
 vi.mock("@/lib/email-approval", () => ({
   approvalBotToken: async () => null, chatApprovalEnabled: async () => false,
@@ -81,6 +83,16 @@ describe("update from chat", () => {
     const confirmed = await decide(req({ id: prompt.id, action: "update", approve: true }, session.cookie));
     expect(startUpdate).not.toHaveBeenCalled();
     // The desktop card shows this sentence; it is not "the power command failed".
+    expect(confirmed.status).toBe(409);
+    expect(await confirmed.json()).toEqual({ error: "An update is already running; the desktop shows how it ends." });
+  });
+
+  it("says an update is running when the start itself refuses for that reason", async () => {
+    // An update took the box between the check and the start, and may be gone
+    // again by any second look: the refusal itself is the answer.
+    const prompt = await (await request(req({ reason: "update please" }))).json();
+    startUpdate.mockReturnValueOnce({ started: false, error: "Update already in progress" });
+    const confirmed = await decide(req({ id: prompt.id, action: "update", approve: true }, session.cookie));
     expect(confirmed.status).toBe(409);
     expect(await confirmed.json()).toEqual({ error: "An update is already running; the desktop shows how it ends." });
   });

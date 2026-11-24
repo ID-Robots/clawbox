@@ -2081,7 +2081,23 @@ async function updateClawBoxAndReboot(): Promise<void> {
     update_needs_continuation: (await readBuildId()) || "no-previous-build",
     [UPDATE_REBUILD_DISPATCHED_KEY]: { ...(await bootMoment()), at: rebuildDispatchedAt },
   });
-  await startRootServiceFireAndForget(REBUILD_ROOT_STEP);
+  try {
+    await startRootServiceFireAndForget(REBUILD_ROOT_STEP);
+  } catch (err) {
+    // Refused before systemd could queue the unit (sudo, the launcher, or the
+    // `systemctl start` the launcher execs): no restart is coming, so the flag
+    // goes, as waitForRebuildToTakeOver clears it. Left, it held every later
+    // start and background job off until the server next restarted. A dispatch
+    // cut off by its own timeout may have queued the unit: that flag stays.
+    if (!(err as { killed?: boolean }).killed) {
+      await setMany({ update_needs_continuation: undefined, [UPDATE_REBUILD_DISPATCHED_KEY]: undefined })
+        .catch((clearErr) => console.warn(
+          "[Updater] Could not clear the continuation flag of a rebuild that never started:",
+          clearErr instanceof Error ? clearErr.message : clearErr,
+        ));
+    }
+    throw err;
+  }
   await waitForRebuildToTakeOver(rebuildDispatchedAt);
 }
 
@@ -6362,7 +6378,20 @@ export async function updateInFlight(): Promise<boolean> {
 export async function startWouldOverlapUpdate(): Promise<boolean> {
   if (updateOwned()) return true;
   if (runtime.state.phase === "failed") return false;
+  // A legacy updater's handover writes no flag, only its marker, and restarts
+  // this server while its root bootstrap still runs.
+  if (existsSync(updaterHandoverFile())) return true;
   return updateInFlight();
+}
+
+/** The marker a legacy updater's root bootstrap leaves for this updater to take over from. */
+function updaterHandoverFile(): string {
+  return path.join(PROJECT_DIR, "data", "updater-handover.json");
+}
+
+/** An update the disk says is waiting for this server: the rebuild's flag, or a handover marker. */
+async function continuationOnDisk(): Promise<boolean> {
+  return existsSync(updaterHandoverFile()) || Boolean(await get("update_needs_continuation"));
 }
 
 /**
@@ -6461,7 +6490,12 @@ async function askContinuation(): Promise<boolean> {
     runtime.continuationAskFailures = 0;
     return answer;
   } catch (err) {
-    if (waiting) {
+    // …and so does one that fails with an update still on disk, wait or no wait:
+    // the boot hook's first ask can find the unit already ended and fail the
+    // verdict's write, and on a box nobody watches nothing else asks again
+    // while that flag holds every start off. With nothing on disk, a failed
+    // ask is its caller's to report, and holds nothing.
+    if (waiting || (await continuationOnDisk())) {
       // A store that refuses every write (a full disk) fails each ask until it
       // is fixed: said at once, then now and then, not every 5 s for hours.
       const failures = (runtime.continuationAskFailures ?? 0) + 1;
@@ -6480,7 +6514,7 @@ async function askContinuation(): Promise<boolean> {
 }
 
 async function resumeContinuation(): Promise<boolean> {
-  const handoverFile = path.join(PROJECT_DIR, "data", "updater-handover.json");
+  const handoverFile = updaterHandoverFile();
   let handover: unknown;
   try {
     if (existsSync(handoverFile)) handover = JSON.parse(await readFile(handoverFile, "utf8"));
@@ -6521,13 +6555,15 @@ async function resumeContinuation(): Promise<boolean> {
     // The new app is real and the root bridge has settled. Resume from the
     // beginning: marking the pre-reboot steps completed here would skip core
     // installation and the very migration the bridge exists to serialize.
-    await rm(handoverFile, { force: true });
+    // The write first: one that fails keeps the marker, so the next ask finds
+    // the same handover instead of a lock with nothing to resume.
     await setMany({
       update_needs_continuation: undefined,
       [UPDATE_REBUILD_DISPATCHED_KEY]: undefined,
       [UPDATE_INTERRUPTED_KEY]: undefined,
       [UPDATE_INTERRUPTED_DETAIL_KEY]: undefined,
     });
+    await rm(handoverFile, { force: true });
     const steps = applicableSteps();
     runtime.running = true;
     runtime.state = createInitialState(steps);
@@ -6800,11 +6836,14 @@ async function resumeContinuation(): Promise<boolean> {
 const DB_MAINTENANCE_BUSY =
   "OpenClaw database maintenance is running (the gateway is stopped for it) — update when it has finished";
 
+/** The start functions' refusal while an update owns the box; callers tell it apart by this text. */
+export const UPDATE_ALREADY_IN_PROGRESS = "Update already in progress";
+
 export function startUpdate(
   opts: { allowHarnessDowngrade?: boolean } = {},
 ): { started: boolean; error?: string } {
   if (updateOwned()) {
-    return { started: false, error: "Update already in progress" };
+    return { started: false, error: UPDATE_ALREADY_IN_PROGRESS };
   }
   // A database compaction holds the gateway down with the same guard the
   // update takes and LIFTS when it is done — under a running compaction the
@@ -6863,7 +6902,7 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
 
 export function startOpenclawUpdate(): { started: boolean; error?: string } {
   if (updateOwned()) {
-    return { started: false, error: "Update already in progress" };
+    return { started: false, error: UPDATE_ALREADY_IN_PROGRESS };
   }
   if (dbMaintenanceRunning()) {
     return { started: false, error: DB_MAINTENANCE_BUSY };
