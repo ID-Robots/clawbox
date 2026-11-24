@@ -104,7 +104,10 @@ core_newer() {
 IDENT=$(build_identity_ok); rc=$?
 if [ "$rc" -eq 0 ]; then
   ok "the served build names the checked-out commit: $(tail -n 1 <<<"$IDENT")"
-elif core_newer "$CORE" "$BUILT_PIN" && [ "$HEAD1" != "$BUILT" ] && [ "$HEAD1" != "$HEAD0" ]; then
+elif core_newer "$CORE" "$BUILT_PIN" && [ "$HEAD1" != "$BUILT" ] && [ "$HEAD1" != "$HEAD0" ] \
+  && [[ $IDENT == *"was built from $BUILT but the checkout is at $HEAD1"* ]]; then
+  # Only the commit mismatch itself (scripts/verify-build-identity.sh): a stamp
+  # or BUILD_ID that does not hold together is drift whatever the core did.
   ok "checkout kept on ${HEAD1:0:12} with OpenClaw $CORE, newer than the $BUILT_PIN the restored build's commit ${BUILT:0:12} pins: the old build over the new checkout until the next update, by design"
 else
   not_ok "drift after the rollback: the served build is not the checked-out commit ${HEAD1:0:12}: $(tr '\n' ' ' <<<"$IDENT" | cut -c1-200)"

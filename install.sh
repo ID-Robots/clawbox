@@ -15925,10 +15925,12 @@ openclaw_core_ahead_of_commit() {
 # the updater leaves the checkout on this tree. Written as the service
 # account, whose file it is, under a name of its own (the store renames
 # config.json.tmp into place), in the bytes and mode the store's own delete
-# leaves. The store rewrites the file without a lock, so the rename only ever
-# replaces the bytes that were read: a write that landed in between is kept,
-# and so is the record, as it was. Never fails the step: the core is in place
-# either way, and a record that stays only brings the old move back.
+# leaves. The store rewrites the file without a lock, and nothing here can take
+# one the older release's store would honour: a write that lands before the
+# re-read just ahead of the rename is kept, and so is the record, as it was; one
+# that lands between that re-read and the rename is replaced. Never fails the
+# step: the core is in place either way, and a record that stays only brings
+# the old move back.
 keep_checkout_with_installed_core() {
   local built ahead rc=0
   built="$(served_build_commit)"
