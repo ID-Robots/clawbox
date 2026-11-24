@@ -43,11 +43,11 @@ Looking for your installed version? Open **Settings → About**. To update, open
 ## ClawBox 4.4
 
 <Note>
-**Release status:** 4.4.0 is on the beta channel until its stable release. A box on `main` is
-offered it as `v4.4.0` once it is released; see [Updating ClawBox](/support/updating).
+**Release status:** a box on `main` is offered 4.4.0 as `v4.4.0` once it is released; see
+[Updating ClawBox](/support/updating).
 </Note>
 
-ClawBox 4.4 adds ClawBox Vault, a password manager built into every box, and an organisation
+ClawBox 4.4 adds ClawBox Vault, a password manager built into ClawBox, and an organisation
 mode for a ClawBox that serves a company's staff. Local AI can run on an AI engine of your own on
 your network, and the box checks for updates every week and can tell you on Telegram. ClawBox AI
 is one model now, DeepSeek V4 Flash. On the OpenClaw edition the assistant moves to OpenClaw
@@ -56,7 +56,9 @@ the desktop shows a **What's new in 4.4** card. Choose **Got it** to hide it on 
 
 ### ClawBox Vault, passwords built in
 
-**ClawBox Vault** is a password manager on every box, opened by the owner from its desktop icon.
+**ClawBox Vault** is a password manager built into ClawBox, opened by the owner from its desktop
+icon. An update in the app installs it on a ClawBox device; a PC set up with `install-x64.sh` gets
+it the next time its installer is run.
 Nothing is saved or filled until you choose a vault PIN of at least six characters. The box's own
 browser then offers **Save to ClawBox Vault?** when you sign in to a site and fills the logins you
 saved, and the assistant can sign in to a site for you without ever seeing the password. Every
@@ -131,7 +133,8 @@ Flash cannot see pictures. A model you chose from another provider stays as it i
   periodic check-in as an ordinary automation job. The update converts the check-in the box had,
   on or off as you had it, and **Unprompted check-ins** in **Settings → Harness** switches that
   job. ClawBox does not create the job itself, so a box set up fresh on this release has none
-  until one is created, and the row says so instead of showing a switch.
+  until one is created, and the row says so instead of showing a switch. A converted check-in is
+  delivered like any other automation, so the same update can reach you more than once.
 - Settings that named a retired ClawBox AI model are moved to `deepseek-v4-flash`.
 - Your data is preserved, and the edition lock is untouched.
 

@@ -2,7 +2,7 @@
 
 Previous release: v4.3.0, 6 November 2026. 301 commits.
 
-4.4 adds ClawBox Vault, a password manager built into every box, and an
+4.4 adds ClawBox Vault, a password manager built into ClawBox, and an
 organisation mode for a ClawBox that serves a company's staff. Local AI can run
 on an AI engine of your own on your network, and the box checks for updates
 every week and can tell you on Telegram. ClawBox AI is one model now, DeepSeek
@@ -13,9 +13,22 @@ get a long list of fixes.
 
 ## Highlights
 
-- **ClawBox Vault, passwords built in.** A password manager on every box,
-  opened by the owner from its desktop icon. Once you choose a vault PIN, the
-  box's browser offers to save your logins and fills them in, and the
+- **OpenClaw 2026.11.5, a one-way move.** On the OpenClaw edition the update
+  takes OpenClaw from 2026.10.9 to 2026.11.5 and moves the assistant's data to
+  its newer format. The move is one-way: after the update an older OpenClaw
+  core cannot open the data any more.
+- **Check-ins become an automation job.** On OpenClaw 2026.11.5 the
+  assistant's periodic check-in is an ordinary automation job. If your box had
+  a check-in, the update turns it into a job, on or off as it was, and
+  Unprompted check-ins in Settings → Harness switches that job without
+  restarting the assistant.
+- **One ClawBox AI model.** ClawBox AI is DeepSeek V4 Flash on every plan, for
+  chat and for pictures. The update moves every setting that named a retired
+  ClawBox AI model, such as the Max plan's own model, to deepseek-v4-flash. A
+  model you chose from another provider stays.
+- **ClawBox Vault, passwords built in.** A password manager built into
+  ClawBox, opened by the owner from its desktop icon. Once you choose a vault
+  PIN, the box's browser offers to save your logins and fills them in, and the
   assistant can log in to a site for you without ever seeing the password.
 - **Organisation mode, for a company's staff.** A switch in Settings → System →
   Users gives other users only Chat, Files and their own settings, each with a
@@ -31,26 +44,16 @@ get a long list of fixes.
   an Update button, when a bot is connected, otherwise on the desktop. You can
   send /update to the bot at any time, and the update still waits for you to
   confirm it on the desktop.
-- **One ClawBox AI model.** ClawBox AI is DeepSeek V4 Flash on every plan, for
-  chat and for pictures. The update moves every setting that named a retired
-  ClawBox AI model, such as the Max plan's own model, to deepseek-v4-flash. A
-  model you chose from another provider stays.
-- **OpenClaw 2026.11.5, a one-way move.** On the OpenClaw edition the update
-  takes OpenClaw from 2026.10.9 to 2026.11.5 and moves the assistant's data to
-  its newer format. The move is one-way: after the update an older OpenClaw
-  core cannot open the data any more.
-- **Check-ins become an automation job.** On OpenClaw 2026.11.5 the
-  assistant's periodic check-in is an ordinary automation job. The update
-  converts the check-in you had, on or off as it was, and Unprompted check-ins
-  in Settings → Harness switches that job without restarting the assistant.
 
 ## New features
 
 ### ClawBox Vault
 
-- **ClawBox Vault** is installed and running on every box, on both editions.
-  Only the owner opens it, from its desktop icon, and nothing is saved or
-  filled until the owner has chosen a vault PIN of at least six characters.
+- **ClawBox Vault** comes with this release on both editions. An update in the
+  app installs and starts it on a ClawBox device; a PC set up with
+  install-x64.sh gets it the next time its installer is run. Only the owner
+  opens it, from its desktop icon, and nothing is saved or filled until the
+  owner has chosen a vault PIN of at least six characters.
 - The box's own browser then offers **Save to ClawBox Vault?** when you sign in
   to a site, and fills the logins you saved on https pages.
 - The assistant can sign in to a site for you through the vault without ever
@@ -366,7 +369,9 @@ get a long list of fixes.
   box had, on or off as you had it, and **Unprompted check-ins** in **Settings →
   Harness** switches that job. ClawBox does not create the job itself, so a box
   set up fresh on this release has none until one is created, and the row says
-  so instead of showing a switch.
+  so instead of showing a switch. A converted check-in is delivered like any
+  other automation: OpenClaw no longer holds back a check-in that repeats the
+  last one, so the same update can reach you more than once.
 - Settings that named a retired ClawBox AI model, the Max plan's
   `deepseek-v4-pro` or the picture model `deepseek-v4-flash-vision-exp`, are
   moved to `deepseek-v4-flash`; a picture setting goes to the vision fallback
@@ -375,8 +380,9 @@ get a long list of fixes.
 - Hermes Agent is updated from v0.22.5 to v0.23.3.
 - On a Jetson, the box's own chat model server moves to a newer llama.cpp
   build, loaded in a mode that fits an 8 GB board.
-- ClawBox Vault is installed and started on every box. Nothing is stored in it
-  until the owner chooses a vault PIN.
+- An update in the app installs and starts ClawBox Vault on a ClawBox device. A
+  PC set up with install-x64.sh gets it the next time its installer is run.
+  Nothing is stored in it until the owner chooses a vault PIN.
 
 ## Breaking changes
 

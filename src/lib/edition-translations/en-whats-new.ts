@@ -22,7 +22,7 @@ export const whatsNewEn: Record<string, string> = {
 
   "whatsNew.vaultTitle": "ClawBox Vault, passwords built in",
   "whatsNew.vaultBody":
-    "A password manager on every box, opened by the owner from its desktop icon. Once you choose a vault PIN, the box's browser offers to save your logins and fills them in, and the assistant can log in to a site for you without ever seeing the password.",
+    "A password manager built into ClawBox, opened by the owner from its desktop icon. Once you choose a vault PIN, the box's browser offers to save your logins and fills them in, and the assistant can log in to a site for you without ever seeing the password.",
   "whatsNew.orgModeTitle": "Organisation mode, for a company's staff",
   "whatsNew.orgModeBody":
     "A switch in Settings → System → Users gives other users only Chat, Files and their own settings, each with a limited assistant and a memory of their own. The owner picks the tools staff may use, sets upload, storage and chat limits, and reads an audit log.",
@@ -40,12 +40,12 @@ export const whatsNewEn: Record<string, string> = {
     "On the OpenClaw edition the update takes OpenClaw from 2026.10.9 to 2026.11.5 and moves the assistant's data to its newer format. The move is one-way: after the update an older OpenClaw core cannot open the data any more.",
   "whatsNew.checkInsJobTitle": "Check-ins become an automation job",
   "whatsNew.checkInsJobBody":
-    "On OpenClaw 2026.11.5 the assistant's periodic check-in is an ordinary automation job. The update converts the check-in you had, on or off as it was, and Unprompted check-ins in Settings → Harness switches that job without restarting the assistant.",
+    "On OpenClaw 2026.11.5 the assistant's periodic check-in is an ordinary automation job. If your box had a check-in, the update turns it into a job, on or off as it was, and Unprompted check-ins in Settings → Harness switches that job without restarting the assistant.",
 
   // The card's slides: one highlight each, so each gets a one- or two-line
   // summary. The bodies above stay whole for the /updating screen's panel.
   "whatsNew.vaultSummary":
-    "A password manager on every box: the browser saves and fills your logins, and the assistant logs in without seeing a password.",
+    "A password manager built into ClawBox: the browser saves and fills your logins, and the assistant logs in without seeing a password.",
   "whatsNew.orgModeSummary":
     "Give a company's staff only Chat, Files and their own settings, each with a limited assistant and a memory of their own.",
   "whatsNew.externalEngineSummary":
@@ -57,7 +57,7 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.openclawMoveSummary":
     "On OpenClaw, the assistant's data moved to OpenClaw 2026.11.5's format. An older OpenClaw cannot open it any more.",
   "whatsNew.checkInsJobSummary":
-    "On OpenClaw, the periodic check-in is an automation job now, switched by Unprompted check-ins in Settings → Harness.",
+    "On OpenClaw, a check-in your box had becomes an automation job, switched by Unprompted check-ins in Settings → Harness.",
 
   // 4.3's highlights, kept for the /updating showcase's demos (see above).
   "whatsNew.screenshotTitle": "Screenshots, built in",

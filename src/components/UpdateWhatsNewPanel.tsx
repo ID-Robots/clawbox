@@ -25,7 +25,7 @@ interface UpdateWhatsNewPanelProps {
  * whose catalogue no longer has it falls back to its own order, so a new
  * "What's new" never leaves a hole.
  */
-export const UPDATE_COMPACT_PICKS = ["whatsNew.agentChartTitle"];
+export const UPDATE_COMPACT_PICKS = ["whatsNew.vaultTitle"];
 
 type Highlight = (typeof WHATS_NEW_HIGHLIGHTS)[number];
 

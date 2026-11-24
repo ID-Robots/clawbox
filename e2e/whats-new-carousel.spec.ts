@@ -1,9 +1,10 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
+import { WHATS_NEW_GENERIC_IMAGE } from "../src/lib/whats-new";
 
 /**
- * "What's new in 4.3", in a real browser: a dialog of one slide per highlight
+ * "What's new in 4.4", in a real browser: a dialog of one slide per highlight
  * that fits the screen whole — the common laptop sizes and a phone — and the
  * "Free backup with ClawBox AI" offer held back until it is closed. Then the
  * update screen's own "What's new" (TASK-2121): the release's showcase, one
@@ -15,6 +16,10 @@ import { installClawboxMocks } from "./helpers/clawbox";
  * The card used to be the first of the top-right notices: on a 720 px screen
  * its highlights scrolled inside a 320 px column and the offer was pushed off
  * the bottom of the screen beneath it.
+ *
+ * No 4.4 highlight has a screenshot or a live demo yet: each shows the generic
+ * picture (WHATS_NEW_GENERIC_IMAGE), still, on the card and in the showcase.
+ * The 4.3 demos stay covered by the showcase's component tests.
  */
 
 // A box with no ClawBox AI account, so the backup offer is due as well.
@@ -29,8 +34,8 @@ const SETUP = {
 
 const WHATS_NEW = {
   show: true,
-  release: "4.3",
-  version: "4.3.0",
+  release: "4.4",
+  version: "4.4.0",
   edition: "openclaw",
   cta: { paidFeatures: true, editionSwitch: "hermes" },
   freeMonthCode: null,
@@ -58,7 +63,7 @@ async function openDesktop(page: Page) {
 /** The dialog is inside the viewport, and the page itself does not scroll. */
 async function expectFits(page: Page) {
   const viewport = page.viewportSize()!;
-  const box = await page.getByRole("dialog", { name: "What's new in 4.3" }).boundingBox();
+  const box = await page.getByRole("dialog", { name: "What's new in 4.4" }).boundingBox();
   expect(box).not.toBeNull();
   expect(box!.x).toBeGreaterThanOrEqual(0);
   expect(box!.y).toBeGreaterThanOrEqual(0);
@@ -83,13 +88,13 @@ for (const size of [
   test(`fits ${size.width}x${size.height} on every slide, and the backup offer waits until it is closed`, async ({ page }) => {
     await page.setViewportSize(size);
     const dismissals = await openDesktop(page);
-    const dialog = page.getByRole("dialog", { name: "What's new in 4.3" });
+    const dialog = page.getByRole("dialog", { name: "What's new in 4.4" });
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByText("This box now runs ClawBox 4.3.0.")).toBeVisible();
+    await expect(dialog.getByText("This box now runs ClawBox 4.4.0.")).toBeVisible();
 
     const dots = dialog.getByTestId("whats-new-dot");
     const total = await dots.count();
-    expect(total).toBe(11);
+    expect(total).toBe(7);
     for (let i = 0; i < total; i++) {
       const slide = dialog.getByTestId("whats-new-slide");
       await expect(slide).toHaveAttribute("data-slide", String(i));
@@ -106,7 +111,7 @@ for (const size of [
     await expect(dialog.getByRole("link", { name: /See plans/ })).toBeVisible();
     await dialog.getByRole("button", { name: "Got it" }).click();
     await expect(dialog).toHaveCount(0);
-    expect(dismissals).toEqual([{ release: "4.3" }]);
+    expect(dismissals).toEqual([{ release: "4.4" }]);
 
     // Now the offer comes up, whole and on screen.
     const offer = page.getByText(OFFER);
@@ -118,7 +123,7 @@ for (const size of [
 test("the arrow keys turn the slides and Escape closes it", async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 768 });
   const dismissals = await openDesktop(page);
-  const dialog = page.getByRole("dialog", { name: "What's new in 4.3" });
+  const dialog = page.getByRole("dialog", { name: "What's new in 4.4" });
   const slide = dialog.getByTestId("whats-new-slide");
   await expect(slide).toHaveAttribute("data-slide", "0");
   await page.keyboard.press("ArrowRight");
@@ -128,7 +133,7 @@ test("the arrow keys turn the slides and Escape closes it", async ({ page }) => 
   await expect(slide).toHaveAttribute("data-slide", "1");
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
-  expect(dismissals).toEqual([{ release: "4.3" }]);
+  expect(dismissals).toEqual([{ release: "4.4" }]);
   await expect(page.getByText(OFFER)).toBeVisible();
 });
 
@@ -141,13 +146,13 @@ for (const size of [
 
     test("opens at full resolution, fits the screen, turns with the arrows, and closes without closing the card", async ({ page }) => {
       const dismissals = await openDesktop(page);
-      const card = page.getByRole("dialog", { name: "What's new in 4.3" });
+      const card = page.getByRole("dialog", { name: "What's new in 4.4" });
       await expect(card).toBeVisible();
 
       await card.getByRole("button", { name: "View screenshot full screen" }).click();
       const view = page.getByTestId("whats-new-lightbox");
       await expect(view).toBeVisible();
-      await expect(view).toHaveAccessibleName("Screenshot: Screenshots, built in");
+      await expect(view).toHaveAccessibleName(`Screenshot: ${SHOWCASE_TITLES[0]}`);
       const image = view.getByTestId("whats-new-lightbox-image");
       // The full-resolution file, loaded, and drawn whole inside the screen.
       await expect.poll(() => image.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth)).toBeGreaterThan(1024);
@@ -161,11 +166,14 @@ for (const size of [
       const natural = await image.evaluate((img: HTMLImageElement) => img.naturalWidth);
       expect(box!.width).toBeLessThanOrEqual(natural + 1);
 
-      // The next feature's screenshot, by key; the previous one by its button.
+      // The next feature's picture, by key; the previous one by its button.
+      // They share the generic picture, so the view's name tells them apart.
       await page.keyboard.press("ArrowRight");
-      await expect(image).toHaveAttribute("src", "/whats-new/4.3/agent-browser-full.webp");
+      await expect(view).toHaveAccessibleName(`Screenshot: ${SHOWCASE_TITLES[1]}`);
+      await expect(image).toHaveAttribute("src", WHATS_NEW_GENERIC_IMAGE);
       await view.getByRole("button", { name: "Previous screenshot" }).click();
-      await expect(image).toHaveAttribute("src", "/whats-new/4.3/screenshot-full.webp");
+      await expect(view).toHaveAccessibleName(`Screenshot: ${SHOWCASE_TITLES[0]}`);
+      await expect(image).toHaveAttribute("src", WHATS_NEW_GENERIC_IMAGE);
 
       // Escape closes the view, and only the view.
       await page.keyboard.press("Escape");
@@ -192,30 +200,34 @@ const RUN_STEPS = [
   "Updating ClawBox and restarting", "Applying system fixups", "Verifying gateway health",
 ].map((label, index) => ({ id: `step_${index}`, label, status: index < 2 ? "completed" : index === 2 ? "running" : "pending" }));
 
+/** The 4.4 highlights, in the notes' order. With no demo of its own, a highlight's chip is its title. */
 const SHOWCASE_CHIPS = [
-  "Screenshots", "One browser for you", "Share an app with a public link", "xAI Grok", "Hold to talk", "The Coding Agent", "Prime Radiant",
-  "Runs report back", "Updates ask first", "Installs wait in line", "Job alerts",
+  "OpenClaw 2026.11.5, a one-way move",
+  "Check-ins become an automation job",
+  "One ClawBox AI model",
+  "ClawBox Vault, passwords built in",
+  "Organisation mode, for a company's staff",
+  "Your own AI engine as Local AI",
+  "A weekly update check, on Telegram too",
 ];
-const FULL_IMAGES = [
-  "screenshot", "agent-browser", "public-link", "model-picker", "hold-to-talk", "agent-chart", "prime-radiant",
-  "run-reports", "update-asks", "install-queue", "job-alerts",
-]
-  .map((name) => `/whats-new/4.3/${name}-full.webp`);
+/** Their titles: the chips' own words, since none of them has a demo and a chip of its own. */
+const SHOWCASE_TITLES = SHOWCASE_CHIPS;
+const FULL_IMAGES = SHOWCASE_CHIPS.map(() => WHATS_NEW_GENERIC_IMAGE);
 
-/** A box running an update to 4.3.0, as every route the update screens ask answers it. */
+/** A box running an update to 4.4.0, as every route the update screens ask answers it. */
 async function mockRun(page: Page) {
   await installClawboxMocks(page, { initialSetup: SETUP, timeoutCapMs: 300_000, chatFacts: { onboardingArmed: false } });
   await page.route("**/setup-api/update/status", (route) => route.fulfill({ json: { phase: "running", currentStepIndex: 2, steps: RUN_STEPS } }));
   await page.route("**/setup-api/update/versions", (route) => route.fulfill({
     json: {
-      clawbox: { current: "4.2.5", target: "4.3.0", updateAvailable: true },
-      openclaw: { current: "2026.10.3", target: "2026.10.7", updateAvailable: true },
+      clawbox: { current: "4.3.0", target: "4.4.0", updateAvailable: true },
+      openclaw: { current: "2026.10.9", target: "2026.11.5", updateAvailable: true },
       edition: "openclaw",
       remote: { reachable: true },
     },
   }));
   await page.route("**/setup-api/update/whats-new", (route) => route.fulfill({
-    json: { version: "4.3.0", channel: "beta", source: "none", highlights: [], releaseUrl: "https://github.com/ID-Robots/clawbox/releases/tag/v4.3.0" },
+    json: { version: "4.4.0", channel: "beta", source: "none", highlights: [], releaseUrl: "https://github.com/ID-Robots/clawbox/releases/tag/v4.4.0" },
   }));
 }
 
@@ -246,32 +258,32 @@ test.describe("the update screen's What's new showcase", () => {
 
   test("shows one feature at a time, picked by a chip or ←/→, and turns by itself", async ({ page }) => {
     const showcase = await openUpdateWindow(page);
-    const region = page.getByRole("region", { name: "What's new in ClawBox 4.3.0" });
+    const region = page.getByRole("region", { name: "What's new in ClawBox 4.4.0" });
     await expect(region).toHaveAttribute("data-variant", "grid");
     await expect(showcase).toHaveAttribute("data-index", "0");
-    await expect(showcase.getByTestId("whats-new-showcase-count")).toHaveText(`01 / ${SHOWCASE_CHIPS.length} · New in 4.3`);
-    await expect(showcase.getByRole("heading", { name: "Screenshots, built in" })).toBeAttached();
+    await expect(showcase.getByTestId("whats-new-showcase-count")).toHaveText(`01 / ${String(SHOWCASE_CHIPS.length).padStart(2, "0")} · New in 4.4`);
+    await expect(showcase.getByRole("heading", { name: SHOWCASE_TITLES[0] })).toBeAttached();
     await expectStageImage(page, FULL_IMAGES[0]);
     await expect(showcase.getByRole("tab")).toHaveText(SHOWCASE_CHIPS);
     // The title types in; the whole of it is there within a second.
-    await expect(showcase.getByTestId("whats-new-showcase-typed")).toContainText("Screenshots, built in");
+    await expect(showcase.getByTestId("whats-new-showcase-typed")).toContainText(SHOWCASE_TITLES[0]);
     await expect(showcase.getByTestId("whats-new-showcase-logo")).toBeVisible();
 
-    await showcase.getByRole("tab", { name: "Prime Radiant" }).click();
-    await expect(showcase).toHaveAttribute("data-index", "6");
-    await expectStageImage(page, FULL_IMAGES[6]);
-    await expect(showcase.getByTestId("whats-new-showcase-live")).toHaveText("Prime Radiant, a living wiki");
+    await showcase.getByRole("tab", { name: SHOWCASE_CHIPS[5] }).click();
+    await expect(showcase).toHaveAttribute("data-index", "5");
+    await expectStageImage(page, FULL_IMAGES[5]);
+    await expect(showcase.getByTestId("whats-new-showcase-live")).toHaveText(SHOWCASE_TITLES[5]);
 
     const last = SHOWCASE_CHIPS.length - 1;
-    await showcase.getByRole("tab", { name: "Job alerts" }).click();
+    await showcase.getByRole("tab", { name: SHOWCASE_CHIPS[last] }).click();
     await expect(showcase).toHaveAttribute("data-index", String(last));
     await expectStageImage(page, FULL_IMAGES[last]);
-    await expect(showcase.getByTestId("whats-new-showcase-live")).toHaveText("Alerts for scheduled jobs");
+    await expect(showcase.getByTestId("whats-new-showcase-live")).toHaveText(SHOWCASE_TITLES[last]);
 
     // The keyboard: → from the last wraps to the first, ← goes back.
     await page.keyboard.press("ArrowRight");
     await expect(showcase).toHaveAttribute("data-index", "0");
-    await expect(showcase.getByRole("tab", { name: "Screenshots" })).toBeFocused();
+    await expect(showcase.getByRole("tab", { name: SHOWCASE_CHIPS[0] })).toBeFocused();
     await page.keyboard.press("ArrowLeft");
     await expect(showcase).toHaveAttribute("data-index", String(last));
 
@@ -284,35 +296,20 @@ test.describe("the update screen's What's new showcase", () => {
     await expectStageImage(page, FULL_IMAGES[0]);
   });
 
-  test("keeps the stage at the screenshots' 16:10 and sizes its overlay text from the stage, with the demo running", async ({ page }) => {
+  test("keeps the stage at the screenshots' 16:10 and sizes its text from the stage; a feature with no demo is a still picture", async ({ page }) => {
     const showcase = await openUpdateWindow(page);
-    await showcase.getByRole("tab", { name: "Share an app with a public link" }).click();
+    await showcase.getByRole("tab", { name: SHOWCASE_CHIPS[3] }).click();
     const stage = showcase.getByTestId("whats-new-showcase-stage");
     const box = (await stage.boundingBox())!;
     expect(box.width / box.height).toBeCloseTo(1.6, 1);
     const fontSize = await stage.evaluate((el) => parseFloat(getComputedStyle(el).fontSize));
     expect(fontSize).toBeCloseTo(box.width * 0.0115, 0);
-    // The camera moves and the link's dialog comes up, then the link is copied.
-    expect(await stage.locator(".wns-cam").evaluate((el) => getComputedStyle(el).animationName)).toBe("wns-lkcam");
-    await expect(stage.locator(".wns-toast")).toHaveCSS("opacity", "1", { timeout: 6_000 });
-    await expect(stage.locator(".wns-copy")).toHaveText("✓ Copied", { timeout: 6_000 });
+    // No demo of its own: the picture stands still, with nothing drawn over it.
+    await expect(stage).toHaveAttribute("data-feature", "plain");
+    expect(await stage.locator(".wns-cam").evaluate((el) => getComputedStyle(el).animationName)).toBe("none");
+    await expect(stage.locator(".wns-toast")).toHaveCount(0);
     // It all sits inside the window: nothing pushes the page sideways.
     expect(await page.evaluate(() => document.scrollingElement!.scrollWidth - document.scrollingElement!.clientWidth)).toBeLessThanOrEqual(1);
-  });
-
-  test("plays the later features' demos over their screenshots: the update's question, then the job's notice", async ({ page }) => {
-    const showcase = await openUpdateWindow(page);
-    const stage = showcase.getByTestId("whats-new-showcase-stage");
-    await showcase.getByRole("tab", { name: "Updates ask first" }).click();
-    await expect(stage).toHaveAttribute("data-feature", "busy");
-    expect(await stage.locator(".wns-cam").evaluate((el) => getComputedStyle(el).animationName)).toBe("wns-bscam");
-    await expect(stage.locator(".wns-toast")).toHaveCSS("opacity", "1", { timeout: 7_000 });
-    await expect(stage.locator(".wns-toast")).toContainText("Cancel waits for the run");
-    await showcase.getByRole("tab", { name: "Job alerts" }).click();
-    await expect(stage).toHaveAttribute("data-feature", "alert");
-    await expectStageImage(page, FULL_IMAGES[SHOWCASE_CHIPS.length - 1]);
-    await expect(stage.locator(".wns-toast")).toHaveCSS("opacity", "1", { timeout: 7_000 });
-    await expect(stage.locator(".wns-toast")).toContainText("Scheduled job “Weekly report” failed 2 times in a row.");
   });
 
   // A computer window too small for the two columns (TASK-2146): they ran past
@@ -343,30 +340,22 @@ test.describe("the update screen's What's new showcase", () => {
     const stage = showcase.getByTestId("whats-new-showcase-stage");
     const box = (await stage.boundingBox())!;
     expect(box.width).toBeGreaterThan(hero.width * 0.8);
-    const title = (await showcase.getByRole("heading", { name: "Screenshots, built in" }).boundingBox())!;
+    const title = (await showcase.getByRole("heading", { name: SHOWCASE_TITLES[0] }).boundingBox())!;
     expect(box.y).toBeGreaterThan(title.y + title.height);
     expect(box.width / box.height).toBeCloseTo(4 / 3, 1);
     expect(await stage.locator(".wns-cam").evaluate((el) => parseFloat(getComputedStyle(el).fontSize))).toBeGreaterThanOrEqual(10);
   });
 
-  test("with reduced motion: no zoom and no typing, every demo already at its end", async ({ page }) => {
+  test("with reduced motion: no zoom and no typing", async ({ page }) => {
     await page.emulateMedia({ reducedMotion: "reduce" });
     const showcase = await openUpdateWindow(page);
     await expect(showcase).toHaveAttribute("data-motion", "reduce");
-    await expect(showcase.getByTestId("whats-new-showcase-typed")).toHaveText("Screenshots, built inScreenshots, built in");
+    await expect(showcase.getByTestId("whats-new-showcase-typed")).toHaveText(`${SHOWCASE_TITLES[0]}${SHOWCASE_TITLES[0]}`);
     await expect(showcase.locator(".wns-caret")).toHaveCount(0);
     const stage = showcase.getByTestId("whats-new-showcase-stage");
     expect(await stage.locator(".wns-cam").evaluate((el) => getComputedStyle(el).animationName)).toBe("none");
-    // The demo's result at once: the "saved" toast, not the flash before it.
-    await expect(stage.locator(".wns-toast")).toHaveCSS("opacity", "1");
-    await expect(stage.locator(".wns-flash")).toHaveCSS("opacity", "0");
-    await showcase.getByRole("tab", { name: "Hold to talk" }).click();
-    await expect(stage).toContainText("Recording 0:04");
-    await showcase.getByRole("tab", { name: "Runs report back" }).click();
-    await expect(stage).toContainText("Run finished");
-    await showcase.getByRole("tab", { name: "Installs wait in line" }).click();
-    await expect(stage.locator(".wns-pct")).toHaveText("86%");
-    await expect(stage.locator(".wns-toast")).toHaveCSS("opacity", "1");
+    await showcase.getByRole("tab", { name: SHOWCASE_CHIPS[4] }).click();
+    await expect(showcase.getByTestId("whats-new-showcase-typed")).toHaveText(`${SHOWCASE_TITLES[4]}${SHOWCASE_TITLES[4]}`);
   });
 
   // TASK-2146: the run used to be drawn in Settings' 672 px pane first, the

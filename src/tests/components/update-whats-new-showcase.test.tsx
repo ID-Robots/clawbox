@@ -381,6 +381,20 @@ describe("UpdateWhatsNewShowcase", () => {
     expect(within(showcase).getByRole("heading", { level: 4, name: "Something later" })).toBeInTheDocument();
   });
 
+  it("draws the release's own highlights, which have no demo yet, as still pictures", async () => {
+    // The catalogue the box ships, not the 4.3 list this file mocks it with.
+    const { WHATS_NEW_HIGHLIGHTS: shipped } = await vi.importActual<typeof import("@/lib/whats-new")>("@/lib/whats-new");
+    const tr: Floor = (_key, english, params) => english.replace(/\{(\w+)\}/g, (_, name: string) => params?.[name] ?? "");
+    const items = shipped.map((item) => ({ key: item.title, title: whatsNewEn[item.title], body: whatsNewEn[item.body], image: item.fullImage }));
+    render(<UpdateWhatsNewShowcase items={items} release={WHATS_NEW_RELEASE} tr={tr} headingLevel="h4" releaseLink={null} />);
+    const showcase = screen.getByTestId("whats-new-showcase");
+    for (const item of items) {
+      fireEvent.click(within(showcase).getByRole("tab", { name: item.title }));
+      expect(showcase).toHaveAttribute("data-feature", "plain");
+      expect(within(showcase).getByTestId("update-whats-new-image")).toHaveAttribute("src", item.image);
+    }
+  });
+
   it("lays its two columns out by its own width, and keeps turning when its list gets shorter", () => {
     const tr: Floor = (_key, english, params) => english.replace(/\{(\w+)\}/g, (_, name: string) => params?.[name] ?? "");
     const item = (n: number) => ({ key: `whatsNew.later${n}`, title: `Feature ${n}`, body: `Body ${n}`, image: `/${n}.webp` });

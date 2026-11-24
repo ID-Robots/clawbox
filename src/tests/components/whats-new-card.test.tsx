@@ -105,13 +105,13 @@ describe("WhatsNewCard", () => {
 
   it("names the highlights in the release notes' order, with a short summary beside the panel's full body", () => {
     expect(WHATS_NEW_HIGHLIGHTS.map((item) => en[item.title])).toEqual([
+      "OpenClaw 2026.11.5, a one-way move",
+      "Check-ins become an automation job",
+      "One ClawBox AI model",
       "ClawBox Vault, passwords built in",
       "Organisation mode, for a company's staff",
       "Your own AI engine as Local AI",
       "A weekly update check, on Telegram too",
-      "One ClawBox AI model",
-      "OpenClaw 2026.11.5, a one-way move",
-      "Check-ins become an automation job",
     ]);
     for (const item of WHATS_NEW_HIGHLIGHTS) {
       expect(en[item.body], item.body).toBeTruthy();

@@ -81,13 +81,13 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 
 | | |
 |---|---|
-| 🔐 **ClawBox Vault, passwords built in** | A password manager on every box, opened by the owner from its desktop icon. Once you choose a vault PIN, the box's browser offers to save your logins and fills them in, and the assistant can log in to a site for you without ever seeing the password. |
+| ⬆️ **OpenClaw 2026.11.5, a one-way move** | On the OpenClaw edition the update takes OpenClaw from 2026.10.9 to 2026.11.5 and moves the assistant's data to its newer format. After the update an older OpenClaw core cannot open the data any more. |
+| ⏰ **Check-ins become an automation job** | On OpenClaw 2026.11.5 the assistant's periodic check-in is an ordinary automation job. If your box had a check-in, the update turns it into a job, switched by **Unprompted check-ins** in **Settings → Harness** without restarting the assistant. |
+| 🤖 **One ClawBox AI model** | ClawBox AI is DeepSeek V4 Flash on every plan, for chat and for pictures. Settings that named a retired ClawBox AI model are moved to `deepseek-v4-flash`. |
+| 🔐 **ClawBox Vault, passwords built in** | A password manager built into ClawBox, opened by the owner from its desktop icon. Once you choose a vault PIN, the box's browser offers to save your logins and fills them in, and the assistant can log in to a site for you without ever seeing the password. |
 | 🏢 **Organisation mode, for a company's staff** | A switch in **Settings → System → Users** gives other users only Chat, Files and their own settings, each with a limited assistant and a memory of their own. The owner picks the tools staff may use, sets upload, storage and chat limits, and reads an audit log. |
 | 🔌 **Your own AI engine as Local AI** | **Settings → Local AI → External engine** runs the chat on an OpenAI-compatible server on your network, such as vLLM, SGLang or llama.cpp. Without a ClawBox AI sign-in, Prime Radiant, picture descriptions and the Memory Shard index use it too. |
 | 📅 **A weekly update check, on Telegram too** | Every Monday morning the box looks for a newer ClawBox and tells you once per version, on Telegram with an **Update** button when a bot is connected, otherwise on the desktop. The update still waits for you to confirm it. |
-| 🤖 **One ClawBox AI model** | ClawBox AI is DeepSeek V4 Flash on every plan, for chat and for pictures. Settings that named a retired ClawBox AI model are moved to `deepseek-v4-flash`. |
-| ⬆️ **OpenClaw 2026.11.5, a one-way move** | On the OpenClaw edition the update takes OpenClaw from 2026.10.9 to 2026.11.5 and moves the assistant's data to its newer format. After the update an older OpenClaw core cannot open the data any more. |
-| ⏰ **Check-ins become an automation job** | On OpenClaw 2026.11.5 the assistant's periodic check-in is an ordinary automation job, switched by **Unprompted check-ins** in **Settings → Harness** without restarting the assistant. |
 
 Full detail, and how to upgrade: **[RELEASE-NOTES-4.4.0.md](RELEASE-NOTES-4.4.0.md)**.
 

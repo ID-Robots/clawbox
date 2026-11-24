@@ -34,19 +34,22 @@ describe("parseReleaseHighlights on the releases this repo shipped", () => {
   it("reads the seven 4.4.0 highlights, title and body, in order, all of them within the panel's handful", () => {
     const highlights = parseReleaseHighlights(notes("4.4.0"));
     expect(highlights.map((h) => h.title)).toEqual([
+      "OpenClaw 2026.11.5, a one-way move",
+      "Check-ins become an automation job",
+      "One ClawBox AI model",
       "ClawBox Vault, passwords built in",
       "Organisation mode, for a company's staff",
       "Your own AI engine as Local AI",
       "A weekly update check, on Telegram too",
-      "One ClawBox AI model",
-      "OpenClaw 2026.11.5, a one-way move",
-      "Check-ins become an automation job",
     ]);
-    // Seven, and nothing past the panel's cap was cut to get there: a box that
-    // reads these notes before it updates is told about the one-way move.
+    // Seven, and nothing past the panel's cap was cut to get there. The three
+    // that change a box on its way up come first: a box that shows only the
+    // first few highlights before it updates still names all three.
     expect(parseReleaseHighlights(notes("4.4.0"), 100)).toEqual(highlights);
     expect(highlights.length).toBeLessThanOrEqual(MAX_HIGHLIGHTS);
-    expect(highlights[5].body).toMatch(/from 2026\.10\.9 to 2026\.11\.5 .* an older OpenClaw core cannot open the data any more\.$/);
+    expect(highlights[0].body).toMatch(/from 2026\.10\.9 to 2026\.11\.5 .* an older OpenClaw core cannot open the data any more\.$/);
+    expect(highlights[1].body).toMatch(/^On OpenClaw 2026\.11\.5 .* If your box had a check-in, the update turns it into a job/);
+    expect(highlights[2].body).toContain("to deepseek-v4-flash.");
     for (const h of highlights) {
       expect(`${h.title} ${h.body}`).not.toMatch(/\*\*|`|\s{2}/);
       expect(h.title.length).toBeLessThan(MAX_TITLE_CHARS);
