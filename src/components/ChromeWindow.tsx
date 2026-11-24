@@ -434,8 +434,9 @@ function ChromeWindow({
           const dh = Math.min(dy, r.startH - minH);
           newH = r.startH - dh;
           // Not above the desktop's top: under the kiosk bar the title bar
-          // could not be grabbed again.
-          newY = Math.max(desktopTop(), r.startPosY + dh);
+          // could not be grabbed again. The bar's height is rounded up onto
+          // the lattice, so a top held there is on it too.
+          newY = Math.max(devicePx(desktopTop(), true), r.startPosY + dh);
         }
 
         // Direct DOM update — no React re-render during resize

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useLayoutEffect, useRef, useState } from "react";
 import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
 import ChromeWindow, { type WindowMode } from "@/components/ChromeWindow";
+import { KIOSK_BAR_VAR } from "@/lib/kiosk-bar-inset";
 
 // Counted: every render of a window asks for the language once.
 const renders = vi.hoisted(() => ({ windows: 0 }));
@@ -303,6 +304,22 @@ describe("on the CSS-and-device pixel lattice", () => {
     expect([left, top, width, height].every((v) => onGrid(v)), `${left}, ${top} ${width} x ${height}`).toBe(true);
     expect(left + width).toBeCloseTo(right, 6);
     expect(top + height).toBeCloseTo(bottom, 6);
+  });
+
+  it("holds a top-edge resize at the kiosk bar on the lattice, never above the bar", () => {
+    // A 41 CSS px bar is 61.5 device px at 1.5: the window's top is held at
+    // the next lattice line under it, 42.
+    document.documentElement.style.setProperty(KIOSK_BAR_VAR, "41px");
+    try {
+      win();
+      fireEvent.mouseDown(el().querySelector<HTMLElement>(".cursor-n-resize")!, { clientX: 700, clientY: 200 });
+      fireEvent.mouseMove(window, { clientX: 700, clientY: -100 });
+      fireEvent.mouseUp(window, { clientX: 700, clientY: -100 });
+      const [, top] = box();
+      expect(top).toBe(42);
+    } finally {
+      document.documentElement.style.removeProperty(KIOSK_BAR_VAR);
+    }
   });
 
   it("holds a resize at the minimum size on whole CSS pixels where no lattice step up to 4 fits", () => {
