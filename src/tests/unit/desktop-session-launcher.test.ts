@@ -504,6 +504,22 @@ describe.skipIf(!usable)("clawbox-desktop-browser in a session", { timeout: 30_0
     expect(lines(path.join(fake, "nvidia-smi.txt"))).toEqual(Array(asked).fill(QUERY));
   });
 
+  it("starts no Chrome when its labwc goes while the tile memory is being sized", async () => {
+    // nvidia-smi can take up to its 2 s timeout: labwc may end meanwhile, and
+    // a Chrome started then lands on the NEXT session's screen.
+    const labwc = compositor();
+    const gone = smi(`kill "$LABWC_PID"; while kill -0 "$LABWC_PID" 2>/dev/null; do ${REAL_SLEEP} 0.02; done; echo 8192`);
+    const { done } = startLauncher(tileMemEnv(labwc.pid!, "7680 2160 2", { nvidiaSmi: gone }));
+    expect(await finished(done)).toBe(0);
+    expect(lines(path.join(fake, "nvidia-smi.txt"))).toEqual([QUERY]);
+    // The watchdog ends such a Chrome at once, often before it has done
+    // anything; the launcher's own log still says it was started.
+    expect(chromeLaunches()).toEqual([]);
+    expect(readText(log)).not.toContain("chromium exited");
+    expect(labwcCalls().filter((c) => c.includes("--exit"))).toEqual([]);
+    expect(readText(log)).toContain(`labwc (${labwc.pid}) is gone; this session is over`);
+  });
+
   it("asks the running Chrome for the desktop window again with the tile memory it started with", async () => {
     const labwc = compositor();
     setModes(["hold"]);

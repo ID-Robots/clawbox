@@ -466,6 +466,8 @@ while :; do
   TILE_MEM=()
   mb="$(tile_mem_mb)"
   [ -n "$mb" ] && TILE_MEM=(--force-gpu-mem-available-mb="$mb")
+  # Sizing can take seconds (nvidia-smi's timeout): labwc may have gone since.
+  compositor_alive || session_over
   "$CHROME" "${FLAGS[@]}" "${TILE_MEM[@]}" --app="$URL" &
   chrome_pid=$!
   watch_desktop "$chrome_pid" &
