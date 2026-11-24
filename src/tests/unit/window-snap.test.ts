@@ -10,6 +10,7 @@ import {
   fitWindowSize,
   getSnapRect,
   getSnapZone,
+  maximizedRect,
   shelfHeight,
   SNAP_THRESHOLD,
   desktopTop,
@@ -181,6 +182,73 @@ describe("fitWindowSize", () => {
 
   it("leaves a window that fits the strip at its own size", () => {
     expect(fitWindowSize({ width: 400, height: 600 }, 400 + DESKTOP_GAP)).toEqual({ width: 400, height: 600 });
+  });
+});
+
+/**
+ * Window geometry on WHOLE DEVICE PIXELS. A 4K monitor at scale 1.5 makes
+ * every odd CSS pixel half a device pixel, and a window standing on one was
+ * redrawn differently once a drag let it go (seen over two 4K monitors).
+ */
+describe("on the device pixel grid", () => {
+  const DPR = 1.5;
+  const onGrid = (v: number) => Math.abs(v * DPR - Math.round(v * DPR)) < 0.01;
+  /** An edge within half a device pixel of where it was: the nearest one. */
+  const nearest = (v: number, edge: number) => expect(Math.abs(v - edge), `${v} for ${edge}`).toBeLessThanOrEqual(0.5 / DPR + 1e-9);
+  const ZONES = ["left", "right", "top", "top-left", "top-right", "bottom-left", "bottom-right"] as const;
+  beforeEach(() => {
+    Object.defineProperty(window, "devicePixelRatio", { value: DPR, configurable: true });
+    // Odd sizes: halves and centres fall between device pixels.
+    Object.defineProperty(window, "innerWidth", { value: 1365, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: 767, configurable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
+  });
+
+  it("lays every snap zone on whole device pixels, its halves still meeting without a gap and filling the desktop", () => {
+    for (const zone of ZONES) {
+      const r = getSnapRect(zone)!;
+      for (const v of [r.x, r.y, r.width, r.height]) expect(onGrid(v), `${zone} ${JSON.stringify(r)}`).toBe(true);
+    }
+    const left = getSnapRect("left")!;
+    const right = getSnapRect("right")!;
+    expect(left.x + left.width).toBeCloseTo(right.x, 6);
+    nearest(right.x + right.width, 1365);
+    const tl = getSnapRect("top-left")!;
+    const bl = getSnapRect("bottom-left")!;
+    expect(tl.y + tl.height).toBeCloseTo(bl.y, 6);
+    nearest(bl.y + bl.height, 767 - SHELF);
+  });
+
+  it("lays a maximized window's edges on whole device pixels", () => {
+    const m = maximizedRect(301);
+    expect([m.x, m.y, m.width, m.height].every(onGrid), JSON.stringify(m)).toBe(true);
+    nearest(m.x + m.width, 1365 - 301);
+    nearest(m.y + m.height, 767 - SHELF);
+  });
+
+  it("clamps and fits a window onto whole device pixels", () => {
+    const p = clampWindowPosition({ x: 347.5, y: 101, width: 600, height: 400 });
+    expect(onGrid(p.x) && onGrid(p.y), JSON.stringify(p)).toBe(true);
+    // The nearest device pixel: 521.25 → 521, 151.5 → 152.
+    expect(p.x).toBeCloseTo(521 / DPR, 6);
+    expect(p.y).toBeCloseTo(152 / DPR, 6);
+    const s = fitWindowSize({ width: 801, height: 601 });
+    expect(onGrid(s.width) && onGrid(s.height), JSON.stringify(s)).toBe(true);
+    // Fitted to the desktop: its edge, to the nearest device pixel.
+    const big = fitWindowSize({ width: 2000, height: 2000 });
+    nearest(big.width, 1365);
+    nearest(big.height, 767 - SHELF);
+  });
+
+  it("changes nothing that is already on the grid, and nothing at all at devicePixelRatio 1", () => {
+    expect(clampWindowPosition({ x: 100, y: 50, width: 800, height: 600 })).toEqual({ x: 100, y: 50 });
+    expect(fitWindowSize({ width: 800, height: 600 })).toEqual({ width: 800, height: 600 });
+    Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
+    Object.defineProperty(window, "innerWidth", { value: W, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: H, configurable: true });
+    expect(getSnapRect("right")).toEqual({ x: W / 2, y: 0, width: W / 2, height: H - SHELF });
   });
 });
 

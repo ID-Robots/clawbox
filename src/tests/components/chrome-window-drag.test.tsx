@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
 import ChromeWindow, { type WindowMode } from "@/components/ChromeWindow";
 
@@ -219,6 +219,124 @@ describe("dragging a window", () => {
     fireEvent.touchMove(window, { touches: [{ clientX: 100, clientY: 100 }] });
     expect(el().style.translate).toBe("");
     expect(el().style.left).toBe(`${W - 600}px`);
+  });
+});
+
+/**
+ * At devicePixelRatio 1.5 (a 4K monitor at scale 1.5) every odd CSS pixel is
+ * half a device pixel: a window centred at `left: 347.5px`, or dragged or
+ * resized by a whole number of CSS pixels, stood between device pixels and was
+ * redrawn differently once the drag let it go. Centring, the drag and its
+ * offset, and the resize all land on whole device pixels.
+ */
+describe("on the device pixel grid", () => {
+  const DPR = 1.5;
+  const onGrid = (v: number) => Math.abs(v * DPR - Math.round(v * DPR)) < 0.01;
+  const px = (v: string) => v.split(" ").map((part) => parseFloat(part));
+  const box = () => [el().style.left, el().style.top, el().style.width, el().style.height].map((v) => parseFloat(v));
+  beforeEach(() => {
+    Object.defineProperty(window, "devicePixelRatio", { value: DPR, configurable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
+  });
+
+  it("centres a new window on whole device pixels", () => {
+    // A size already on the grid (806 x 602 is 1209 x 903 device px), centred
+    // at (1440 - 806) / 2 = 317 and (844 - 602) / 2 = 121 CSS px: 475.5 and
+    // 181.5 device px. Read at the FIRST commit, by the app inside the window,
+    // before the window's own effects run: the frame it opens with.
+    const first: number[] = [];
+    function App() {
+      const ref = useRef<HTMLDivElement>(null);
+      useLayoutEffect(() => {
+        const w = ref.current!.closest<HTMLElement>("[data-window-id]")!;
+        first.push(parseFloat(w.style.left), parseFloat(w.style.top));
+      }, []);
+      return <div ref={ref} />;
+    }
+    render(
+      <ChromeWindow title="Files" appId="files" windowId="files-1" isActive zIndex={100} onClose={noop} onFocus={noop}
+        onMinimize={noop} defaultWidth={806} defaultHeight={602}>
+        <App />
+      </ChromeWindow>,
+    );
+    expect(first.length === 2 && first.every(onGrid), `${first}`).toBe(true);
+    const [left, top] = box();
+    expect(onGrid(left) && onGrid(top), `${left}, ${top}`).toBe(true);
+  });
+
+  it("drags it by whole device pixels, and drops it where the drag showed it", () => {
+    const onGeometryChange = vi.fn();
+    win({ onGeometryChange });
+    fireEvent.mouseDown(titleBar(), { clientX: 700, clientY: 210 });
+    fireEvent.mouseMove(window, { clientX: 801, clientY: 301 });
+    const [dx, dy] = px(el().style.translate);
+    expect(onGrid(dx) && onGrid(dy), el().style.translate).toBe(true);
+    fireEvent.mouseUp(window, { clientX: 801, clientY: 301 });
+    const [left, top] = box();
+    expect(onGrid(left) && onGrid(top), `${left}, ${top}`).toBe(true);
+    expect(left).toBeCloseTo(400 + dx, 6);
+    expect(top).toBeCloseTo(200 + dy, 6);
+    expect(onGeometryChange).toHaveBeenCalledWith({ x: expect.closeTo(left, 6), y: expect.closeTo(top, 6), width: 600, height: 400 });
+  });
+
+  it("resizes it by whole device pixels, the opposite edge staying where it was", () => {
+    win();
+    const handle = (cursor: string) => el().querySelector<HTMLElement>(`.${cursor}`)!;
+    fireEvent.mouseDown(handle("cursor-se-resize"), { clientX: 1000, clientY: 600 });
+    fireEvent.mouseMove(window, { clientX: 1101, clientY: 701 });
+    fireEvent.mouseUp(window, { clientX: 1101, clientY: 701 });
+    let [left, top, width, height] = box();
+    expect([width, height].every(onGrid), `${width} x ${height}`).toBe(true);
+    expect([left, top]).toEqual([400, 200]);
+
+    const right = left + width;
+    const bottom = top + height;
+    fireEvent.mouseDown(handle("cursor-nw-resize"), { clientX: 400, clientY: 200 });
+    fireEvent.mouseMove(window, { clientX: 301, clientY: 101 });
+    fireEvent.mouseUp(window, { clientX: 301, clientY: 101 });
+    [left, top, width, height] = box();
+    expect([left, top, width, height].every(onGrid), `${left}, ${top} ${width} x ${height}`).toBe(true);
+    expect(left + width).toBeCloseTo(right, 6);
+    expect(top + height).toBeCloseTo(bottom, 6);
+  });
+
+  it("holds a resize at the minimum size on whole device pixels too", () => {
+    // At devicePixelRatio 1.125 the 300 px minimum width is 337.5 device px.
+    const dpr = 1.125;
+    Object.defineProperty(window, "devicePixelRatio", { value: dpr, configurable: true });
+    const aligned = (v: number) => Math.abs(v * dpr - Math.round(v * dpr)) < 0.01;
+    win();
+    // The left edge dragged far right: held at the minimum, the right edge where it was.
+    fireEvent.mouseDown(el().querySelector<HTMLElement>(".cursor-w-resize")!, { clientX: 400, clientY: 400 });
+    fireEvent.mouseMove(window, { clientX: 900, clientY: 400 });
+    fireEvent.mouseUp(window, { clientX: 900, clientY: 400 });
+    const [left, , width] = box();
+    expect(aligned(left) && aligned(width), `${left} + ${width}`).toBe(true);
+    expect(width).toBeGreaterThanOrEqual(300);
+    expect(width - 300).toBeLessThan(1 / dpr);
+    expect(left + width).toBeCloseTo(1000, 6);
+  });
+
+  it("saves a size held at the minimum that the next window still takes, where the nearest device pixel is under it", () => {
+    // At 1.331 the nearest device pixel to 300 is 299.8 CSS px, and a saved
+    // size under 300 x 200 is refused: the window reopened at its default.
+    const dpr = 1.331;
+    Object.defineProperty(window, "devicePixelRatio", { value: dpr, configurable: true });
+    const aligned = (v: number) => Math.abs(v * dpr - Math.round(v * dpr)) < 0.01;
+    const { unmount } = win();
+    fireEvent.mouseDown(el().querySelector<HTMLElement>(".cursor-se-resize")!, { clientX: 1000, clientY: 600 });
+    fireEvent.mouseMove(window, { clientX: 300, clientY: 100 });
+    fireEvent.mouseUp(window, { clientX: 300, clientY: 100 });
+    const [, , width, height] = box();
+    expect(aligned(width) && aligned(height), `${width} x ${height}`).toBe(true);
+    expect(width).toBeGreaterThanOrEqual(300);
+    expect(height).toBeGreaterThanOrEqual(200);
+    unmount();
+    win({ initialPosition: undefined, initialSize: undefined });
+    const [, , reopenedW, reopenedH] = box();
+    expect([reopenedW, reopenedH]).toEqual([width, height]);
   });
 });
 
