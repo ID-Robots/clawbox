@@ -528,9 +528,11 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     }
     if (crossing) updateSeconds = Math.round((Date.now() - triggeredAtMs) / 1000);
     // The crossing was decided on the pin read before the trigger, and the
-    // updater resolves the branch again when it fetches: hold the pin the update
-    // installed to that snapshot before anything relies on it. A move that left
-    // the pin alone changes nothing here, and is only said.
+    // updater resolves the branch again when it fetches: on a crossing, hold
+    // the pin the update installed to that snapshot before the last case relies
+    // on it. A move that left the pin alone changes nothing here, and is only
+    // said; so is a moved pin on a run that crosses nothing, where no case
+    // reads it and the upgrade it installed is still a healthy one.
     const installedPin = firstWord(await dockerExec(["cat", "/home/clawbox/clawbox/config/openclaw-target.txt"]));
     const installedCommit = (await dockerExec(
       ["git", "-c", "safe.directory=/home/clawbox/clawbox", "-C", "/home/clawbox/clawbox", "rev-parse", "HEAD"],
@@ -539,11 +541,16 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     if (installedCommit !== targetCommit) {
       console.log(`[codex crossing] ${UPGRADE_BRANCH} moved after the snapshot: ${targetCommit} then, ${installedCommit} installed`);
     }
-    expect(
-      installedPin,
-      `fixture: ${UPGRADE_BRANCH} moved between the snapshot and the update: pin ${targetPin} at ${targetCommit}, ` +
-      `the update installed pin ${installedPin} at ${installedCommit}; run the job again`,
-    ).toBe(targetPin);
+    if (crossing) {
+      expect(
+        installedPin,
+        `fixture: ${UPGRADE_BRANCH} moved between the snapshot and the update: pin ${targetPin} at ${targetCommit}, ` +
+        `the update installed pin ${installedPin} at ${installedCommit}; run the job again`,
+      ).toBe(targetPin);
+    } else if (installedPin !== targetPin) {
+      console.log(`[codex crossing] not exercised, and ${UPGRADE_BRANCH}'s pin moved after the snapshot: ` +
+        `${targetPin} then, ${installedPin} installed`);
+    }
   });
 
   test(`git HEAD is on ${UPGRADE_BRANCH}`, async () => {
