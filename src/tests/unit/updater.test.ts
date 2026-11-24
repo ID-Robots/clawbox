@@ -6193,6 +6193,177 @@ describe("updater", () => {
       }
     });
 
+    // While the continuation waits on a root unit, nothing may start a run: a
+    // Try again on a second window still showing an older failed card, a chat
+    // approval, a direct POST. A run started then cuts the wait off for good,
+    // leaves this run's flag on disk, and runs its own `git reset --hard`
+    // beside the unit's exit guard. Each case below that lets a run start
+    // gives it an update channel it refuses before step 1, so it settles.
+    const waitLog = (spy: { mock: { calls: unknown[][] } }, part: string) =>
+      spy.mock.calls.map(([m]) => String(m)).filter((m) => m.includes(part));
+
+    it("starts no update while it waits on the rebuild unit, and still judges when the unit ends", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", "workstaton");
+      const log = vi.spyOn(console, "log");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.getUpdateState().phase).toBe("running");
+
+        // Right after the ask that began the wait, and between two later asks.
+        for (let ask = 0; ask < 2; ask++) {
+          expect(updater.startUpdate()).toEqual({ started: false, error: "Update already in progress" });
+          expect(updater.startOpenclawUpdate()).toEqual({ started: false, error: "Update already in progress" });
+          expect(await updater.dismissSettledUpdate()).toMatchObject({ dismissed: false, reason: "in-progress" });
+          await vi.advanceTimersByTimeAsync(5_000);
+        }
+        expect(flagCleared()).toBe(false);
+
+        // The unit ends: the next ask of the server's own still judges, and the
+        // reason is the rebuild's own line.
+        unit.active = "failed";
+        unit.result = "exit-code";
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([
+          expect.stringMatching(/rebuild step ended \d+ s after .*: the update failed: Error: rebuild failed \(exit 137\)/),
+        ]);
+        expect(flagCleared()).toBe(true);
+
+        // Nothing waits any more: an update can start again.
+        await vi.waitFor(() => expect(updater.startUpdate().started).toBe(true));
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        log.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("lets go when the continuation flag is gone while it waits: no step left running, nothing refused", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", "workstaton");
+      const log = vi.spyOn(console, "log");
+      try {
+        updater.resetUpdateState();
+        restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.startUpdate().started).toBe(false);
+
+        // The store no longer holds the flag by the next ask.
+        const store = mockGet.getMockImplementation()!;
+        mockGet.mockImplementation(async (key: string) => (key === "update_needs_continuation" ? undefined : store(key)));
+        await vi.advanceTimersByTimeAsync(5_000);
+
+        expect(updater.getUpdateState().phase).toBe("idle");
+        expect(waitLog(log, "Stopped waiting for the rebuild step")).toHaveLength(1);
+        expect(await updater.dismissSettledUpdate()).toEqual({ dismissed: true });
+        expect(updater.startUpdate().started).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        log.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("goes on asking when the store will not take the verdict, keeps the box, and says so sparsely", async () => {
+      // A full disk: once the unit has ended, the verdict's first write fails,
+      // and each ask fails the same way until it does not.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", "workstaton");
+      const log = vi.spyOn(console, "log");
+      const warn = vi.spyOn(console, "warn");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+        unit.active = "failed";
+        unit.result = "exit-code";
+        mockSetMany.mockRejectedValue(new Error("ENOSPC: no space left on device, write"));
+
+        for (let ask = 0; ask < 12; ask++) {
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(updater.startUpdate().started).toBe(false);
+        }
+        expect(waitLog(warn, "judge the update")).toHaveLength(1);
+        // …and a line now and then while it lasts, not one every 5 s.
+        await vi.advanceTimersByTimeAsync(600_000);
+        expect(waitLog(warn, "judge the update")).toHaveLength(2);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([]);
+
+        mockSetMany.mockResolvedValue();
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([
+          expect.stringMatching(/the update failed: Error: rebuild failed \(exit 137\)/),
+        ]);
+        await vi.waitFor(() => expect(updater.startUpdate().started).toBe(true));
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        log.mockRestore();
+        warn.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("starts no update while the handover waits on the root bootstrap, and says once that systemd does not answer", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", "workstaton");
+      mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
+      const warn = vi.spyOn(console, "warn");
+      const actual = await vi.importActual<typeof import("fs")>("fs");
+      try {
+        updater.resetUpdateState();
+        mockReadFile.mockImplementation(async (file) => {
+          const f = String(file);
+          if (f.endsWith("updater-handover.json")) return JSON.stringify({ version: 1, previousBuildId: "build-old" });
+          if (f.endsWith("BUILD_ID")) return "build-new\n";
+          throw new Error("ENOENT");
+        });
+        setupExecFileMock({
+          "show clawbox-root-update@bootstrap_updater.service -p ActiveState":
+            new Error("Failed to connect to bus: No such file or directory"),
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.startUpdate()).toEqual({ started: false, error: "Update already in progress" });
+        expect(await updater.updateInFlight()).toBe(true);
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(updater.startUpdate().started).toBe(false);
+        expect(waitLog(warn, "systemd")).toEqual([expect.stringContaining("Failed to connect to bus")]);
+
+        // The handover is over (its marker gone): nothing waits, an update can start.
+        mockExists.mockImplementation(actual.existsSync);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(updater.startUpdate().started).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        warn.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+        mockExists.mockImplementation(actual.existsSync);
+      }
+    });
+
+    it("keeps the update's warnings on the screen while it waits", async () => {
+      updater.resetUpdateState();
+      const repinned = { code: "repinned", message: "This box now follows the main branch." };
+      restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }], {
+        store: { update_warnings: JSON.stringify([repinned]) },
+      });
+      try {
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.getUpdateState().phase).toBe("running");
+        expect(updater.getUpdateState().warnings).toEqual([repinned]);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
     it("reads the unit's state before its result, so a unit that ends between the two is still judged failed", async () => {
       updater.resetUpdateState();
       // Whichever systemd question comes first sees the unit running; it has

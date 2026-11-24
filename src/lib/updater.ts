@@ -5953,6 +5953,10 @@ interface UpdaterRuntime {
   continuationRecheck?: NodeJS.Timeout | null;
   /** When this process began waiting for the rebuild unit to end, on `monotonicNow()`. */
   rebuildWaitSince?: number | null;
+  /** Asks of a wait that failed in a row, so a store that refuses every write is logged sparsely. */
+  continuationAskFailures?: number;
+  /** The handover wait last got no answer from systemd, and has said so once. */
+  handoverUnanswered?: boolean;
 }
 const runtimeKey: unique symbol = Symbol.for("clawbox.updater.runtime.v1");
 const processRuntime = globalThis as typeof globalThis & { [runtimeKey]?: UpdaterRuntime };
@@ -5962,9 +5966,14 @@ const runtime = processRuntime[runtimeKey] ??= {
   continuationInFlight: null,
 };
 
-/** An update owns the box: one is running, or a continuation is being read. */
+/**
+ * An update owns the box: one is running, a continuation is being read, or a
+ * continuation waits on a root unit with its next ask armed — between two asks
+ * as much as during one, so nothing starts a run beside that unit. Truthy, not
+ * `!== null`: a fresh process's runtime has no recheck field at all.
+ */
 function updateOwned(): boolean {
-  return runtime.running || runtime.continuationInFlight !== null;
+  return runtime.running || runtime.continuationInFlight !== null || Boolean(runtime.continuationRecheck);
 }
 
 export function getUpdateState(): UpdateState {
@@ -5981,6 +5990,8 @@ export function resetUpdateState(): void {
   runtime.continuationInFlight = null;
   cancelContinuationRecheck();
   runtime.rebuildWaitSince = null;
+  runtime.continuationAskFailures = 0;
+  runtime.handoverUnanswered = false;
 }
 
 export type DismissOutcome =
@@ -6336,15 +6347,18 @@ export async function updateInFlight(): Promise<boolean> {
 
 /**
  * Check if a post-restart continuation is needed and trigger it.
- * Called once from the server boot path (src/instrumentation.ts) and from
- * the status route on every idle poll as the fallback. Single-flight:
+ * Called once from the server boot path (src/instrumentation.ts), from the
+ * status route on every idle poll as the fallback, and by its own recheck
+ * while it waits on a root unit (askContinuationAgainLater). The recheck is
+ * the only caller during a rebuild wait: that wait shows "running", which the
+ * status route answers as it is. Single-flight:
  * overlapping callers share one resume and get its one answer, so a status
  * poll that lands on the boot hook's read answers "running", not "idle".
  */
 export function checkContinuation(): Promise<boolean> {
   if (runtime.running) return Promise.resolve(false);
   if (!runtime.continuationInFlight) {
-    runtime.continuationInFlight = resumeContinuation().finally(() => {
+    runtime.continuationInFlight = askContinuation().finally(() => {
       runtime.continuationInFlight = null;
     });
   }
@@ -6366,11 +6380,11 @@ const CONTINUATION_RECHECK_MS = 5_000;
 function askContinuationAgainLater(): void {
   if (runtime.continuationRecheck) return;
   const timer = setTimeout(() => {
-    runtime.continuationRecheck = null;
-    checkContinuation().catch((err) => {
-      console.warn("[Updater] Could not judge the update yet:", err instanceof Error ? err.message : err);
-      askContinuationAgainLater();
-    });
+    // The ask takes this handle over (askContinuation), so the box stays
+    // owned from here to its answer; an ask that fails says so and re-arms.
+    checkContinuation().catch(() => undefined);
+    // No ask took it — a run owns the box now — so nothing is left to wait for.
+    if (runtime.continuationRecheck === timer) runtime.continuationRecheck = null;
   }, CONTINUATION_RECHECK_MS);
   timer.unref();
   runtime.continuationRecheck = timer;
@@ -6390,12 +6404,14 @@ function cancelContinuationRecheck(): void {
  * restore_checkout_to_served_build). That reset then fails, and git's `fatal:`
  * line lands in the unit's journal.
  */
-function waitForRebuildUnit(steps: UpdateStepDef[], restartIndex: number): void {
+function waitForRebuildUnit(steps: UpdateStepDef[], restartIndex: number, warnings: UpdateWarning[]): void {
   if (runtime.rebuildWaitSince == null) {
     runtime.rebuildWaitSince = monotonicNow();
     console.log("[Updater] ClawBox came back before its rebuild step ended: the update is judged when that step ends");
   }
   runtime.state = createInitialState(steps);
+  // The repin and drift warnings stay on the screen through the wait, as after it.
+  runtime.state.warnings = warnings;
   runtime.state.phase = "running";
   for (let i = 0; i < restartIndex; i++) runtime.state.steps[i].status = "completed";
   runtime.state.steps[restartIndex].status = "running";
@@ -6404,16 +6420,46 @@ function waitForRebuildUnit(steps: UpdateStepDef[], restartIndex: number): void 
 }
 
 /** The second of the wait's two log lines, with how it ended. */
-function endRebuildWait(outcome: string): void {
+function endRebuildWait(outcome: string, how = "The rebuild step ended"): void {
   if (runtime.rebuildWaitSince == null) return;
   const seconds = Math.round((monotonicNow() - runtime.rebuildWaitSince) / 1000);
   runtime.rebuildWaitSince = null;
-  console.log(`[Updater] The rebuild step ended ${seconds} s after ClawBox came back: ${outcome}`);
+  console.log(`[Updater] ${how} ${seconds} s after ClawBox came back: ${outcome}`);
+}
+
+/** A wait's failed asks in a row: the first is logged, then every this many (about ten minutes). */
+const CONTINUATION_FAILURE_LOG_EVERY = 120;
+
+async function askContinuation(): Promise<boolean> {
+  // An armed recheck means this ask belongs to a wait, and this ask is the one
+  // it was for. One that fails keeps the wait — and the box — by arming the
+  // next ask BEFORE it lets go, so no run can start in between.
+  const waiting = Boolean(runtime.continuationRecheck);
+  cancelContinuationRecheck();
+  try {
+    const answer = await resumeContinuation();
+    runtime.continuationAskFailures = 0;
+    return answer;
+  } catch (err) {
+    if (waiting) {
+      // A store that refuses every write (a full disk) fails each ask until it
+      // is fixed: said at once, then now and then, not every 5 s for hours.
+      const failures = (runtime.continuationAskFailures ?? 0) + 1;
+      runtime.continuationAskFailures = failures;
+      if (failures === 1 || failures % CONTINUATION_FAILURE_LOG_EVERY === 0) {
+        const count = failures === 1 ? "first failed ask" : `${failures} failed asks in a row`;
+        console.warn(
+          `[Updater] Could not judge the update yet (${count}; asking again every ${CONTINUATION_RECHECK_MS / 1000} s):`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+      askContinuationAgainLater();
+    }
+    throw err;
+  }
 }
 
 async function resumeContinuation(): Promise<boolean> {
-  // This ask is the one a pending recheck was for.
-  cancelContinuationRecheck();
   const handoverFile = path.join(PROJECT_DIR, "data", "updater-handover.json");
   let handover: unknown;
   try {
@@ -6424,12 +6470,21 @@ async function resumeContinuation(): Promise<boolean> {
   }
   if (handover !== undefined) {
     let bootstrapState: string | null = null;
+    let unanswered = "an empty answer";
     try {
       const { stdout } = await execFile("/usr/bin/systemctl", [
         "show", rootStepUnit("bootstrap_updater"), "-p", "ActiveState", "--value",
       ], { timeout: 10_000 });
       bootstrapState = stdout.trim() || null;
-    } catch { /* a later status/boot probe can retry */ }
+    } catch (err) {
+      unanswered = err instanceof Error ? err.message : String(err);
+    }
+    // Unanswered is "wait", asked again every 5 s and owning the box: one line
+    // when that begins, so a handover stuck on it is visible.
+    if (!bootstrapState && !runtime.handoverUnanswered) {
+      console.warn(`[Updater] systemd does not answer for the root bootstrap (${unanswered}): the updater handover waits until it does`);
+    }
+    runtime.handoverUnanswered = !bootstrapState;
     const verdict = classifyUpdaterHandover(handover, await readBuildId(), bootstrapState);
     if (verdict === "wait") {
       askContinuationAgainLater();
@@ -6463,6 +6518,14 @@ async function resumeContinuation(): Promise<boolean> {
 
   const needsContinuation = await get("update_needs_continuation");
   if (!needsContinuation) {
+    // The flag went while this process showed the rebuild wait (no update can
+    // start then, so the store was wiped or edited under it): nothing is left
+    // to judge. The wait ends here rather than show its step running — which
+    // refuses a Dismiss and the update notice — until the server restarts.
+    if (runtime.rebuildWaitSince != null) {
+      endRebuildWait("its continuation flag is gone, so there is nothing left to judge", "Stopped waiting for the rebuild step");
+      runtime.state = createInitialState(applicableSteps());
+    }
     // Boot safety. A run that died between setting the lock and writing its
     // continuation flag would otherwise leave the desktop locked with nothing
     // left to unlock it — there is no update to resume, so there is no lock to
@@ -6638,7 +6701,7 @@ async function resumeContinuation(): Promise<boolean> {
   // ends with the unit (its TimeoutStartSec caps it). Not on the owner's path,
   // where that unit is never this run's.
   if (unitRunning && !unitFailed && (buildUnchanged || buildMissing)) {
-    waitForRebuildUnit(steps, restartIndex);
+    waitForRebuildUnit(steps, restartIndex, await restoreWarnings());
     return false;
   }
 
