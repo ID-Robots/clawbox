@@ -6254,21 +6254,33 @@ describe("updater", () => {
       }
     });
 
-    it("lets go when the continuation flag is gone while it waits: no step left running, nothing refused", async () => {
+    it("keeps waiting while the unit runs though the continuation flag is gone, then lets go: nothing left running or refused", async () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
       vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
       const log = vi.spyOn(console, "log");
       try {
         updater.resetUpdateState();
-        restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
         expect(await updater.checkContinuation()).toBe(false);
         expect(updater.startUpdate().started).toBe(false);
 
-        // The store no longer holds the flag by the next ask.
+        // The store no longer holds the flag by the next ask (wiped or rewritten
+        // under the wait). The unit still runs, or systemd cannot say: its tail
+        // may still reset the checkout, so the update keeps the box.
         const store = mockGet.getMockImplementation()!;
         mockGet.mockImplementation(async (key: string) => (key === "update_needs_continuation" ? undefined : store(key)));
-        await vi.advanceTimersByTimeAsync(5_000);
+        for (const active of ["activating", NO_ANSWER]) {
+          unit.active = active;
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(updater.getUpdateState().phase).toBe("running");
+          expect(waitLog(log, "Stopped waiting for the rebuild step")).toEqual([]);
+          expect(updater.startUpdate().started).toBe(false);
+        }
 
+        // The unit has ended: nothing is left to judge.
+        unit.active = "failed";
+        unit.result = "exit-code";
+        await vi.advanceTimersByTimeAsync(5_000);
         expect(updater.getUpdateState().phase).toBe("idle");
         expect(waitLog(log, "Stopped waiting for the rebuild step")).toHaveLength(1);
         expect(await updater.dismissSettledUpdate()).toEqual({ dismissed: true });
@@ -6278,6 +6290,50 @@ describe("updater", () => {
         log.mockRestore();
         updater.resetUpdateState();
         vi.useRealTimers();
+      }
+    });
+
+    it("keeps waiting when systemd does not answer in the middle of the wait, unless the unit is known to have failed", async () => {
+      // Seen running once, the unit is not "ended" because one question went
+      // unanswered: a `success` Result then is the running oneshot's, and judging
+      // on it would give the fixed sentence and release the lock beside its tail.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const log = vi.spyOn(console, "log");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+
+        unit.active = NO_ANSWER;
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([]);
+        expect(flagCleared()).toBe(false);
+        expect(updater.startUpdate().started).toBe(false);
+
+        // Still unanswered, but the Result says it failed: that ends the wait.
+        unit.result = "exit-code";
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([
+          expect.stringMatching(/the update failed: Error: rebuild failed \(exit 137\)/),
+        ]);
+      } finally {
+        log.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("judges at once, as before, when systemd does not answer this process's first ask", async () => {
+      // No wait has begun: a box whose systemd cannot be asked is not held
+      // waiting on a unit nobody has seen run.
+      updater.resetUpdateState();
+      restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }], { unit: { active: NO_ANSWER, result: "success" } });
+      try {
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.getUpdateState().phase).toBe("failed");
+        expect(updater.getUpdateState().error).toBe(NO_NEW_BUILD);
+      } finally {
+        updater.resetUpdateState();
       }
     });
 

@@ -6575,10 +6575,17 @@ async function resumeContinuation(): Promise<boolean> {
   const needsContinuation = await get("update_needs_continuation");
   if (!needsContinuation) {
     // The flag went while this process showed the rebuild wait (no update can
-    // start then, so the store was wiped or edited under it): nothing is left
-    // to judge. The wait ends here rather than show its step running — which
-    // refuses a Dismiss and the update notice — until the server restarts.
+    // start then, so the store was wiped or edited under it). While the unit
+    // may still run, the wait goes on: its tail can still reset the checkout,
+    // and a lock released now would let a new update in beside it. Once it has
+    // settled, nothing is left to judge, and the wait ends here rather than
+    // show its step running — which refuses a Dismiss and the update notice —
+    // until the server restarts.
     if (runtime.rebuildWaitSince != null) {
+      if (await rootStepStillRunning(REBUILD_ROOT_STEP)) {
+        askContinuationAgainLater();
+        return false;
+      }
       endRebuildWait("its continuation flag is gone, so there is nothing left to judge", "Stopped waiting for the rebuild step");
       runtime.state = createInitialState(applicableSteps());
     }
@@ -6722,9 +6729,14 @@ async function resumeContinuation(): Promise<boolean> {
   const ownerRebuilt = rebuiltByOwner();
   // Asked BEFORE the Result (see "NOT YET" below): a unit that ends between the
   // two questions is then "running" with a settled Result, never "settled" with
-  // the `success` it answered while it still ran.
-  const unitRunning = !ownerRebuilt
-    && /^(?:activating|active|deactivating|reloading)$/.test((await getRootStepActiveState(REBUILD_ROOT_STEP)) ?? "");
+  // the `success` it answered while it still ran. Inside a wait this process
+  // has seen begin, only a settled state ends it: an ask systemd did not answer
+  // is no evidence the unit ended (rootStepStillRunning), and its `success`
+  // would be the running oneshot's. A first ask keeps the strict reading, so a
+  // unit nobody has seen run is judged at once.
+  const unitRunning = !ownerRebuilt && (runtime.rebuildWaitSince != null
+    ? await rootStepStillRunning(REBUILD_ROOT_STEP)
+    : /^(?:activating|active|deactivating|reloading)$/.test((await getRootStepActiveState(REBUILD_ROOT_STEP)) ?? ""));
   const unitFailed = !ownerRebuilt && rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP));
   const recordedBuildId = typeof needsContinuation === "string" ? needsContinuation : null;
   const currentBuildId = await readBuildId();
