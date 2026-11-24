@@ -338,6 +338,31 @@ describe("on the device pixel grid", () => {
     const [, , reopenedW, reopenedH] = box();
     expect([reopenedW, reopenedH]).toEqual([width, height]);
   });
+
+  it.each([
+    // Opened at the minimum height; only the right edge moves.
+    ["height", { width: 600, height: 200 }, "cursor-e-resize", [1000, 300], [1050, 300]],
+    // Opened at the minimum width; only the bottom edge moves.
+    ["width", { width: 300, height: 400 }, "cursor-s-resize", [550, 600], [550, 650]],
+  ] as const)("saves a FITTED %s at the minimum that the next window still takes, when the resize moves only the other edge", (_, initialSize, handle, from, to) => {
+    // At 1.331 the nearest device pixel to 300 x 200 is 299.8 x 199.8 CSS px;
+    // the edge the resize leaves alone is saved as it was fitted.
+    const dpr = 1.331;
+    Object.defineProperty(window, "devicePixelRatio", { value: dpr, configurable: true });
+    const { unmount } = win({ initialSize });
+    fireEvent.mouseDown(el().querySelector<HTMLElement>(`.${handle}`)!, { clientX: from[0], clientY: from[1] });
+    fireEvent.mouseMove(window, { clientX: to[0], clientY: to[1] });
+    fireEvent.mouseUp(window, { clientX: to[0], clientY: to[1] });
+    const [, , width, height] = box();
+    expect(width, `${width} x ${height}`).toBeGreaterThanOrEqual(300);
+    expect(height, `${width} x ${height}`).toBeGreaterThanOrEqual(200);
+    unmount();
+    win({ initialPosition: undefined, initialSize: undefined });
+    const [, , reopenedW, reopenedH] = box();
+    // Fitted again on the way in: the same device pixel, give or take float noise.
+    expect(reopenedW).toBeCloseTo(width, 6);
+    expect(reopenedH).toBeCloseTo(height, 6);
+  });
 });
 
 describe("a snap drop", () => {

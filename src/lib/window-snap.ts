@@ -291,8 +291,10 @@ export function fitWindowSize(
   const availW = rInset > 0 ? area.width - DESKTOP_GAP * 2 : area.width;
   const availH = area.height;
   return {
-    width: devicePx(Math.max(MIN_WINDOW_WIDTH, Math.min(size.width, availW))),
-    height: devicePx(Math.max(MIN_WINDOW_HEIGHT, Math.min(size.height, availH))),
+    // The minimums at or above 300 x 200 (`atLeast`): a resize that leaves
+    // one edge alone saves it as fitted, and `getSavedSize` refuses less.
+    width: Math.max(devicePx(MIN_WINDOW_WIDTH, true), devicePx(Math.min(size.width, availW))),
+    height: Math.max(devicePx(MIN_WINDOW_HEIGHT, true), devicePx(Math.min(size.height, availH))),
   };
 }
 
@@ -310,7 +312,7 @@ export function fitPlacedWindow(rect: DeskRect): { width: number; height: number
   if (typeof window === "undefined" || !getDeskScreens()) return fitted;
   const all = deskScreens();
   const rowWidth = Math.max(...all.map((s) => s.x + s.width)) - Math.min(...all.map((s) => s.x));
-  return { width: devicePx(Math.max(MIN_WINDOW_WIDTH, Math.min(rect.width, rowWidth))), height: fitted.height };
+  return { width: Math.max(devicePx(MIN_WINDOW_WIDTH, true), devicePx(Math.min(rect.width, rowWidth))), height: fitted.height };
 }
 
 /** The narrowest the docked chat panel is ever drawn. */
