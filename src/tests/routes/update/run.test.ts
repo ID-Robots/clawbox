@@ -10,6 +10,7 @@ vi.mock("@/lib/update-busy", () => ({
 vi.mock("@/lib/updater", () => ({
   startUpdate: vi.fn(),
   isUpdateCompleted: vi.fn(),
+  startWouldOverlapUpdate: vi.fn(),
 }));
 
 // The /updating screen's "What's new" prefetch (TASK-1205): git and GitHub,
@@ -18,12 +19,13 @@ vi.mock("@/lib/update-whats-new-server", () => ({
   prefetchUpdateWhatsNew: vi.fn(),
 }));
 
-import { startUpdate, isUpdateCompleted } from "@/lib/updater";
+import { startUpdate, isUpdateCompleted, startWouldOverlapUpdate } from "@/lib/updater";
 import { activeAgentWork } from "@/lib/update-busy";
 import { prefetchUpdateWhatsNew } from "@/lib/update-whats-new-server";
 
 const mockStartUpdate = vi.mocked(startUpdate);
 const mockIsUpdateCompleted = vi.mocked(isUpdateCompleted);
+const mockStartWouldOverlap = vi.mocked(startWouldOverlapUpdate);
 const mockPrefetch = vi.mocked(prefetchUpdateWhatsNew);
 const mockActiveAgentWork = vi.mocked(activeAgentWork);
 
@@ -53,6 +55,7 @@ describe("POST /setup-api/update/run", () => {
 
     mockStartUpdate.mockReturnValue({ started: true });
     mockIsUpdateCompleted.mockResolvedValue(false);
+    mockStartWouldOverlap.mockResolvedValue(false);
     mockPrefetch.mockResolvedValue(undefined);
 
     const mod = await import("@/app/setup-api/update/run/route");
@@ -62,6 +65,19 @@ describe("POST /setup-api/update/run", () => {
   afterEach(() => {
     vi.clearAllMocks();
     session.cleanup();
+  });
+
+  it("starts nothing while an update this server has not taken over yet is in flight, and answers as a refused start", async () => {
+    // A server restarted by an update owns nothing until its first ask, while
+    // the flag on disk says the rebuild unit may still run: startUpdate alone
+    // would start. The update screen reads `started: false` and shows the run
+    // the status route then reports.
+    mockStartWouldOverlap.mockResolvedValue(true);
+    const res = await updateRunPost(jsonRequest({ force: true }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ started: false, error: "Update already in progress" });
+    expect(mockStartUpdate).not.toHaveBeenCalled();
   });
 
   it("starts an update successfully", async () => {

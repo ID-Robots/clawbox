@@ -20,6 +20,7 @@ vi.mock("@/lib/updater", () => ({
   startUpdate: vi.fn(() => ({ started: true })),
   startOpenclawUpdate: vi.fn(() => ({ started: true })),
   isUpdateCompleted: vi.fn(async () => false),
+  startWouldOverlapUpdate: vi.fn(async () => false),
 }));
 vi.mock("@/lib/update-whats-new-server", () => ({
   prefetchUpdateWhatsNew: vi.fn(async () => undefined),

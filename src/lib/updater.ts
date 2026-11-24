@@ -6346,6 +6346,26 @@ export async function updateInFlight(): Promise<boolean> {
 }
 
 /**
+ * Would a new start overlap an update in flight? Asked by everything that
+ * starts an update or asks the owner to — the start routes and the approval
+ * path — because `startUpdate` is synchronous and refuses on this process's
+ * ownership alone. That misses one window: a server restarted by the update
+ * owns nothing until its first ask (the boot hook's, five seconds and the boot
+ * config repair later), while the flag on disk says the rebuild unit may still
+ * be running.
+ *
+ * …except the flag a run in THIS process left when it failed after writing it
+ * (its rebuild step could not be dispatched; on a PC, the restart did not
+ * come). This process shows that failure, and its Try again must start, as it
+ * always could. A restarted process shows "idle" until its first ask.
+ */
+export async function startWouldOverlapUpdate(): Promise<boolean> {
+  if (updateOwned()) return true;
+  if (runtime.state.phase === "failed") return false;
+  return updateInFlight();
+}
+
+/**
  * Check if a post-restart continuation is needed and trigger it.
  * Called once from the server boot path (src/instrumentation.ts), from the
  * status route on every idle poll as the fallback, and by its own recheck

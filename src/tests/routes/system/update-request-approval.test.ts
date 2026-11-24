@@ -6,7 +6,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 const startUpdate = vi.hoisted(() => vi.fn(() => ({ started: true })));
-vi.mock("@/lib/updater", () => ({ startUpdate }));
+// Whether an update is already in flight (the updater's own answer is pinned in updater.test.ts).
+const inFlight = vi.hoisted(() => vi.fn(async () => false));
+vi.mock("@/lib/updater", () => ({ startUpdate, startWouldOverlapUpdate: inFlight }));
 vi.mock("@/lib/update-whats-new-server", () => ({ prefetchUpdateWhatsNew: async () => undefined }));
 vi.mock("@/lib/email-approval", () => ({
   approvalBotToken: async () => null, chatApprovalEnabled: async () => false,
@@ -22,6 +24,8 @@ describe("update from chat", () => {
     session = installSessionFixture();
     fs.writeFileSync(path.join(session.root, "data/.mcp-token"), token);
     startUpdate.mockClear();
+    inFlight.mockReset();
+    inFlight.mockResolvedValue(false);
     request = (await import("@/app/setup-api/update/request/route")).POST;
     decide = (await import("@/app/setup-api/system/power/approval/route")).POST;
     const lib = await import("@/lib/power-approval");
@@ -54,6 +58,27 @@ describe("update from chat", () => {
   it("a declined update never starts", async () => {
     const prompt = await (await request(req({ reason: "update please" }))).json();
     expect((await decide(req({ id: prompt.id, action: "update", approve: false }, session.cookie))).status).toBe(200);
+    expect(startUpdate).not.toHaveBeenCalled();
+  });
+
+  it("raises no question and starts nothing while an update is already in flight", async () => {
+    inFlight.mockResolvedValue(true);
+    const asked = await request(req({ reason: "update please" }));
+    expect(asked.status).toBe(409);
+    expect((await asked.json()).error).toBe("An update is already running; the desktop shows how it ends.");
+    expect((await import("@/lib/power-approval")).pendingPowerApproval()).toBeNull();
+
+    const owner = await request(req({}, session.cookie));
+    expect(owner.status).toBe(409);
+    expect(startUpdate).not.toHaveBeenCalled();
+  });
+
+  it("starts nothing when the owner confirms after an update has begun", async () => {
+    // Asked first; an update started from the desktop before the Confirm. A
+    // restarted server's update that it has not asked about yet counts too.
+    const prompt = await (await request(req({ reason: "update please" }))).json();
+    inFlight.mockResolvedValue(true);
+    await decide(req({ id: prompt.id, action: "update", approve: true }, session.cookie));
     expect(startUpdate).not.toHaveBeenCalled();
   });
 

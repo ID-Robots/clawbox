@@ -3,11 +3,13 @@ import { installSessionFixture, type SessionFixture } from "@/tests/helpers/sess
 
 vi.mock("@/lib/updater", () => ({
   startOpenclawUpdate: vi.fn(),
+  startWouldOverlapUpdate: vi.fn(),
 }));
 
-import { startOpenclawUpdate } from "@/lib/updater";
+import { startOpenclawUpdate, startWouldOverlapUpdate } from "@/lib/updater";
 
 const mockStartOpenclawUpdate = vi.mocked(startOpenclawUpdate);
+const mockStartWouldOverlap = vi.mocked(startWouldOverlapUpdate);
 
 describe("POST /setup-api/update/openclaw", () => {
   let postOpenclawUpdate: () => Promise<Response>;
@@ -19,6 +21,7 @@ describe("POST /setup-api/update/openclaw", () => {
     session = installSessionFixture();
 
     mockStartOpenclawUpdate.mockReturnValue({ started: true });
+    mockStartWouldOverlap.mockResolvedValue(false);
 
     const mod = await import("@/app/setup-api/update/openclaw/route");
     // The owner's click: the route checks for a signed-in person itself.
@@ -37,6 +40,16 @@ describe("POST /setup-api/update/openclaw", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ started: true });
+  });
+
+  it("starts nothing beside a full update this server has not taken over yet", async () => {
+    // Its run would also release that update's desktop lock when it ended.
+    mockStartWouldOverlap.mockResolvedValue(true);
+    const response = await postOpenclawUpdate();
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({ started: false, error: "Update already in progress" });
+    expect(mockStartOpenclawUpdate).not.toHaveBeenCalled();
   });
 
   it("returns 409 when an update is already running", async () => {

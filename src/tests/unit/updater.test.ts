@@ -6198,13 +6198,16 @@ describe("updater", () => {
     // approval, a direct POST. A run started then cuts the wait off for good,
     // leaves this run's flag on disk, and runs its own `git reset --hard`
     // beside the unit's exit guard. Each case below that lets a run start
-    // gives it an update channel it refuses before step 1, so it settles.
+    // gives it this channel. It must stay INVALID: the run is refused before
+    // step 1 and settles, where a real channel would let it go on into the
+    // cases after this one.
+    const REFUSED_CHANNEL = "not-a-channel";
     const waitLog = (spy: { mock: { calls: unknown[][] } }, part: string) =>
       spy.mock.calls.map(([m]) => String(m)).filter((m) => m.includes(part));
 
     it("starts no update while it waits on the rebuild unit, and still judges when the unit ends", async () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", "workstaton");
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
       const log = vi.spyOn(console, "log");
       try {
         updater.resetUpdateState();
@@ -6243,7 +6246,7 @@ describe("updater", () => {
 
     it("lets go when the continuation flag is gone while it waits: no step left running, nothing refused", async () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", "workstaton");
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
       const log = vi.spyOn(console, "log");
       try {
         updater.resetUpdateState();
@@ -6272,7 +6275,7 @@ describe("updater", () => {
       // A full disk: once the unit has ended, the verdict's first write fails,
       // and each ask fails the same way until it does not.
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", "workstaton");
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
       const log = vi.spyOn(console, "log");
       const warn = vi.spyOn(console, "warn");
       try {
@@ -6310,7 +6313,7 @@ describe("updater", () => {
 
     it("starts no update while the handover waits on the root bootstrap, and says once that systemd does not answer", async () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", "workstaton");
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
       mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
       const warn = vi.spyOn(console, "warn");
       const actual = await vi.importActual<typeof import("fs")>("fs");
@@ -6359,6 +6362,60 @@ describe("updater", () => {
         expect(await updater.checkContinuation()).toBe(false);
         expect(updater.getUpdateState().phase).toBe("running");
         expect(updater.getUpdateState().warnings).toEqual([repinned]);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("starts nothing on the owner's approval before a restarted server has first asked about its update", async () => {
+      // Between the restart and the first ask (the boot hook's, five seconds and
+      // the boot config repair later) nothing in this process owns the update,
+      // while the flag on disk says the rebuild unit may still be running.
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      vi.doMock("@/lib/update-whats-new-server", () => ({ prefetchUpdateWhatsNew: vi.fn(async () => undefined) }));
+      vi.doMock("@/lib/pending-actions", () => ({ pushPendingAction: vi.fn(async () => ({})) }));
+      try {
+        updater.resetUpdateState();
+        restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        const { dispatchPowerAction, PowerApprovalConflict } = await import("@/lib/power-approval");
+
+        await expect(dispatchPowerAction("update")).rejects.toBeInstanceOf(PowerApprovalConflict);
+        expect(updater.getUpdateState().phase).toBe("idle");
+        expect(await updater.startWouldOverlapUpdate()).toBe(true);
+      } finally {
+        vi.doUnmock("@/lib/update-whats-new-server");
+        vi.doUnmock("@/lib/pending-actions");
+        updater.resetUpdateState();
+      }
+    });
+
+    it("still lets a run this process saw fail start again, though it left its flag on disk", async () => {
+      // Its rebuild step could not be dispatched: the flag was written and
+      // nothing clears it, and the failed card offers Try again — which must
+      // start, as it always could. Only a restarted process, which shows "idle"
+      // until its first ask, reads that flag as an update in flight.
+      setupExecFileMock({
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      try {
+        updater.resetUpdateState();
+        updater.startUpdate();
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        const flagWrites = mockSetMany.mock.calls
+          .map(([entries]) => entries as Record<string, unknown>)
+          .filter((entries) => "update_needs_continuation" in entries)
+          .map((entries) => entries.update_needs_continuation);
+        expect(flagWrites).toEqual([expect.any(String)]);
+        mockGet.mockImplementation(async (key: string) => (key === "update_needs_continuation" ? flagWrites[0] : undefined));
+
+        expect(await updater.startWouldOverlapUpdate()).toBe(false);
+        // The same disk, read by a restarted server before its first ask.
+        updater.resetUpdateState();
+        expect(await updater.startWouldOverlapUpdate()).toBe(true);
       } finally {
         updater.resetUpdateState();
       }

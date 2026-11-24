@@ -33,6 +33,7 @@ vi.mock("@/lib/updater", () => ({
   })),
   invalidateVersionCache: vi.fn(),
   getUpdateState: vi.fn(() => ({ phase: "idle", steps: [] })),
+  startWouldOverlapUpdate: vi.fn(async () => false),
   startUpdate: () => startUpdate(),
 }));
 vi.mock("@/lib/update-whats-new-server", () => ({

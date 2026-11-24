@@ -182,11 +182,15 @@ export async function checkForUpdate(fresh: boolean): Promise<UpdateAvailability
   }
 }
 
-/** Is an update running right now? Then there is nothing to announce or to ask for. */
+/**
+ * Is an update in flight right now? Then there is nothing to announce or to ask
+ * for. The updater's own answer, not the phase: the legacy handover's wait and
+ * a server the update restarted, before its first ask, both still read "idle".
+ */
 async function updateRunning(): Promise<boolean> {
   try {
-    const { getUpdateState } = await import("@/lib/updater");
-    return getUpdateState().phase === "running";
+    const { startWouldOverlapUpdate } = await import("@/lib/updater");
+    return await startWouldOverlapUpdate();
   } catch {
     return false;
   }
