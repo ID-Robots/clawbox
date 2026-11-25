@@ -63,7 +63,8 @@ describe("chat-first on a phone", () => {
 
   it("lets Android's Back take a phone from the chat to the desktop", () => {
     const handler = src.match(/const handleBack = [\s\S]*?window\.addEventListener\("popstate", handleBack\);/)?.[0] ?? "";
-    expect(handler).toMatch(/if \(isMobile && chatOpen\) \{ setChatOpen\(false\); return; \}/);
+    // The chat's own open menu or sheet goes first (TASK-2778), then the chat.
+    expect(handler).toMatch(/if \(isMobile && chatOpen\) \{ if \(!runMobileBack\(CHAT_MOBILE_BACK\)\) setChatOpen\(false\); return; \}/);
     // Before any window: on a phone the chat is drawn above all of them.
     expect(handler.indexOf("isMobile && chatOpen")).toBeLessThan(handler.indexOf("closeWindow(top.id)"));
     expect(src).toMatch(/\}, \[launcherOpen, trayOpen, openWindows, closeWindow, isMobile, chatOpen\]\);/);

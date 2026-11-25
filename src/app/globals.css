@@ -2712,6 +2712,14 @@ input[type="range"].appearance-none::-moz-range-track {
   border-radius: 12px;
 }
 
+/* The portrait phone chat's menu slides in from the left (TASK-2778,
+ * ChatPhoneChrome.tsx); its bottom sheets reuse `slide-up`. Reduced motion is
+ * the blanket rule's. */
+@keyframes chat-phone-menu-in {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
 /* The phone chat's text size (TASK-1157, src/lib/chat-phone-layout.ts). Set on
  * the transcript only, and applied to each of its entries rather than to the
  * scrolling box itself: `zoom` on the box would grow the box, while on its

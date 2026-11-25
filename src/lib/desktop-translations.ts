@@ -402,6 +402,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.view.textSmaller": "Smaller text",
     "chat.view.textLarger": "Larger text",
     "chat.view.textReset": "Reset text size",
+    "chat.phone.menu": "Menu",
+    "chat.phone.model": "Model",
     "chat.slash.menuLabel": "Slash commands",
     "chat.slash.noMatches": "No matching commands",
     "chat.generatedImage": "Generated image",

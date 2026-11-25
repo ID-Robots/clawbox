@@ -508,6 +508,8 @@ const table: Record<string, string> = {
   "chat.modelUnavailableZeroQuota": "{model} не е достъпен за този акаунт в {provider} — лимитът на заявките му е 0 (все още няма API кредит или квота за него).",
   "chat.noChatModel": "Няма избран чат модел",
   "chat.openFullUi": "Отвори пълния интерфейс",
+  "chat.phone.menu": "Меню",
+  "chat.phone.model": "Модел",
   "chat.pillChatProvider": "Доставчик за чата",
   "chat.pillHermesModel": "Модел на Hermes",
   "chat.pillProviderModel": "Модел на {provider}",

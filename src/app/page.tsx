@@ -74,7 +74,7 @@ import {
 import { TOAST_EVENT } from "@/components/ToastHost";
 import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
 import { readChatFirstEnvironment, shouldOpenChatFirst } from "@/lib/mobile-chat-first";
-import { runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
+import { CHAT_MOBILE_BACK, runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
 import { isBoxOwnScreen, setVisibleInterval } from "@/lib/visible-interval";
 import { pairingPollCadence } from "@/lib/pairing-poll-cadence";
 import { confirmSessionStillValid } from "@/lib/session-expiry";
@@ -2590,8 +2590,9 @@ function ChromeDesktopInner() {
       if (trayOpen) { setTrayOpen(false); return; }
       // On a phone the chat is full-screen and above every window, so it is
       // the top thing Back can close — and closing it is how the phone gets
-      // from the chat it opened in to the desktop behind it.
-      if (isMobile && chatOpen) { setChatOpen(false); return; }
+      // from the chat it opened in to the desktop behind it. Its own menu or
+      // sheet, when one is open, closes first (CHAT_MOBILE_BACK).
+      if (isMobile && chatOpen) { if (!runMobileBack(CHAT_MOBILE_BACK)) setChatOpen(false); return; }
       // A screen inside the top app with a level above it: go up one level.
       if (runMobileBack()) return;
 

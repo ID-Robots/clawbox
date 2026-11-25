@@ -166,12 +166,19 @@ async function say(page: Page, text: string) {
   await expect(transcript(page).getByText(`Box heard: ${text}`, { exact: true })).toBeVisible();
 }
 
-/** The phone's tab list sits in the header its fullscreen chat folds away. */
+/**
+ * The phone's conversations. Held upright (TASK-2778) they are in the menu the
+ * slim bar opens; a pick there closes it again.
+ */
 async function phoneTabs(page: Page) {
-  const toggle = page.getByTestId("chat-header-toggle");
-  if (await toggle.getAttribute("aria-expanded") === "false") await toggle.click();
-  return page.getByTestId("chat-tab");
+  const menu = page.getByTestId("chat-phone-menu");
+  if (await menu.count() === 0) await page.getByTestId("chat-phone-menu-button").click();
+  await expect(menu).toBeVisible();
+  return menu.getByTestId("chat-phone-menu-chat");
 }
+
+/** The conversation's name, which the portrait bar shows once it has messages. */
+const phoneTitle = (page: Page) => page.getByTestId("chat-phone-title");
 
 async function desktopWithConversation(browser: Browser, box: FakeBox) {
   const desktop = await openDevice(browser, box, DESKTOP);
@@ -200,7 +207,7 @@ test.describe("one conversation on the desktop and the phone", () => {
       // Chat-first on a phone; and the conversation it lands in is the one the
       // owner was just in on the desktop — not the main one.
       await expect(phone.page.getByTestId("chat-popup")).toHaveCSS("pointer-events", "auto");
-      await expect(phone.page.getByTestId("chat-header-toggle")).toContainText(FIRST_WORDS);
+      await expect(phoneTitle(phone.page)).toContainText(FIRST_WORDS);
       await expect(transcript(phone.page).getByText(FIRST_WORDS, { exact: true })).toBeVisible();
       await expect(transcript(phone.page).getByText(`Box heard: ${FIRST_WORDS}`, { exact: true })).toBeVisible();
       await expect(transcript(phone.page).getByText(MAIN_GREETING)).toHaveCount(0);
@@ -208,8 +215,9 @@ test.describe("one conversation on the desktop and the phone", () => {
       const tabs = await phoneTabs(phone.page);
       await expect(tabs).toHaveCount(2);
       await expect(tabs.nth(1)).toHaveAttribute("data-session-key", desktop.key);
-      await expect(tabs.nth(1)).toHaveAttribute("aria-selected", "true");
-      await phone.page.getByTestId("chat-header-toggle").click();
+      await expect(tabs.nth(1)).toHaveAttribute("data-active", "true");
+      await phone.page.keyboard.press("Escape");
+      await expect(phone.page.getByTestId("chat-phone-menu")).toHaveCount(0);
       await phone.page.screenshot({ path: testInfo.outputPath("phone-continues.png") });
 
       // The phone carries it on, into the SAME session, and the desktop — open
@@ -239,10 +247,10 @@ test.describe("one conversation on the desktop and the phone", () => {
     const desktop = await desktopWithConversation(browser, box);
     try {
       // Nothing moves the phone while nobody is looking at it…
-      await expect(phone.page.getByTestId("chat-header-toggle")).toContainText("ClawBox");
+      await expect(phoneTitle(phone.page)).toContainText("ClawBox");
       // …and coming back to it brings the owner to where they were.
       await phone.page.evaluate(() => window.dispatchEvent(new Event("focus")));
-      await expect(phone.page.getByTestId("chat-header-toggle")).toContainText(FIRST_WORDS);
+      await expect(phoneTitle(phone.page)).toContainText(FIRST_WORDS);
       await expect(transcript(phone.page).getByText(`Box heard: ${FIRST_WORDS}`, { exact: true })).toBeVisible();
       // A desktop the owner never left does not move under them: its own turn
       // is the newest thing that happened.
@@ -261,14 +269,14 @@ test.describe("one conversation on the desktop and the phone", () => {
     const phone = await openDevice(browser, box, PHONE);
     try {
       await phone.page.goto("/");
-      await expect(phone.page.getByTestId("chat-header-toggle")).toContainText(FIRST_WORDS);
+      await expect(phoneTitle(phone.page)).toContainText(FIRST_WORDS);
       let tabs = await phoneTabs(phone.page);
-      await tabs.first().click();
+      await tabs.first().getByTestId("chat-phone-menu-select").click();
       await expect(transcript(phone.page).getByText(MAIN_GREETING)).toBeVisible();
       await expect(transcript(phone.page).getByText(FIRST_WORDS, { exact: true })).toHaveCount(0);
 
       tabs = await phoneTabs(phone.page);
-      await tabs.nth(1).click();
+      await tabs.nth(1).getByTestId("chat-phone-menu-select").click();
       for (const line of [FIRST_WORDS, `Box heard: ${FIRST_WORDS}`, "Somewhere to eat in Belém", "Box heard: Somewhere to eat in Belém"]) {
         await expect(transcript(phone.page).getByText(line, { exact: true })).toBeVisible();
       }

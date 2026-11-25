@@ -508,6 +508,8 @@ const table: Record<string, string> = {
   "chat.modelUnavailableZeroQuota": "この {provider} アカウントでは {model} を利用できません — リクエスト上限が 0 です(このモデル用の API クレジットやクォータがまだありません)。",
   "chat.noChatModel": "チャットモデルが未設定",
   "chat.openFullUi": "フル画面を開く",
+  "chat.phone.menu": "メニュー",
+  "chat.phone.model": "モデル",
   "chat.pillChatProvider": "チャットのプロバイダー",
   "chat.pillHermesModel": "Hermes のモデル",
   "chat.pillProviderModel": "{provider} のモデル",
