@@ -1,6 +1,6 @@
 # ClawBox 4.4.0
 
-Previous release: v4.3.0, 6 November 2026. 301 commits.
+Previous release: v4.3.0, 6 November 2026. 343 commits.
 
 4.4 adds ClawBox Vault, a password manager built into ClawBox, and an
 organisation mode for a ClawBox that serves a company's staff. Local AI can run
@@ -149,6 +149,11 @@ installs on PCs get a long list of fixes.
 
 ### Chat
 
+- **A simpler chat on a phone held upright.** A slim bar at the top has a
+  menu button. The menu slides in from the left with New chat, your chats,
+  Desktop and the text size. Under your message, **+** holds attachments and
+  more, and the model button picks the model. Held sideways, the chat looks as
+  before.
 - **Email draft for you to approve.** When the assistant prepares an email as a
   draft through a mail tool you granted, the chat can show the draft as a card
   with **Send**, **Keep as draft** and **Tell me what to change**. Only a person's
@@ -182,6 +187,11 @@ installs on PCs get a long list of fixes.
   ClawBoxes** lists up to eight of your other ClawBoxes, and Ctrl+Shift+2 to
   Ctrl+Shift+9 open them from the desktop like workspaces; Ctrl+Shift+1 is
   always this box.
+- A second switch there, **Linked ClawBoxes use this ClawBox's monitors
+  (experimental)**, is off by default too. With both on, a box's own screen in
+  kiosk mode lays out the other boxes' desktops by its own monitors, so windows
+  maximise and snap on the monitor they are on. Arrange the monitors in
+  **Settings → Monitors** on the box that runs the screen.
 
 ## Improvements
 
@@ -235,6 +245,8 @@ installs on PCs get a long list of fixes.
 - On a Jetson, the desktop session no longer starts four of Ubuntu's background
   apps, which saves memory.
 - Agent Browser's header is more compact.
+- The Coding Agent has a new robot head icon, and Agent Browser a colour globe
+  on a light tile.
 
 ### Security
 
@@ -260,6 +272,11 @@ installs on PCs get a long list of fixes.
   updater, for example by the out-of-memory killer, says so.
 - A second update can no longer start while the first is still finishing.
 - With several monitors, the update screen is drawn on the main monitor.
+- On a ClawBox device on OpenClaw, an update that fails after it already moved
+  OpenClaw forward no longer moves the box's code back to the older release,
+  which does not fit the newer OpenClaw. The box runs the version it had until
+  the update is finished: choose **Try again**, or **Update everything** in
+  **Settings → System Update**.
 
 ### Chat
 
@@ -338,6 +355,13 @@ installs on PCs get a long list of fixes.
   missing dependency.
 - A server app that cannot start says what failed instead of "not found".
 - The desktop shelf's tray no longer covers the app icons on mid-size windows.
+- On the ClawBox desktop session of a PC with two 4K monitors, windows no
+  longer flicker or lose parts.
+- On a screen scaled to 150% or similar, a window no longer shifts or redraws
+  when you drop it after a drag.
+- Copying with the keyboard in the Terminal or on the box's remote desktop no
+  longer shows a "Copied" notice. If the browser refuses the copy, a notice
+  still tells you.
 - The Screenshot app remembers **Capture with** and **Hide this window**.
 - The owner's Terminal opens programs on the remote desktop.
 - ClawKeep leaves no staging archives behind in the temporary folder.
