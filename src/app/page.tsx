@@ -362,6 +362,21 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     return <img src="/hermes-agent.png" alt="Hermes" width={px} height={px} draggable={false} style={{ objectFit: "contain", borderRadius: 6 }} />;
   }
 
+  if (id === "coding") {
+    // The friendly robot's head, cut out on a transparent background so it
+    // sits on the app's dark blue tile.
+    const scaled = Math.round(px * 1.2);
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src="/coding-agent.png"
+        alt=""
+        draggable={false}
+        style={{ width: scaled, height: scaled, objectFit: "contain", maxWidth: "none", maxHeight: "none" }}
+      />
+    );
+  }
+
   if (id === "browser") {
     return <AgentBrowserIcon className={`${size} text-white`} />;
   }
