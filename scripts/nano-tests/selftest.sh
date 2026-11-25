@@ -352,9 +352,9 @@ build_identity_ok() {
 board() {
   case "$1" in
     *python3*) # the facts: at the start, then after the update
-      if [ -e "$T85/started" ]; then echo "openclaw 2026.11.5 $T85_BUILT 2026.10.9 2026.11.5 $T85_TARGET"; return; fi
+      if [ -e "$T85/started" ]; then echo "$T85_EDITION 2026.11.5 $T85_BUILT 2026.10.9 2026.11.5 $T85_TARGET"; return; fi
       : > "$T85/started"
-      echo "openclaw 2026.10.9 $T85_START 2026.10.9 2026.10.9 present" ;;
+      echo "$T85_EDITION 2026.10.9 $T85_START 2026.10.9 2026.10.9 present" ;;
     # The served build is whole as its own commit's (unless T85_WHOLE=0), and
     # as no other.
     *verify-build-identity.sh*)
@@ -369,7 +369,8 @@ EOF
 R85=1111111111111111111111111111111111111111
 t85() { # NAME BUILD-SERVED-AFTER [BUILD-AT-START [WHOLE (1|0) [RECORD (absent|present)]]]
   rm -f "$T85/started"
-  T85_RELEASE=$R85 T85_BUILT=$2 T85_START=${3:-$R85} T85_WHOLE=${4:-1} T85_TARGET=${5:-absent} NANO_BRANCH=fix/x \
+  T85_RELEASE=$R85 T85_BUILT=$2 T85_START=${3:-$R85} T85_WHOLE=${4:-1} T85_TARGET=${5:-absent} \
+    T85_EDITION=${T85_EDITION:-openclaw} NANO_BRANCH=fix/x \
     bash "$T85/tests/85-update-rollback.sh" > "$WORK/t85-$1.out" 2>&1
 }
 t85 release 1111111111111111111111111111111111111111
@@ -388,6 +389,9 @@ check "...saying so" contains "$WORK/t85-broken.out" "not ok - the restored buil
 t85 record "$R85" "$R85" 1 present
 check "85: a rollback record left behind fails the kept checkout" test $? -eq 1
 check "...saying so" contains "$WORK/t85-record.out" "not ok - data/config.json still holds the dashboard's rollback target"
+T85_EDITION=hermes NANO_REQUIRE_CORE_MOVE=1 t85 hermes "$R85"
+check "85: NANO_REQUIRE_CORE_MOVE=1 on a Hermes board notes that no core moves" contains "$WORK/t85-hermes.out" "# Hermes edition: no OpenClaw core moves"
+check "...and does not fail the run for it" lacks "$WORK/t85-hermes.out" "not ok - Hermes edition"
 
 # ---- long-tier tests are opt-in ----------------------------------------------
 L=$WORK/tests-long

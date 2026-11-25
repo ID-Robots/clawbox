@@ -35,7 +35,7 @@
 # the release's own core, updated to a branch that pins a newer one, exercises
 # a core move; any other run says plainly that it proves nothing about keeping
 # the checkout with a moved core, and NANO_REQUIRE_CORE_MOVE=1 (a release run)
-# fails it instead.
+# fails it instead, on every edition but Hermes, where no OpenClaw core moves.
 #
 # Skipped without NANO_BRANCH. The board is left on the release (or wherever
 # the rollback left it); 90-upgrade-from-release updates it from there.
@@ -111,7 +111,9 @@ fi
 note "start: edition ${EDITION:--}, OpenClaw core ${CORE0:--}; the release's build ${BUILT0:0:12} pins ${RELEASE_PIN:--}"
 CORE_START_OK=0
 if [ "$EDITION" = hermes ]; then
-  core_move_unproven "Hermes edition: no OpenClaw core moves, so this run proves nothing about keeping the checkout with a moved core"
+  # A note even under NANO_REQUIRE_CORE_MOVE=1: no update moves an OpenClaw
+  # core on Hermes, so a release run there could never pass.
+  note "Hermes edition: no OpenClaw core moves, so this run proves nothing about keeping the checkout with a moved core"
 elif [ -n "${CORE0:-}" ] && [ "$CORE0" != "-" ] && [ "$CORE0" = "${RELEASE_PIN:-}" ]; then
   CORE_START_OK=1
 else
