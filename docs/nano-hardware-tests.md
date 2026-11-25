@@ -514,17 +514,23 @@ Notes on what the brief asked for and what the box actually offers:
   is reported as a skip.
 - **The ClawBox edition.** The suite assumes the OpenClaw edition every lab
   board runs; on a Hermes-only board the gateway tests fail rather than skip.
-- **The kept state `85` leaves (known limits).** After an update that had
-  moved the OpenClaw core fails, the box serves the release's build over the
-  branch's checkout, and System Update says the update failed and offers it
-  again. Until that update runs, two things fail, both because the release's
-  build runs over the newer core, whichever commit is checked out:
-  Settings → Local AI's install (`68-local-ai-chat`), because the release's
-  dashboard passes `--profile-id`, which the newer core refuses while its
-  gateway runs; and, when doctor's migration was cut short, the gateway after
-  its next restart, which exits 78 on the databases it has not finished
-  migrating and is not restarted. One completed update clears both. Run
-  neither `68` nor `75` against that state.
+- **The kept state `85` leaves (known limit).** On every edition but Hermes,
+  when the failed update had already moved the OpenClaw core, the box serves
+  the release's build over the newer checkout until an update completes. Once
+  the failed run is dismissed, System Update's drift card offers **Update
+  everything**, which ends the state. Until it has run, saving an API key
+  through the release's dashboard fails: it passes `--profile-id`, which the
+  newer core refuses while its gateway runs. That is Settings → Local AI's
+  install (`68-local-ai-chat`) and setting a provider's API key. Do not run
+  `68` against this state.
+- **A migration cut short (known limit; not a state a passing `85` leaves).**
+  When doctor's migration does not finish (doctor killed, or a blocker it
+  reports), the core step stops before the rebuild and leaves the gateway
+  stopped. At its next start the gateway exits 78 on the databases the newer
+  core has not finished migrating, whichever build is served, and is not
+  restarted. A `85` run that meets this state ends `not ok`. One completed
+  update, which runs doctor again, clears it. Run neither `68` nor `75`
+  against it.
 
 ### Secrets
 
