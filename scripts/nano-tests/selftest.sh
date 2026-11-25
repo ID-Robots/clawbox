@@ -324,8 +324,9 @@ done
 
 # ---- 85-update-rollback keeps the checkout only over the release's build -----
 # The real test against a stand-in lib.sh whose board answers from T85_*: the
-# update moved the core and failed, so the checkout stays on NANO_SHA, and the
-# build put back must be the one the board started on, the release's.
+# update moved the core and failed, so the checkout stays on NANO_SHA. The board
+# must start on a build of the release's commit, and the build put back must be
+# a build of that same commit, whole, with no rollback record left.
 export T85=$WORK/t85
 mkdir -p "$T85/tests"
 cp "$HERE/tests/85-update-rollback.sh" "$T85/tests/"
@@ -351,19 +352,24 @@ build_identity_ok() {
 board() {
   case "$1" in
     *python3*) # the facts: at the start, then after the update
-      if [ -e "$T85/started" ]; then echo "openclaw 2026.11.5 $T85_BUILT 2026.10.9 2026.11.5 absent"; return; fi
+      if [ -e "$T85/started" ]; then echo "openclaw 2026.11.5 $T85_BUILT 2026.10.9 2026.11.5 $T85_TARGET"; return; fi
       : > "$T85/started"
-      echo "openclaw 2026.10.9 $T85_RELEASE 2026.10.9 2026.10.9 present" ;;
-    # The served build is whole as its own commit's, and as no other.
-    *verify-build-identity.sh*) [ "$2" = "$T85_BUILT" ] && echo "BUILD IDENTITY: OK — 2 artifact(s) built from ${2:0:7}" ;;
+      echo "openclaw 2026.10.9 $T85_START 2026.10.9 2026.10.9 present" ;;
+    # The served build is whole as its own commit's (unless T85_WHOLE=0), and
+    # as no other.
+    *verify-build-identity.sh*)
+      if [ "$2" = "$T85_BUILT" ] && [ "$T85_WHOLE" = 1 ]; then echo "BUILD IDENTITY: OK — 2 artifact(s) built from ${2:0:7}"; return 0; fi
+      echo "BUILD IDENTITY: FAIL — .next/standalone/.next/build-info.json was built from $T85_BUILT but the checkout is at $2"
+      return 1 ;;
     *'next build'*) echo "count 1" ;;
     *) echo 200 ;;
   esac
 }
 EOF
-t85() { # NAME BUILD-SERVED-AFTER
+R85=1111111111111111111111111111111111111111
+t85() { # NAME BUILD-SERVED-AFTER [BUILD-AT-START [WHOLE (1|0) [RECORD (absent|present)]]]
   rm -f "$T85/started"
-  T85_RELEASE=1111111111111111111111111111111111111111 T85_BUILT=$2 NANO_BRANCH=fix/x \
+  T85_RELEASE=$R85 T85_BUILT=$2 T85_START=${3:-$R85} T85_WHOLE=${4:-1} T85_TARGET=${5:-absent} NANO_BRANCH=fix/x \
     bash "$T85/tests/85-update-rollback.sh" > "$WORK/t85-$1.out" 2>&1
 }
 t85 release 1111111111111111111111111111111111111111
@@ -372,6 +378,16 @@ check "...as kept by design" contains "$WORK/t85-release.out" "ok - checkout kep
 t85 other 2222222222222222222222222222222222222222
 check "85: a whole build of another commit put back under the kept checkout fails" test $? -eq 1
 check "...naming it as not the release's" contains "$WORK/t85-other.out" "not ok - the restored build 222222222222 is not the release's"
+t85 start 3333333333333333333333333333333333333333 3333333333333333333333333333333333333333
+check "85: a board whose build at the start is of another commit fails" test $? -eq 1
+check "...at the start, before any update" contains "$WORK/t85-start.out" "not ok - the board did not start on the release's build"
+check "...and never blames the restore" lacks "$WORK/t85-start.out" "update to fix/x started"
+t85 broken "$R85" "$R85" 0
+check "85: a build of the release's commit that is not whole fails the kept checkout" test $? -eq 1
+check "...saying so" contains "$WORK/t85-broken.out" "not ok - the restored build does not hold together as 111111111111's"
+t85 record "$R85" "$R85" 1 present
+check "85: a rollback record left behind fails the kept checkout" test $? -eq 1
+check "...saying so" contains "$WORK/t85-record.out" "not ok - data/config.json still holds the dashboard's rollback target"
 
 # ---- long-tier tests are opt-in ----------------------------------------------
 L=$WORK/tests-long

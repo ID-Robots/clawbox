@@ -23,10 +23,13 @@
 #      the branch (install.sh openclaw_core_ahead_of_commit), so the release's
 #      build is served over the branch's checkout until the next update. That
 #      state must be exactly this: the checkout on NANO_SHA, the restored build
-#      the one the board started on, of the release's commit, and whole, and
-#      no rollback target left in data/config.json for the dashboard to act
-#      on. On every edition but Hermes the checkout must never pin an older
-#      core than the one installed.
+#      a build of the commit the board started on (the release's) and whole
+#      as that commit's, and no rollback target left in data/config.json for
+#      the dashboard to act on. On every edition but Hermes the checkout must
+#      never pin an older core than the one installed.
+#
+# The board must start on a build of the release's commit; a board whose build
+# is of another commit fails at the start.
 #
 # The core the board starts with is recorded. Only a board that starts with
 # the release's own core, updated to a branch that pins a newer one, exercises
@@ -98,6 +101,13 @@ core_move_unproven() {
 }
 
 read -r EDITION CORE0 BUILT0 RELEASE_PIN _ _ <<<"$(core_facts)"
+# ensure_on_release keeps a board whose checkout is the release without looking
+# at its build. A build of another commit (or none readable) is a start this
+# test cannot judge a rollback from, so it fails here, not later as a restore.
+if [ "${BUILT0:-}" != "$HEAD0" ]; then
+  not_ok "the board did not start on the release's build: the checkout is ${HEAD0:0:12}, the served build ${BUILT0:--}"
+  finish
+fi
 note "start: edition ${EDITION:--}, OpenClaw core ${CORE0:--}; the release's build ${BUILT0:0:12} pins ${RELEASE_PIN:--}"
 CORE_START_OK=0
 if [ "$EDITION" = hermes ]; then
@@ -171,14 +181,14 @@ elif core_newer "$CORE" "$BUILT_PIN" && [ "$HEAD1" != "$BUILT" ] \
   && [[ $IDENT == *"was built from $BUILT but the checkout is at $HEAD1"* ]]; then
   # Only the commit mismatch itself (scripts/verify-build-identity.sh). It
   # stops at that first mismatch, so the restored build is checked again
-  # below: it must be the build the board started on, of the release's commit,
-  # and whole as that commit's.
+  # below: it must be a build of the commit the board started on (the
+  # release's, checked at the start), and whole as that commit's.
   ok "checkout kept on ${HEAD1:0:12} with OpenClaw $CORE, newer than the $BUILT_PIN the restored build's commit ${BUILT:0:12} pins: the old build over the new checkout until the next update, by design"
   if [ "$HEAD1" != "${NANO_SHA:-}" ]; then
     not_ok "the kept checkout ${HEAD1:0:12} is not the commit under test ${NANO_SHA:-(NANO_SHA unset)}"
   fi
-  if [ "$BUILT" != "$BUILT0" ] || [ "$BUILT" != "$HEAD0" ]; then
-    not_ok "the restored build ${BUILT:0:12} is not the release's: the update started from ${HEAD0:0:12}, serving a build of ${BUILT0:0:12}"
+  if [ "$BUILT" != "$BUILT0" ]; then
+    not_ok "the restored build ${BUILT:0:12} is not the release's: the board started on a build of ${BUILT0:0:12}"
   else
     # shellcheck disable=SC2016  # expanded on the board
     KEPT=$(board 'cd "$REPO" && bash scripts/verify-build-identity.sh --project-dir "$REPO" --expect-sha "$1" 2>&1 | tail -n 3' "$BUILT"); rc=$?
