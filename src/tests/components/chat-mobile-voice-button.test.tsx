@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
+import { HOLD_TO_TALK_KEY } from "@/lib/chat-hold-to-talk";
 
 // A jsdom mount of `ChatPopup` — the fake gateway handshake, the model seed,
 // the transcript — costs seconds under a full parallel run, and a case does it
@@ -405,6 +406,29 @@ describe("the portrait phone composer", () => {
     expect(primary.nextElementSibling).toBeNull();
     expect(screen.getAllByTestId("voice-record")).toHaveLength(1);
     expect(screen.getByTestId("chat-popup")).toHaveAttribute("data-chat-portrait", "true");
+  });
+
+  // The hold-to-talk key listens on the window, so a modal sheet above the
+  // chat did not stop it: F8 there recorded behind the sheet.
+  it("leaves the hold-to-talk key alone while a sheet is open, and holds to talk again once it is shut", async () => {
+    installFetch("hello");
+    render(<ChatPopup isOpen onClose={() => {}} mobile />);
+    await readyToRecord();
+    fireEvent.click(screen.getByTestId("composer-options-toggle"));
+    const sheet = screen.getByRole("dialog", { name: "Chat options" });
+    fireEvent.keyDown(sheet, { key: HOLD_TO_TALK_KEY });
+    await act(async () => { await Promise.resolve(); });
+    expect(FakeMediaRecorder.instances).toHaveLength(0);
+    expect(screen.queryByTestId("voice-stop")).toBeNull();
+
+    fireEvent.keyDown(sheet, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Chat options" })).toBeNull());
+    await waitFor(() => {
+      if (!screen.queryByTestId("voice-stop")) fireEvent.keyDown(screen.getByRole("textbox"), { key: HOLD_TO_TALK_KEY });
+      expect(screen.getByTestId("voice-stop")).toBeInTheDocument();
+    });
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("voice-stop")).toBeNull());
   });
 
   it("keeps the microphone beside Send while the owner types", async () => {

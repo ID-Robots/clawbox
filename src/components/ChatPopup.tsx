@@ -1104,6 +1104,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
     setPlusSheetOpen(false)
     setModelSheetOpen(false)
   }
+  // Read by the hold-to-talk key, which listens on the window: the menu and
+  // the sheets are modal, so the key must not start a recording behind them.
+  const phoneOverlayOpenRef = useRef(false)
+  useEffect(() => { phoneOverlayOpenRef.current = phoneMenuOpen || plusSheetOpen || modelSheetOpen }, [phoneMenuOpen, plusSheetOpen, modelSheetOpen])
   const toggleFullscreenChat = useCallback(() => {
     setFullscreenPref(!fullscreenPref)
   }, [fullscreenPref, setFullscreenPref])
@@ -5854,6 +5858,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
         return
       }
       if (!isHoldToTalkKey(e) || isKeyForwardingTarget(e.target)) return
+      // Not behind the upright chat's menu or sheets (a hold already running
+      // keeps going; Escape above still ends it).
+      if (!holdRef.current && phoneOverlayOpenRef.current) return
       e.preventDefault()
       // Offered only while the mic button would be: a chat with no
       // connection cannot send what it hears.
