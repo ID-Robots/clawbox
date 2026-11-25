@@ -11,9 +11,17 @@ vi.mock("@/lib/email-approval", () => ({
   approvalBotToken: async () => "123:FAKE", chatApprovalEnabled: async () => true,
   ownerChatIds: async () => ["100", "200"], startApprovalPoller: poll,
 }));
+const reply = vi.hoisted(() => vi.fn<(token: string, chatId: string, text: string, replyTo?: number) => Promise<void>>(async () => {}));
 vi.mock("@/lib/email-approval-telegram", () => ({
-  sendApprovalMessage: send, answerCallback: async () => {}, clearApprovalKeyboard: clear, replyInChat: async () => {},
+  sendApprovalMessage: send, answerCallback: async () => {}, clearApprovalKeyboard: clear, replyInChat: reply,
 }));
+// Only the update action reaches the updater.
+const startUpdate = vi.hoisted(() => vi.fn(() => ({ started: true })));
+const inFlight = vi.hoisted(() => vi.fn(async () => false));
+vi.mock("@/lib/updater", () => ({
+  startUpdate, startWouldOverlapUpdate: inFlight, UPDATE_ALREADY_IN_PROGRESS: "Update already in progress",
+}));
+vi.mock("@/lib/update-whats-new-server", () => ({ prefetchUpdateWhatsNew: async () => undefined }));
 import { requestPowerApproval, pendingPowerApproval, resolvePowerApproval, applyPowerApprovalCallback } from "@/lib/power-approval";
 
 describe("power requests through the dedicated approvals bot", () => {
@@ -24,6 +32,9 @@ describe("power requests through the dedicated approvals bot", () => {
     delete state.deniedAt;
     exec.mockImplementation((...args: unknown[]) => (args.at(-1) as (...a: unknown[]) => void)(null, "", ""));
     push.mockImplementation(async () => ({}));
+    reply.mockImplementation(async () => {});
+    startUpdate.mockImplementation(() => ({ started: true }));
+    inFlight.mockResolvedValue(false);
     send.mockImplementation(async (_token, chat) => {
       if (chat === "200") throw new Error("second owner has not started bot");
       return 7;
@@ -41,6 +52,13 @@ describe("power requests through the dedicated approvals bot", () => {
     await applyPowerApprovalCallback({ ...query, from: { id: 100 } });
     await applyPowerApprovalCallback({ ...query, from: { id: 100 } });
     expect(exec).toHaveBeenCalledOnce();
+  });
+  it("says an update is already running, not that it failed, when the owner's Update meets one", async () => {
+    const p = await requestPowerApproval("update", "test");
+    inFlight.mockResolvedValue(true);
+    await applyPowerApprovalCallback({ id: "q", from: { id: 100 }, data: `pa:${p.id}`, message: { message_id: 7, chat: { id: 100 } } });
+    expect(startUpdate).not.toHaveBeenCalled();
+    expect(reply).toHaveBeenCalledWith("123:FAKE", "100", "An update is already running; the desktop shows how it ends.", 7);
   });
   it("an answer in Telegram takes the question off every open desktop", async () => {
     const p = await requestPowerApproval("restart", "test");

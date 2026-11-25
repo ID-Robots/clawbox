@@ -12,6 +12,7 @@ import {
   MIN_WINDOW_WIDTH,
   clampWindowPosition,
   desktopTop,
+  devicePx,
   fitPlacedWindow,
   fitWindowSize,
   getSnapRect,
@@ -100,8 +101,8 @@ function getInitialPosition(width: number, height: number, rInset = 0) {
     // of a strip-wide window — where its controls live — under the panel, so
     // the window ends DESKTOP_GAP before the chat's edge, the margin the
     // desktop's floating surfaces keep from each other.
-    x: area.x + (rInset > 0 ? Math.min(centredX, Math.max(DESKTOP_GAP, maxWidth - DESKTOP_GAP - width)) : centredX),
-    y: top + Math.max(20, (maxHeight - height) / 2),
+    x: devicePx(area.x + (rInset > 0 ? Math.min(centredX, Math.max(DESKTOP_GAP, maxWidth - DESKTOP_GAP - width)) : centredX)),
+    y: devicePx(top + Math.max(20, (maxHeight - height) / 2)),
   };
 }
 
@@ -410,26 +411,32 @@ function ChromeWindow({
 
       if (resizeRef.current.isResizing) {
         const r = resizeRef.current;
-        const dx = clientX - r.startX;
-        const dy = clientY - r.startY;
+        // A step of whole device pixels (`devicePx`), and minimums on them
+        // too: every edge it moves stays on them, and the opposite edge stays
+        // exactly where it was.
+        const dx = devicePx(clientX - r.startX);
+        const dy = devicePx(clientY - r.startY);
+        const minW = devicePx(MIN_WINDOW_WIDTH, true);
+        const minH = devicePx(MIN_WINDOW_HEIGHT, true);
         let newW = r.startW;
         let newH = r.startH;
         let newX = r.startPosX;
         let newY = r.startPosY;
 
-        if (r.edge.includes("r")) newW = Math.max(MIN_WINDOW_WIDTH, r.startW + dx);
-        if (r.edge.includes("b")) newH = Math.max(MIN_WINDOW_HEIGHT, r.startH + dy);
+        if (r.edge.includes("r")) newW = Math.max(minW, r.startW + dx);
+        if (r.edge.includes("b")) newH = Math.max(minH, r.startH + dy);
         if (r.edge.includes("l")) {
-          const dw = Math.min(dx, r.startW - MIN_WINDOW_WIDTH);
+          const dw = Math.min(dx, r.startW - minW);
           newW = r.startW - dw;
           newX = r.startPosX + dw;
         }
         if (r.edge.includes("t")) {
-          const dh = Math.min(dy, r.startH - MIN_WINDOW_HEIGHT);
+          const dh = Math.min(dy, r.startH - minH);
           newH = r.startH - dh;
           // Not above the desktop's top: under the kiosk bar the title bar
-          // could not be grabbed again.
-          newY = Math.max(desktopTop(), r.startPosY + dh);
+          // could not be grabbed again. The bar's height is rounded up onto
+          // the lattice, so a top held there is on it too.
+          newY = Math.max(devicePx(desktopTop(), true), r.startPosY + dh);
         }
 
         // Direct DOM update — no React re-render during resize
@@ -453,7 +460,8 @@ function ChromeWindow({
       // bar sat under the shelf, a window was unreachable for good — no context
       // menu offers Close, and minimize/restore and the next reload both put it
       // straight back. The cursor is still free, so the snap zones below still
-      // fire at the real screen edges.
+      // fire at the real screen edges. On whole device pixels, so the offset
+      // below — from a start on them too — moves the window by whole ones.
       const { x: newX, y: newY } = clampWindowPosition({
         x: dragRef.current.startPosX + dx,
         y: dragRef.current.startPosY + dy,

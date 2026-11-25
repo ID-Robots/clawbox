@@ -11,7 +11,9 @@ import { atPinRelease, describeRefresh } from "../../../e2e-install/helpers/open
  *
  * `describeRefresh` reads the plugin refresh's rows out of the openclaw_install
  * journal. A bare row is printed BEFORE the CLI runs, so it is an attempt; the
- * line under it says how it ended.
+ * line under it says how it ended. The lines below are written by hand;
+ * install-openclaw-fast-path.test.ts also runs it over the lines install.sh
+ * prints, so a change to the installer's words fails there.
  */
 
 const at = (messages: string[]) => messages.map((message, i) => ({ atUs: i, message }));

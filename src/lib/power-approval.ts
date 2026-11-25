@@ -139,12 +139,31 @@ export function powerKeyboardPending(): boolean {
   return (pendingPowerApproval()?.messages.length ?? 0) > 0;
 }
 
+/**
+ * An update already in flight is no question to ask and nothing to start: the
+ * conflict says so, and the routes answer it as 409 with this sentence. It
+ * includes a server the update restarted that has not yet asked about it,
+ * which `startUpdate` alone would not refuse.
+ */
+const UPDATE_ALREADY_RUNNING = "An update is already running; the desktop shows how it ends.";
+
+async function refuseUpdateInFlight(): Promise<void> {
+  // Lazy: the updater is a large module the power path never needs.
+  const { startWouldOverlapUpdate } = await import("@/lib/updater");
+  if (await startWouldOverlapUpdate()) throw new PowerApprovalConflict(UPDATE_ALREADY_RUNNING);
+}
+
 export async function dispatchPowerAction(action: PowerAction): Promise<void> {
   if (action === "update") {
-    // Lazy: the updater is a large module the power path never needs.
-    const { startUpdate } = await import("@/lib/updater");
+    await refuseUpdateInFlight();
+    const { startUpdate, UPDATE_ALREADY_IN_PROGRESS } = await import("@/lib/updater");
     const result = startUpdate();
-    if (!result.started) throw new Error(result.error ?? "The update did not start");
+    if (!result.started) {
+      // One that claimed the box since the check above, told by the refusal
+      // itself: a second look could miss an owner that came and went.
+      if (result.error === UPDATE_ALREADY_IN_PROGRESS) throw new PowerApprovalConflict(UPDATE_ALREADY_RUNNING);
+      throw new Error(result.error ?? "The update did not start");
+    }
     const { prefetchUpdateWhatsNew } = await import("@/lib/update-whats-new-server");
     void prefetchUpdateWhatsNew();
     return;
@@ -155,6 +174,7 @@ export async function dispatchPowerAction(action: PowerAction): Promise<void> {
 
 /** One bounded question, not an agent-controlled stream of confirmation popups. */
 export async function requestPowerApproval(action: PowerAction, reason: string): Promise<PowerApproval> {
+  if (action === "update") await refuseUpdateInFlight();
   const existing = pendingPowerApproval();
   if (existing) {
     if (existing.action !== action) throw new PowerApprovalConflict("Another power request is already awaiting confirmation");
@@ -245,9 +265,12 @@ export async function applyPowerApprovalCallback(query: TelegramCallbackQuery): 
   // Acknowledge before teardown so Telegram does not leave a spinning button.
   await say(data.startsWith("pa:") ? "Confirmed." : "Cancelled.");
   try { await resolvePowerApproval(prompt.id, prompt.action, data.startsWith("pa:")); }
-  catch {
-    for (const m of prompt.messages) await replyInChat(token, m.chatId,
-      `${QUESTION[prompt.action].failed} Please try again from the desktop.`, m.messageId).catch(() => undefined);
+  catch (err) {
+    // An update already in flight is not a failure to retry: say what it is.
+    const said = err instanceof PowerApprovalConflict
+      ? err.message
+      : `${QUESTION[prompt.action].failed} Please try again from the desktop.`;
+    for (const m of prompt.messages) await replyInChat(token, m.chatId, said, m.messageId).catch(() => undefined);
   }
   return true;
 }

@@ -214,6 +214,54 @@ describe("layoutBox (clawbox-desktop-span.mjs)", () => {
     expect(layoutBox(one({ modes: ["1920x1080"] }))).toBeNull();
   });
 
+  it("measures the row in DEVICE pixels at the highest scale on it, with the monitors on (`device`)", () => {
+    // What the launcher sizes Chrome's tile memory by: two 4K monitors are
+    // 7680x2160 device px at scale 1.5 as at 1.
+    const twoUhd = (scale: number) => wlrRandrText([
+      { name: "DP-1", modes: ["3840x2160@current"], position: [0, 0], scale },
+      { name: "DP-2", modes: ["3840x2160@current"], position: [3840 / scale, 0], scale },
+    ]);
+    expect(layoutBox(twoUhd(1), { device: true })).toEqual({ width: 7680, height: 2160, monitors: 2 });
+    expect(layoutBox(twoUhd(1.5), { device: true })).toEqual({ width: 7680, height: 2160, monitors: 2 });
+    // Chrome's one window draws the whole row at the highest scale on it.
+    const mixed = wlrRandrText([
+      { name: "DP-1", modes: ["3840x2160@current"], position: [0, 0], scale: 1.5 },
+      { name: "HDMI-A-1", modes: ["1920x1080@current"], position: [2560, 0] },
+    ]);
+    expect(layoutBox(mixed, { device: true })).toEqual({ width: (2560 + 1920) * 1.5, height: 2160, monitors: 2 });
+    expect(layoutBox(one({ modes: ["3840x2160@current"], scale: 2 }), { device: true })).toEqual({ width: 3840, height: 2160, monitors: 1 });
+    expect(layoutBox(fixture("wlr-randr-two-external.txt"), { device: true })).toEqual({ width: 5120, height: 1440, monitors: 2 });
+    // Mirrored monitors stand at one place: one monitor's worth of page.
+    const mirrored = wlrRandrText([
+      { name: "DP-1", modes: ["3840x2160@current"], position: [0, 0] },
+      { name: "DP-2", modes: ["3840x2160@current"], position: [0, 0] },
+    ]);
+    expect(layoutBox(mirrored, { device: true })).toEqual({ width: 3840, height: 2160, monitors: 1 });
+    expect(layoutBox("", { device: true })).toBeNull();
+  });
+
+  it("prints the device-pixel row for the launcher (`--device-row`), and nothing when no monitor is on", () => {
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-span-device-row-"));
+    try {
+      const run = (text: string) => {
+        fs.writeFileSync(path.join(bin, "out.txt"), text);
+        fs.writeFileSync(path.join(bin, "wlr-randr"), `#!/bin/sh\ncat "${path.join(bin, "out.txt")}"\n`, { mode: 0o755 });
+        return spawnSync(process.execPath, [SPAN, "--device-row"], {
+          encoding: "utf-8",
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}` },
+        });
+      };
+      const two = run(fixture("wlr-randr-two-external.txt"));
+      expect(two.stdout).toBe("5120 1440 2\n");
+      expect(two.status).toBe(0);
+      const none = run("");
+      expect(none.stdout).toBe("");
+      expect(none.status).toBe(1);
+    } finally {
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
   it("agrees with the web server's parser on every case above", () => {
     const cases = [
       fixture("wlr-randr-two-external.txt"),

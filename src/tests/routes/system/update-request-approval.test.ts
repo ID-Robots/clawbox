@@ -5,8 +5,12 @@ import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
-const startUpdate = vi.hoisted(() => vi.fn(() => ({ started: true })));
-vi.mock("@/lib/updater", () => ({ startUpdate }));
+const startUpdate = vi.hoisted(() => vi.fn((): { started: boolean; error?: string } => ({ started: true })));
+// Whether an update is already in flight (the updater's own answer is pinned in updater.test.ts).
+const inFlight = vi.hoisted(() => vi.fn(async () => false));
+vi.mock("@/lib/updater", () => ({
+  startUpdate, startWouldOverlapUpdate: inFlight, UPDATE_ALREADY_IN_PROGRESS: "Update already in progress",
+}));
 vi.mock("@/lib/update-whats-new-server", () => ({ prefetchUpdateWhatsNew: async () => undefined }));
 vi.mock("@/lib/email-approval", () => ({
   approvalBotToken: async () => null, chatApprovalEnabled: async () => false,
@@ -22,6 +26,8 @@ describe("update from chat", () => {
     session = installSessionFixture();
     fs.writeFileSync(path.join(session.root, "data/.mcp-token"), token);
     startUpdate.mockClear();
+    inFlight.mockReset();
+    inFlight.mockResolvedValue(false);
     request = (await import("@/app/setup-api/update/request/route")).POST;
     decide = (await import("@/app/setup-api/system/power/approval/route")).POST;
     const lib = await import("@/lib/power-approval");
@@ -55,6 +61,48 @@ describe("update from chat", () => {
     const prompt = await (await request(req({ reason: "update please" }))).json();
     expect((await decide(req({ id: prompt.id, action: "update", approve: false }, session.cookie))).status).toBe(200);
     expect(startUpdate).not.toHaveBeenCalled();
+  });
+
+  it("raises no question and starts nothing while an update is already in flight", async () => {
+    inFlight.mockResolvedValue(true);
+    const asked = await request(req({ reason: "update please" }));
+    expect(asked.status).toBe(409);
+    expect((await asked.json()).error).toBe("An update is already running; the desktop shows how it ends.");
+    expect((await import("@/lib/power-approval")).pendingPowerApproval()).toBeNull();
+
+    const owner = await request(req({}, session.cookie));
+    expect(owner.status).toBe(409);
+    expect(startUpdate).not.toHaveBeenCalled();
+  });
+
+  it("starts nothing when the owner confirms after an update has begun", async () => {
+    // Asked first; an update started from the desktop before the Confirm. A
+    // restarted server's update that it has not asked about yet counts too.
+    const prompt = await (await request(req({ reason: "update please" }))).json();
+    inFlight.mockResolvedValue(true);
+    const confirmed = await decide(req({ id: prompt.id, action: "update", approve: true }, session.cookie));
+    expect(startUpdate).not.toHaveBeenCalled();
+    // The desktop card shows this sentence; it is not "the power command failed".
+    expect(confirmed.status).toBe(409);
+    expect(await confirmed.json()).toEqual({ error: "An update is already running; the desktop shows how it ends." });
+  });
+
+  it("says an update is running when the start itself refuses for that reason", async () => {
+    // An update took the box between the check and the start, and may be gone
+    // again by any second look: the refusal itself is the answer.
+    const prompt = await (await request(req({ reason: "update please" }))).json();
+    startUpdate.mockReturnValueOnce({ started: false, error: "Update already in progress" });
+    const confirmed = await decide(req({ id: prompt.id, action: "update", approve: true }, session.cookie));
+    expect(confirmed.status).toBe(409);
+    expect(await confirmed.json()).toEqual({ error: "An update is already running; the desktop shows how it ends." });
+  });
+
+  it("keeps every other failure of the owner's Confirm as it was", async () => {
+    const prompt = await (await request(req({ reason: "update please" }))).json();
+    startUpdate.mockReturnValueOnce({ started: false, error: "OpenClaw database maintenance is running" });
+    const confirmed = await decide(req({ id: prompt.id, action: "update", approve: true }, session.cookie));
+    expect(confirmed.status).toBe(500);
+    expect(await confirmed.json()).toEqual({ error: "Power command failed; request it again to retry" });
   });
 
   it("the power route still refuses action=update", async () => {

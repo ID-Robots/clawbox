@@ -51,9 +51,14 @@ vi.mock("@/lib/openclaw-maintenance", async (importOriginal) => {
 // through the link `postbuild` writes for the NESTED standalone layout, so a
 // mock without it would make every case that reaches the entry throw inside
 // readBuildId's `try` and answer "" — i.e. pass for the wrong reason.
+// `rm` so a case can see what the updater removes, and when (the handover
+// marker). It throws as the absent function it replaces did unless a case
+// says otherwise: runs that other cases leave going end where they always did,
+// instead of dispatching root steps into the cases after them.
 vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
   realpath: vi.fn(),
+  rm: vi.fn(() => { throw new TypeError("rm is not a function"); }),
 }));
 
 // `existsSync` is how readBuildId decides WHICH tree the server runs from — the
@@ -244,6 +249,7 @@ import {
   journalctlModel,
   numberedEntries,
   type ExecAnswer,
+  type JournalEntry,
 } from "@/tests/helpers/journalctl-model";
 import { OPENCLAW_INSTALL_FAILED_JOURNAL, OPENCLAW_INSTALL_FAILED_REASON } from "@/tests/fixtures/openclaw-install-failed-journal";
 
@@ -254,6 +260,7 @@ const mockExec = vi.mocked(childProcess.exec);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockReadFile = vi.mocked(fs.readFile);
 const mockRealpath = vi.mocked(fs.realpath);
+const mockRm = vi.mocked(fs.rm);
 const mockExists = vi.mocked(existsSync);
 const mockGatewayUp = vi.mocked(waitForPortOpen);
 const mockSpawn = vi.mocked(childProcess.spawn);
@@ -367,6 +374,17 @@ function setupExecFileMock(results: Record<string, ExecFileAnswer> = {}) {
       }
     }
 
+    // The rebuild step's dispatch never returns unless the case answers it with
+    // an error: on a box the unit it queues replaces this server, and a test
+    // can only model that as a run that stops here (as `mockRestartUiProcess`
+    // does for the install-x64.sh restart). Answered with success, it left the
+    // run in waitForRebuildToTakeOver for twenty minutes, asking the rebuild
+    // unit's Result every 5 s through whichever case came next.
+    if (!(result instanceof Error) && args.includes("--no-block") && args.includes("rebuild_reboot")) {
+      const replaced = { then: () => replaced, catch: () => replaced };
+      return replaced as unknown as ReturnType<typeof childProcess.execFile>;
+    }
+
     const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
 
     if (callback) {
@@ -475,6 +493,11 @@ describe("updater", () => {
     // The FLAT standalone layout — the entry is where it looks like it is.
     // The nested one has a case of its own.
     mockRealpath.mockImplementation((async (p: unknown) => String(p)) as never);
+    // Back to their factory defaults (the real existsSync; an rm that throws):
+    // a case that overrides one and does not put it back must not hand its
+    // files to every case after it.
+    mockExists.mockReset();
+    mockRm.mockReset();
     mockGatewayUp.mockResolvedValue(true);
 
     setupExecMock({
@@ -4684,6 +4707,22 @@ describe("updater", () => {
       expect(state.error).toBe("ClawBox restarted without producing a new build — see the clawbox-setup service log");
     });
 
+    it("judges at once on the owner's path, whatever an older updater's rebuild unit is doing", async () => {
+      // The appliance waits for a rebuild unit that is still running; on this
+      // PC that unit is never this run's, so nothing waits on it.
+      setupExecFileMock({
+        "show clawbox-root-update@rebuild_reboot.service -p ActiveState": { stdout: "activating\n", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      mockGet.mockImplementation(async (key) => key === "update_needs_continuation" ? "same-build" : undefined);
+      mockRebuiltBox("same-build");
+      expect(await updater.checkContinuation()).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toBe("ClawBox restarted without producing a new build — see the clawbox-setup service log");
+    });
+
     it("restarts a stopped gateway through its granted unit restart, and diagnoses one that stays down", async () => {
       mockGet.mockResolvedValue(true);
       mockGatewayUp.mockImplementation(async () => commands().some((call) => call.includes("restart clawbox-gateway")));
@@ -4801,6 +4840,32 @@ describe("updater", () => {
       expect(mockRebuildAsOwner).not.toHaveBeenCalled();
       expect(mockRestartUiProcess).not.toHaveBeenCalled();
       expect(mockX64Install).toHaveBeenCalled();
+    });
+
+    it("records when it dispatched the rebuild, on the clock the journal stamps its lines with", async () => {
+      // The server that judges the rebuild after the restart did not dispatch
+      // it: this moment is what keeps its read of the unit's journal to this run.
+      setupExecFileMock({
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      const before = Date.now();
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      const flagWrite = mockSetMany.mock.calls.findIndex(
+        ([entries]) => typeof (entries as Record<string, unknown>).update_needs_continuation === "string",
+      );
+      const record = (mockSetMany.mock.calls[flagWrite]?.[0] as Record<string, unknown> | undefined)
+        ?.update_rebuild_dispatched as { at?: unknown } | undefined;
+      expect(record?.at).toBeGreaterThanOrEqual(before);
+      expect(record?.at).toBeLessThanOrEqual(Date.now());
+      // Written BEFORE the dispatch: no line of this run can predate it.
+      const dispatch = mockExecFile.mock.calls.findIndex(([, args]) => (args as string[]).includes("rebuild_reboot"));
+      expect(mockSetMany.mock.invocationCallOrder[flagWrite])
+        .toBeLessThan(mockExecFile.mock.invocationCallOrder[dispatch]);
     });
   });
 
@@ -5625,12 +5690,34 @@ describe("updater", () => {
   });
 
   describe("checkContinuation", () => {
+    // The runtime is process-wide (it outlives the module reset above), so each
+    // case starts from a reset one and leaves a reset one, on the real clock.
+    beforeEach(() => {
+      updater.resetUpdateState();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      updater.resetUpdateState();
+    });
+
+    // While the continuation waits on a root unit, nothing may start a run: a
+    // Try again on a second window still showing an older failed card, a chat
+    // approval, a direct POST. A run started then cuts the wait off for good,
+    // leaves this run's flag on disk, and runs its own `git reset --hard`
+    // beside the unit's exit guard. Each case below that lets a run start
+    // gives it this channel. It must stay INVALID: the run is refused before
+    // step 1 and settles, where a real channel would let it go on into the
+    // cases after this one.
+    const REFUSED_CHANNEL = "not-a-channel";
+
     it("returns false when already running", async () => {
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
       updater.resetUpdateState();
       updater.startUpdate();
 
       const result = await updater.checkContinuation();
       expect(result).toBe(false);
+      await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
     });
 
     it("returns false when no continuation needed", async () => {
@@ -5729,6 +5816,7 @@ describe("updater", () => {
           update_interrupted_at: undefined,
         }),
       );
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("resumes once when a boot check and a status poll overlap, and tells both", async () => {
@@ -5753,6 +5841,7 @@ describe("updater", () => {
         mockSetMany.mock.calls.filter(([entries]) => "update_needs_continuation" in entries),
       ).toHaveLength(1);
       expect(mockGet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("refuses a full or scoped update while the continuation is being read", async () => {
@@ -5771,6 +5860,7 @@ describe("updater", () => {
 
       flagRead.resolve();
       expect(await continuation).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("reports a failed update instead of resuming when the rebuild unit failed", async () => {
@@ -5927,6 +6017,763 @@ describe("updater", () => {
       expect(state.warnings?.some((w) => w.code === "checkout-rolled-back")).toBe(true);
     });
 
+    // A failed build restores the previous one and restarts this server BEFORE
+    // its rebuild unit ends (install.sh: restore_previous_build, then the
+    // engines, node-pty and the exit traps). A oneshot that is still running
+    // answers `Result=success`, so the server that comes back sees no failure.
+    const REBUILD_UNIT = "clawbox-root-update@rebuild_reboot.service";
+    const DISPATCHED_AT = Date.parse("2026-01-01T12:00:00Z");
+    const THIS_RUN_ERROR = "Error: rebuild failed (exit 137) — bun run build was killed by signal 9 "
+      + "(no OOM kill in the kernel log; a stop, a timeout or an operator looks the same).";
+    const NO_NEW_BUILD = "ClawBox restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
+    /** A unit's `active` when systemd does not answer the ActiveState question at all. */
+    const NO_ANSWER = "(systemd did not answer)";
+    interface RestoredBox {
+      /** The rebuild unit, which a case moves on; still running unless it says otherwise. */
+      unit?: { active: string; result: string };
+      /** The dispatch record: this run's, with its moment, unless a case says otherwise. */
+      record?: unknown;
+      /** More of the store, more files (by the end of their path), more commands. */
+      store?: Record<string, unknown>;
+      files?: Record<string, string>;
+      exec?: Record<string, ExecFileAnswer>;
+    }
+    /** The restored box: the same build, this run's dispatch record, and a rebuild unit the case moves on. */
+    function restoredBox(journal: JournalEntry[], options: RestoredBox = {}) {
+      const unit = options.unit ?? { active: "activating", result: "success" };
+      const record = "record" in options ? options.record : { boot: BOOT, uptime: 1000.5, at: DISPATCHED_AT };
+      mockGet.mockImplementation(async (key: string) => {
+        if (key === "update_needs_continuation") return "build-aaa";
+        if (key === "update_rebuild_dispatched") return record;
+        return options.store?.[key];
+      });
+      mockReadFile.mockImplementation(async (file) => {
+        const f = String(file);
+        if (f.endsWith("BUILD_ID")) return "build-aaa\n";
+        const known = Object.entries(options.files ?? {}).find(([suffix]) => f.endsWith(suffix));
+        if (known) return known[1];
+        throw new Error("ENOENT");
+      });
+      setupExecFileMock({
+        ...options.exec,
+        [`show ${REBUILD_UNIT} -p ActiveState`]: () => (unit.active === NO_ANSWER
+          ? new Error("Failed to connect to bus: Connection timed out")
+          : { stdout: `${unit.active}\n`, stderr: "" }),
+        [`show ${REBUILD_UNIT} -p Result`]: () => ({ stdout: `${unit.result}\n`, stderr: "" }),
+        "/usr/bin/journalctl": journalctlModel({ [REBUILD_UNIT]: journal }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      return unit;
+    }
+    const flagCleared = () => mockSetMany.mock.calls.some(
+      ([entries]) => "update_needs_continuation" in entries && entries.update_needs_continuation === undefined,
+    );
+
+    it("leaves no full update going that reads a later case's rebuild unit", async () => {
+      // A case that waits only on an early step leaves its run going, and the
+      // run goes on into the rebuild step. On a box the unit that step queues
+      // replaces this server; nothing replaces a test. A dispatch the fixture
+      // answered left the run in waitForRebuildToTakeOver, asking the rebuild
+      // unit's Result every 5 s through whichever case came next — and a case
+      // whose unit had failed got that run's "Rebuild failed — see …" over its
+      // own state and one more clear of its continuation flag.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        updater.resetUpdateState();
+        updater.startUpdate();
+        await vi.advanceTimersByTimeAsync(60_000);
+        const dispatches = mockExecFile.mock.calls
+          .filter(([, args]) => (args as string[]).join(" ").includes("--no-block rebuild_reboot"));
+        expect(dispatches).toHaveLength(1);
+
+        // What the next case does first: a reset, and a rebuild unit that failed.
+        updater.resetUpdateState();
+        setupExecFileMock({
+          [`show ${REBUILD_UNIT} -p Result`]: { stdout: "exit-code\n", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+        mockExecFile.mockClear();
+        mockSetMany.mockClear();
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(updater.getUpdateState().error).toBeUndefined();
+        expect(updater.getUpdateState().phase).toBe("idle");
+        expect(mockSetMany).not.toHaveBeenCalled();
+        const resultAsks = mockExecFile.mock.calls
+          .filter(([, args]) => (args as string[]).join(" ").includes(`${REBUILD_UNIT} -p Result`));
+        expect(resultAsks).toEqual([]);
+      } finally {
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("shows the rebuild's own error line when the server came back before the rebuild unit ended", async () => {
+      updater.resetUpdateState();
+      const journal: JournalEntry[] = [
+        { message: "Running bun build...", atMs: DISPATCHED_AT + 51_000 },
+        { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
+        { message: "  Restored the previous build; the dashboard answers on :80 again", atMs: DISPATCHED_AT + 57_000 },
+      ];
+      // The checkout still on the new commit beside the restored build, so the
+      // rollback has something to do (install.sh's exit guard normally has).
+      const OLD = "a".repeat(40);
+      const NEW = "b".repeat(40);
+      const unit = restoredBox(journal, {
+        store: { update_rollback_target: JSON.stringify({ commit: OLD, branch: "main", recordedAt: "2026-01-01T00:00:00Z" }) },
+        files: { "build-info.json": JSON.stringify({ commit: OLD, builtAt: "2026-01-01T00:00:00Z", buildId: "build-aaa" }) },
+        exec: {
+          "rev-parse --abbrev-ref HEAD": { stdout: "beta\n", stderr: "" },
+          "rev-parse HEAD": { stdout: `${NEW}\n`, stderr: "" },
+        },
+      });
+      const checkoutMoves = () => mockExecFile.mock.calls
+        .filter(([cmd, args]) => cmd === "git" && (args as string[]).join(" ").endsWith(`checkout -q -f -B main ${OLD}`))
+        .length;
+      const log = vi.spyOn(console, "log");
+      const waitLines = () => log.mock.calls.map(([m]) => String(m)).filter((m) => m.includes("rebuild step"));
+
+      // The restored server's first polls: the unit has not ended, so there is
+      // no verdict yet — the restart step is still running, the flag stays, and
+      // the checkout is not moved under the unit.
+      for (let poll = 0; poll < 2; poll++) {
+        expect(await updater.checkContinuation()).toBe(false);
+        const waiting = updater.getUpdateState();
+        expect(waiting.error ?? null).toBeNull();
+        expect(waiting.phase).toBe("running");
+        expect(waiting.steps.find((step) => step.id === "restart")?.status).toBe("running");
+      }
+      expect(flagCleared()).toBe(false);
+      expect(checkoutMoves()).toBe(0);
+
+      // The unit ends as it does on the box: failed, with its exit code.
+      journal.push(
+        { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 64_000 },
+        { message: `${REBUILD_UNIT}: Failed with result 'exit-code'.`, atMs: DISPATCHED_AT + 64_000 },
+      );
+      unit.active = "failed";
+      unit.result = "exit-code";
+
+      expect(await updater.checkContinuation()).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toBe(THIS_RUN_ERROR);
+      expect(state.steps.find((step) => step.id === "restart")?.error).toBe(THIS_RUN_ERROR);
+      expect(flagCleared()).toBe(true);
+      // Judged once the unit had ended, so the checkout rollback ran.
+      expect(checkoutMoves()).toBe(1);
+      // One line when the wait began, one when it ended — never one per poll.
+      expect(waitLines()).toHaveLength(2);
+      expect(waitLines()[1]).toMatch(/rebuild step ended \d+ s after .*: the update failed: Error: rebuild failed \(exit 137\)/);
+      log.mockRestore();
+    });
+
+    it("gives its verdict with nobody watching: the server asks again by itself until the unit ends", async () => {
+      // Approved from a chat, on a box with no page open: the boot hook's one
+      // ask lands while the unit still runs, and no status poll ever comes.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const log = vi.spyOn(console, "log");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+
+        unit.active = "failed";
+        unit.result = "exit-code";
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(updater.getUpdateState().phase).toBe("failed");
+        expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+        expect(log.mock.calls.map(([m]) => String(m))).toContainEqual(
+          expect.stringMatching(/rebuild step ended \d+ s after .*: the update failed: Error: rebuild failed \(exit 137\)/),
+        );
+        // Its own clear of the flag (with the interruption record beside it),
+        // and the desktop lock released after it.
+        const writes = mockSetMany.mock.calls.map(([entries]) => entries as Record<string, unknown>);
+        const ownClear = writes.findIndex((e) => "update_needs_continuation" in e && "update_interrupted_at" in e);
+        expect(ownClear).toBeGreaterThan(-1);
+        expect(writes.slice(ownClear).some((e) => "update_in_progress" in e && e.update_in_progress === undefined)).toBe(true);
+      } finally {
+        log.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps every status poll off git while the rebuild unit still runs", async () => {
+      // `git status` takes the index lock, and the unit's exit guard runs
+      // `git reset --hard` in that window: a collision fails the reset.
+      try {
+        updater.resetUpdateState();
+        restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        const { GET } = await import("@/app/setup-api/update/status/route");
+        const phases: string[] = [];
+        for (let poll = 0; poll < 2; poll++) phases.push((await (await GET()).json()).phase);
+        const gitStatus = mockExecFile.mock.calls
+          .filter(([cmd, args]) => cmd === "git" && (args as string[]).includes("status"))
+          .map(([, args]) => (args as string[]).join(" "));
+        expect(gitStatus).toEqual([]);
+        expect(phases).toEqual(["running", "running"]);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("names the rebuild's own failure, not a later error line from the unit's exit", async () => {
+      updater.resetUpdateState();
+      restoredBox([
+        { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
+        { message: "  Moving the checkout back from bbbbbbb to aaaaaaa, the commit the restored build was made from", atMs: DISPATCHED_AT + 62_000 },
+        { message: "fatal: Unable to create '/home/clawbox/clawbox/.git/index.lock': File exists.", atMs: DISPATCHED_AT + 62_100 },
+        { message: "  Warning: could not move the checkout back to aaaaaaa", atMs: DISPATCHED_AT + 62_200 },
+        { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 64_000 },
+      ], { unit: { active: "failed", result: "exit-code" } });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+    });
+
+    it("reads an older updater's record, which carries no dispatch moment, as before: the unit's last 40 entries", async () => {
+      updater.resetUpdateState();
+      restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }], {
+        unit: { active: "failed", result: "exit-code" },
+        record: { boot: BOOT, uptime: 1000.5 },
+      });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      const reads = mockExecFile.mock.calls
+        .filter(([cmd, args]) => cmd === "/usr/bin/journalctl" && (args as string[]).includes(REBUILD_UNIT))
+        .map(([, args]) => args);
+      expect(reads).toEqual([["-u", REBUILD_UNIT, "-n", "40", "--no-pager", "-o", "cat"]]);
+      expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+    });
+
+    it("asks the handover again by itself while the root bootstrap still runs", async () => {
+      // The same probe-once hole as the rebuild's wait: the boot hook asks once.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
+      try {
+        updater.resetUpdateState();
+        mockReadFile.mockImplementation(async (file) => {
+          const f = String(file);
+          if (f.endsWith("updater-handover.json")) return JSON.stringify({ version: 1, previousBuildId: "build-old" });
+          if (f.endsWith("BUILD_ID")) return "build-new\n";
+          throw new Error("ENOENT");
+        });
+        setupExecFileMock({
+          "show clawbox-root-update@bootstrap_updater.service -p ActiveState": { stdout: "activating\n", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+        const asks = () => mockExecFile.mock.calls
+          .filter(([, args]) => (args as string[]).join(" ").includes("bootstrap_updater.service -p ActiveState"))
+          .length;
+
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(asks()).toBe(1);
+        await vi.advanceTimersByTimeAsync(11_000);
+        expect(asks()).toBeGreaterThanOrEqual(2);
+      } finally {
+        updater.resetUpdateState();
+        vi.useRealTimers();
+        const actual = await vi.importActual<typeof import("fs")>("fs");
+        mockExists.mockImplementation(actual.existsSync);
+      }
+    });
+
+    const waitLog = (spy: { mock: { calls: unknown[][] } }, part: string) =>
+      spy.mock.calls.map(([m]) => String(m)).filter((m) => m.includes(part));
+
+    it("starts no update while it waits on the rebuild unit, and still judges when the unit ends", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      const log = vi.spyOn(console, "log");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.getUpdateState().phase).toBe("running");
+
+        // Right after the ask that began the wait, and between two later asks.
+        for (let ask = 0; ask < 2; ask++) {
+          expect(updater.startUpdate()).toEqual({ started: false, error: "Update already in progress" });
+          expect(updater.startOpenclawUpdate()).toEqual({ started: false, error: "Update already in progress" });
+          expect(await updater.dismissSettledUpdate()).toMatchObject({ dismissed: false, reason: "in-progress" });
+          await vi.advanceTimersByTimeAsync(5_000);
+        }
+        expect(flagCleared()).toBe(false);
+
+        // The unit ends: the next ask of the server's own still judges, and the
+        // reason is the rebuild's own line.
+        unit.active = "failed";
+        unit.result = "exit-code";
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([
+          expect.stringMatching(/rebuild step ended \d+ s after .*: the update failed: Error: rebuild failed \(exit 137\)/),
+        ]);
+        expect(flagCleared()).toBe(true);
+
+        // Nothing waits any more: an update can start again.
+        await vi.waitFor(() => expect(updater.startUpdate().started).toBe(true));
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        log.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps waiting while the unit runs though the continuation flag is gone, then lets go: nothing left running or refused", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      const log = vi.spyOn(console, "log");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.startUpdate().started).toBe(false);
+
+        // The store no longer holds the flag by the next ask (wiped or rewritten
+        // under the wait). The unit still runs, or systemd cannot say: its tail
+        // may still reset the checkout, so the update keeps the box.
+        const store = mockGet.getMockImplementation()!;
+        mockGet.mockImplementation(async (key: string) => (key === "update_needs_continuation" ? undefined : store(key)));
+        for (const active of ["activating", NO_ANSWER]) {
+          unit.active = active;
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(updater.getUpdateState().phase).toBe("running");
+          expect(waitLog(log, "Stopped waiting for the rebuild step")).toEqual([]);
+          expect(updater.startUpdate().started).toBe(false);
+        }
+
+        // The unit has ended: nothing is left to judge.
+        unit.active = "failed";
+        unit.result = "exit-code";
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(updater.getUpdateState().phase).toBe("idle");
+        expect(waitLog(log, "Stopped waiting for the rebuild step")).toHaveLength(1);
+        expect(await updater.dismissSettledUpdate()).toEqual({ dismissed: true });
+        expect(updater.startUpdate().started).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        log.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps waiting when systemd does not answer in the middle of the wait, unless the unit is known to have failed", async () => {
+      // Seen running once, the unit is not "ended" because one question went
+      // unanswered: a `success` Result then is the running oneshot's, and judging
+      // on it would give the fixed sentence and release the lock beside its tail.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const log = vi.spyOn(console, "log");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+
+        unit.active = NO_ANSWER;
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([]);
+        expect(flagCleared()).toBe(false);
+        expect(updater.startUpdate().started).toBe(false);
+
+        // Still unanswered, but the Result says it failed: that ends the wait.
+        unit.result = "exit-code";
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([
+          expect.stringMatching(/the update failed: Error: rebuild failed \(exit 137\)/),
+        ]);
+      } finally {
+        log.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("judges at once, as before, when systemd does not answer this process's first ask", async () => {
+      // No wait has begun: a box whose systemd cannot be asked is not held
+      // waiting on a unit nobody has seen run.
+      updater.resetUpdateState();
+      restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }], { unit: { active: NO_ANSWER, result: "success" } });
+      try {
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.getUpdateState().phase).toBe("failed");
+        expect(updater.getUpdateState().error).toBe(NO_NEW_BUILD);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("goes on asking when the store will not take the verdict, keeps the box, and says so sparsely", async () => {
+      // A full disk: once the unit has ended, the verdict's first write fails,
+      // and each ask fails the same way until it does not.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      const log = vi.spyOn(console, "log");
+      const warn = vi.spyOn(console, "warn");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+        unit.active = "failed";
+        unit.result = "exit-code";
+        mockSetMany.mockRejectedValue(new Error("ENOSPC: no space left on device, write"));
+
+        for (let ask = 0; ask < 12; ask++) {
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(updater.startUpdate().started).toBe(false);
+        }
+        expect(waitLog(warn, "judge the update")).toHaveLength(1);
+        // …and a line now and then while it lasts, not one every 5 s.
+        await vi.advanceTimersByTimeAsync(600_000);
+        expect(waitLog(warn, "judge the update")).toHaveLength(2);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([]);
+
+        mockSetMany.mockResolvedValue();
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([
+          expect.stringMatching(/the update failed: Error: rebuild failed \(exit 137\)/),
+        ]);
+        await vi.waitFor(() => expect(updater.startUpdate().started).toBe(true));
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        log.mockRestore();
+        warn.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("starts no update while the handover waits on the root bootstrap, and says once that systemd does not answer", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
+      const warn = vi.spyOn(console, "warn");
+      const actual = await vi.importActual<typeof import("fs")>("fs");
+      try {
+        updater.resetUpdateState();
+        mockReadFile.mockImplementation(async (file) => {
+          const f = String(file);
+          if (f.endsWith("updater-handover.json")) return JSON.stringify({ version: 1, previousBuildId: "build-old" });
+          if (f.endsWith("BUILD_ID")) return "build-new\n";
+          throw new Error("ENOENT");
+        });
+        setupExecFileMock({
+          "show clawbox-root-update@bootstrap_updater.service -p ActiveState":
+            new Error("Failed to connect to bus: No such file or directory"),
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.startUpdate()).toEqual({ started: false, error: "Update already in progress" });
+        expect(await updater.updateInFlight()).toBe(true);
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(updater.startUpdate().started).toBe(false);
+        expect(waitLog(warn, "systemd")).toEqual([expect.stringContaining("Failed to connect to bus")]);
+
+        // The handover is over (its marker gone): nothing waits, an update can start.
+        mockExists.mockImplementation(actual.existsSync);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(updater.startUpdate().started).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        warn.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+        mockExists.mockImplementation(actual.existsSync);
+      }
+    });
+
+    it("keeps the update's warnings on the screen while it waits", async () => {
+      updater.resetUpdateState();
+      const repinned = { code: "repinned", message: "This box now follows the main branch." };
+      restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }], {
+        store: { update_warnings: JSON.stringify([repinned]) },
+      });
+      try {
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.getUpdateState().phase).toBe("running");
+        expect(updater.getUpdateState().warnings).toEqual([repinned]);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("starts nothing on the owner's approval before a restarted server has first asked about its update", async () => {
+      // Between the restart and the first ask (the boot hook's, five seconds and
+      // the boot config repair later) nothing in this process owns the update,
+      // while the flag on disk says the rebuild unit may still be running.
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      vi.doMock("@/lib/update-whats-new-server", () => ({ prefetchUpdateWhatsNew: vi.fn(async () => undefined) }));
+      vi.doMock("@/lib/pending-actions", () => ({ pushPendingAction: vi.fn(async () => ({})) }));
+      try {
+        updater.resetUpdateState();
+        restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        const { dispatchPowerAction, PowerApprovalConflict } = await import("@/lib/power-approval");
+
+        await expect(dispatchPowerAction("update")).rejects.toBeInstanceOf(PowerApprovalConflict);
+        expect(updater.getUpdateState().phase).toBe("idle");
+        expect(await updater.startWouldOverlapUpdate()).toBe(true);
+      } finally {
+        vi.doUnmock("@/lib/update-whats-new-server");
+        vi.doUnmock("@/lib/pending-actions");
+        updater.resetUpdateState();
+      }
+    });
+
+    /** The rebuild dispatch, answered as a case says; the run settles when it fails. */
+    const failedDispatch = (error: Error) => setupExecFileMock({
+      "--no-block rebuild_reboot": error,
+      ping: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+    });
+    const flagWrites = () => mockSetMany.mock.calls
+      .map(([entries]) => entries as Record<string, unknown>)
+      .filter((entries) => "update_needs_continuation" in entries)
+      .map((entries) => entries.update_needs_continuation);
+
+    it("clears its flag when the rebuild step was refused before systemd could queue it, and keeps the refusal as the reason", async () => {
+      // Nothing will restart this server, so the flag would only hold every later
+      // start and every background job off until it did.
+      failedDispatch(Object.assign(new Error("sudo: a password is required"), { stderr: "sudo: a password is required\n" }));
+      // The clear itself cannot be written: the step still says why it failed.
+      mockSetMany.mockImplementation(async (entries: Record<string, unknown>) => {
+        if ("update_needs_continuation" in entries && entries.update_needs_continuation === undefined) {
+          throw new Error("ENOSPC: no space left on device, write");
+        }
+      });
+      try {
+        updater.resetUpdateState();
+        updater.startUpdate();
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        expect(flagWrites()).toEqual([expect.any(String), undefined]);
+        const restart = updater.getUpdateState().steps.find((step) => step.id === "restart");
+        expect(restart?.error).toMatch(/not allowed to start root steps/);
+        expect(restart?.error).not.toMatch(/ENOSPC/);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("still lets a run this process saw fail start again when its rebuild dispatch may have queued the unit", async () => {
+      // Cut off by its own timeout, the dispatch may have reached systemd: the
+      // flag stays for the server that unit would restart. The failed card
+      // offers Try again, which must start, as it always could; only a
+      // restarted process, which shows "idle" until its first ask, reads that
+      // flag as an update in flight.
+      failedDispatch(Object.assign(new Error("Command failed: timed out"), { killed: true, signal: "SIGTERM" }));
+      try {
+        updater.resetUpdateState();
+        updater.startUpdate();
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        const written = flagWrites();
+        expect(written).toEqual([expect.any(String)]);
+        mockGet.mockImplementation(async (key: string) => (key === "update_needs_continuation" ? written[0] : undefined));
+
+        expect(await updater.startWouldOverlapUpdate()).toBe(false);
+        // The same disk, read by a restarted server before its first ask.
+        updater.resetUpdateState();
+        expect(await updater.startWouldOverlapUpdate()).toBe(true);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("lets nothing start while a legacy updater's handover marker is on disk, before the first ask too", async () => {
+      // install.sh's handover writes only its marker, no continuation flag, and
+      // restarts this server while its root bootstrap still runs.
+      const actual = await vi.importActual<typeof import("fs")>("fs");
+      mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
+      try {
+        updater.resetUpdateState();
+        expect(await updater.startWouldOverlapUpdate()).toBe(true);
+      } finally {
+        mockExists.mockImplementation(actual.existsSync);
+        updater.resetUpdateState();
+      }
+    });
+
+    it("asks again by itself when the first ask cannot write its verdict, with no page open", async () => {
+      // The boot hook's first ask finds the unit already ended, and the
+      // verdict's first write fails (a full disk). No wait was ever entered, and
+      // the flag on disk holds every start off until somebody asks again.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const warn = vi.spyOn(console, "warn");
+      try {
+        updater.resetUpdateState();
+        restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }], { unit: { active: "failed", result: "exit-code" } });
+        mockSetMany.mockRejectedValueOnce(new Error("ENOSPC: no space left on device, write"));
+        await expect(updater.checkContinuation()).rejects.toThrow(/ENOSPC/);
+        expect(waitLog(warn, "judge the update")).toHaveLength(1);
+        expect(updater.startUpdate().started).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        const writes = mockSetMany.mock.calls.map(([entries]) => entries as Record<string, unknown>);
+        const clears = writes.flatMap((e, i) => ("update_needs_continuation" in e && e.update_needs_continuation === undefined ? [i] : []));
+        expect(clears).toHaveLength(2);
+        expect(writes.slice(clears[1]).some((e) => "update_in_progress" in e && e.update_in_progress === undefined)).toBe(true);
+      } finally {
+        warn.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("takes nothing when an ask fails with no update on disk", async () => {
+      // A box with no continuation flag and no handover marker: a failed ask is
+      // the caller's to report, not a wait that holds the box.
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        updater.resetUpdateState();
+        // A lock with nothing to resume: the ask stamps an interruption, and that write fails.
+        mockGet.mockImplementation(async (key: string) => (key === "update_in_progress" ? true : undefined));
+        mockSet.mockRejectedValue(new Error("ENOSPC: no space left on device, write"));
+        await expect(updater.checkContinuation()).rejects.toThrow(/ENOSPC/);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(updater.startUpdate().started).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a legacy updater's handover marker until the resume's own write has landed", async () => {
+      // A failed write that took the marker with it would leave the next ask no
+      // handover to resume: it would find a lock and nothing to resume, and
+      // report an interruption instead of running the update from step 1.
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const actual = await vi.importActual<typeof import("fs")>("fs");
+      mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
+      mockRm.mockImplementation(async () => undefined);
+      try {
+        updater.resetUpdateState();
+        mockReadFile.mockImplementation(async (file) => {
+          const f = String(file);
+          if (f.endsWith("updater-handover.json")) return JSON.stringify({ version: 1, previousBuildId: "build-old" });
+          if (f.endsWith("BUILD_ID")) return "build-new\n";
+          throw new Error("ENOENT");
+        });
+        setupExecFileMock({
+          "show clawbox-root-update@bootstrap_updater.service -p ActiveState": { stdout: "inactive\n", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+        // Only this marker's removals.
+        const markerRemovals = () => mockRm.mock.calls.flatMap(([file], i) =>
+          (String(file).endsWith("updater-handover.json") ? [mockRm.mock.invocationCallOrder[i]] : []));
+        mockSetMany.mockRejectedValueOnce(new Error("ENOSPC: no space left on device, write"));
+        await expect(updater.checkContinuation()).rejects.toThrow(/ENOSPC/);
+        expect(markerRemovals()).toEqual([]);
+
+        // The next ask, its own, finds the same handover and resumes it.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(markerRemovals()).toHaveLength(1);
+        const resumeWrite = mockSetMany.mock.calls.findLastIndex(([entries]) => "update_needs_continuation" in (entries as Record<string, unknown>));
+        expect(mockSetMany.mock.invocationCallOrder[resumeWrite]).toBeLessThan(markerRemovals()[0]);
+        // The resume is a full run from step 1: refused by the channel above, here.
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        mockExists.mockImplementation(actual.existsSync);
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("reads the unit's state before its result, so a unit that ends between the two is still judged failed", async () => {
+      updater.resetUpdateState();
+      // Whichever systemd question comes first sees the unit running; it has
+      // ended, failed, by the next one.
+      let asked = 0;
+      restoredBox([
+        { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
+        { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 64_000 },
+      ], {
+        unit: {
+          get active() { return asked++ === 0 ? "activating" : "failed"; },
+          get result() { return asked++ === 0 ? "success" : "exit-code"; },
+        },
+      });
+
+      for (let poll = 0; poll < 3 && updater.getUpdateState().phase !== "failed"; poll++) {
+        await updater.checkContinuation();
+      }
+      expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+    });
+
+    it("finds this run's error line behind a long tail of what the unit did after the restore", async () => {
+      // Engines resumed, node-pty rebuilt, the exit traps: each sudo leaves
+      // session lines in the unit's journal, and they all come after the error.
+      updater.resetUpdateState();
+      const tail = Array.from({ length: 60 }, (_, i) => ({
+        message: i % 2 ? "pam_unix(sudo:session): session closed for user clawbox" : "  Still waiting for node-pty...",
+        atMs: DISPATCHED_AT + 60_000 + i,
+      }));
+      restoredBox([
+        { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
+        ...tail,
+        { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 70_000 },
+      ], { unit: { active: "failed", result: "exit-code" } });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+    });
+
+    it("keeps the no-new-build sentence when the rebuild unit ended without failing, whatever it printed last", async () => {
+      updater.resetUpdateState();
+      const unit = restoredBox([
+        { message: "Rebuilding: .env changed after the build", atMs: DISPATCHED_AT + 48_000 },
+        { message: "Running bun build...", atMs: DISPATCHED_AT + 51_000 },
+      ]);
+
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().error ?? null).toBeNull();
+
+      unit.active = "inactive";
+      expect(await updater.checkContinuation()).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      // The unit said no reason, and its last progress line is not one.
+      expect(state.error).toBe(NO_NEW_BUILD);
+    });
+
+    it("never shows an earlier run's error line as this run's reason", async () => {
+      updater.resetUpdateState();
+      restoredBox([
+        // The owner's previous attempt, an hour before this run dispatched.
+        { message: "Error: rebuild failed (exit 1) — bun run build did not succeed.", atMs: DISPATCHED_AT - 3_600_000 },
+        { message: `${REBUILD_UNIT}: Failed with result 'exit-code'.`, atMs: DISPATCHED_AT - 3_599_000 },
+        // This run: its shell was killed before it could say why.
+        { message: "Running bun build...", atMs: DISPATCHED_AT + 51_000 },
+        { message: `${REBUILD_UNIT}: Main process exited, code=killed, status=9/KILL`, atMs: DISPATCHED_AT + 54_000 },
+        { message: `${REBUILD_UNIT}: Failed with result 'signal'.`, atMs: DISPATCHED_AT + 54_000 },
+      ], { unit: { active: "failed", result: "signal" } });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toBe("Error: the step was killed (SIGKILL, exit 137) without reporting a reason — "
+        + "the journal shows no OOM kill, so a stop or a timeout looks the same.");
+    });
+
+    it("resumes at once when the rebuild produced a new build, though its unit has not ended", async () => {
+      // The restart arm restarts this server before its unit's exit traps run:
+      // a good update must not wait on that.
+      updater.resetUpdateState();
+      restoredBox([]);
+      mockRebuiltBox("build-bbb");
+
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+    });
+
     it("reports a failed update when the rebuild left no build at all", async () => {
       // The hole the BUILD_ID comparison left open. `do_rebuild` deleted
       // `.next` before building, so an OOM-killed build (measured on the dev
@@ -5990,6 +6837,7 @@ describe("updater", () => {
       // continuation is allowed to run.
       expect(await updater.checkContinuation()).toBe(true);
       expect(updater.getUpdateState().phase).not.toBe("failed");
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("reports a failed update when a box that had no build still has none", async () => {

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
 import ChromeWindow, { type WindowMode } from "@/components/ChromeWindow";
+import { KIOSK_BAR_VAR } from "@/lib/kiosk-bar-inset";
 
 // Counted: every render of a window asks for the language once.
 const renders = vi.hoisted(() => ({ windows: 0 }));
@@ -219,6 +220,168 @@ describe("dragging a window", () => {
     fireEvent.touchMove(window, { touches: [{ clientX: 100, clientY: 100 }] });
     expect(el().style.translate).toBe("");
     expect(el().style.left).toBe(`${W - 600}px`);
+  });
+});
+
+/**
+ * At devicePixelRatio 1.5 (a 4K monitor at scale 1.5) Chrome draws a window
+ * the same on the drag's layer and back in the page only where its position is
+ * a whole CSS pixel AND a whole device pixel — measured: 400 and 402 drew the
+ * same, 400.6667 (a whole device pixel) did not. Centring, the drag and its
+ * offset, and the resize all land on that lattice: even CSS pixels at 1.5.
+ */
+describe("on the CSS-and-device pixel lattice", () => {
+  const DPR = 1.5;
+  const onGrid = (v: number, step = 2) => Math.abs(v / step - Math.round(v / step)) < 1e-9;
+  const px = (v: string) => v.split(" ").map((part) => parseFloat(part));
+  const box = () => [el().style.left, el().style.top, el().style.width, el().style.height].map((v) => parseFloat(v));
+  beforeEach(() => {
+    Object.defineProperty(window, "devicePixelRatio", { value: DPR, configurable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
+  });
+
+  it("centres a new window on the lattice", () => {
+    // A size already on the lattice (806 x 602), centred at (1440 - 806) / 2 =
+    // 317 and (844 - 602) / 2 = 121 CSS px: odd, so off it. Read at the FIRST commit, by the app inside the window,
+    // before the window's own effects run: the frame it opens with.
+    const first: number[] = [];
+    function App() {
+      const ref = useRef<HTMLDivElement>(null);
+      useLayoutEffect(() => {
+        const w = ref.current!.closest<HTMLElement>("[data-window-id]")!;
+        first.push(parseFloat(w.style.left), parseFloat(w.style.top));
+      }, []);
+      return <div ref={ref} />;
+    }
+    render(
+      <ChromeWindow title="Files" appId="files" windowId="files-1" isActive zIndex={100} onClose={noop} onFocus={noop}
+        onMinimize={noop} defaultWidth={806} defaultHeight={602}>
+        <App />
+      </ChromeWindow>,
+    );
+    expect(first.length === 2 && first.every((v) => onGrid(v)), `${first}`).toBe(true);
+    const [left, top] = box();
+    expect(onGrid(left) && onGrid(top), `${left}, ${top}`).toBe(true);
+  });
+
+  it.each([
+    [1.5, 2],
+    [1.25, 4],
+  ])("drags it by multiples of the lattice step (at %s, %s CSS px), and drops it where the drag showed it", (dpr, step) => {
+    Object.defineProperty(window, "devicePixelRatio", { value: dpr, configurable: true });
+    const onGeometryChange = vi.fn();
+    win({ onGeometryChange });
+    fireEvent.mouseDown(titleBar(), { clientX: 700, clientY: 210 });
+    fireEvent.mouseMove(window, { clientX: 801, clientY: 301 });
+    const [dx, dy] = px(el().style.translate);
+    expect(onGrid(dx, step) && onGrid(dy, step), el().style.translate).toBe(true);
+    fireEvent.mouseUp(window, { clientX: 801, clientY: 301 });
+    const [left, top] = box();
+    expect(onGrid(left, step) && onGrid(top, step), `${left}, ${top}`).toBe(true);
+    expect(left).toBeCloseTo(400 + dx, 6);
+    expect(top).toBeCloseTo(200 + dy, 6);
+    expect(onGeometryChange).toHaveBeenCalledWith({ x: expect.closeTo(left, 6), y: expect.closeTo(top, 6), width: 600, height: 400 });
+  });
+
+  it("resizes it to even CSS pixels, the opposite edge staying where it was", () => {
+    win();
+    const handle = (cursor: string) => el().querySelector<HTMLElement>(`.${cursor}`)!;
+    fireEvent.mouseDown(handle("cursor-se-resize"), { clientX: 1000, clientY: 600 });
+    fireEvent.mouseMove(window, { clientX: 1101, clientY: 701 });
+    fireEvent.mouseUp(window, { clientX: 1101, clientY: 701 });
+    let [left, top, width, height] = box();
+    expect([width, height].every((v) => onGrid(v)), `${width} x ${height}`).toBe(true);
+    expect([left, top]).toEqual([400, 200]);
+
+    const right = left + width;
+    const bottom = top + height;
+    fireEvent.mouseDown(handle("cursor-nw-resize"), { clientX: 400, clientY: 200 });
+    fireEvent.mouseMove(window, { clientX: 301, clientY: 101 });
+    fireEvent.mouseUp(window, { clientX: 301, clientY: 101 });
+    [left, top, width, height] = box();
+    expect([left, top, width, height].every((v) => onGrid(v)), `${left}, ${top} ${width} x ${height}`).toBe(true);
+    expect(left + width).toBeCloseTo(right, 6);
+    expect(top + height).toBeCloseTo(bottom, 6);
+  });
+
+  it("holds a top-edge resize at the kiosk bar on the lattice, never above the bar", () => {
+    // A 41 CSS px bar is 61.5 device px at 1.5: the window's top is held at
+    // the next lattice line under it, 42.
+    document.documentElement.style.setProperty(KIOSK_BAR_VAR, "41px");
+    try {
+      win();
+      fireEvent.mouseDown(el().querySelector<HTMLElement>(".cursor-n-resize")!, { clientX: 700, clientY: 200 });
+      fireEvent.mouseMove(window, { clientX: 700, clientY: -100 });
+      fireEvent.mouseUp(window, { clientX: 700, clientY: -100 });
+      const [, top] = box();
+      expect(top).toBe(42);
+    } finally {
+      document.documentElement.style.removeProperty(KIOSK_BAR_VAR);
+    }
+  });
+
+  it("holds a resize at the minimum size on whole CSS pixels where no lattice step up to 4 fits", () => {
+    // At devicePixelRatio 1.125 a whole device pixel needs 8 CSS px: the
+    // lattice is plain whole CSS pixels, and the minimum stays 300.
+    const dpr = 1.125;
+    Object.defineProperty(window, "devicePixelRatio", { value: dpr, configurable: true });
+    const aligned = (v: number) => Number.isInteger(v);
+    win();
+    // The left edge dragged far right: held at the minimum, the right edge where it was.
+    fireEvent.mouseDown(el().querySelector<HTMLElement>(".cursor-w-resize")!, { clientX: 400, clientY: 400 });
+    fireEvent.mouseMove(window, { clientX: 900, clientY: 400 });
+    fireEvent.mouseUp(window, { clientX: 900, clientY: 400 });
+    const [left, , width] = box();
+    expect(aligned(left) && aligned(width), `${left} + ${width}`).toBe(true);
+    expect(width).toBe(300);
+    expect(left + width).toBeCloseTo(1000, 6);
+  });
+
+  it("saves a size held at the minimum on whole CSS pixels that the next window still takes", () => {
+    // A saved size under 300 x 200 is refused: the window reopened at its
+    // default. At 1.331 the lattice is plain whole CSS pixels.
+    const dpr = 1.331;
+    Object.defineProperty(window, "devicePixelRatio", { value: dpr, configurable: true });
+    const aligned = (v: number) => Number.isInteger(v);
+    const { unmount } = win();
+    fireEvent.mouseDown(el().querySelector<HTMLElement>(".cursor-se-resize")!, { clientX: 1000, clientY: 600 });
+    fireEvent.mouseMove(window, { clientX: 300, clientY: 100 });
+    fireEvent.mouseUp(window, { clientX: 300, clientY: 100 });
+    const [, , width, height] = box();
+    expect(aligned(width) && aligned(height), `${width} x ${height}`).toBe(true);
+    expect(width).toBeGreaterThanOrEqual(300);
+    expect(height).toBeGreaterThanOrEqual(200);
+    unmount();
+    win({ initialPosition: undefined, initialSize: undefined });
+    const [, , reopenedW, reopenedH] = box();
+    expect([reopenedW, reopenedH]).toEqual([width, height]);
+  });
+
+  it.each([
+    // Opened at the minimum height; only the right edge moves.
+    ["height", { width: 600, height: 200 }, "cursor-e-resize", [1000, 300], [1050, 300]],
+    // Opened at the minimum width; only the bottom edge moves.
+    ["width", { width: 300, height: 400 }, "cursor-s-resize", [550, 600], [550, 650]],
+  ] as const)("saves a FITTED %s at the minimum that the next window still takes, when the resize moves only the other edge", (_, initialSize, handle, from, to) => {
+    // The edge the resize leaves alone is saved as it was fitted, and a
+    // fitted minimum must stay one getSavedSize takes back.
+    const dpr = 1.331;
+    Object.defineProperty(window, "devicePixelRatio", { value: dpr, configurable: true });
+    const { unmount } = win({ initialSize });
+    fireEvent.mouseDown(el().querySelector<HTMLElement>(`.${handle}`)!, { clientX: from[0], clientY: from[1] });
+    fireEvent.mouseMove(window, { clientX: to[0], clientY: to[1] });
+    fireEvent.mouseUp(window, { clientX: to[0], clientY: to[1] });
+    const [, , width, height] = box();
+    expect(width, `${width} x ${height}`).toBeGreaterThanOrEqual(300);
+    expect(height, `${width} x ${height}`).toBeGreaterThanOrEqual(200);
+    unmount();
+    win({ initialPosition: undefined, initialSize: undefined });
+    const [, , reopenedW, reopenedH] = box();
+    // Fitted again on the way in: the same device pixel, give or take float noise.
+    expect(reopenedW).toBeCloseTo(width, 6);
+    expect(reopenedH).toBeCloseTo(height, 6);
   });
 });
 
