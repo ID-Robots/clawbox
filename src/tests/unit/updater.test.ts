@@ -374,13 +374,13 @@ function setupExecFileMock(results: Record<string, ExecFileAnswer> = {}) {
       }
     }
 
-    // The rebuild step's dispatch, when the case does not answer it, never
-    // returns: on a box the unit it queues replaces this server, and a test
+    // The rebuild step's dispatch never returns unless the case answers it with
+    // an error: on a box the unit it queues replaces this server, and a test
     // can only model that as a run that stops here (as `mockRestartUiProcess`
-    // does for the install-x64.sh restart). Answered, it left the run in
-    // waitForRebuildToTakeOver for twenty minutes, asking the rebuild unit's
-    // Result every 5 s through whichever case came next.
-    if (result === undefined && args.includes("--no-block") && args.includes("rebuild_reboot")) {
+    // does for the install-x64.sh restart). Answered with success, it left the
+    // run in waitForRebuildToTakeOver for twenty minutes, asking the rebuild
+    // unit's Result every 5 s through whichever case came next.
+    if (!(result instanceof Error) && args.includes("--no-block") && args.includes("rebuild_reboot")) {
       const replaced = { then: () => replaced, catch: () => replaced };
       return replaced as unknown as ReturnType<typeof childProcess.execFile>;
     }
@@ -5691,9 +5691,7 @@ describe("updater", () => {
 
   describe("checkContinuation", () => {
     // The runtime is process-wide (it outlives the module reset above), so each
-    // case starts from a reset one and leaves a reset one. The reset before runs
-    // on the real clock: a faked clearTimeout leaves a native timer running, so a
-    // reset after useFakeTimers() could not cancel a recheck armed on the real one.
+    // case starts from a reset one and leaves a reset one, on the real clock.
     beforeEach(() => {
       updater.resetUpdateState();
     });
@@ -6186,9 +6184,8 @@ describe("updater", () => {
         unit.result = "exit-code";
         await vi.advanceTimersByTimeAsync(30_000);
 
-        // Read from what the continuation itself wrote, not the process-wide
-        // state: earlier cases leave runs polling this very Result query, and
-        // the "exit-code" answered here can end one of them into that state.
+        expect(updater.getUpdateState().phase).toBe("failed");
+        expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
         expect(log.mock.calls.map(([m]) => String(m))).toContainEqual(
           expect.stringMatching(/rebuild step ended \d+ s after .*: the update failed: Error: rebuild failed \(exit 137\)/),
         );
@@ -6669,7 +6666,7 @@ describe("updater", () => {
           ping: { stdout: "", stderr: "" },
           systemctl: { stdout: "", stderr: "" },
         });
-        // Only this marker's removals: a run another case left going may remove files of its own.
+        // Only this marker's removals.
         const markerRemovals = () => mockRm.mock.calls.flatMap(([file], i) =>
           (String(file).endsWith("updater-handover.json") ? [mockRm.mock.invocationCallOrder[i]] : []));
         mockSetMany.mockRejectedValueOnce(new Error("ENOSPC: no space left on device, write"));
