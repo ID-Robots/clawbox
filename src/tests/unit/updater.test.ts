@@ -374,6 +374,17 @@ function setupExecFileMock(results: Record<string, ExecFileAnswer> = {}) {
       }
     }
 
+    // The rebuild step's dispatch, when the case does not answer it, never
+    // returns: on a box the unit it queues replaces this server, and a test
+    // can only model that as a run that stops here (as `mockRestartUiProcess`
+    // does for the install-x64.sh restart). Answered, it left the run in
+    // waitForRebuildToTakeOver for twenty minutes, asking the rebuild unit's
+    // Result every 5 s through whichever case came next.
+    if (result === undefined && args.includes("--no-block") && args.includes("rebuild_reboot")) {
+      const replaced = { then: () => replaced, catch: () => replaced };
+      return replaced as unknown as ReturnType<typeof childProcess.execFile>;
+    }
+
     const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
 
     if (callback) {
@@ -482,6 +493,11 @@ describe("updater", () => {
     // The FLAT standalone layout — the entry is where it looks like it is.
     // The nested one has a case of its own.
     mockRealpath.mockImplementation((async (p: unknown) => String(p)) as never);
+    // Back to their factory defaults (the real existsSync; an rm that throws):
+    // a case that overrides one and does not put it back must not hand its
+    // files to every case after it.
+    mockExists.mockReset();
+    mockRm.mockReset();
     mockGatewayUp.mockResolvedValue(true);
 
     setupExecMock({
@@ -5674,12 +5690,36 @@ describe("updater", () => {
   });
 
   describe("checkContinuation", () => {
+    // The runtime is process-wide (it outlives the module reset above), so each
+    // case starts from a reset one and leaves a reset one. The reset before runs
+    // on the real clock: a faked clearTimeout leaves a native timer running, so a
+    // reset after useFakeTimers() could not cancel a recheck armed on the real one.
+    beforeEach(() => {
+      updater.resetUpdateState();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      updater.resetUpdateState();
+    });
+
+    // While the continuation waits on a root unit, nothing may start a run: a
+    // Try again on a second window still showing an older failed card, a chat
+    // approval, a direct POST. A run started then cuts the wait off for good,
+    // leaves this run's flag on disk, and runs its own `git reset --hard`
+    // beside the unit's exit guard. Each case below that lets a run start
+    // gives it this channel. It must stay INVALID: the run is refused before
+    // step 1 and settles, where a real channel would let it go on into the
+    // cases after this one.
+    const REFUSED_CHANNEL = "not-a-channel";
+
     it("returns false when already running", async () => {
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
       updater.resetUpdateState();
       updater.startUpdate();
 
       const result = await updater.checkContinuation();
       expect(result).toBe(false);
+      await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
     });
 
     it("returns false when no continuation needed", async () => {
@@ -5778,6 +5818,7 @@ describe("updater", () => {
           update_interrupted_at: undefined,
         }),
       );
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("resumes once when a boot check and a status poll overlap, and tells both", async () => {
@@ -5802,6 +5843,7 @@ describe("updater", () => {
         mockSetMany.mock.calls.filter(([entries]) => "update_needs_continuation" in entries),
       ).toHaveLength(1);
       expect(mockGet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("refuses a full or scoped update while the continuation is being read", async () => {
@@ -5820,6 +5862,7 @@ describe("updater", () => {
 
       flagRead.resolve();
       expect(await continuation).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("reports a failed update instead of resuming when the rebuild unit failed", async () => {
@@ -6243,15 +6286,6 @@ describe("updater", () => {
       }
     });
 
-    // While the continuation waits on a root unit, nothing may start a run: a
-    // Try again on a second window still showing an older failed card, a chat
-    // approval, a direct POST. A run started then cuts the wait off for good,
-    // leaves this run's flag on disk, and runs its own `git reset --hard`
-    // beside the unit's exit guard. Each case below that lets a run start
-    // gives it this channel. It must stay INVALID: the run is refused before
-    // step 1 and settles, where a real channel would let it go on into the
-    // cases after this one.
-    const REFUSED_CHANNEL = "not-a-channel";
     const waitLog = (spy: { mock: { calls: unknown[][] } }, part: string) =>
       spy.mock.calls.map(([m]) => String(m)).filter((m) => m.includes(part));
 
@@ -6606,6 +6640,7 @@ describe("updater", () => {
         await expect(updater.checkContinuation()).rejects.toThrow(/ENOSPC/);
         await vi.advanceTimersByTimeAsync(10_000);
         expect(updater.startUpdate().started).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
       } finally {
         updater.resetUpdateState();
         vi.useRealTimers();
@@ -6646,6 +6681,8 @@ describe("updater", () => {
         expect(markerRemovals()).toHaveLength(1);
         const resumeWrite = mockSetMany.mock.calls.findLastIndex(([entries]) => "update_needs_continuation" in (entries as Record<string, unknown>));
         expect(mockSetMany.mock.invocationCallOrder[resumeWrite]).toBeLessThan(markerRemovals()[0]);
+        // The resume is a full run from step 1: refused by the channel above, here.
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
       } finally {
         mockExists.mockImplementation(actual.existsSync);
         updater.resetUpdateState();
@@ -6803,6 +6840,7 @@ describe("updater", () => {
       // continuation is allowed to run.
       expect(await updater.checkContinuation()).toBe(true);
       expect(updater.getUpdateState().phase).not.toBe("failed");
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("reports a failed update when a box that had no build still has none", async () => {
