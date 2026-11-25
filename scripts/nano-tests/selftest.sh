@@ -68,6 +68,7 @@ CLAIMF=$NANO_STUB_HOME/.cache/clawbox-nano-tests/suite.claim
 export NANO_CI=$WORK/bin/nano-ci NANO_STUB_LOG=$WORK/nano-ci-calls.log NANO_SELFTEST_LIB=$LIB
 export NANO_KILL_GRACE=1 NANO_SHA=0123456789abcdef0123456789abcdef01234567
 unset GITHUB_ACTIONS NANO_RESULTS_DIR NANO_TESTS_DIR NANO_IP NANO_LAB NANO_RUN_ID
+unset T85_EDITION T85_CORE0 T85_HEAD1 T85_HEAD_PIN NANO_REQUIRE_CORE_MOVE
 : > "$NANO_STUB_LOG"
 
 fixture() { # DIR NAME BODY
@@ -400,6 +401,11 @@ check "...and the served build naming the checkout" contains "$WORK/t85-hermes.o
 T85_EDITION=hermes T85_CORE0=2026.11.5 t85 hermes-kept "$R85"
 check "85: a checkout kept over the release's build on Hermes fails" test $? -eq 1
 check "...as drift, not as a kept checkout" contains "$WORK/t85-hermes-kept.out" "not ok - drift after the rollback"
+# The dual edition carries the OpenClaw core install.sh moves: it keeps the
+# checkout like openclaw, only Hermes is excluded.
+T85_EDITION=dual t85 dual "$R85"
+check "85: the dual edition keeps the checkout over the release's build after a core move" test $? -eq 0
+check "...as kept by design" contains "$WORK/t85-dual.out" "ok - checkout kept on 0123456789ab"
 
 # ---- long-tier tests are opt-in ----------------------------------------------
 L=$WORK/tests-long
