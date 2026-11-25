@@ -344,17 +344,19 @@ wait_app_update() { "$2"; UPDATE_PHASE=failed UPDATE_ERROR="Rebuild failed"; }
 runtime_settled_line() { ok "settled"; }
 runtime_kept() { ok "runtime kept"; }
 runtime_chat_turn() { ok "chat turn answered"; }
-board_head() { echo "$NANO_SHA"; }
+# The checkout after the update: NANO_SHA (kept), or T85_HEAD1.
+board_head() { echo "${T85_HEAD1:-$NANO_SHA}"; }
 build_identity_ok() {
-  echo "BUILD IDENTITY: FAIL — .next/build-info.json was built from $T85_BUILT but the checkout is at $NANO_SHA"
+  if [ "${T85_HEAD1:-$NANO_SHA}" = "$T85_BUILT" ]; then echo "BUILD IDENTITY: OK — 2 artifact(s) built from ${T85_BUILT:0:7}"; return 0; fi
+  echo "BUILD IDENTITY: FAIL — .next/build-info.json was built from $T85_BUILT but the checkout is at ${T85_HEAD1:-$NANO_SHA}"
   return 1
 }
 board() {
   case "$1" in
     *python3*) # the facts: at the start, then after the update
-      if [ -e "$T85/started" ]; then echo "$T85_EDITION 2026.11.5 $T85_BUILT 2026.10.9 2026.11.5 $T85_TARGET"; return; fi
+      if [ -e "$T85/started" ]; then echo "$T85_EDITION 2026.11.5 $T85_BUILT 2026.10.9 ${T85_HEAD_PIN:-2026.11.5} $T85_TARGET"; return; fi
       : > "$T85/started"
-      echo "$T85_EDITION 2026.10.9 $T85_START 2026.10.9 2026.10.9 present" ;;
+      echo "$T85_EDITION ${T85_CORE0:-2026.10.9} $T85_START 2026.10.9 2026.10.9 present" ;;
     # The served build is whole as its own commit's (unless T85_WHOLE=0), and
     # as no other.
     *verify-build-identity.sh*)
@@ -389,9 +391,15 @@ check "...saying so" contains "$WORK/t85-broken.out" "not ok - the restored buil
 t85 record "$R85" "$R85" 1 present
 check "85: a rollback record left behind fails the kept checkout" test $? -eq 1
 check "...saying so" contains "$WORK/t85-record.out" "not ok - data/config.json still holds the dashboard's rollback target"
-T85_EDITION=hermes NANO_REQUIRE_CORE_MOVE=1 t85 hermes "$R85"
-check "85: NANO_REQUIRE_CORE_MOVE=1 on a Hermes board notes that no core moves" contains "$WORK/t85-hermes.out" "# Hermes edition: no OpenClaw core moves"
-check "...and does not fail the run for it" lacks "$WORK/t85-hermes.out" "not ok - Hermes edition"
+# Hermes, with an OpenClaw core an earlier edition left (newer than the pin,
+# not moved by this update): the checkout must go back to the release.
+T85_EDITION=hermes T85_CORE0=2026.11.5 T85_HEAD1=$R85 T85_HEAD_PIN=2026.10.9 NANO_REQUIRE_CORE_MOVE=1 t85 hermes "$R85"
+check "85: NANO_REQUIRE_CORE_MOVE=1 on a Hermes board whose checkout went back passes" test $? -eq 0
+check "...noting that no core moves there" contains "$WORK/t85-hermes.out" "# Hermes edition: no OpenClaw core moves"
+check "...and the served build naming the checkout" contains "$WORK/t85-hermes.out" "ok - the served build names the checked-out commit"
+T85_EDITION=hermes T85_CORE0=2026.11.5 t85 hermes-kept "$R85"
+check "85: a checkout kept over the release's build on Hermes fails" test $? -eq 1
+check "...as drift, not as a kept checkout" contains "$WORK/t85-hermes-kept.out" "not ok - drift after the rollback"
 
 # ---- long-tier tests are opt-in ----------------------------------------------
 L=$WORK/tests-long

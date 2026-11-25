@@ -18,8 +18,9 @@
 #      must be left working: the dashboard serves /login, the gateway settles,
 #      the build it serves names the commit it has checked out (no drift: the
 #      rollback put back both, or neither), and a chat turn answers.
-#      One exception, by design: an update that had already moved the OpenClaw
-#      core past the pin of the restored build's commit keeps the checkout on
+#      One exception, by design and never on Hermes: an update that had
+#      already moved the OpenClaw core past the pin of the restored build's
+#      commit keeps the checkout on
 #      the branch (install.sh openclaw_core_ahead_of_commit), so the release's
 #      build is served over the branch's checkout until the next update. That
 #      state must be exactly this: the checkout on NANO_SHA, the restored build
@@ -179,8 +180,11 @@ fi
 IDENT=$(build_identity_ok); rc=$?
 if [ "$rc" -eq 0 ]; then
   ok "the served build names the checked-out commit: $(tail -n 1 <<<"$IDENT")"
-elif core_newer "$CORE" "$BUILT_PIN" && [ "$HEAD1" != "$BUILT" ] \
+elif [ "$EDITION" != hermes ] && core_newer "$CORE" "$BUILT_PIN" && [ "$HEAD1" != "$BUILT" ] \
   && [[ $IDENT == *"was built from $BUILT but the checkout is at $HEAD1"* ]]; then
+  # Never on Hermes: install.sh's rule stands down there
+  # (installs_openclaw_harness), and an OpenClaw core an earlier edition left
+  # can be newer than the pin without this update moving it.
   # Only the commit mismatch itself (scripts/verify-build-identity.sh). It
   # stops at that first mismatch, so the restored build is checked again
   # below: it must be a build of the commit the board started on (the
