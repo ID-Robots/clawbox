@@ -5198,7 +5198,7 @@ const table: Record<string, string> = {
   "whatsNew.back": "Tillbaka",
   "whatsNew.closeFullscreen": "Stäng helskärm",
   "whatsNew.dismiss": "Stäng ”Nytt i 4.4”",
-  "whatsNew.externalEngineBody": "Inställningar → Lokal AI → Extern AI-motor kör chatten på en OpenAI-kompatibel AI-motor i ditt nätverk, till exempel en ClawBox Workstation byggd av NVIDIA DGX Spark, i stället för på ClawBoxens modell. På en Workstation med flera Spark ser ägaren varje Spark och den delade motorn under Inställningar → System → Kluster.",
+  "whatsNew.externalEngineBody": "Inställningar → Lokal AI → Extern AI-motor kör chatten på en OpenAI-kompatibel AI-motor i ditt nätverk, till exempel en ClawBox Workstation byggd av NVIDIA DGX Spark, i stället för på ClawBoxens modell. På en Workstation med flera Spark ser ägaren, när de andra finns med i dess inställningar, varje Spark och den delade motorn under Inställningar → System → Kluster.",
   "whatsNew.externalEngineSummary": "Kör chatten på en AI-motor i ditt nätverk, till exempel en ClawBox Workstation, i stället för på ClawBoxens modell.",
   "whatsNew.externalEngineTitle": "En ClawBox Workstation som din AI-motor",
   "whatsNew.fullscreenLabel": "Skärmbild: {title}",

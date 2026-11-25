@@ -1707,7 +1707,7 @@ export const ja: Record<string, string> = {
   "whatsNew.orgModeTitle": "組織モード：会社のスタッフ向け",
   "whatsNew.orgModeBody": "設定 → システム → ユーザーのスイッチで、ほかのユーザーはチャット、ファイル、自分の設定だけを使えるようになります。スタッフはそれぞれ、自分だけの記憶を持つ制限付きのアシスタントとチャットし、ファイルは共有フォルダー Shared のほかに自分専用のホームフォルダーに置けます。オーナーはスタッフに選んだツールを渡し、アップロード・保存容量・チャットの上限を設定し、監査ログを確認できます。",
   "whatsNew.externalEngineTitle": "ClawBox Workstation を AI エンジンに",
-  "whatsNew.externalEngineBody": "設定 → ローカル AI → 外部エンジンで、ClawBox 上のモデルの代わりに、ネットワーク上の OpenAI 互換 AI エンジン（NVIDIA DGX Spark で構成した ClawBox Workstation など）でチャットを動かせます。複数の Spark で構成した Workstation では、オーナーは設定 → システム → クラスターで各 Spark と共有エンジンを確認できます。",
+  "whatsNew.externalEngineBody": "設定 → ローカル AI → 外部エンジンで、ClawBox 上のモデルの代わりに、ネットワーク上の OpenAI 互換 AI エンジン（NVIDIA DGX Spark で構成した ClawBox Workstation など）でチャットを動かせます。複数の Spark で構成した Workstation では、ほかの Spark を設定に登録すると、オーナーは設定 → システム → クラスターで各 Spark と共有エンジンを確認できます。",
   "whatsNew.weeklyUpdateTitle": "毎週のアップデート確認、Telegram にも",
   "whatsNew.weeklyUpdateBody": "毎週月曜の午前に ClawBox が新しいバージョンを探し、バージョンごとに一度だけお知らせします。ボットから届けられる場合は更新ボタン付きで Telegram に、それ以外はデスクトップに表示します。ボットにはいつでも個別チャットで /update を送れますが、更新はデスクトップ、または承認ボットが設定されていればそのボットで確定するまで始まりません。",
   "whatsNew.officeFilesTitle": "Word・Excel・PowerPoint のファイルをチャットで",

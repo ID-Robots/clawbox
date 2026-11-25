@@ -1715,7 +1715,7 @@ export const zh: Record<string, string> = {
   "whatsNew.orgModeTitle": "组织模式：面向公司员工",
   "whatsNew.orgModeBody": "设置 → 系统 → 用户中的一个开关让其他用户只能使用聊天、文件和自己的设置。每位员工都与一个受限的助手聊天，助手有只属于这位员工的记忆；文件放在自己的主文件夹里，旁边还有一个共享文件夹 Shared。所有者为员工开放选定的工具，设定上传、存储空间和聊天的限制，并查看审计日志。",
   "whatsNew.externalEngineTitle": "用 ClawBox Workstation 作为你的 AI 引擎",
-  "whatsNew.externalEngineBody": "设置 → 本地 AI → 外部引擎让聊天运行在你网络中的 OpenAI 兼容 AI 引擎上，例如由 NVIDIA DGX Spark 组成的 ClawBox Workstation，而不是本机的模型。在由多台 Spark 组成的 Workstation 上，所有者可以在设置 → 系统 → 集群中查看每台 Spark 和共享引擎。",
+  "whatsNew.externalEngineBody": "设置 → 本地 AI → 外部引擎让聊天运行在你网络中的 OpenAI 兼容 AI 引擎上，例如由 NVIDIA DGX Spark 组成的 ClawBox Workstation，而不是本机的模型。在由多台 Spark 组成的 Workstation 上，把其他 Spark 写入其设置后，所有者可以在设置 → 系统 → 集群中查看每台 Spark 和共享引擎。",
   "whatsNew.weeklyUpdateTitle": "每周检查更新，也能通过 Telegram 通知",
   "whatsNew.weeklyUpdateBody": "每周一上午 ClawBox 会查找更新的版本，每个版本只通知一次：机器人能联系到你时通过 Telegram 发送，并附一个更新按钮，否则显示在桌面上。你随时可以在私聊中给机器人发送 /update，而更新仍会等你在桌面上（如已设置审批机器人，也可在机器人中）确认后才开始。",
   "whatsNew.officeFilesTitle": "在聊天中使用 Word、Excel 和 PowerPoint 文件",

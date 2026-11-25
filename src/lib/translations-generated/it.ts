@@ -5198,7 +5198,7 @@ const table: Record<string, string> = {
   "whatsNew.back": "Indietro",
   "whatsNew.closeFullscreen": "Chiudi lo schermo intero",
   "whatsNew.dismiss": "Chiudi «Novità della 4.4»",
-  "whatsNew.externalEngineBody": "Impostazioni → IA locale → Motore esterno fa girare la chat su un motore di IA compatibile con OpenAI nella tua rete, come una ClawBox Workstation fatta di NVIDIA DGX Spark, invece che sul modello del ClawBox. Su una Workstation di più Spark, il proprietario vede ogni Spark e il motore condiviso in Impostazioni → Sistema → Cluster.",
+  "whatsNew.externalEngineBody": "Impostazioni → IA locale → Motore esterno fa girare la chat su un motore di IA compatibile con OpenAI nella tua rete, come una ClawBox Workstation fatta di NVIDIA DGX Spark, invece che sul modello del ClawBox. Su una Workstation di più Spark, una volta elencati gli altri nelle sue impostazioni, il proprietario vede ogni Spark e il motore condiviso in Impostazioni → Sistema → Cluster.",
   "whatsNew.externalEngineSummary": "Fai girare la chat su un motore di IA nella tua rete, come una ClawBox Workstation, invece che sul modello del ClawBox.",
   "whatsNew.externalEngineTitle": "Una ClawBox Workstation come motore di IA",
   "whatsNew.fullscreenLabel": "Istantanea: {title}",

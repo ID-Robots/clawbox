@@ -27,8 +27,9 @@ installs on PCs get a long list of fixes.
 - **A ClawBox Workstation as your AI engine.** Settings → Local AI → External
   engine runs the chat on an OpenAI-compatible AI engine on your network, such
   as a ClawBox Workstation built from NVIDIA DGX Sparks, instead of the model
-  on the box. On a Workstation of several Sparks, the owner sees each Spark
-  and the shared engine under Settings → System → Cluster.
+  on the box. On a Workstation of several Sparks, once the others are listed
+  in its settings, the owner sees each Spark and the shared engine under
+  Settings → System → Cluster.
 - **A weekly update check, on Telegram too.** Every Monday morning the box
   looks for a newer ClawBox and tells you once per version: on Telegram, with
   an Update button, when the bot can reach you, otherwise on the desktop. You

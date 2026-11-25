@@ -5198,7 +5198,7 @@ const table: Record<string, string> = {
   "whatsNew.back": "戻る",
   "whatsNew.closeFullscreen": "全画面表示を閉じる",
   "whatsNew.dismiss": "「4.4 の新機能」を閉じる",
-  "whatsNew.externalEngineBody": "設定 → ローカル AI → 外部エンジンで、ClawBox 上のモデルの代わりに、ネットワーク上の OpenAI 互換 AI エンジン（NVIDIA DGX Spark で構成した ClawBox Workstation など）でチャットを動かせます。複数の Spark で構成した Workstation では、オーナーは設定 → システム → クラスターで各 Spark と共有エンジンを確認できます。",
+  "whatsNew.externalEngineBody": "設定 → ローカル AI → 外部エンジンで、ClawBox 上のモデルの代わりに、ネットワーク上の OpenAI 互換 AI エンジン（NVIDIA DGX Spark で構成した ClawBox Workstation など）でチャットを動かせます。複数の Spark で構成した Workstation では、ほかの Spark を設定に登録すると、オーナーは設定 → システム → クラスターで各 Spark と共有エンジンを確認できます。",
   "whatsNew.externalEngineSummary": "ClawBox 上のモデルの代わりに、ネットワーク上の AI エンジン（ClawBox Workstation など）でチャットを動かせます。",
   "whatsNew.externalEngineTitle": "ClawBox Workstation を AI エンジンに",
   "whatsNew.fullscreenLabel": "スクリーンショット: {title}",

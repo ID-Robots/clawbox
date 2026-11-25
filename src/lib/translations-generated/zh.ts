@@ -5198,7 +5198,7 @@ const table: Record<string, string> = {
   "whatsNew.back": "上一步",
   "whatsNew.closeFullscreen": "关闭全屏",
   "whatsNew.dismiss": "关闭“4.4 新功能”",
-  "whatsNew.externalEngineBody": "设置 → 本地 AI → 外部引擎让聊天运行在你网络中的 OpenAI 兼容 AI 引擎上，例如由 NVIDIA DGX Spark 组成的 ClawBox Workstation，而不是本机的模型。在由多台 Spark 组成的 Workstation 上，所有者可以在设置 → 系统 → 集群中查看每台 Spark 和共享引擎。",
+  "whatsNew.externalEngineBody": "设置 → 本地 AI → 外部引擎让聊天运行在你网络中的 OpenAI 兼容 AI 引擎上，例如由 NVIDIA DGX Spark 组成的 ClawBox Workstation，而不是本机的模型。在由多台 Spark 组成的 Workstation 上，把其他 Spark 写入其设置后，所有者可以在设置 → 系统 → 集群中查看每台 Spark 和共享引擎。",
   "whatsNew.externalEngineSummary": "让聊天运行在你网络中的 AI 引擎上，例如 ClawBox Workstation，而不是本机的模型。",
   "whatsNew.externalEngineTitle": "用 ClawBox Workstation 作为你的 AI 引擎",
   "whatsNew.fullscreenLabel": "截图：{title}",

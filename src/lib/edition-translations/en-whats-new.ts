@@ -28,7 +28,7 @@ export const whatsNewEn: Record<string, string> = {
     "A switch in Settings → System → Users gives other users only Chat, Files and their own settings. Each member of staff chats with a limited assistant that has a memory of their own, and keeps files in a home folder of their own beside a Shared folder. The owner gives staff chosen tools, sets upload, storage and chat limits, and reads an audit log.",
   "whatsNew.externalEngineTitle": "A ClawBox Workstation as your AI engine",
   "whatsNew.externalEngineBody":
-    "Settings → Local AI → External engine runs the chat on an OpenAI-compatible AI engine on your network, such as a ClawBox Workstation built from NVIDIA DGX Sparks, instead of the model on the box. On a Workstation of several Sparks, the owner sees each Spark and the shared engine under Settings → System → Cluster.",
+    "Settings → Local AI → External engine runs the chat on an OpenAI-compatible AI engine on your network, such as a ClawBox Workstation built from NVIDIA DGX Sparks, instead of the model on the box. On a Workstation of several Sparks, once the others are listed in its settings, the owner sees each Spark and the shared engine under Settings → System → Cluster.",
   "whatsNew.weeklyUpdateTitle": "A weekly update check, on Telegram too",
   "whatsNew.weeklyUpdateBody":
     "Every Monday morning the box looks for a newer ClawBox and tells you once per version: on Telegram, with an Update button, when the bot can reach you, otherwise on the desktop. You can send /update to the bot in a private chat at any time, and the update still waits for you to confirm it on the desktop or, where one is set up, in the approvals bot.",

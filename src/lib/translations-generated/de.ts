@@ -5198,7 +5198,7 @@ const table: Record<string, string> = {
   "whatsNew.back": "Zurück",
   "whatsNew.closeFullscreen": "Vollbild schließen",
   "whatsNew.dismiss": "„Neu in 4.4“ schließen",
-  "whatsNew.externalEngineBody": "Einstellungen → Lokale KI → Externe Engine lässt den Chat auf einer OpenAI-kompatiblen KI-Engine in Ihrem Netzwerk laufen, etwa einer ClawBox Workstation aus NVIDIA DGX Sparks, statt auf dem Modell der ClawBox. Bei einer Workstation aus mehreren Sparks sieht der Besitzer jeden Spark und die gemeinsame Engine unter Einstellungen → System → Cluster.",
+  "whatsNew.externalEngineBody": "Einstellungen → Lokale KI → Externe Engine lässt den Chat auf einer OpenAI-kompatiblen KI-Engine in Ihrem Netzwerk laufen, etwa einer ClawBox Workstation aus NVIDIA DGX Sparks, statt auf dem Modell der ClawBox. Bei einer Workstation aus mehreren Sparks sieht der Besitzer, sobald die anderen in ihren Einstellungen eingetragen sind, jeden Spark und die gemeinsame Engine unter Einstellungen → System → Cluster.",
   "whatsNew.externalEngineSummary": "Lassen Sie den Chat auf einer KI-Engine in Ihrem Netzwerk laufen, etwa einer ClawBox Workstation, statt auf dem Modell der ClawBox.",
   "whatsNew.externalEngineTitle": "Eine ClawBox Workstation als Ihre KI-Engine",
   "whatsNew.fullscreenLabel": "Bildschirmfoto: {title}",

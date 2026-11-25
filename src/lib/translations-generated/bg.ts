@@ -5198,7 +5198,7 @@ const table: Record<string, string> = {
   "whatsNew.back": "Назад",
   "whatsNew.closeFullscreen": "Затворете цял екран",
   "whatsNew.dismiss": "Затворете „Какво ново в 4.4“",
-  "whatsNew.externalEngineBody": "Настройки → Локален AI → Външен двигател пуска чата на съвместим с OpenAI AI двигател във вашата мрежа, например ClawBox Workstation от NVIDIA DGX Spark, вместо на модела на ClawBox. При Workstation от няколко Spark собственикът вижда всеки Spark и общия двигател в Настройки → Система → Клъстер.",
+  "whatsNew.externalEngineBody": "Настройки → Локален AI → Външен двигател пуска чата на съвместим с OpenAI AI двигател във вашата мрежа, например ClawBox Workstation от NVIDIA DGX Spark, вместо на модела на ClawBox. При Workstation от няколко Spark, след като другите са вписани в настройките ѝ, собственикът вижда всеки Spark и общия двигател в Настройки → Система → Клъстер.",
   "whatsNew.externalEngineSummary": "Пуснете чата на AI двигател във вашата мрежа, например ClawBox Workstation, вместо на модела на ClawBox.",
   "whatsNew.externalEngineTitle": "ClawBox Workstation като ваш AI двигател",
   "whatsNew.fullscreenLabel": "Екранна снимка: {title}",
