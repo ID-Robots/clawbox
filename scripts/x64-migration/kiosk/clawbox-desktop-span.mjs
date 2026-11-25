@@ -3,6 +3,7 @@
 //
 //   node clawbox-desktop-span.mjs <cdp port> <desktop url>          once
 //   node clawbox-desktop-span.mjs <cdp port> <desktop url> --watch  every 2 s, until killed
+//   node clawbox-desktop-span.mjs --device-row                      the row in device pixels
 //
 // The watcher reads `wlr-randr` every 2 s, but asks Chrome's pages only when
 // something may have changed: a look whose row is the one the last full pass
@@ -59,8 +60,12 @@ function wlrRandr() {
 const logical = (px, scale) => Math.trunc(Math.fround(px / Math.fround(scale)));
 
 // The row of enabled monitors, from wlr-randr's text: each output's current
-// mode, position, scale and rotation.
-export function layoutBox(text) {
+// mode, position, scale and rotation. With `device`, the row in DEVICE pixels
+// as the desktop's Chrome draws it — at the highest scale on the row, which
+// wlroots asks a surface spanning several outputs to draw at — and how many
+// monitors make it up: what the launcher sizes Chrome's tile memory by
+// (clawbox-desktop-browser, `--device-row`).
+export function layoutBox(text, { device = false } = {}) {
   const outs = [];
   let cur = null;
   for (const line of text.split("\n")) {
@@ -85,10 +90,15 @@ export function layoutBox(text) {
   });
   const left = Math.min(...rects.map((r) => r.x));
   const top = Math.min(...rects.map((r) => r.y));
-  return {
+  const box = {
     width: Math.max(...rects.map((r) => r.x + r.w)) - left,
     height: Math.max(...rects.map((r) => r.y + r.h)) - top,
   };
+  if (!device) return box;
+  const scale = Math.max(...on.map((o) => o.scale));
+  // Mirrored monitors all stand at the layout's origin: one place, one monitor.
+  const monitors = new Set(rects.map((r) => `${r.x},${r.y}`)).size;
+  return { width: Math.round(box.width * scale), height: Math.round(box.height * scale), monitors };
 }
 
 // The desktop shell's own pages (src/lib/kiosk-tabs.ts, SHELL_PATH_RE): the
@@ -336,6 +346,12 @@ export function createWatcher(port, desktopUrl, { readBox = async () => layoutBo
 
 async function main() {
   const [port, desktopUrl, mode] = process.argv.slice(2);
+  if (port === "--device-row") {
+    // "<width> <height> <monitors>" in device pixels; nothing when no monitor is on.
+    const row = layoutBox(await wlrRandr(), { device: true });
+    if (row) console.log(`${row.width} ${row.height} ${row.monitors}`);
+    process.exit(row ? 0 : 1);
+  }
   if (!port || !desktopUrl) {
     console.error("usage: clawbox-desktop-span.mjs <cdp port> <desktop url> [--watch]");
     process.exit(2);

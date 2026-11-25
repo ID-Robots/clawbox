@@ -39,7 +39,6 @@ import ToastHost from "@/components/ToastHost";
 import BackgroundTaskCards, { useBackgroundTasks } from "@/components/BackgroundTaskCards";
 import PowerApprovalPrompt, { POWER_APPROVAL_EVENT } from "@/components/PowerApprovalPrompt";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
-import AgentBrowserIcon from "@/components/AgentBrowserIcon";
 import GoogleChromeIcon from "@/components/GoogleChromeIcon";
 import PrimeRadiantIcon from "@/components/PrimeRadiantIcon";
 import { I18nProvider, useT } from "@/lib/i18n";
@@ -74,7 +73,7 @@ import {
 import { TOAST_EVENT } from "@/components/ToastHost";
 import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
 import { readChatFirstEnvironment, shouldOpenChatFirst } from "@/lib/mobile-chat-first";
-import { runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
+import { CHAT_MOBILE_BACK, runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
 import { isBoxOwnScreen, setVisibleInterval } from "@/lib/visible-interval";
 import { pairingPollCadence } from "@/lib/pairing-poll-cadence";
 import { confirmSessionStillValid } from "@/lib/session-expiry";
@@ -362,8 +361,33 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     return <img src="/hermes-agent.png" alt="Hermes" width={px} height={px} draggable={false} style={{ objectFit: "contain", borderRadius: 6 }} />;
   }
 
+  if (id === "coding") {
+    // The friendly robot's head, cut out on a transparent background so it
+    // sits on the app's dark blue tile.
+    const scaled = Math.round(px * 1.2);
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src="/coding-agent.png"
+        alt=""
+        draggable={false}
+        style={{ width: scaled, height: scaled, objectFit: "contain", maxWidth: "none", maxHeight: "none" }}
+      />
+    );
+  }
+
   if (id === "browser") {
-    return <AgentBrowserIcon className={`${size} text-white`} />;
+    // A flat colour-block globe made for ClawBox, on the app's light tile.
+    const scaled = Math.round(px * 1.85);
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src="/agent-browser-flat-globe.png"
+        alt=""
+        draggable={false}
+        style={{ width: scaled, height: scaled, objectFit: "contain", maxWidth: "none", maxHeight: "none" }}
+      />
+    );
   }
 
   if (id === DESKTOP_CHROME_APP_ID) {
@@ -2590,8 +2614,9 @@ function ChromeDesktopInner() {
       if (trayOpen) { setTrayOpen(false); return; }
       // On a phone the chat is full-screen and above every window, so it is
       // the top thing Back can close — and closing it is how the phone gets
-      // from the chat it opened in to the desktop behind it.
-      if (isMobile && chatOpen) { setChatOpen(false); return; }
+      // from the chat it opened in to the desktop behind it. Its own menu or
+      // sheet, when one is open, closes first (CHAT_MOBILE_BACK).
+      if (isMobile && chatOpen) { if (!runMobileBack(CHAT_MOBILE_BACK)) setChatOpen(false); return; }
       // A screen inside the top app with a level above it: go up one level.
       if (runMobileBack()) return;
 

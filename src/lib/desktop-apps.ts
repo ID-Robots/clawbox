@@ -69,7 +69,7 @@ export const apps: AppDef[] = [
   // product name, so it carries no translation key.
   { id: "vault", name: "ClawBox Vault", color: "#14532d", type: "vault", pinned: true, defaultWidth: 1040, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
-  { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
+  { id: "browser", name: "app.browser", color: "#f8fafc", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   // The web itself: a start page with a search box, opened as an EXTERNAL
   // page through the kiosk API on the x64 laptop's kiosk Chrome, where the
   // extension's bar then gives it an address bar and tab chips. Kiosk-only:
@@ -114,8 +114,8 @@ export const APP_GLYPHS: Readonly<Record<string, string>> = Object.freeze({
   system_update: "system_update",
   vault: "key",
   vnc: "desktop_windows",
-  // The globe: the open web, as opposed to `browser`'s window with the
-  // assistant in it (AgentBrowserIcon).
+  // The plain globe glyph: the open web. `browser` carries its own picture
+  // (page.tsx AppIcon).
   web: "language",
   camera: "photo_camera",
   screenshot: "screenshot_monitor",

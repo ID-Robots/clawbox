@@ -549,7 +549,11 @@ import { ChatDropOverlay, ChatUploadChips } from './ChatDropUploads'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 import { usePortrait } from '@/lib/use-portrait'
 import { useChatFullscreen, useChatTextScale } from '@/lib/use-chat-phone-layout'
-import { ChatFullscreenButton, ChatHeaderStrip, ChatTextSizeBar, ChatTextSizeButton } from '@/components/ChatPhoneChrome'
+import {
+  ChatFullscreenButton, ChatHeaderStrip, ChatModelPill, ChatPhoneBar, ChatPhoneMenu, ChatPhonePickerGroup,
+  ChatPhoneSheet, ChatPhoneSheetAction, ChatTextSizeBar, ChatTextSizeButton,
+  type ChatPhoneMenuChat, type ChatPhonePicker,
+} from '@/components/ChatPhoneChrome'
 import LocalAiChatBanner, { chatOnLocalAi, useLocalAiBannerDismissed, useLocalAiLoadingLabel } from '@/components/LocalAiChatBanner'
 import LocalAiLongChatOffer from '@/components/LocalAiLongChatOffer'
 import { useLocalAiLongChat } from '@/lib/use-local-ai-long-chat'
@@ -729,6 +733,10 @@ const TRANSCRIPT_PANEL_ID = 'chat-transcript-panel'
 // What the phone's fullscreen strip and its text size button open (TASK-1157).
 const HEADER_REGION_ID = 'chat-header-region'
 const TEXT_SIZE_BAR_ID = 'chat-text-size-bar'
+// The portrait phone's menu and model sheet (TASK-2778). The "+" sheet is
+// 'chat-composer-options', the id of the row it stands in for.
+const PHONE_MENU_ID = 'chat-phone-menu'
+const MODEL_SHEET_ID = 'chat-model-sheet'
 /**
  * A tab's DOM id, derived from its session key so the panel can name the
  * selected tab as its label without either side holding an index. `null` is the
@@ -1048,8 +1056,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
   // conversation gets the screen. On until the owner leaves it, and remembered
   // either way (lib/chat-phone-layout.ts). A phone only — the desktop never
   // reads it.
+  //
+  // Upright, a phone has no fullscreen mode (TASK-2778): its slim bar is the
+  // only header there is, so the stored choice is neither read nor written
+  // there and landscape keeps it.
   const [fullscreenPref, setFullscreenPref] = useChatFullscreen()
-  const fullscreenChat = mobile && fullscreenPref
+  // The mode the phone's landscape layout follows; upright it waits unused.
+  const fullscreenMode = mobile && fullscreenPref
+  const fullscreenChat = fullscreenMode && !portraitComposer
   // The conversation's text size, on a phone only; the desktop stays at 100%.
   const [textScalePref, setTextScalePref] = useChatTextScale()
   const textScale = mobile ? textScalePref : 1
@@ -1060,20 +1074,40 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
   // phone: folded in fullscreen chat, on show otherwise, and either way the
   // owner can flip them — on a 390px screen three pickers and Create pushed
   // the conversation up by a whole row for a choice that changes once a week.
-  const [composerOptionsOpen, setComposerOptionsOpen] = useState(!fullscreenChat)
+  const [composerOptionsOpen, setComposerOptionsOpen] = useState(!fullscreenMode)
   // Closing the chat, or switching fullscreen, puts both back where the mode
   // says they belong — otherwise a peek would come back open on the next
   // visit, which is not what "folded by default" means. Adjusted while
   // rendering (React's pattern for state that follows a value), so no frame is
   // drawn with the previous mode's regions.
-  const layoutKey = !isOpen ? 'closed' : fullscreenChat ? 'fullscreen' : 'standard'
+  const layoutKey = !isOpen ? 'closed' : fullscreenMode ? 'fullscreen' : 'standard'
   const [layoutFor, setLayoutFor] = useState(layoutKey)
   if (layoutFor !== layoutKey) {
     setLayoutFor(layoutKey)
     setHeaderPeek(false)
-    setComposerOptionsOpen(!fullscreenChat)
+    setComposerOptionsOpen(!fullscreenMode)
     if (!isOpen) setTextSizeOpen(false)
   }
+  // Upright only (TASK-2778): the menu that holds what the slim bar leaves
+  // out, the "+" sheet (attachment, Create, a picture) and the model pill's
+  // sheet. Their own state, so a turn through portrait leaves landscape's
+  // fold and peek as they were; closing the chat or turning the phone shuts
+  // all three.
+  const [phoneMenuOpen, setPhoneMenuOpen] = useState(false)
+  const [plusSheetOpen, setPlusSheetOpen] = useState(false)
+  const [modelSheetOpen, setModelSheetOpen] = useState(false)
+  const phoneOverlaysKey = isOpen && portraitComposer
+  const [phoneOverlaysFor, setPhoneOverlaysFor] = useState(phoneOverlaysKey)
+  if (phoneOverlaysFor !== phoneOverlaysKey) {
+    setPhoneOverlaysFor(phoneOverlaysKey)
+    setPhoneMenuOpen(false)
+    setPlusSheetOpen(false)
+    setModelSheetOpen(false)
+  }
+  // Read by the hold-to-talk key, which listens on the window: the menu and
+  // the sheets are modal, so the key must not start a recording behind them.
+  const phoneOverlayOpenRef = useRef(false)
+  useEffect(() => { phoneOverlayOpenRef.current = phoneMenuOpen || plusSheetOpen || modelSheetOpen }, [phoneMenuOpen, plusSheetOpen, modelSheetOpen])
   const toggleFullscreenChat = useCallback(() => {
     setFullscreenPref(!fullscreenPref)
   }, [fullscreenPref, setFullscreenPref])
@@ -5824,6 +5858,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
         return
       }
       if (!isHoldToTalkKey(e) || isKeyForwardingTarget(e.target)) return
+      // Not behind the upright chat's menu or sheets (a hold already running
+      // keeps going; Escape above still ends it).
+      if (!holdRef.current && phoneOverlayOpenRef.current) return
       e.preventDefault()
       // Offered only while the mic button would be: a chat with no
       // connection cannot send what it hears.
@@ -7938,38 +7975,285 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
   // The whole settings row — attachment, Create, the pickers. Behind the fold
   // control on a phone (folded in fullscreen chat until asked for); always on
   // show on a big screen.
-  const composerExtrasShown = !mobile || composerOptionsOpen
+  // Upright, the row's actions are the "+" sheet instead (below), never in the flow.
+  const composerExtrasShown = !mobile || (composerOptionsOpen && !portraitComposer)
   // The phone's fold control. It leads the input row in BOTH states, so the
   // button a thumb (or the keyboard focus) just pressed never moves: folding
-  // takes the row under it away and nothing else.
+  // takes the row under it away and nothing else. Upright it is the "+" that
+  // opens the options as a bottom sheet (TASK-2778).
   const renderComposerToggle = () => {
     const label = tr('chat.composer.options', 'Chat options')
+    const open = portraitComposer ? plusSheetOpen : composerOptionsOpen
     return (
       <button
         type="button"
-        onClick={() => setComposerOptionsOpen(open => !open)}
+        onClick={(e) => {
+          if (!portraitComposer) { setComposerOptionsOpen(o => !o); return }
+          // Focused first, so the sheet hands focus back here when it closes
+          // (a tap does not focus a button in Safari).
+          e.currentTarget.focus()
+          setPlusSheetOpen(true)
+        }}
         // The folded pickers' answer rides along as the description, so the
         // choice is still said while the pills are out of sight.
-        title={!composerOptionsOpen && pillSummary ? `${label} · ${pillSummary}` : label}
+        title={!portraitComposer && !composerOptionsOpen && pillSummary ? `${label} · ${pillSummary}` : label}
         aria-label={label}
-        aria-expanded={composerOptionsOpen}
-        aria-controls={composerOptionsOpen ? 'chat-composer-options' : undefined}
+        aria-haspopup={portraitComposer ? 'dialog' : undefined}
+        aria-expanded={open}
+        aria-controls={open ? 'chat-composer-options' : undefined}
         data-testid="composer-options-toggle"
         className="chat-composer-options-toggle"
         style={{
-          background: composerOptionsOpen ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
-          color: composerOptionsOpen ? '#f97316' : 'rgba(255,255,255,0.4)',
+          background: open ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
+          color: open ? '#f97316' : portraitComposer ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.4)',
         }}
       >
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-          <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
-          <circle cx="16" cy="6" r="2" />
-          <circle cx="10" cy="12" r="2" />
-          <circle cx="16" cy="18" r="2" />
-        </svg>
+        {portraitComposer ? (
+          <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 24 }}>add</span>
+        ) : (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
+            <circle cx="16" cy="6" r="2" />
+            <circle cx="10" cy="12" r="2" />
+            <circle cx="16" cy="18" r="2" />
+          </svg>
+        )}
       </button>
     )
   }
+  // The OpenClaw pickers' data, shared by the pills and the portrait model
+  // sheet so the two cannot drift. Moved here unchanged from the pills.
+  const providerPicker = (() => {
+    if (!chatModelState) return null
+    // No `activeOptionId` means no row on this list is what the box
+    // is running — whether because the primary matches none of them,
+    // or because nothing is pinned at all. Both used to default to
+    // options[0], which named the first provider in the list — ClawBox
+    // AI on every paired box — as the active one. It also made the
+    // owner's most natural recovery gesture a no-op: HeaderDropdown
+    // fires onChange only when the pick differs from `value`, so
+    // clicking the row the header was already showing did nothing.
+    // Empty `value` keeps that click live and the label honest.
+    //
+    // The `activeModel` half of this test was dropped when chat/model
+    // stopped resolving a null primary onto the Local-AI placeholder:
+    // that made "nothing pinned" a null/null state, which this
+    // predicate had been reading as "a row is active".
+    const unselectableActive = !chatModelState.activeOptionId
+    const activeId = chatModelState.activeOptionId
+      ?? (unselectableActive ? '' : (chatModelState.options[0]?.id ?? ''))
+    const activeOption = chatModelState.options.find(o => o.id === activeId)
+    const triggerLabel = activeOption
+      ? getProviderPillText(activeOption)
+      : (unselectableActive ? (chatModelState.activeLabel ?? t('chat.noChatModel')) : activeId)
+    const options = chatModelState.options.map((option) => ({
+      id: option.id,
+      label: getChatModelOptionText(option),
+    }))
+    return { activeId, triggerLabel, options }
+  })()
+  const providerModelPicker = (() => {
+    // Inline model switcher: renders next to the provider dropdown
+    // whenever the active provider has multiple available models.
+    // Lets users hot-swap between Claude Haiku/Sonnet/Opus, GPT
+    // variants, Gemini variants, or OpenRouter's 340+ models
+    // mid-chat without opening Settings. If the current model
+    // isn't in the live catalog (custom ID typed in Settings),
+    // we prepend it as a "Custom" entry so the select reflects
+    // reality.
+    //
+    // The catalog is the live one from /setup-api/ai-models/catalog
+    // (kept in sync via the useEffect above), with the static
+    // fallback as cold-start render. Used to be a hand-curated
+    // array that rotted on every upstream rename — see the comment
+    // at the top of provider-models.ts for the migration history.
+    if (!chatModelState) return null
+    const activeOption = chatModelState.options.find(
+      (option) => option.id === chatModelState.activeOptionId,
+    )
+    if (!activeOption?.provider) return null
+    // ClawBox AI: nothing here. Same rule as the Hermes branch above,
+    // through the same predicate — one product, one chat model, so the
+    // provider pill is the last word before the thinking dial. The row
+    // collapses rather than leaving a gap: this returns no node, and
+    // .chat-header-pills only puts a gap BETWEEN pills that render.
+    //
+    // Stated here even though `chatProviderCatalog` is already null for
+    // this provider (see useProviderCatalog above), because THIS is
+    // where the pill is built: a future change that gives ClawBox AI a
+    // catalogue again must not quietly give it a pill again too.
+    if (isClawboxAiChat) return null
+    const catalog = chatProviderCatalog
+    if (!catalog) return null
+    // Show the dropdown when there are multiple models to pick OR
+    // the catalog permits a custom model id (then the picker
+    // surfaces a "type your own" affordance, which is the only way
+    // to switch to a different Claude variant when Anthropic's
+    // OAuth scope returned a single canonical model).
+    if (catalog.models.length < 2 && !catalog.allowCustom) return null
+    // ClawBox AI's wire-format provider is `deepseek` (Mike's
+    // gateway forwards to DeepSeek's API), while the UI normalizes
+    // to `clawai`. Try the canonical provider first, then fall
+    // back to the deepseek alias so the picker can resolve the
+    // active model id either way.
+    // The ChatGPT row's UI id is `codex` while its models are written
+    // `openai/<id>` — OpenClaw 2 retired the namespace but not the
+    // label (src/lib/chatgpt-subscription.ts). Comparing the row's id
+    // against the reference verbatim answered "not this provider's
+    // model" on every ChatGPT box and took this dropdown — the only
+    // way to move between GPT-5.5 / GPT-5.4 / GPT-5.6 after setup —
+    // off the screen entirely.
+    const activeModelId = extractProviderModelId(
+      chatModelState.activeModel,
+      chatgptReferenceProvider(activeOption.provider),
+    )
+    if (!activeModelId) return null
+    const curatedHasActive = catalog.models.some(
+      (option) => option.id === activeModelId,
+    )
+    const modelOptions = curatedHasActive
+      ? catalog.models
+      : [
+          { id: activeModelId, label: activeModelId, hint: 'Custom model' },
+          ...catalog.models,
+        ]
+    const activeRow = modelOptions.find(o => o.id === activeModelId)
+    const activeModelLabel = activeRow?.label ?? activeModelId
+    // A model the box's SUBSCRIPTION surface does not carry is
+    // SHOWN, not hidden, and it says why — the same treatment the
+    // setup wizard gives it, because the wizard's help line sends
+    // the customer here to switch models. Dropping the row would
+    // be the same lie in the other direction.
+    const options = modelOptions.map(option => {
+      const blocked = !isModelUsableOnSubscription(option, headerOnSubscription)
+      return {
+        id: option.id,
+        label: option.label,
+        hint: option.hint,
+        disabled: blocked,
+        unavailableReason: blocked ? t('ai.modelNeedsApiKey') : undefined,
+      }
+    })
+    const onChange = (nextId: string) => {
+      if (nextId === activeModelId) return
+      // The list already refuses a disabled row, but the switch is
+      // not allowed to depend on that: the server guard exists for
+      // ids that arrive some other way, and this one exists so the
+      // customer is never shown a "Switched to ..." for a model
+      // the same screen just told them the box cannot run.
+      const next = modelOptions.find(option => option.id === nextId)
+      if (next && !isModelUsableOnSubscription(next, headerOnSubscription)) return
+      // The ChatGPT row's models are written `openai/<id>`: its
+      // UI id `codex` is a label, not a namespace. Posting
+      // `codex/<id>` from the product's own daily switcher made the
+      // server's legacy-ref shim — written for a stale tab — the
+      // happy path, and the row signal below the thing that was
+      // never exercised.
+      const wireProvider = chatgptReferenceProvider(activeOption.provider)
+      void switchChatModel({
+        provider: activeOption.provider,
+        model: `${wireProvider}/${nextId}`,
+        label: next?.label ?? nextId,
+      })
+    }
+    return { activeOption, activeModelId, activeModelLabel, options, onChange }
+  })()
+  // The effort / thinking levels, worded once for the pill and the sheet.
+  // THINKING_LEVEL_LABELS is the gateway's English vocabulary; the pill is a
+  // control on a desktop that may be in any of ten languages, so the level is
+  // worded here and the English is the floor for a level the catalogue does
+  // not know.
+  const thinkingLevelOptions = visibleThinkingLevels.map(level => ({
+    id: level,
+    label: tr(`chat.effort.${level}`, THINKING_LEVEL_LABELS[level] ?? level),
+  }))
+  const hermesReasoningPickerOptions = hermesReasoningOptions.map(level => ({
+    id: level,
+    label: hermesReasoningLabel(level),
+    /* Thinking on this model is ~25x slower on a short
+       question (measured: 0.2s vs 8.4s). A dial that hides
+       that is a dial that surprises people.
+       `isThinkingOnLevel` is the SAME predicate the proxy
+       uses to set enable_thinking — deriving "is on" here
+       instead (e.g. "the last option") would let this hint
+       and the wire behaviour drift apart silently. */
+    hint: hermesBinaryReasoning
+      ? (isThinkingOnLevel(hermesProvider, level)
+        ? tr('chat.thinkingOnHint', 'Better at reasoning. Much slower.')
+        : tr('chat.thinkingOffHint', 'Fastest. Answers immediately.'))
+      : undefined,
+  }))
+  const hermesModelPicked = !isClawboxAiProvider(hermesProvider) && showModelPill
+  // The portrait model sheet (TASK-2778): the same pickers as the pills, with
+  // the same values, options and handlers — the providers, the provider's
+  // models where it has a choice, then the effort or thinking row.
+  const ownerPicks = switchingModel || chatUser !== null
+  const phonePickers: ChatPhonePicker[] = []
+  if (portraitComposer) {
+    if (harnessId === 'hermes') {
+      if (hermesProviders.length > 0) {
+        phonePickers.push({
+          id: 'provider', label: tr('chat.pillChatProvider', 'Chat provider'), value: hermesProvider,
+          options: hermesProviders.map(p => ({ id: p.id, label: hermesProviderName(p.id) })), onChange: changeHermesProvider,
+        })
+        if (hermesModelPicked) {
+          phonePickers.push({
+            id: 'model', label: tr('chat.pillHermesModel', 'Hermes model'), value: hermesModelsLoading ? '' : hermesModel,
+            options: (hermesScope?.models ?? []).map(m => ({ id: m.id, label: m.id })), onChange: changeHermesModel,
+            disabled: hermesModelsLoading,
+          })
+        }
+        if (hermesReasoningOptions.length > 0) {
+          phonePickers.push({
+            id: 'effort', chips: true, value: hermesEffectiveReasoning, options: hermesReasoningPickerOptions,
+            label: hermesBinaryReasoning ? tr('chat.pillThinking', 'Thinking') : tr('chat.pillReasoningEffort', 'Reasoning effort'),
+            onChange: changeHermesReasoning,
+          })
+        }
+      }
+    } else {
+      if (providerPicker) {
+        phonePickers.push({
+          id: 'provider', label: tr('chat.pillChatProvider', 'Chat provider'), value: providerPicker.activeId,
+          options: providerPicker.options, onChange: handleChatSourceChange, disabled: ownerPicks,
+        })
+      }
+      if (providerModelPicker) {
+        phonePickers.push({
+          id: 'model', label: tr('chat.pillProviderModel', '{provider} model', { provider: providerModelPicker.activeOption.label }),
+          value: providerModelPicker.activeModelId, options: providerModelPicker.options,
+          onChange: providerModelPicker.onChange, disabled: ownerPicks,
+        })
+      }
+      if (visibleThinkingLevels.length > 1) {
+        phonePickers.push({
+          id: 'effort', chips: true, label: tr('chat.pillReasoningEffort', 'Reasoning effort'),
+          value: effectiveThinkingLevel, options: thinkingLevelOptions, onChange: handleThinkingLevelChange,
+          disabled: effortStarting,
+        })
+      }
+    }
+  }
+  // A sheet with nothing left to list closes, rather than reopening on its own
+  // when the pickers come back.
+  if (modelSheetOpen && phonePickers.length === 0) setModelSheetOpen(false)
+  // What the model pill says: the model (or the provider where there is no
+  // model to choose), then the effort beside it in a quieter voice.
+  const modelPillLabel = harnessId === 'hermes'
+    ? (hermesModelPicked && !hermesModelsLoading && hermesModel ? shortModelPillLabel(hermesModel, hermesProviderPill) : hermesProviderPill || 'Hermes')
+    : (providerModelPicker?.activeModelLabel ?? providerPicker?.triggerLabel ?? '')
+  const modelPillDetail = harnessId === 'hermes'
+    ? (hermesReasoningOptions.length > 0 ? hermesReasoningTriggerLabel(hermesEffectiveReasoning) : undefined)
+    : visibleThinkingLevels.length > 1
+      ? (effortStarting ? tr('chat.effort.starting', 'Starting…') : tr(`chat.effort.${effectiveThinkingLevel}`, THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel))
+      : undefined
+  // Plain functions: this is past the closed chat's early return, so no hooks;
+  // the overlays read their close handler through a ref anyway.
+  const closeModelSheet = () => setModelSheetOpen(false)
+  const closeComposerOptions = () => setPlusSheetOpen(false)
+  const closePhoneMenu = () => setPhoneMenuOpen(false)
+  // Anything for "+" to offer at all; with nothing, there is no "+".
+  const hasComposerOptions = caps.canAttachImages || caps.canAttachDocuments || !orgMember || caps.imageGenerationTrigger === 'composer'
   // What the fullscreen strip says in place of the header: the conversation on
   // screen, and whether another one is answering or holds an unread reply —
   // the per-tab dots it would otherwise hide.
@@ -7986,7 +8270,23 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
   const stripActivity: 'busy' | 'unread' | null = [...busyKeys].some(k => !!k && k !== shownSessionKey)
     ? 'busy'
     : [...unreadKeys].some(k => !!k && k !== shownSessionKey) ? 'unread' : null
-  const headerHidden = fullscreenChat && !headerPeek
+  // Upright the slim bar stands in for the whole header (TASK-2778). It stays
+  // in the tree, hidden, for the tab ids the transcript is labelled by.
+  const headerHidden = (fullscreenChat && !headerPeek) || portraitComposer
+  // The menu's conversations: main first, then the tabs, with the strip's
+  // busy and unread facts and names.
+  const phoneChats: ChatPhoneMenuChat[] = !(portraitComposer && phoneMenuOpen) ? [] : [
+    { key: mainSessionKey, label: 'ClawBox', main: true },
+    ...tabs.map(tb => ({ key: tb.key, label: tabLabel(tb), main: false })),
+  ].map(chat => {
+    const active = chat.main ? activeTabKey === null : activeTabKey === chat.key
+    const busy = !!chat.key && busyKeys.has(chat.key)
+    const unread = !!chat.key && !active && unreadKeys.has(chat.key)
+    const name = busy ? t('chat.tabBusy', { label: chat.label })
+      : unread ? t('chat.tabUnread', { label: chat.label })
+      : chat.label
+    return { ...chat, active, busy, unread, name }
+  })
   const renderViewControls = (size: number) => (
     <>
       <ChatTextSizeButton open={textSizeOpen} onToggle={() => setTextSizeOpen(open => !open)} controls={TEXT_SIZE_BAR_ID} size={size} />
@@ -8240,6 +8540,17 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
           {renderViewControls(32)}
         </ChatHeaderStrip>
       )}
+      {/* Upright, the only header: the menu, and the conversation's name once
+          there is a conversation (TASK-2778). */}
+      {portraitComposer && (
+        <ChatPhoneBar
+          menuOpen={phoneMenuOpen}
+          menuId={PHONE_MENU_ID}
+          onOpenMenu={() => setPhoneMenuOpen(true)}
+          title={messages.length > 0 ? activeTabLabel : undefined}
+          activity={stripActivity}
+        />
+      )}
       <div
         data-testid="chat-header"
         id={HEADER_REGION_ID}
@@ -8483,7 +8794,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
         )}
         {/* A phone outside fullscreen: the text size and the way into
             fullscreen chat. In fullscreen both live on the strip instead. */}
-        {mobile && !fullscreenChat && renderViewControls(40)}
+        {mobile && !fullscreenChat && !portraitComposer && renderViewControls(40)}
         {mobile ? (
           // On a phone the chat is where the page LANDS (src/lib/mobile-chat-first.ts),
           // so closing it is not dismissing a popup but going to the desktop
@@ -8525,7 +8836,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
         )}
       </div>
 
-      {mobile && textSizeOpen && (
+      {mobile && textSizeOpen && !portraitComposer && (
         <ChatTextSizeBar id={TEXT_SIZE_BAR_ID} scale={textScalePref} onChange={setTextScalePref} />
       )}
 
@@ -9218,8 +9529,19 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
         {/* Primary phone row: the fold control, text, then microphone and
             send/stop (portrait) or microphone-or-send/stop (landscape). Folded,
             this row IS the composer — the text box and its send action. */}
-        <div className="chat-composer-primary" data-testid={mobile ? 'chat-composer-primary' : undefined} style={mobile ? { display: 'flex', alignItems: 'flex-end', gap: 8 } : { display: 'contents' }}>
-        {mobile && renderComposerToggle()}
+        {/* Upright (TASK-2778) the row is one rounded box: the text across the
+            top, then "+", the model, the microphone and Send/Stop under it. */}
+        <div
+          className="chat-composer-primary"
+          data-testid={mobile ? 'chat-composer-primary' : undefined}
+          style={portraitComposer
+            ? {
+                display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '2px 8px 8px',
+                borderRadius: 22, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)',
+              }
+            : mobile ? { display: 'flex', alignItems: 'flex-end', gap: 8 } : { display: 'contents' }}
+        >
+        {mobile && !portraitComposer && renderComposerToggle()}
         <textarea
           ref={inputRef}
           value={input}
@@ -9256,11 +9578,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
           disabled={status !== 'connected' || greetingPending}
           rows={1}
           style={{
-            width: '100%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)',
+            width: '100%',
+            // Upright the rounded box around the row is the field's frame.
+            background: portraitComposer ? 'transparent' : 'rgba(255,255,255,0.06)',
+            border: portraitComposer ? 'none' : '1px solid rgba(255,255,255,0.08)',
             borderRadius: 12, padding: '8px 12px', color: '#fff', fontSize: 13.5,
             resize: 'none', outline: 'none', maxHeight: 100, lineHeight: 1.4,
             fontFamily: 'inherit',
-            ...(mobile ? { flex: 1, minWidth: 0 } : {}),
+            ...(portraitComposer ? { flex: '1 0 100%', minWidth: 0 } : mobile ? { flex: 1, minWidth: 0 } : {}),
           }}
           onInput={(e) => {
             const el = e.currentTarget
@@ -9274,6 +9599,22 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
             space above and below it). Same button and same orange as before;
             `[data-chat-mobile] .chat-composer-primary > button` sizes it to
             the 44px tap target every control in this row gets. */}
+        {portraitComposer && hasComposerOptions && renderComposerToggle()}
+        {portraitComposer && (
+          // Takes the row's free width, so the microphone and Send always sit
+          // at its far end, with or without a pill in it.
+          <div style={{ flex: '1 1 0', minWidth: 0, display: 'flex' }}>
+            {phonePickers.length > 0 && (
+              <ChatModelPill
+                label={modelPillLabel}
+                detail={modelPillDetail}
+                open={modelSheetOpen}
+                controls={MODEL_SHEET_ID}
+                onOpen={() => setModelSheetOpen(true)}
+              />
+            )}
+          </div>
+        )}
         {portraitComposer && caps.canTranscribe && renderVoiceButton(true)}
         {mobile && (mobileVoiceAction ? renderVoiceButton(true) : renderSendButton())}
         {/* Portaled and fixed — this wrapper is `display: contents` on desktop
@@ -9441,22 +9782,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
                        and truncated the level away; the glyph costs ~11px. */
                     triggerLabel={hermesReasoningTriggerLabel(hermesEffectiveReasoning)}
                     triggerIcon={REASONING_PILL_ICON}
-                    options={hermesReasoningOptions.map(level => ({
-                      id: level,
-                      label: hermesReasoningLabel(level),
-                      /* Thinking on this model is ~25x slower on a short
-                         question (measured: 0.2s vs 8.4s). A dial that hides
-                         that is a dial that surprises people.
-                         `isThinkingOnLevel` is the SAME predicate the proxy
-                         uses to set enable_thinking — deriving "is on" here
-                         instead (e.g. "the last option") would let this hint
-                         and the wire behaviour drift apart silently. */
-                      hint: hermesBinaryReasoning
-                        ? (isThinkingOnLevel(hermesProvider, level)
-                          ? tr('chat.thinkingOnHint', 'Better at reasoning. Much slower.')
-                          : tr('chat.thinkingOffHint', 'Fastest. Answers immediately.'))
-                        : undefined,
-                    }))}
+                    options={hermesReasoningPickerOptions}
                     onChange={changeHermesReasoning}
                     onPointerDown={stopHeaderDrag}
                     triggerMaxWidth={120}
@@ -9468,165 +9794,36 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
               <span className="header-dropdown-trigger" style={{ cursor: 'default', maxWidth: 130 }}>Hermes</span>
             )
           ) : (<>
-          {chatModelState && (() => {
-            // No `activeOptionId` means no row on this list is what the box
-            // is running — whether because the primary matches none of them,
-            // or because nothing is pinned at all. Both used to default to
-            // options[0], which named the first provider in the list — ClawBox
-            // AI on every paired box — as the active one. It also made the
-            // owner's most natural recovery gesture a no-op: HeaderDropdown
-            // fires onChange only when the pick differs from `value`, so
-            // clicking the row the header was already showing did nothing.
-            // Empty `value` keeps that click live and the label honest.
-            //
-            // The `activeModel` half of this test was dropped when chat/model
-            // stopped resolving a null primary onto the Local-AI placeholder:
-            // that made "nothing pinned" a null/null state, which this
-            // predicate had been reading as "a row is active".
-            const unselectableActive = !chatModelState.activeOptionId
-            const activeId = chatModelState.activeOptionId
-              ?? (unselectableActive ? '' : (chatModelState.options[0]?.id ?? ''))
-            const activeOption = chatModelState.options.find(o => o.id === activeId)
-            const triggerLabel = activeOption
-              ? getProviderPillText(activeOption)
-              : (unselectableActive ? (chatModelState.activeLabel ?? t('chat.noChatModel')) : activeId)
-            return (
-              <HeaderDropdown
-                ariaLabel={tr('chat.pillChatProvider', 'Chat provider')}
-                value={activeId}
-                triggerLabel={triggerLabel}
-                options={chatModelState.options.map((option) => ({
-                  id: option.id,
-                  label: getChatModelOptionText(option),
-                }))}
-                onChange={handleChatSourceChange}
-                onPointerDown={stopHeaderDrag}
-                // The box's model: shown to every user, moved by the owner.
-                disabled={switchingModel || chatUser !== null}
-                triggerMaxWidth={130}
-                popoverWidth={220}
-              />
-            )
-          })()}
-          {(() => {
-            // Inline model switcher: renders next to the provider dropdown
-            // whenever the active provider has multiple available models.
-            // Lets users hot-swap between Claude Haiku/Sonnet/Opus, GPT
-            // variants, Gemini variants, or OpenRouter's 340+ models
-            // mid-chat without opening Settings. If the current model
-            // isn't in the live catalog (custom ID typed in Settings),
-            // we prepend it as a "Custom" entry so the select reflects
-            // reality.
-            //
-            // The catalog is the live one from /setup-api/ai-models/catalog
-            // (kept in sync via the useEffect above), with the static
-            // fallback as cold-start render. Used to be a hand-curated
-            // array that rotted on every upstream rename — see the comment
-            // at the top of provider-models.ts for the migration history.
-            if (!chatModelState) return null
-            const activeOption = chatModelState.options.find(
-              (option) => option.id === chatModelState.activeOptionId,
-            )
-            if (!activeOption?.provider) return null
-            // ClawBox AI: nothing here. Same rule as the Hermes branch above,
-            // through the same predicate — one product, one chat model, so the
-            // provider pill is the last word before the thinking dial. The row
-            // collapses rather than leaving a gap: this returns no node, and
-            // .chat-header-pills only puts a gap BETWEEN pills that render.
-            //
-            // Stated here even though `chatProviderCatalog` is already null for
-            // this provider (see useProviderCatalog above), because THIS is
-            // where the pill is built: a future change that gives ClawBox AI a
-            // catalogue again must not quietly give it a pill again too.
-            if (isClawboxAiChat) return null
-            const catalog = chatProviderCatalog
-            if (!catalog) return null
-            // Show the dropdown when there are multiple models to pick OR
-            // the catalog permits a custom model id (then the picker
-            // surfaces a "type your own" affordance, which is the only way
-            // to switch to a different Claude variant when Anthropic's
-            // OAuth scope returned a single canonical model).
-            if (catalog.models.length < 2 && !catalog.allowCustom) return null
-            // ClawBox AI's wire-format provider is `deepseek` (Mike's
-            // gateway forwards to DeepSeek's API), while the UI normalizes
-            // to `clawai`. Try the canonical provider first, then fall
-            // back to the deepseek alias so the picker can resolve the
-            // active model id either way.
-            // The ChatGPT row's UI id is `codex` while its models are written
-            // `openai/<id>` — OpenClaw 2 retired the namespace but not the
-            // label (src/lib/chatgpt-subscription.ts). Comparing the row's id
-            // against the reference verbatim answered "not this provider's
-            // model" on every ChatGPT box and took this dropdown — the only
-            // way to move between GPT-5.5 / GPT-5.4 / GPT-5.6 after setup —
-            // off the screen entirely.
-            const activeModelId = extractProviderModelId(
-              chatModelState.activeModel,
-              chatgptReferenceProvider(activeOption.provider),
-            )
-            if (!activeModelId) return null
-            const curatedHasActive = catalog.models.some(
-              (option) => option.id === activeModelId,
-            )
-            const modelOptions = curatedHasActive
-              ? catalog.models
-              : [
-                  { id: activeModelId, label: activeModelId, hint: 'Custom model' },
-                  ...catalog.models,
-                ]
-            const activeRow = modelOptions.find(o => o.id === activeModelId)
-            const activeModelLabel = activeRow?.label ?? activeModelId
-            return (
-              <HeaderDropdown
-                ariaLabel={tr('chat.pillProviderModel', '{provider} model', { provider: activeOption.label })}
-                value={activeModelId}
-                triggerLabel={shortModelPillLabel(
-                  activeModelLabel,
-                  getProviderPillText(activeOption),
-                )}
-                // A model the box's SUBSCRIPTION surface does not carry is
-                // SHOWN, not hidden, and it says why — the same treatment the
-                // setup wizard gives it, because the wizard's help line sends
-                // the customer here to switch models. Dropping the row would
-                // be the same lie in the other direction.
-                options={modelOptions.map(option => {
-                  const blocked = !isModelUsableOnSubscription(option, headerOnSubscription)
-                  return {
-                    id: option.id,
-                    label: option.label,
-                    hint: option.hint,
-                    disabled: blocked,
-                    unavailableReason: blocked ? t('ai.modelNeedsApiKey') : undefined,
-                  }
-                })}
-                onChange={(nextId) => {
-                  if (nextId === activeModelId) return
-                  // The list already refuses a disabled row, but the switch is
-                  // not allowed to depend on that: the server guard exists for
-                  // ids that arrive some other way, and this one exists so the
-                  // customer is never shown a "Switched to ..." for a model
-                  // the same screen just told them the box cannot run.
-                  const next = modelOptions.find(option => option.id === nextId)
-                  if (next && !isModelUsableOnSubscription(next, headerOnSubscription)) return
-                  // The ChatGPT row's models are written `openai/<id>`: its
-                  // UI id `codex` is a label, not a namespace. Posting
-                  // `codex/<id>` from the product's own daily switcher made the
-                  // server's legacy-ref shim — written for a stale tab — the
-                  // happy path, and the row signal below the thing that was
-                  // never exercised.
-                  const wireProvider = chatgptReferenceProvider(activeOption.provider)
-                  void switchChatModel({
-                    provider: activeOption.provider,
-                    model: `${wireProvider}/${nextId}`,
-                    label: next?.label ?? nextId,
-                  })
-                }}
-                onPointerDown={stopHeaderDrag}
-                disabled={switchingModel || chatUser !== null}
-                triggerMaxWidth={140}
-                popoverWidth={240}
-              />
-            )
-          })()}
+          {providerPicker && (
+            <HeaderDropdown
+              ariaLabel={tr('chat.pillChatProvider', 'Chat provider')}
+              value={providerPicker.activeId}
+              triggerLabel={providerPicker.triggerLabel}
+              options={providerPicker.options}
+              onChange={handleChatSourceChange}
+              onPointerDown={stopHeaderDrag}
+              // The box's model: shown to every user, moved by the owner.
+              disabled={switchingModel || chatUser !== null}
+              triggerMaxWidth={130}
+              popoverWidth={220}
+            />
+          )}
+          {providerModelPicker && (
+            <HeaderDropdown
+              ariaLabel={tr('chat.pillProviderModel', '{provider} model', { provider: providerModelPicker.activeOption.label })}
+              value={providerModelPicker.activeModelId}
+              triggerLabel={shortModelPillLabel(
+                providerModelPicker.activeModelLabel,
+                getProviderPillText(providerModelPicker.activeOption),
+              )}
+              options={providerModelPicker.options}
+              onChange={providerModelPicker.onChange}
+              onPointerDown={stopHeaderDrag}
+              disabled={switchingModel || chatUser !== null}
+              triggerMaxWidth={140}
+              popoverWidth={240}
+            />
+          )}
           {/* Per-provider effort levels — see REASONING_BY_PROVIDER for
               the upstream-API-accurate set per provider. The wire vocabulary
               is the OpenClaw gateway's full union; the gateway translates
@@ -9639,14 +9836,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
             <HeaderDropdown
               ariaLabel={tr('chat.pillReasoningEffort', 'Reasoning effort')}
               value={effectiveThinkingLevel}
-              /* THINKING_LEVEL_LABELS is the gateway's English vocabulary;
-                 the pill is a control on a desktop that may be in any of ten
-                 languages, so the level is worded here and the English is
-                 the floor for a level the catalogue does not know. */
-              options={visibleThinkingLevels.map(level => ({
-                id: level,
-                label: tr(`chat.effort.${level}`, THINKING_LEVEL_LABELS[level] ?? level),
-              }))}
+              options={thinkingLevelOptions}
               onChange={handleThinkingLevelChange}
               onPointerDown={stopHeaderDrag}
               disabled={effortStarting}
@@ -9667,6 +9857,77 @@ function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpen
         </div>
         )}
       </div>
+
+      {/* The portrait phone's menu and its two sheets (TASK-2778). Drawn inside
+          the chat, which is the whole screen there, so they cover exactly it;
+          each one is a modal, and Back closes it before the chat. */}
+      {portraitComposer && phoneMenuOpen && (
+        <ChatPhoneMenu
+          id={PHONE_MENU_ID}
+          onClose={closePhoneMenu}
+          chats={phoneChats}
+          connected={status === 'connected'}
+          onNewChat={() => { closePhoneMenu(); void newTab() }}
+          onSelectChat={(key) => {
+            closePhoneMenu()
+            const chat = phoneChats.find(c => c.key === key)
+            // The tab strip's rule: a switch needs the box, and the open one
+            // is already on screen.
+            if (chat && !chat.active && key && status === 'connected') void switchSession(key)
+          }}
+          onCloseChat={(key) => { closePhoneMenu(); closeTab(key) }}
+          onRestart={() => { closePhoneMenu(); if (!startingSession) void startNewSession() }}
+          restartDisabled={startingSession}
+          onShowDesktop={onClose}
+          textSizeId={TEXT_SIZE_BAR_ID}
+          textScale={textScalePref}
+          onTextScaleChange={setTextScalePref}
+        />
+      )}
+      {portraitComposer && plusSheetOpen && (
+        <ChatPhoneSheet id="chat-composer-options" testId="chat-plus-sheet" title={tr('chat.composer.options', 'Chat options')} onClose={closeComposerOptions}>
+          <div style={{ display: 'flex', gap: 10 }}>
+            {/* The same actions, gates and handlers as the composer row. */}
+            {(caps.canAttachImages || caps.canAttachDocuments) && (
+              <ChatPhoneSheetAction
+                testId="chat-attach"
+                icon="attach_file"
+                label={tr('chat.attachFile', 'Attach file')}
+                disabled={status !== 'connected'}
+                // The file picker opens from this tap, while it still counts
+                // as one; the sheet closes after.
+                onClick={() => { fileInputRef.current?.click(); closeComposerOptions() }}
+              />
+            )}
+            {!orgMember && (
+              <ChatPhoneSheetAction
+                testId="chat-new-app-toggle"
+                icon="deployed_code"
+                label={t('codingAgent.createNewProject')}
+                pressed={newApp.show}
+                onClick={() => { closeComposerOptions(); newApp.toggle() }}
+              />
+            )}
+            {caps.imageGenerationTrigger === 'composer' && (
+              <ChatPhoneSheetAction
+                testId="generate-image"
+                icon={drawing ? 'hourglass_top' : 'imagesmode'}
+                label={t('chat.generatePicture')}
+                title={input.trim().length === 0 ? t('chat.generatePictureEmpty') : undefined}
+                disabled={status !== 'connected' || drawing || input.trim().length === 0}
+                onClick={() => { closeComposerOptions(); void generatePicture() }}
+              />
+            )}
+          </div>
+        </ChatPhoneSheet>
+      )}
+      {portraitComposer && modelSheetOpen && phonePickers.length > 0 && (
+        <ChatPhoneSheet id={MODEL_SHEET_ID} testId="chat-model-sheet" title={tr('chat.phone.model', 'Model')} onClose={closeModelSheet}>
+          {phonePickers.map(picker => (
+            <ChatPhonePickerGroup key={picker.id} picker={picker} onPicked={closeModelSheet} />
+          ))}
+        </ChatPhoneSheet>
+      )}
 
       {/* Where a drop against an edge would land the chat — the same plate the
           app windows draw, portalled so the popup's own overflow cannot clip

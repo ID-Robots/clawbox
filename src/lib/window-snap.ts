@@ -91,6 +91,33 @@ export const MIN_WINDOW_WIDTH = 300;
 export const MIN_WINDOW_HEIGHT = 200;
 
 /**
+ * A window's left, top, width or height — or a drag's step — on the nearest
+ * point that is a WHOLE CSS PIXEL AND A WHOLE DEVICE PIXEL: a multiple of
+ * `step` CSS px, the smallest whole number from 1 to 4 that is a whole number
+ * of device pixels (1 at devicePixelRatio 1 and 2, 2 at 1.5 and 2.5, 4 at
+ * 1.25 and 1.75), and plain whole CSS pixels where none is (1.1, 1.125,
+ * 1.331). Measured in Chrome at 1.5: a window at 400 or 402 CSS px drew the
+ * same, one at 400.6667 — a whole device pixel, not a whole CSS pixel — drew
+ * thousands of pixels differently, and a window dropped off the lattice was
+ * redrawn after a drag. Every place a window's geometry is made (centring,
+ * clamp, fit, snap rects, drag, resize) goes through this one rounding; at
+ * devicePixelRatio 1 it only takes away fractions. `atLeast`: the lattice
+ * point at or above `v`, for a minimum — the resize's 300 x 200 is what a
+ * saved size is checked against (`getSavedSize`).
+ */
+export function devicePx(v: number, atLeast = false): number {
+  const dpr = typeof window !== "undefined" && window.devicePixelRatio > 0 ? window.devicePixelRatio : 1;
+  let step = 1;
+  for (let k = 1; k <= 4; k++) {
+    if (Math.abs(k * dpr - Math.round(k * dpr)) < 1e-6) {
+      step = k;
+      break;
+    }
+  }
+  return (atLeast ? Math.ceil(v / step) : Math.round(v / step)) * step;
+}
+
+/**
  * The shelf's real height, safe-area inset included.
  *
  * ChromeShelf is `calc(56px + env(safe-area-inset-bottom))`; a flat 56 made a
@@ -136,7 +163,11 @@ export function workArea(screen: DeskScreen, rInset = 0): DeskRect {
 
 /** Where a maximized window on the screen under `at` stands (the main screen's work area without `at`). */
 export function maximizedRect(rInset = 0, at?: { x: number; y: number }): DeskRect {
-  return workArea(at ? screenAt(at.x, at.y) : mainScreen(), rInset);
+  const a = workArea(at ? screenAt(at.x, at.y) : mainScreen(), rInset);
+  // Its left and top on the lattice (`devicePx`); its far edges the work
+  // area's own, never rounded short of them.
+  const x = devicePx(a.x), y = devicePx(a.y);
+  return { x, y, width: a.x + a.width - x, height: a.y + a.height - y };
 }
 
 export function getSnapZone(clientX: number, clientY: number, rInset = 0): SnapZone {
@@ -225,7 +256,7 @@ export function clampWindowPosition(
     const x = Math.min(Math.max(rect.x, Math.min(left, spareRow)), Math.max(left, spareRow));
     const area = workArea(screenForRect({ ...rect, x }));
     const y = Math.min(Math.max(rect.y, area.y), Math.max(area.y, area.y + area.height - TITLE_BAR_HEIGHT));
-    return { x, y };
+    return { x: devicePx(x), y: devicePx(y) };
   }
   const spare = window.innerWidth - rect.width;
   const top = desktopTop();
@@ -235,7 +266,7 @@ export function clampWindowPosition(
   const x = Math.min(Math.max(rect.x, Math.min(0, spare)), Math.max(0, spare));
   // Below the kiosk bar (0 without one) and with the title bar above the shelf.
   const y = Math.min(Math.max(rect.y, top), Math.max(top, availH - TITLE_BAR_HEIGHT));
-  return { x, y };
+  return { x: devicePx(x), y: devicePx(y) };
 }
 
 /**
@@ -269,8 +300,10 @@ export function fitWindowSize(
   const availW = rInset > 0 ? area.width - DESKTOP_GAP * 2 : area.width;
   const availH = area.height;
   return {
-    width: Math.max(MIN_WINDOW_WIDTH, Math.min(size.width, availW)),
-    height: Math.max(MIN_WINDOW_HEIGHT, Math.min(size.height, availH)),
+    // The minimums at or above 300 x 200 (`atLeast`): a resize that leaves
+    // one edge alone saves it as fitted, and `getSavedSize` refuses less.
+    width: Math.max(devicePx(MIN_WINDOW_WIDTH, true), devicePx(Math.min(size.width, availW))),
+    height: Math.max(devicePx(MIN_WINDOW_HEIGHT, true), devicePx(Math.min(size.height, availH))),
   };
 }
 
@@ -288,7 +321,7 @@ export function fitPlacedWindow(rect: DeskRect): { width: number; height: number
   if (typeof window === "undefined" || !getDeskScreens()) return fitted;
   const all = deskScreens();
   const rowWidth = Math.max(...all.map((s) => s.x + s.width)) - Math.min(...all.map((s) => s.x));
-  return { width: Math.max(MIN_WINDOW_WIDTH, Math.min(rect.width, rowWidth)), height: fitted.height };
+  return { width: Math.max(devicePx(MIN_WINDOW_WIDTH, true), devicePx(Math.min(rect.width, rowWidth))), height: fitted.height };
 }
 
 /** The narrowest the docked chat panel is ever drawn. */
@@ -349,15 +382,20 @@ export function getSnapRect(zone: SnapZone, rInset = 0, at?: { x: number; y: num
   // The strip between the kiosk bar (0 without one) and the shelf, on the
   // main screen; another monitor of the row is all window space.
   const a = workArea(at ? screenAt(at.x, at.y) : mainScreen(), rInset);
-  const { x: l, y: t, width: w, height: h } = a;
+  // The near and middle EDGES on the lattice (`devicePx`), so the halves and
+  // quarters still meet without a gap or an overlap; the far edges are the
+  // work area's own — a lattice coarser than a device pixel would otherwise
+  // round them short of the screen or the shelf.
+  const l = devicePx(a.x), t = devicePx(a.y), r = a.x + a.width, b = a.y + a.height;
+  const mx = devicePx(a.x + a.width / 2), my = devicePx(a.y + a.height / 2);
   switch (zone) {
-    case "left": return { x: l, y: t, width: w / 2, height: h };
-    case "right": return { x: l + w / 2, y: t, width: w / 2, height: h };
-    case "top": return { x: l, y: t, width: w, height: h };
-    case "top-left": return { x: l, y: t, width: w / 2, height: h / 2 };
-    case "top-right": return { x: l + w / 2, y: t, width: w / 2, height: h / 2 };
-    case "bottom-left": return { x: l, y: t + h / 2, width: w / 2, height: h / 2 };
-    case "bottom-right": return { x: l + w / 2, y: t + h / 2, width: w / 2, height: h / 2 };
+    case "left": return { x: l, y: t, width: mx - l, height: b - t };
+    case "right": return { x: mx, y: t, width: r - mx, height: b - t };
+    case "top": return { x: l, y: t, width: r - l, height: b - t };
+    case "top-left": return { x: l, y: t, width: mx - l, height: my - t };
+    case "top-right": return { x: mx, y: t, width: r - mx, height: my - t };
+    case "bottom-left": return { x: l, y: my, width: mx - l, height: b - my };
+    case "bottom-right": return { x: mx, y: my, width: r - mx, height: b - my };
     default: return null;
   }
 }

@@ -58,7 +58,8 @@ import { useSettledSessionUser } from "@/lib/use-session-user";
 import { isOrgMember, ORG_USER_SETTINGS_SECTIONS } from "@/lib/org-mode";
 import { useLinkedBoxesFlag } from "@/lib/use-box-switcher";
 import OwnPasswordCard from "./OwnPasswordCard";
-import MonitorsPanel from "./MonitorsPanel";
+import MonitorsPanel, { ViewedMonitors } from "./MonitorsPanel";
+import { useViewerMonitors } from "@/lib/use-monitor-layout";
 import LinkedBoxesPanel from "./LinkedBoxesPanel";
 // From the pure module, never `@/lib/plugin-repair`: that one reads the
 // marker file and would pull `fs` into the browser bundle.
@@ -729,6 +730,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // Linked ClawBoxes is an experiment: its page is drawn only once the owner
   // has switched it on (System update → Advanced options).
   const linkedBoxesOn = useLinkedBoxesFlag(!nonOwner && !orgMember);
+  // Shown on another box's kiosk (its Linked ClawBoxes monitors switch is on):
+  // this box's own monitors are not this screen's, so Monitors only reports them.
+  const viewerMonitors = useViewerMonitors();
   const sectionShown = useCallback((id: Section): boolean => {
     if (id === "account") return nonOwner;
     if (id === "update" && nonOwner) return false;
@@ -7011,7 +7015,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         {/* ─── Linked ClawBoxes ─── */}
         {activeSection === "linkedBoxes" && <LinkedBoxesPanel />}
 
-        {activeSection === "monitors" && monitorsAvailable && <MonitorsPanel />}
+        {activeSection === "monitors" && monitorsAvailable && (viewerMonitors === undefined ? <MonitorsPanel /> : <ViewedMonitors status={viewerMonitors} />)}
 
         {/* ─── About ─── */}
         {activeSection === "update" && (

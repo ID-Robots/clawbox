@@ -79,13 +79,15 @@ afterEach(() => {
 });
 
 describe("the clipboard keys", () => {
-  it("copies the selection on Ctrl+Shift+C and keeps the key from the shell", async () => {
+  it("copies the selection on Ctrl+Shift+C, quietly, and keeps the key from the shell", async () => {
     render(<TerminalApp />);
     await waitFor(() => expect(terms.length).toBe(1));
     selection = "make build";
     expect(terms[0].press({ ctrlKey: true, shiftKey: true, key: "C" })).toBe(false);
     expect(writeText).toHaveBeenCalledWith("make build");
-    expect(await screen.findByTestId("terminal-notice")).toHaveTextContent("Copied to clipboard");
+    // No "Copied to clipboard" notice for a copy key that worked.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(screen.queryByTestId("terminal-notice")).toBeNull();
   });
 
   it("copies nothing, and still sends nothing, with nothing selected", async () => {

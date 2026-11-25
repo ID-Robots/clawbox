@@ -676,8 +676,10 @@ export default function VNCApp({ viewOnly = false, pasteButton = "overlay", ref 
       if (!text) return;
       const ok = await copyToClipboard(text);
       if (copyToastTimerRef.current) window.clearTimeout(copyToastTimerRef.current);
-      setCopyToast({ text, copied: ok });
-      copyToastTimerRef.current = window.setTimeout(() => setCopyToast(null), ok ? 5_000 : 30_000);
+      // A copy that landed is silent, like Ctrl+C anywhere else. Only a refused
+      // one shows the toast, whose Copy button is then how the text gets here.
+      setCopyToast(ok ? null : { text, copied: false });
+      if (!ok) copyToastTimerRef.current = window.setTimeout(() => setCopyToast(null), 30_000);
     } finally {
       remoteClipboardInflightRef.current = false;
       if (remoteClipboardPendingRef.current) {

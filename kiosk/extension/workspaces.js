@@ -30,6 +30,19 @@
 // Off — or refused, or never read — the keys are left to the page and the
 // owner's list is forgotten, as if it were not there.
 //
+// A second experiment rides on the first (TASK-2771): a linked box's desktop
+// shown on this kiosk is laid out by THIS kiosk's monitors — the box that
+// serves it knows only its own. Its switch is the box preference
+// ui_linked_boxes_screens, read with the first and kept the same way. On a page
+// of a linked box (any page that is not the kiosk's own) this script asks the
+// worker for the kiosk's monitors every few seconds while the page is shown,
+// and writes the answer — geometry only — in VIEWER_ATTR on <html>, which that
+// box's desktop reads (src/lib/use-monitor-layout.ts). The worker answers only
+// a page on the origin of one of the owner's linked boxes, and reads the
+// monitors through the kiosk's own desktop, which asks its own box, same
+// origin, as the owner ({ type: "readMonitors" }). Off, or a page that is not a
+// linked box: no mark, and the page is laid out as it always was.
+//
 // The worker answers a switch by sending the tab it activated a
 // { type: "boxIndicator", slot, kind, name, names, text? }, drawn here in a
 // shadow root: a row of numbered dots, the slot lit, and the box's name (or,
@@ -51,16 +64,30 @@
   const LINKED_BOXES_EVENT = "clawbox:linked-boxes-changed";
   const LINKED_BOXES_PATH = "/setup-api/linked-boxes";
   const FLAG_EVENT = "clawbox:linked-boxes-flag";
-  const FLAG_PATH = "/setup-api/preferences?keys=ui_linked_boxes";
+  const FLAG_PATH = "/setup-api/preferences?keys=ui_linked_boxes,ui_linked_boxes_screens";
   const FLAG_KEY = "linkedBoxesOn";
+  const SCREENS_FLAG_EVENT = "clawbox:linked-boxes-screens-flag";
+  const SCREENS_FLAG_KEY = "linkedBoxScreensOn";
+  const SCREENS_PATH = "/setup-api/monitors";
+  const VIEWER_ATTR = "data-clawbox-viewer-screens";
+  const VIEWER_POLL_MS = 3000;
   const INDICATOR_MS = 1800;
 
   const send = (msg) => chrome.runtime.sendMessage(msg).catch(() => null);
 
   let on = false;
-  chrome.storage.local.get(FLAG_KEY).then((got) => { on = got[FLAG_KEY] === true; }, () => {});
+  // The second switch, kept true only while the first is on as well.
+  let screensOn = false;
+  chrome.storage.local.get([FLAG_KEY, SCREENS_FLAG_KEY]).then((got) => {
+    on = got[FLAG_KEY] === true;
+    screensOn = got[SCREENS_FLAG_KEY] === true;
+    viewerSync();
+  }, () => {});
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area === "local" && changes[FLAG_KEY]) on = changes[FLAG_KEY].newValue === true;
+    if (area !== "local" || !(changes[FLAG_KEY] || changes[SCREENS_FLAG_KEY])) return;
+    if (changes[FLAG_KEY]) on = changes[FLAG_KEY].newValue === true;
+    if (changes[SCREENS_FLAG_KEY]) screensOn = changes[SCREENS_FLAG_KEY].newValue === true;
+    viewerSync();
   });
 
   function slotOf(e) {
@@ -155,6 +182,60 @@
     hideTimer = setTimeout(() => host && host.remove(), INDICATOR_MS);
   }
 
+  // ─── A linked box's page, on this kiosk's monitors ───
+  // Every web page that is not on the kiosk's own origins: the worker says
+  // which of them is a linked box. One read at a time, every VIEWER_POLL_MS
+  // while the page is shown, again when it is shown and when a switch changes.
+  const isViewerPage = /^https?:/.test(location.origin) && !DESKTOP_ORIGINS.includes(location.origin + "/") && window.top === window;
+  let viewerTimer = 0;
+  let viewerReading = false;
+
+  function setViewerMark(screens) {
+    const root = document.documentElement;
+    if (!root) return;
+    if (!screens) {
+      if (root.hasAttribute(VIEWER_ATTR)) root.removeAttribute(VIEWER_ATTR);
+      return;
+    }
+    const value = JSON.stringify(screens);
+    if (root.getAttribute(VIEWER_ATTR) !== value) root.setAttribute(VIEWER_ATTR, value);
+  }
+
+  async function viewerTick() {
+    viewerReading = true;
+    let again = true;
+    try {
+      const answer = await send({ type: "viewerScreens" });
+      if (on && screensOn) {
+        // Not a linked box (or the list is gone): no mark, and no more asking
+        // until the page is shown again. A worker that did not answer, or a
+        // desktop that could not read, leaves the mark as it was.
+        if (answer && answer.ok === false) {
+          setViewerMark(null);
+          again = false;
+        } else if (answer && answer.ok === true && answer.screens) {
+          setViewerMark(answer.screens);
+        }
+      }
+    } finally {
+      viewerReading = false;
+    }
+    if (again && on && screensOn && document.visibilityState !== "hidden") viewerTimer = setTimeout(viewerTick, VIEWER_POLL_MS);
+  }
+
+  function viewerSync() {
+    clearTimeout(viewerTimer);
+    viewerTimer = 0;
+    if (!isViewerPage) return;
+    if (!on || !screensOn) {
+      setViewerMark(null);
+      return;
+    }
+    // A read in flight schedules the next one itself, once it is done.
+    if (document.visibilityState !== "hidden" && !viewerReading) viewerTick();
+  }
+  document.addEventListener("visibilitychange", viewerSync);
+
   // ─── The list, from the kiosk's own desktop ───
   const isDesktop = DESKTOP_ORIGINS.includes(location.origin + "/") && location.pathname === "/";
 
@@ -176,14 +257,15 @@
       const flag = await fetch(FLAG_PATH, init);
       const refused = flag.status === 401 || flag.status === 403;
       if (!refused && !flag.ok) return null;
-      const enabled = !refused && (await flag.json()).ui_linked_boxes === true;
+      const flags = refused ? {} : await flag.json();
+      const enabled = flags.ui_linked_boxes === true;
       // An answer that comes back after a newer read's was kept is no longer the
       // switch's state: it neither turns the keys off nor has the list revoked.
       // A refusal is the one answer that always goes through.
       if (!refused && mine < flagKept) return null;
       if (refused || mine > flagKept) {
         flagKept = Math.max(flagKept, mine);
-        chrome.storage.local.set({ [FLAG_KEY]: enabled });
+        chrome.storage.local.set({ [FLAG_KEY]: enabled, [SCREENS_FLAG_KEY]: enabled && flags.ui_linked_boxes_screens === true });
       }
       if (!enabled) return { revoked: true };
       const res = await fetch(LINKED_BOXES_PATH, init);
@@ -198,6 +280,21 @@
         emptyText: body && body.labels && typeof body.labels.empty === "string" ? body.labels.empty : "",
         validUntil: body && Number.isFinite(body.sessionExpiresAt) ? body.sessionExpiresAt : 0,
       };
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // This kiosk's own monitors, as its box answers the owner: handed to the
+  // worker as they came, which keeps the geometry and nothing else.
+  async function readMonitors() {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), READ_MS);
+    try {
+      const res = await fetch(SCREENS_PATH, { cache: "no-store", credentials: "same-origin", signal: abort.signal });
+      return res.ok ? await res.json() : null;
     } catch {
       return null;
     } finally {
@@ -234,6 +331,10 @@
       sendResponse({ ok: true });
       return undefined;
     }
+    if (msg.type === "readMonitors" && isDesktop) {
+      readMonitors().then(sendResponse);
+      return true; // async sendResponse
+    }
     if (msg.type === "readBoxes" && isDesktop) {
       // The worker's own ask is a read too: a push still out from before it is older.
       const mine = ++boxesRead;
@@ -256,6 +357,7 @@
     pushBoxes();
     window.addEventListener(LINKED_BOXES_EVENT, pushBoxes);
     window.addEventListener(FLAG_EVENT, pushBoxes);
+    window.addEventListener(SCREENS_FLAG_EVENT, pushBoxes);
     document.addEventListener("visibilitychange", () => { if (!document.hidden) pushBoxes(); });
   }
 

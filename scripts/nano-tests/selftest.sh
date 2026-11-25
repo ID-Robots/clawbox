@@ -68,6 +68,7 @@ CLAIMF=$NANO_STUB_HOME/.cache/clawbox-nano-tests/suite.claim
 export NANO_CI=$WORK/bin/nano-ci NANO_STUB_LOG=$WORK/nano-ci-calls.log NANO_SELFTEST_LIB=$LIB
 export NANO_KILL_GRACE=1 NANO_SHA=0123456789abcdef0123456789abcdef01234567
 unset GITHUB_ACTIONS NANO_RESULTS_DIR NANO_TESTS_DIR NANO_IP NANO_LAB NANO_RUN_ID
+unset T85_EDITION T85_CORE0 T85_HEAD1 T85_HEAD_PIN NANO_REQUIRE_CORE_MOVE
 : > "$NANO_STUB_LOG"
 
 fixture() { # DIR NAME BODY
@@ -321,6 +322,90 @@ for t in "$HERE"/tests/*; do
       grep -qE "$re" <<<"$files" || { echo "no file matches $p"; exit 1; }
     done <<<"$patterns"' _ "$t" "$HERE/../.."
 done
+
+# ---- 85-update-rollback keeps the checkout only over the release's build -----
+# The real test against a stand-in lib.sh whose board answers from T85_*: the
+# update moved the core and failed, so the checkout stays on NANO_SHA. The board
+# must start on a build of the release's commit, and the build put back must be
+# a build of that same commit, whole, with no rollback record left.
+export T85=$WORK/t85
+mkdir -p "$T85/tests"
+cp "$HERE/tests/85-update-rollback.sh" "$T85/tests/"
+cat > "$T85/lib.sh" <<'EOF'
+NANO_TEST_FAILED=0
+ok() { printf 'ok - %s\n' "$*"; }
+not_ok() { printf 'not ok - %s\n' "$*"; NANO_TEST_FAILED=1; }
+skip() { printf 'ok # SKIP %s\n' "$*"; }
+note() { printf '# %s\n' "$*"; }
+finish() { exit "$NANO_TEST_FAILED"; }
+ensure_on_release() { HEAD0=$T85_RELEASE; }
+start_app_update() { :; }
+api_error() { :; }
+wait_app_update() { "$2"; UPDATE_PHASE=failed UPDATE_ERROR="Rebuild failed"; }
+runtime_settled_line() { ok "settled"; }
+runtime_kept() { ok "runtime kept"; }
+runtime_chat_turn() { ok "chat turn answered"; }
+# The checkout after the update: NANO_SHA (kept), or T85_HEAD1.
+board_head() { echo "${T85_HEAD1:-$NANO_SHA}"; }
+build_identity_ok() {
+  if [ "${T85_HEAD1:-$NANO_SHA}" = "$T85_BUILT" ]; then echo "BUILD IDENTITY: OK — 2 artifact(s) built from ${T85_BUILT:0:7}"; return 0; fi
+  echo "BUILD IDENTITY: FAIL — .next/build-info.json was built from $T85_BUILT but the checkout is at ${T85_HEAD1:-$NANO_SHA}"
+  return 1
+}
+board() {
+  case "$1" in
+    *python3*) # the facts: at the start, then after the update
+      if [ -e "$T85/started" ]; then echo "$T85_EDITION 2026.11.5 $T85_BUILT 2026.10.9 ${T85_HEAD_PIN:-2026.11.5} $T85_TARGET"; return; fi
+      : > "$T85/started"
+      echo "$T85_EDITION ${T85_CORE0:-2026.10.9} $T85_START 2026.10.9 2026.10.9 present" ;;
+    # The served build is whole as its own commit's (unless T85_WHOLE=0), and
+    # as no other.
+    *verify-build-identity.sh*)
+      if [ "$2" = "$T85_BUILT" ] && [ "$T85_WHOLE" = 1 ]; then echo "BUILD IDENTITY: OK — 2 artifact(s) built from ${2:0:7}"; return 0; fi
+      echo "BUILD IDENTITY: FAIL — .next/standalone/.next/build-info.json was built from $T85_BUILT but the checkout is at $2"
+      return 1 ;;
+    *'next build'*) echo "count 1" ;;
+    *) echo 200 ;;
+  esac
+}
+EOF
+R85=1111111111111111111111111111111111111111
+t85() { # NAME BUILD-SERVED-AFTER [BUILD-AT-START [WHOLE (1|0) [RECORD (absent|present)]]]
+  rm -f "$T85/started"
+  T85_RELEASE=$R85 T85_BUILT=$2 T85_START=${3:-$R85} T85_WHOLE=${4:-1} T85_TARGET=${5:-absent} \
+    T85_EDITION=${T85_EDITION:-openclaw} NANO_BRANCH=fix/x \
+    bash "$T85/tests/85-update-rollback.sh" > "$WORK/t85-$1.out" 2>&1
+}
+t85 release 1111111111111111111111111111111111111111
+check "85: the checkout kept over the release's build after a core move passes" test $? -eq 0
+check "...as kept by design" contains "$WORK/t85-release.out" "ok - checkout kept on 0123456789ab"
+t85 other 2222222222222222222222222222222222222222
+check "85: a whole build of another commit put back under the kept checkout fails" test $? -eq 1
+check "...naming it as not the release's" contains "$WORK/t85-other.out" "not ok - the restored build 222222222222 is not the release's"
+t85 start 3333333333333333333333333333333333333333 3333333333333333333333333333333333333333
+check "85: a board whose build at the start is of another commit fails" test $? -eq 1
+check "...at the start, before any update" contains "$WORK/t85-start.out" "not ok - the board did not start on the release's build"
+check "...and never blames the restore" lacks "$WORK/t85-start.out" "update to fix/x started"
+t85 broken "$R85" "$R85" 0
+check "85: a build of the release's commit that is not whole fails the kept checkout" test $? -eq 1
+check "...saying so" contains "$WORK/t85-broken.out" "not ok - the restored build does not hold together as 111111111111's"
+t85 record "$R85" "$R85" 1 present
+check "85: a rollback record left behind fails the kept checkout" test $? -eq 1
+check "...saying so" contains "$WORK/t85-record.out" "not ok - data/config.json still holds the dashboard's rollback target"
+# Hermes, with an OpenClaw core an earlier edition left (newer than the pin,
+# not moved by this update): the checkout must go back to the release.
+T85_EDITION=hermes T85_CORE0=2026.11.5 T85_HEAD1=$R85 T85_HEAD_PIN=2026.10.9 NANO_REQUIRE_CORE_MOVE=1 t85 hermes "$R85"
+check "85: NANO_REQUIRE_CORE_MOVE=1 on a Hermes board whose checkout went back passes" test $? -eq 0
+check "...noting that no core moves there" contains "$WORK/t85-hermes.out" "# Hermes edition: no OpenClaw core moves"
+check "...and the served build naming the checkout" contains "$WORK/t85-hermes.out" "ok - the served build names the checked-out commit"
+T85_EDITION=hermes T85_CORE0=2026.11.5 t85 hermes-kept "$R85"
+check "85: a checkout kept over the release's build on Hermes fails" test $? -eq 1
+check "...as drift, not as a kept checkout" contains "$WORK/t85-hermes-kept.out" "not ok - drift after the rollback"
+# The dual edition carries the OpenClaw core install.sh moves: it keeps the
+# checkout like openclaw, only Hermes is excluded.
+T85_EDITION=dual t85 dual "$R85"
+check "85: the dual edition keeps the checkout over the release's build after a core move" test $? -eq 0
+check "...as kept by design" contains "$WORK/t85-dual.out" "ok - checkout kept on 0123456789ab"
 
 # ---- long-tier tests are opt-in ----------------------------------------------
 L=$WORK/tests-long

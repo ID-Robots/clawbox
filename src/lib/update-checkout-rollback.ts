@@ -18,6 +18,14 @@
  * When a new build is in place (the failure came after the rebuild) nothing
  * moves: build and checkout already agree.
  *
+ * Nor, on a box install.sh updates, once the update has moved the OpenClaw core
+ * past the pin of the recorded commit: install.sh drops the record then
+ * (keep_checkout_with_installed_core), because that commit's code would run
+ * against a core it was never released with. The box keeps the new checkout
+ * beside the old build, which the next update rebuilds. An x64 PC
+ * (install-x64.sh, the desktop integration) moves its core elsewhere, keeps
+ * the record and still has the checkout moved back.
+ *
  * Dependencies are injected so the decision logic is testable without git.
  */
 
