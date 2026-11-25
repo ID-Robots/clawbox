@@ -110,6 +110,8 @@ const RELEASES: readonly { version: string; files: string }[] = [
   { version: "1.7.0", files: "8beb31bd59ef5a658a6ef2b001abe70a38e06c38d85eeddee2ba38b50a5c8ab0" },
   // A switch answer that comes back after a newer one was kept is ignored: it no longer has the list revoked.
   { version: "1.7.1", files: "f74920a9b3c8761a3e215e4a6741905dbb6c732c2ee77f4066beb82de1da27ca" },
+  // A linked box's page is laid out by this kiosk's monitors (second experiment): the worker hands it the geometry, the kiosk's desktop reads it.
+  { version: "1.8.0", files: "03b81586d20de9309f725bed41173c8d5b2fb1bfac2ace25ab877e437cc969dd" },
 ];
 
 /**
@@ -627,7 +629,14 @@ describe("kiosk extension", () => {
     // …and the experiment's switch: the event Settings fires when it is saved
     // and the preference it is read from.
     expect(stringConst(ws, "FLAG_EVENT")).toBe(exported("LINKED_BOXES_FLAG_EVENT"));
-    expect(stringConst(ws, "FLAG_PATH")).toBe(`/setup-api/preferences?keys=${exported("LINKED_BOXES_FLAG_PREF")}`);
+    // …read together with the second experiment's (TASK-2771).
+    expect(stringConst(ws, "FLAG_PATH")).toBe(`/setup-api/preferences?keys=${exported("LINKED_BOXES_FLAG_PREF")},${exported("VIEWER_SCREENS_FLAG_PREF")}`);
+    expect(stringConst(ws, "SCREENS_FLAG_EVENT")).toBe(exported("VIEWER_SCREENS_FLAG_EVENT"));
+    // The mark a linked box's page reads its host kiosk's monitors from, and where the kiosk's own box says them.
+    expect(stringConst(ws, "VIEWER_ATTR")).toBe(exported("VIEWER_SCREENS_ATTR"));
+    expect(stringConst(ws, "SCREENS_PATH")).toBe("/setup-api/monitors");
+    // The second switch is kept under one name, in the script that reads it and the worker that checks it.
+    expect(stringConst(bg, "SCREENS_FLAG_KEY")).toBe(stringConst(ws, "SCREENS_FLAG_KEY"));
     // The kiosk's own desktop, by the worker's list of its origins.
     const origins = (src: string) => [...(/const DESKTOP_ORIGINS = \[([\s\S]*?)\];/.exec(src)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((x) => x[1]);
     expect(origins(ws)).toEqual(origins(bg));
@@ -643,6 +652,15 @@ describe("kiosk extension", () => {
     expect(bg).toContain("if (tab) await chrome.tabs.update(tab.id, { active: true });");
     expect(bg).toContain("else tab = await chrome.tabs.create({ url: box.url, active: true });");
     expect(bg).toMatch(/case "boxes":\s*\/\/[^\n]*\n\s*if \(!sender\.tab \|\| !isDesktop\(sender\.tab\.url\)/);
+    // A linked box's page gets the kiosk's monitors from the worker alone, which
+    // answers only a page on the origin of one of the owner's boxes, by the address
+    // Chrome gives for it, and asks the kiosk's own desktop to read them.
+    expect(bg).toContain('case "viewerScreens":\n        return viewerScreens(sender);');
+    expect(bg).toContain("const url = sender.url || (sender.tab && sender.tab.url);");
+    expect(bg).toContain("return !!list && cleanBoxes(list.boxes).some((b) => webOrigin(b.url) === origin);");
+    expect(bg).toContain('chrome.tabs.sendMessage(desk.id, { type: "readMonitors" })');
+    expect(ws).toContain('if (msg.type === "readMonitors" && isDesktop) {');
+    expect(ws).toContain("root.setAttribute(VIEWER_ATTR, value);");
     // A name drawn as text, never markup.
     expect(ws).toContain("text.textContent = indicatorText(ind);");
     expect(ws).not.toMatch(/innerHTML/);

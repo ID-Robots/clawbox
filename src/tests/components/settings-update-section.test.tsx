@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 import { translations } from "@/lib/translations";
-import { LINKED_BOXES_FLAG_EVENT } from "@/lib/box-switcher";
+import { LINKED_BOXES_FLAG_EVENT, VIEWER_SCREENS_FLAG_EVENT } from "@/lib/box-switcher";
 
 vi.mock("@/lib/i18n", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/i18n")>()),
@@ -177,6 +177,50 @@ describe("Settings → System Update", () => {
       await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
       expect(prefs).toEqual({ ui_linked_boxes: false });
       expect(navEntries(nav).some((e) => e.includes(label))).toBe(false);
+    });
+
+    // The second experiment (TASK-2771): a linked box shown in this kiosk is laid
+    // out by this kiosk's monitors. Its own switch, built like the first.
+    describe("the monitors switch", () => {
+      const heard: unknown[] = [];
+      const onHeard = (e: Event) => { heard.push((e as CustomEvent<unknown>).detail); };
+      beforeEach(() => {
+        heard.length = 0;
+        window.addEventListener(VIEWER_SCREENS_FLAG_EVENT, onHeard);
+      });
+      afterEach(() => { window.removeEventListener(VIEWER_SCREENS_FLAG_EVENT, onHeard); });
+
+      async function openAdvanced() {
+        render(<SettingsApp ui={defaultUi} />);
+        await screen.findByRole("navigation");
+        fireEvent.click(screen.getByRole("button", { name: new RegExp(translations.en["settings.systemUpdate"]) }));
+        fireEvent.click(await screen.findByRole("button", { name: translations.en["update.advancedOptions"] }));
+        return {
+          first: await screen.findByRole("switch", { name: translations.en["update.linkedBoxesExperimental"] }),
+          second: await screen.findByRole("switch", { name: translations.en["update.linkedBoxesScreensExperimental"] }),
+        };
+      }
+
+      it("is off by default, saved as its own preference, announced on the page, and leaves the first switch alone", async () => {
+        const { first, second } = await openAdvanced();
+        expect(second).toHaveAttribute("aria-checked", "false");
+        fireEvent.click(second);
+        await waitFor(() => expect(second).toHaveAttribute("aria-checked", "true"));
+        expect(prefs).toEqual({ ui_linked_boxes_screens: true });
+        expect(heard).toEqual([true]);
+        expect(first).toHaveAttribute("aria-checked", "false");
+        fireEvent.click(second);
+        await waitFor(() => expect(second).toHaveAttribute("aria-checked", "false"));
+        expect(prefs).toEqual({ ui_linked_boxes_screens: false });
+        expect(heard).toEqual([true, false]);
+      });
+
+      it("shows on when the box says so, without touching the first", async () => {
+        prefs = { ui_linked_boxes_screens: true };
+        const { first, second } = await openAdvanced();
+        await waitFor(() => expect(second).toHaveAttribute("aria-checked", "true"));
+        expect(first).toHaveAttribute("aria-checked", "false");
+      });
     });
   });
 });

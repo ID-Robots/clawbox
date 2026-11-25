@@ -18,7 +18,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { useT } from "@/lib/i18n";
-import { MONITORS_CHANGED_EVENT, identifyMonitors } from "@/lib/desktop-screens";
+import { MONITORS_CHANGED_EVENT, identifyMonitors, type MonitorStatusLike } from "@/lib/desktop-screens";
 import { useDeskScreens } from "@/lib/use-desk-screens";
 import { MONITOR_SCALES, logicalSize, type MonitorMode, type MonitorSetting, type MonitorTransform } from "@/lib/monitors-layout";
 import type { MonitorStatus, MonitorView } from "@/lib/monitors";
@@ -887,6 +887,41 @@ export default function MonitorsPanel() {
           {busy ? t("settings.monitors.applying") : t("settings.monitors.apply")}
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Settings → Monitors on a box SHOWN in another box's kiosk whose Linked
+ * ClawBoxes monitors switch is on (TASK-2771). The monitors this screen is laid
+ * out by are the kiosk's, arranged on the box that runs it — this box's own
+ * outputs are not this screen's, so none of them is read or drawn here and
+ * nothing here can change one: the kiosk's monitors (`useViewerMonitors`), read
+ * only, under one line that says where they are arranged.
+ */
+export function ViewedMonitors({ status }: { status: MonitorStatusLike | null }) {
+  const { t } = useT();
+  const on = (status?.monitors ?? []).filter((m) => m.enabled && m.rect);
+  return (
+    <div className="space-y-5" data-testid="monitors-viewed">
+      <div>
+        <h3 className="text-lg font-semibold text-[var(--text-primary)]">{t("settings.monitors.title")}</h3>
+        <p className="text-sm text-[var(--text-secondary)] mt-1 leading-relaxed">{t("settings.monitors.viewedElsewhere")}</p>
+      </div>
+      {on.length > 0 && (
+        <ul className="bg-white/5 rounded-xl p-4 space-y-2 list-none m-0" data-testid="monitors-viewed-list">
+          {on.map((m) => (
+            <li key={m.id} className="flex items-center gap-3 text-sm text-white">
+              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">desktop_windows</span>
+              <span>{m.builtIn ? t("settings.monitors.builtIn") : m.id}</span>
+              <span className="text-white/50">{Math.round(m.rect!.width)}×{Math.round(m.rect!.height)}</span>
+              {status?.main === m.id && (
+                <span className="text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[var(--coral-bright)] text-white">{t("settings.monitors.main")}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

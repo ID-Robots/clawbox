@@ -22,6 +22,8 @@ import {
   LINKED_BOXES_FLAG_PREF,
   LINKED_BOXES_URL,
   MAX_WORKSPACES,
+  VIEWER_SCREENS_FLAG_EVENT,
+  VIEWER_SCREENS_FLAG_PREF,
   boxSwitchSlot,
   decodeCarried,
   effectiveWorkspaces,
@@ -123,7 +125,10 @@ async function fetchList(): Promise<ListAnswer | null> {
  * a caller can tell a switch still on its way from one that is off. The switch
  * tells every reader on the page the moment it is saved (LINKED_BOXES_FLAG_EVENT).
  */
-export function useLinkedBoxesFlag(ask: boolean): boolean | null {
+export function useLinkedBoxesFlag(
+  ask: boolean,
+  { pref, event } = { pref: LINKED_BOXES_FLAG_PREF, event: LINKED_BOXES_FLAG_EVENT },
+): boolean | null {
   const [on, setOn] = useState<boolean | null>(null);
   useEffect(() => {
     if (!ask) return;
@@ -133,9 +138,9 @@ export function useLinkedBoxesFlag(ask: boolean): boolean | null {
     void (async () => {
       let answer = false;
       try {
-        const res = await fetch(`/setup-api/preferences?keys=${LINKED_BOXES_FLAG_PREF}`, { cache: "no-store" });
+        const res = await fetch(`/setup-api/preferences?keys=${pref}`, { cache: "no-store" });
         const body: Record<string, unknown> | null = res.ok ? await res.json() : null;
-        answer = body?.[LINKED_BOXES_FLAG_PREF] === true;
+        answer = body?.[pref] === true;
       } catch {
         /* No answer is off: the experiment stays hidden. */
       }
@@ -145,13 +150,22 @@ export function useLinkedBoxesFlag(ask: boolean): boolean | null {
       saved = true;
       setOn((e as CustomEvent<unknown>).detail === true);
     };
-    window.addEventListener(LINKED_BOXES_FLAG_EVENT, onSaved);
+    window.addEventListener(event, onSaved);
     return () => {
       live = false;
-      window.removeEventListener(LINKED_BOXES_FLAG_EVENT, onSaved);
+      window.removeEventListener(event, onSaved);
     };
-  }, [ask]);
+  }, [ask, pref, event]);
   return ask ? on : false;
+}
+
+/**
+ * The second experiment's switch (TASK-2771): a linked box shown in this kiosk
+ * is laid out by the kiosk's monitors. Read and saved exactly like the first.
+ */
+const VIEWER_SCREENS_FLAG = { pref: VIEWER_SCREENS_FLAG_PREF, event: VIEWER_SCREENS_FLAG_EVENT };
+export function useViewerScreensFlag(ask: boolean): boolean | null {
+  return useLinkedBoxesFlag(ask, VIEWER_SCREENS_FLAG);
 }
 
 /**

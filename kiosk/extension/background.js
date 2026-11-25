@@ -15,7 +15,9 @@
 //     linked ClawBox <slot>, each in a tab of its own (see switchBox below);
 //   { type: "boxes", selfName, boxes, emptyText } — the desktop's copy of
 //     the list; { type: "boxesRevoked" } — forget it (see below);
-//   { type: "pendingIndicator" } — the indicator a switch left for this tab.
+//   { type: "pendingIndicator" } — the indicator a switch left for this tab;
+//   { type: "viewerScreens" } — a linked box's page asks for the monitors of
+//     THIS kiosk, to be laid out by them (see viewerScreens below).
 //
 // The desktop is found by URL prefix: the origin of DESKTOP_ORIGINS, which is
 // what the launcher's CLAWBOX_KIOSK_URL is on a laptop (a different URL means
@@ -154,6 +156,10 @@ const PENDING_KEY = "linkedBoxIndicators";
 const PENDING_TTL_MS = 15000;
 const MAX_LABEL = 300;
 const ASK_DESKTOP_MS = 3000;
+// chrome.storage.local, kept by workspaces.js: the experiment's second switch.
+const SCREENS_FLAG_KEY = "linkedBoxScreensOn";
+const MAX_SCREENS = 16;
+const MAX_SCREEN_PX = 100000;
 
 // Moves on with every change of the kept list (a newer one saved, or the list
 // forgotten): a desktop answer asked for before it is stale.
@@ -258,10 +264,15 @@ function withDeadline(promise, ms) {
   return Promise.race([promise, late]).finally(() => clearTimeout(timer));
 }
 
+/** The kiosk's own desktop tab ("/" of a desktop origin), if it is open. */
+async function desktopTab() {
+  const all = await normalTabs();
+  return all.find((t) => t.id != null && isDesktop(t.url) && webOrigin(t.url) && new URL(t.url).pathname === "/");
+}
+
 async function askDesktopForBoxes() {
   const asked = listGeneration;
-  const all = await normalTabs();
-  const desk = all.find((t) => t.id != null && isDesktop(t.url) && webOrigin(t.url) && new URL(t.url).pathname === "/");
+  const desk = await desktopTab();
   if (!desk) return null;
   try {
     const list = await withDeadline(chrome.tabs.sendMessage(desk.id, { type: "readBoxes" }), ASK_DESKTOP_MS);
@@ -286,6 +297,77 @@ async function askDesktopForBoxes() {
   } catch {
     return null;
   }
+}
+
+// ─── A linked box's page on this kiosk's monitors (TASK-2771) ───
+//
+// A linked box serves its desktop from ITS box, which knows only its own
+// monitors; laid out by those, the desktop is stretched over this kiosk's row
+// as one screen. The page asks here ({ type: "viewerScreens" }, from
+// workspaces.js, every few seconds while it is shown) for the monitors of THIS
+// kiosk, and the worker asks the kiosk's own desktop to read them — its box,
+// same origin, the owner's session — rather than reading them itself.
+//
+// Only for a page on the origin of one of the owner's linked boxes (the list
+// kept above, session-bound and forgotten like everything else), only while
+// the experiment's switch is on, and only the GEOMETRY: the connector name for
+// an id (a monitor's own id carries its make, model and serial), where each
+// monitor that is on sits and how big it is, which is the main one, the
+// row's size and whether they mirror — rebuilt here value by value, nothing of
+// the box's answer passed through. A page can ask but cannot tell the worker
+// what the monitors are: the desktop tab's own script reads them.
+
+const sizedPx = (n) => typeof n === "number" && Number.isFinite(n) && n > 0 && n <= MAX_SCREEN_PX;
+const placedPx = (n) => typeof n === "number" && Number.isFinite(n) && Math.abs(n) <= MAX_SCREEN_PX;
+
+/** The box's monitor status as geometry only, `{ available: false }` when it has no layout to give, or undefined when it is not an answer. */
+function cleanScreens(raw) {
+  if (!raw || typeof raw !== "object") return undefined;
+  if (raw.available === false) return { available: false };
+  const box = raw.box;
+  if (raw.available !== true || !box || !sizedPx(box.width) || !sizedPx(box.height) || !Array.isArray(raw.monitors)) return undefined;
+  const monitors = [];
+  let main = null;
+  for (const m of raw.monitors.slice(0, MAX_SCREENS)) {
+    const r = m && m.enabled === true ? m.rect : null;
+    if (!r || !placedPx(r.x) || !placedPx(r.y) || !sizedPx(r.width) || !sizedPx(r.height)) continue;
+    const id = typeof m.name === "string" && /^[\x21-\x7e]{1,64}$/.test(m.name) ? m.name : `monitor-${monitors.length + 1}`;
+    if (monitors.some((x) => x.id === id)) continue;
+    if (m.id === raw.main) main = id;
+    monitors.push({ id, enabled: true, rect: { x: r.x, y: r.y, width: r.width, height: r.height }, ...(m.builtIn === true ? { builtIn: true } : {}) });
+  }
+  if (!monitors.length) return { available: false };
+  return { available: true, main, box: { width: box.width, height: box.height }, monitors, mirror: raw.mirror === true };
+}
+
+/** The kiosk's monitors from its own desktop tab, or undefined when that tab did not answer in time. */
+async function askDesktopForScreens() {
+  const desk = await desktopTab();
+  if (!desk) return undefined;
+  try {
+    return cleanScreens(await withDeadline(chrome.tabs.sendMessage(desk.id, { type: "readMonitors" }), ASK_DESKTOP_MS));
+  } catch {
+    return undefined;
+  }
+}
+
+async function viewerScreens(sender) {
+  // The page that asks, by the address Chrome says it is at, never by anything it sent.
+  const url = sender.url || (sender.tab && sender.tab.url);
+  const origin = url && !isDesktop(url) ? webOrigin(url) : null;
+  if (!origin) return { ok: false, error: "not a web page" };
+  const switchedOn = (await chrome.storage.local.get(SCREENS_FLAG_KEY))[SCREENS_FLAG_KEY] === true;
+  const linked = async () => {
+    const list = switchedOn ? await storedBoxes() : null;
+    return !!list && cleanBoxes(list.boxes).some((b) => webOrigin(b.url) === origin);
+  };
+  if (!(await linked())) return { ok: false, error: "not a linked box" };
+  const revoked = revocations;
+  const screens = await askDesktopForScreens();
+  // The list forgotten, its session ended or this box taken off it while the
+  // desktop read the monitors: nothing leaves.
+  if (revocations !== revoked || !(await linked())) return { ok: false, error: "the list was forgotten" };
+  return screens ? { ok: true, screens } : { ok: true };
 }
 
 async function sessionGet(key) {
@@ -451,6 +533,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return { ok: true };
       case "pendingIndicator":
         return takePendingIndicator(sender.tab && sender.tab.id);
+      case "viewerScreens":
+        return viewerScreens(sender);
       default:
         return { ok: false, error: "unknown message" };
     }
