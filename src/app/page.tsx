@@ -377,12 +377,12 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   }
 
   if (id === "browser") {
-    // A globe drawn for ClawBox, on the app's light tile.
+    // A flat colour-block globe made for ClawBox, on the app's light tile.
     const scaled = Math.round(px * 1.85);
     return (
       // eslint-disable-next-line @next/next/no-img-element
       <img
-        src="/agent-browser-globe.png"
+        src="/agent-browser-flat-globe.png"
         alt=""
         draggable={false}
         style={{ width: scaled, height: scaled, objectFit: "contain", maxWidth: "none", maxHeight: "none" }}
