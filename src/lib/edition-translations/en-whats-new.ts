@@ -22,42 +22,32 @@ export const whatsNewEn: Record<string, string> = {
 
   "whatsNew.vaultTitle": "ClawBox Vault, passwords built in",
   "whatsNew.vaultBody":
-    "A password manager built into ClawBox, opened by the owner from its desktop icon. Once you choose a vault PIN, the box's browser offers to save your logins and fills them in, and the assistant can log in to a site for you without ever seeing the password.",
+    "A password manager built into ClawBox, opened by the owner from its desktop icon. Once you choose a vault PIN, the box's browser offers to save your logins and fills them in, and the assistant can sign in to a site for you without ever seeing the password.",
   "whatsNew.orgModeTitle": "Organisation mode, for a company's staff",
   "whatsNew.orgModeBody":
-    "A switch in Settings → System → Users gives other users only Chat, Files and their own settings, each with a limited assistant and a memory of their own. The owner picks the tools staff may use, sets upload, storage and chat limits, and reads an audit log.",
-  "whatsNew.externalEngineTitle": "Your own AI engine as Local AI",
+    "A switch in Settings → System → Users gives other users only Chat, Files and their own settings. Each member of staff chats with a limited assistant that has a memory of their own, and keeps files in a home folder of their own beside a Shared folder. The owner gives staff chosen tools, sets upload, storage and chat limits, and reads an audit log.",
+  "whatsNew.externalEngineTitle": "A ClawBox Workstation as your AI engine",
   "whatsNew.externalEngineBody":
-    "Settings → Local AI → External engine runs the chat on an OpenAI-compatible server you run on your network, such as vLLM, SGLang or llama.cpp, instead of the model on the box. Without a ClawBox AI sign-in, Prime Radiant, picture descriptions and the Memory Shard index use it too.",
+    "Settings → Local AI → External engine runs the chat on an OpenAI-compatible AI engine on your network, such as a ClawBox Workstation built from NVIDIA DGX Sparks, instead of the model on the box. On a Workstation of several Sparks, the owner sees each Spark and the shared engine under Settings → System → Cluster.",
   "whatsNew.weeklyUpdateTitle": "A weekly update check, on Telegram too",
   "whatsNew.weeklyUpdateBody":
-    "Every Monday morning the box looks for a newer ClawBox and tells you once per version: on Telegram, with an Update button, when a bot is connected, otherwise on the desktop. You can send /update to the bot at any time, and the update still waits for you to confirm it on the desktop or, where one is set up, in the approvals bot.",
-  "whatsNew.clawaiModelTitle": "One ClawBox AI model",
-  "whatsNew.clawaiModelBody":
-    "ClawBox AI is DeepSeek V4 Flash on every plan, for chat and for pictures. The update moves every setting that named a retired ClawBox AI model, such as the Max plan's own model, to deepseek-v4-flash. A model you chose from another provider stays.",
-  "whatsNew.openclawMoveTitle": "OpenClaw 2026.11.5, a one-way move",
-  "whatsNew.openclawMoveBody":
-    "On the OpenClaw edition the update takes OpenClaw from 2026.10.9 to 2026.11.5 and moves the assistant's data to its newer format. The move is one-way: after the update an older OpenClaw core cannot open the data any more.",
-  "whatsNew.checkInsJobTitle": "Check-ins become an automation job",
-  "whatsNew.checkInsJobBody":
-    "On OpenClaw 2026.11.5 the assistant's periodic check-in is an ordinary automation job. If your box had a check-in, the update turns it into a job, on or off as it was, and Unprompted check-ins in Settings → Harness switches that job without restarting the assistant.",
+    "Every Monday morning the box looks for a newer ClawBox and tells you once per version: on Telegram, with an Update button, when the bot can reach you, otherwise on the desktop. You can send /update to the bot in a private chat at any time, and the update still waits for you to confirm it on the desktop or, where one is set up, in the approvals bot.",
+  "whatsNew.officeFilesTitle": "Word, Excel and PowerPoint files in the chat",
+  "whatsNew.officeFilesBody":
+    "The chat takes Word, Excel, PowerPoint and OpenDocument attachments (.docx, .xlsx, .pptx, .odt, .ods), and the box reads their text for the assistant. A password-protected file is turned away with a note that says why.",
 
   // The card's slides: one highlight each, so each gets a one- or two-line
   // summary. The bodies above stay whole for the /updating screen's panel.
   "whatsNew.vaultSummary":
-    "A password manager built into ClawBox: the browser saves and fills your logins, and the assistant logs in without seeing a password.",
+    "A password manager in ClawBox: the box's browser saves and fills your logins, and the assistant signs in without seeing the password.",
   "whatsNew.orgModeSummary":
-    "Give a company's staff only Chat, Files and their own settings, each with a limited assistant and a memory of their own.",
+    "Each member of staff gets a limited assistant with their own memory and files. The owner sets tools and limits and reads an audit log.",
   "whatsNew.externalEngineSummary":
-    "Run the chat on an OpenAI-compatible AI server on your own network, such as vLLM, SGLang or llama.cpp.",
+    "Run the chat on an AI engine on your network, such as a ClawBox Workstation, instead of the model on the box.",
   "whatsNew.weeklyUpdateSummary":
-    "Every Monday the box looks for a newer ClawBox and tells you, on Telegram with an Update button when a bot is connected.",
-  "whatsNew.clawaiModelSummary":
-    "ClawBox AI is DeepSeek V4 Flash on every plan. Settings that named a retired model now use deepseek-v4-flash.",
-  "whatsNew.openclawMoveSummary":
-    "On OpenClaw, the assistant's data moved to OpenClaw 2026.11.5's format. An older OpenClaw cannot open it any more.",
-  "whatsNew.checkInsJobSummary":
-    "On OpenClaw, a check-in your box had becomes an automation job, switched by Unprompted check-ins in Settings → Harness.",
+    "The box tells you when a new ClawBox is out, on Telegram too, and you can send /update to the bot in a private chat.",
+  "whatsNew.officeFilesSummary":
+    "Attach a Word, Excel, PowerPoint or OpenDocument file, and the box reads its text for the assistant.",
 
   // 4.3's highlights, kept for the /updating showcase's demos (see above).
   "whatsNew.screenshotTitle": "Screenshots, built in",

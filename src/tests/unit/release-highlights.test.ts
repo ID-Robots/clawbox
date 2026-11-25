@@ -26,32 +26,33 @@ import {
   splitHighlight,
   stripTags,
 } from "@/lib/release-highlights";
+import { whatsNewEn } from "@/lib/edition-translations/en-whats-new";
+import { WHATS_NEW_HIGHLIGHTS } from "@/lib/whats-new";
 
 const notes = (version: string) =>
   fs.readFileSync(path.join(process.cwd(), `RELEASE-NOTES-${version}.md`), "utf-8");
 
 describe("parseReleaseHighlights on the releases this repo shipped", () => {
-  it("reads the seven 4.4.0 highlights, title and body, in order, all of them within the panel's handful", () => {
+  it("reads the five 4.4.0 highlights, title and body, in order, word for word the card's English copy", () => {
     const highlights = parseReleaseHighlights(notes("4.4.0"));
     expect(highlights.map((h) => h.title)).toEqual([
-      "OpenClaw 2026.11.5, a one-way move",
-      "Check-ins become an automation job",
-      "One ClawBox AI model",
       "ClawBox Vault, passwords built in",
       "Organisation mode, for a company's staff",
-      "Your own AI engine as Local AI",
+      "A ClawBox Workstation as your AI engine",
       "A weekly update check, on Telegram too",
+      "Word, Excel and PowerPoint files in the chat",
     ]);
-    // Seven, and nothing past the panel's cap was cut to get there. The three
-    // that change a box on its way up come first: a box that shows only the
-    // first few highlights before it updates still names all three.
+    // Five, and nothing past the panel's cap was cut to get there.
     expect(parseReleaseHighlights(notes("4.4.0"), 100)).toEqual(highlights);
     expect(highlights.length).toBeLessThanOrEqual(MAX_HIGHLIGHTS);
-    expect(highlights[0].body).toMatch(/from 2026\.10\.9 to 2026\.11\.5 .* an older OpenClaw core cannot open the data any more\.$/);
-    expect(highlights[1].body).toMatch(/^On OpenClaw 2026\.11\.5 .* If your box had a check-in, the update turns it into a job/);
-    expect(highlights[2].body).toContain("to deepseek-v4-flash.");
+    expect(highlights.map((h) => ({ title: h.title, body: h.body }))).toEqual(
+      WHATS_NEW_HIGHLIGHTS.map((item) => ({ title: whatsNewEn[item.title], body: whatsNewEn[item.body] })),
+    );
+    // The changes an update makes on its way to 4.4 are the notes' "Before
+    // you update", not highlights.
+    expect(notes("4.4.0")).toMatch(/^## Before you update$/m);
     for (const h of highlights) {
-      expect(`${h.title} ${h.body}`).not.toMatch(/\*\*|`|\s{2}/);
+      expect(`${h.title} ${h.body}`).not.toMatch(/\*\*|`|\s{2}|2026\.11\.5|deepseek/);
       expect(h.title.length).toBeLessThan(MAX_TITLE_CHARS);
       expect(h.body.length).toBeLessThan(MAX_BODY_CHARS);
     }

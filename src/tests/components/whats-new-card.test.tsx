@@ -7,7 +7,6 @@ import { translations } from "@/lib/translations";
 import { useWhatsNew, WHATS_NEW_SETTLE_MS } from "@/lib/use-whats-new";
 import {
   WHATS_NEW_DOCS_URL,
-  WHATS_NEW_GENERIC_IMAGE,
   WHATS_NEW_HIGHLIGHTS,
   WHATS_NEW_PLANS_URL,
   type WhatsNewPlanCta,
@@ -19,7 +18,7 @@ import { LANGUAGES, type Locale } from "@/lib/i18n";
  * TASK-1059, TASK-1195: the desktop's "What's new in 4.4" card.
  *
  * A dialog with one slide per 4.4 highlight, each over a screenshot of the
- * feature, or the generic picture while it has none. The last slide links the docs page and offers the plan only for
+ * feature. The last slide links the docs page and offers the plan only for
  * what the box's plan does not cover yet. The Hermes edition is told about
  * switching back to OpenClaw.
  */
@@ -45,8 +44,6 @@ const en = translations.en;
 const PREVIOUS_HIGHLIGHTS = ["multiUser", "monitorMode", "githubBackup", "kiosk", "editionChoice", "clawkeep", "hardwareFixes"];
 /** The 4.1 and 4.0 cards' highlight keys, gone since. */
 const OLDER_HIGHLIGHTS = ["phoneFullscreen", "chatRestore", "webappData", "autoMerge", "codingAgent", "hostname", "phoneChat", "modelPills"];
-/** The highlights' pictures, as strings: a release may show the generic one on every slide. */
-const PICTURES: readonly { image: string; fullImage: string }[] = WHATS_NEW_HIGHLIGHTS;
 
 function stateWith(cta: WhatsNewPlanCta, overrides: Partial<WhatsNewState> = {}): WhatsNewState {
   return {
@@ -86,13 +83,13 @@ describe("WhatsNewCard", () => {
     expect(within(dialog).getByRole("region", { name: "Highlights of ClawBox 4.4" })).toBeInTheDocument();
   });
 
-  it("pages through the seven 4.4 highlights, one per slide, each over its picture", () => {
+  it("pages through the five 4.4 highlights, one per slide, each over its own screenshot", () => {
     render(<WhatsNewCard state={MAX} onDismiss={() => {}} />);
-    expect(WHATS_NEW_HIGHLIGHTS).toHaveLength(7);
+    expect(WHATS_NEW_HIGHLIGHTS).toHaveLength(5);
     WHATS_NEW_HIGHLIGHTS.forEach((item, i) => {
       const current = slide();
       expect(current).toHaveAttribute("aria-roledescription", "slide");
-      expect(current).toHaveAccessibleName(`${i + 1} of 7`);
+      expect(current).toHaveAccessibleName(`${i + 1} of 5`);
       expect(within(current).getByRole("heading", { level: 3 })).toHaveTextContent(en[item.title]);
       expect(within(current).getByText(en[item.summary])).toBeInTheDocument();
       expect(within(current).getByTestId("whats-new-image")).toHaveAttribute("src", item.image);
@@ -105,13 +102,11 @@ describe("WhatsNewCard", () => {
 
   it("names the highlights in the release notes' order, with a short summary beside the panel's full body", () => {
     expect(WHATS_NEW_HIGHLIGHTS.map((item) => en[item.title])).toEqual([
-      "OpenClaw 2026.11.5, a one-way move",
-      "Check-ins become an automation job",
-      "One ClawBox AI model",
       "ClawBox Vault, passwords built in",
       "Organisation mode, for a company's staff",
-      "Your own AI engine as Local AI",
+      "A ClawBox Workstation as your AI engine",
       "A weekly update check, on Telegram too",
+      "Word, Excel and PowerPoint files in the chat",
     ]);
     for (const item of WHATS_NEW_HIGHLIGHTS) {
       expect(en[item.body], item.body).toBeTruthy();
@@ -122,13 +117,9 @@ describe("WhatsNewCard", () => {
     }
   });
 
-  it("every picture ships in public/: a small WebP screenshot of its own, or the generic picture", () => {
-    // The generic picture is a real JPEG, the ClawBox wallpaper: no feature
-    // in it, so a highlight without a screenshot never shows another one.
-    expect(readFileSync(path.join(process.cwd(), "public", WHATS_NEW_GENERIC_IMAGE)).subarray(0, 3)).toEqual(Buffer.from([0xff, 0xd8, 0xff]));
+  it("every screenshot is a small WebP that ships in public/", () => {
     const seen = new Set<string>();
-    for (const { image } of PICTURES) {
-      if (image === WHATS_NEW_GENERIC_IMAGE) continue;
+    for (const { image } of WHATS_NEW_HIGHLIGHTS) {
       expect(image, image).toMatch(/^\/whats-new\/4\.4\/[a-z-]+\.webp$/);
       expect(seen.has(image), `${image} is used twice`).toBe(false);
       seen.add(image);
@@ -156,7 +147,7 @@ describe("WhatsNewCard", () => {
     expect(slide()).toHaveAttribute("data-slide", "0");
 
     const dots = screen.getAllByTestId("whats-new-dot");
-    expect(dots).toHaveLength(7);
+    expect(dots).toHaveLength(5);
     expect(dots[0]).toHaveAttribute("aria-current", "step");
     fireEvent.click(screen.getByRole("button", { name: "Show highlight 5" }));
     expect(slide()).toHaveAttribute("data-slide", "4");
@@ -432,7 +423,7 @@ describe("WhatsNewCard", () => {
       expect(dialog).toHaveAttribute("aria-modal", "true");
       expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[1].fullImage);
       expect(viewImage()).toHaveAttribute("alt", en[WHATS_NEW_HIGHLIGHTS[1].title]);
-      expect(within(dialog).getByText("2 of 7", { exact: false })).toBeInTheDocument();
+      expect(within(dialog).getByText("2 of 5", { exact: false })).toBeInTheDocument();
       expect(document.activeElement).toBe(within(dialog).getByRole("button", { name: "Close full screen" }));
       // Drawn over the card: in the body, one layer above it.
       expect(dialog.parentElement).toBe(document.body);
@@ -486,23 +477,17 @@ describe("WhatsNewCard", () => {
       const prev = () => screen.getByRole("button", { name: "Previous screenshot" });
       const next = () => screen.getByRole("button", { name: "Next screenshot" });
       expect(prev()).toBeDisabled();
-      // Each step shows that feature's picture, named for it: the name tells
-      // two features apart that share the generic picture.
-      const shows = (i: number) => {
-        expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[i].fullImage);
-        expect(viewImage()).toHaveAttribute("alt", en[WHATS_NEW_HIGHLIGHTS[i].title]);
-      };
       fireEvent.click(next());
-      shows(1);
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[1].fullImage);
       fireEvent.keyDown(window, { key: "ArrowRight" });
-      shows(2);
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[2].fullImage);
       fireEvent.keyDown(window, { key: "ArrowLeft" });
-      shows(1);
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[1].fullImage);
       expect(view()).toHaveAttribute("data-slide", "1");
       // One step per key: the card's own handler stands aside while the view is up.
       expect(slide()).toHaveAttribute("data-slide", "1");
       for (let i = 1; i < WHATS_NEW_HIGHLIGHTS.length; i++) fireEvent.keyDown(window, { key: "ArrowRight" });
-      shows(WHATS_NEW_HIGHLIGHTS.length - 1);
+      expect(viewImage()).toHaveAttribute("src", WHATS_NEW_HIGHLIGHTS[4].fullImage);
       expect(next()).toBeDisabled();
       // Closing lands on the feature last looked at.
       fireEvent.keyDown(window, { key: "Escape" });
@@ -547,12 +532,7 @@ describe("WhatsNewCard", () => {
 
     it("every full-resolution screenshot is a real WebP of at most 1920x1200, in 16:10, kept small", () => {
       const seen = new Set<string>();
-      for (const { image, fullImage } of PICTURES) {
-        // No screenshot yet: the generic picture, full screen as well.
-        if (image === WHATS_NEW_GENERIC_IMAGE) {
-          expect(fullImage, fullImage).toBe(WHATS_NEW_GENERIC_IMAGE);
-          continue;
-        }
+      for (const { image, fullImage } of WHATS_NEW_HIGHLIGHTS) {
         expect(fullImage, fullImage).toBe(image.replace(/\.webp$/, "-full.webp"));
         expect(seen.has(fullImage)).toBe(false);
         seen.add(fullImage);

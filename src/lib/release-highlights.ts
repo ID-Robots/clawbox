@@ -32,7 +32,7 @@ export interface ReleaseHighlight {
 
 /**
  * A panel shows a handful and links to the rest: the update screen's step list
- * stays the thing to read. The 4.4 notes list seven, the 4.3 notes eleven (the
+ * stays the thing to read. The 4.4 notes list five, the 4.3 notes eleven (the
  * first seven are the headline features), the 4.2 notes seven, the 4.1 notes
  * four, the 4.0 notes eight.
  */

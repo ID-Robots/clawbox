@@ -26,15 +26,6 @@ import { PORTAL_PLANS_URL } from "@/lib/clawai-usage";
 export const WHATS_NEW_RELEASE = "4.4";
 
 /**
- * The picture a highlight shows until it has a screenshot of its own: the
- * ClawBox wallpaper already in `public/`, which pictures no feature at all.
- * None of the 4.4 highlights has a screenshot yet, and a 4.3 screenshot would
- * show the owner a different feature; the card and the showcase have no slide
- * without a picture.
- */
-export const WHATS_NEW_GENERIC_IMAGE = "/clawbox-wallpaper.jpeg";
-
-/**
  * The highlights of the release {@link WHATS_NEW_RELEASE} names, in the order
  * its release notes list them — catalogue keys, so they read in the owner's
  * language. The copy is taken from RELEASE-NOTES-4.4.0.md, so this list should
@@ -47,65 +38,48 @@ export const WHATS_NEW_GENERIC_IMAGE = "/clawbox-wallpaper.jpeg";
  * highlight per slide, so it shows the `summary` (one or two lines) under a
  * screenshot of the feature itself, `image`, served from `public/`. The
  * slide's full-screen view shows the same picture at full resolution,
- * `fullImage` (up to 1920x1200), fitted to the screen. A highlight with no
- * screenshot yet shows {@link WHATS_NEW_GENERIC_IMAGE} in both.
+ * `fullImage` (up to 1920x1200), fitted to the screen.
  */
 export const WHATS_NEW_HIGHLIGHTS = [
-  {
-    icon: "upgrade",
-    title: "whatsNew.openclawMoveTitle",
-    body: "whatsNew.openclawMoveBody",
-    summary: "whatsNew.openclawMoveSummary",
-    image: WHATS_NEW_GENERIC_IMAGE,
-    fullImage: WHATS_NEW_GENERIC_IMAGE,
-  },
-  {
-    icon: "schedule",
-    title: "whatsNew.checkInsJobTitle",
-    body: "whatsNew.checkInsJobBody",
-    summary: "whatsNew.checkInsJobSummary",
-    image: WHATS_NEW_GENERIC_IMAGE,
-    fullImage: WHATS_NEW_GENERIC_IMAGE,
-  },
-  {
-    icon: "smart_toy",
-    title: "whatsNew.clawaiModelTitle",
-    body: "whatsNew.clawaiModelBody",
-    summary: "whatsNew.clawaiModelSummary",
-    image: WHATS_NEW_GENERIC_IMAGE,
-    fullImage: WHATS_NEW_GENERIC_IMAGE,
-  },
   {
     icon: "password",
     title: "whatsNew.vaultTitle",
     body: "whatsNew.vaultBody",
     summary: "whatsNew.vaultSummary",
-    image: WHATS_NEW_GENERIC_IMAGE,
-    fullImage: WHATS_NEW_GENERIC_IMAGE,
+    image: "/whats-new/4.4/vault.webp",
+    fullImage: "/whats-new/4.4/vault-full.webp",
   },
   {
     icon: "corporate_fare",
     title: "whatsNew.orgModeTitle",
     body: "whatsNew.orgModeBody",
     summary: "whatsNew.orgModeSummary",
-    image: WHATS_NEW_GENERIC_IMAGE,
-    fullImage: WHATS_NEW_GENERIC_IMAGE,
+    image: "/whats-new/4.4/org-mode.webp",
+    fullImage: "/whats-new/4.4/org-mode-full.webp",
   },
   {
     icon: "dns",
     title: "whatsNew.externalEngineTitle",
     body: "whatsNew.externalEngineBody",
     summary: "whatsNew.externalEngineSummary",
-    image: WHATS_NEW_GENERIC_IMAGE,
-    fullImage: WHATS_NEW_GENERIC_IMAGE,
+    image: "/whats-new/4.4/external-engine.webp",
+    fullImage: "/whats-new/4.4/external-engine-full.webp",
   },
   {
     icon: "event_repeat",
     title: "whatsNew.weeklyUpdateTitle",
     body: "whatsNew.weeklyUpdateBody",
     summary: "whatsNew.weeklyUpdateSummary",
-    image: WHATS_NEW_GENERIC_IMAGE,
-    fullImage: WHATS_NEW_GENERIC_IMAGE,
+    image: "/whats-new/4.4/weekly-update.webp",
+    fullImage: "/whats-new/4.4/weekly-update-full.webp",
+  },
+  {
+    icon: "description",
+    title: "whatsNew.officeFilesTitle",
+    body: "whatsNew.officeFilesBody",
+    summary: "whatsNew.officeFilesSummary",
+    image: "/whats-new/4.4/office-files.webp",
+    fullImage: "/whats-new/4.4/office-files-full.webp",
   },
 ] as const;
 

@@ -16,7 +16,7 @@ Entries are grouped by release, newest first.
 
 <Columns cols={2}>
   <Card title="4.4" href="#clawbox-44" icon="key">
-    ClawBox Vault, organisation mode, your own AI engine as Local AI, a weekly update check and OpenClaw 2026.11.5.
+    ClawBox Vault, organisation mode, a ClawBox Workstation as your AI engine, a weekly update check and Office files in the chat.
   </Card>
   <Card title="4.3" href="#clawbox-43" icon="sparkles">
     Screenshots, one shared browser, public app links, xAI Grok, Prime Radiant and updates that ask before they stop your agents.
@@ -48,11 +48,12 @@ Looking for your installed version? Open **Settings → About**. To update, open
 </Note>
 
 ClawBox 4.4 adds ClawBox Vault, a password manager built into ClawBox, and an organisation
-mode for a ClawBox that serves a company's staff. Local AI can run on an AI engine of your own on
-your network, and the box checks for updates every week and can tell you on Telegram. ClawBox AI
-is one model now, DeepSeek V4 Flash. On the OpenClaw edition the assistant moves to OpenClaw
-2026.11.5, a one-way move, and its periodic check-in becomes an automation job. After updating,
-the desktop shows a **What's new in 4.4** card. Choose **Got it** to hide it on all your browsers.
+mode for a ClawBox that serves a company's staff. Local AI can run on an AI engine on your
+network, such as a ClawBox Workstation, the box checks for updates every week and can tell you on
+Telegram, and the chat reads Word, Excel and PowerPoint files. Three changes happen on the way to
+4.4 and are listed under [Before you update to 4.4](#before-you-update-to-44): the OpenClaw
+2026.11.5 move, check-ins as an automation job, and one ClawBox AI model. After updating, the
+desktop shows a **What's new in 4.4** card. Choose **Got it** to hide it on all your browsers.
 
 ### ClawBox Vault, passwords built in
 
@@ -69,36 +70,39 @@ factory reset removes it.
 
 **Organisation mode**, an owner-only switch in **Settings → System → Users**, gives other users
 only Chat, Files and their own settings. Each member of staff chats with a limited assistant of
-their own, with a memory nobody else can read, and their **Files** shows only their own home and a
+their own, with a memory other users cannot open, and their **Files** shows only their own home and a
 **Shared** folder. In the same place the owner chooses the **Tools for members of staff**, sets
 **Limits for other users** for uploads, home folders and chat messages, and reads the **Audit
 log**. The owner can also reset another user's password, and every other user can change their
 own in **Settings → Account**.
 
-### Your own AI engine as Local AI
+### A ClawBox Workstation as your AI engine
 
-**Settings → Local AI → External engine** runs the chat on an OpenAI-compatible server you run on
-your network, such as vLLM, SGLang or llama.cpp, instead of the model on the box. On a box without
-a ClawBox AI sign-in, Prime Radiant, picture descriptions and the Memory Shard index use it too,
-and **Your speech server** in **Settings → Local AI → Speech to text** can transcribe what you say
-on a server of your own. **Hide cloud AI providers** removes the cloud providers from Settings,
-the setup wizard and the chat's model picker.
+**Settings → Local AI → External engine** runs the chat on an OpenAI-compatible AI engine on your
+network, such as a ClawBox Workstation built from NVIDIA DGX Sparks, or a vLLM, SGLang or
+llama.cpp server, instead of the model on the box. On a Workstation of several Sparks, the owner
+sees each Spark and the shared engine in a **Cluster** tab under **Settings → System**, once the
+other Sparks are listed in the box's settings file. A Workstation gets its updates from a
+`workstation` channel of its own. On a box without a ClawBox AI sign-in, Prime Radiant, picture
+descriptions and the Memory Shard index use the External engine too, and **Your speech server** in
+**Settings → Local AI → Speech to text** can transcribe what you say on a server of your own.
+**Hide cloud AI providers** removes the cloud providers from Settings, the setup wizard and the
+chat's model picker.
 
 ### A weekly update check, on Telegram too
 
-**Check for updates every week**, in **Settings → System Update**, is on by default. Every Monday
-around 10:00, box time, the box looks for a newer ClawBox and tells you once per version: on
-Telegram, with an **Update** button, when a bot is connected, otherwise on the desktop. The owner
-can send **/update** to the bot at any time. The update starts only once you confirm it on the
-desktop, or with the button the approvals bot sends where one is set up, and not while agents are
-working.
+The **Weekly update check** in **Settings → System Update** is on by default. Every Monday around
+10:00, box time, the box looks for a newer ClawBox and tells you once per version: on Telegram,
+with an **Update** button, when the bot can reach you, otherwise on the desktop. The owner can
+send **/update** to the bot in a private chat at any time. The update starts only once you confirm
+it on the desktop, or with the button the approvals bot sends where one is set up. A tap on
+**Update** while agents are working says so and leaves them to finish.
 
-### One ClawBox AI model
+### Word, Excel and PowerPoint files in the chat
 
-ClawBox AI is **DeepSeek V4 Flash** on every plan, for chat and for pictures. The update moves
-every setting that named a retired ClawBox AI model, the Max plan's own model or the separate
-picture model, to `deepseek-v4-flash`; a picture setting goes to a vision fallback instead while
-Flash cannot see pictures. A model you chose from another provider stays as it is.
+The chat takes Word, Excel, PowerPoint and OpenDocument attachments (`.docx`, `.xlsx`, `.pptx`,
+`.odt`, `.ods`), and the box reads their text for the assistant, on both editions. A
+password-protected file is turned away with a note that says why.
 
 ### Smaller things
 
@@ -109,14 +113,13 @@ Flash cannot see pictures. A model you chose from another provider stays as it i
 - When the assistant drafts an email through a mail tool you granted, the chat can show the draft
   for you to approve, with **Send**, **Keep as draft** and **Tell me what to change**. Off until
   the owner turns it on in **Settings → Email**.
-- The chat takes Word, Excel, PowerPoint and OpenDocument attachments.
 - Memory search can use the larger Qwen3-Embedding-4B on a PC with an NVIDIA GPU.
 - In-app updates keep the chat down for much less time, reinstall only the OpenClaw plugins that
   need it, and offer **Try again** after a failure. **Full update log** shows everything the
   update printed.
 - **Linked ClawBoxes (experimental)**, off by default in **Settings → System Update → Advanced
   options**, switches between your ClawBoxes with Ctrl+Shift+1…9.
-- ClawBox installs on NVIDIA DGX Spark workstations, which follow an update channel of their own.
+- ClawBox installs on NVIDIA DGX Spark workstations with the PC installer.
 - A box whose Wi-Fi radio was switched off turns it back on, and the hotspot switch in Settings
   matches what the box does.
 - A Memory Shard index pass is no longer cut off after two hours.
@@ -136,7 +139,11 @@ Flash cannot see pictures. A model you chose from another provider stays as it i
   job. ClawBox does not create the job itself, so a box set up fresh on this release has none
   until one is created, and the row says so instead of showing a switch. A converted check-in is
   delivered like any other automation, so the same update can reach you more than once.
-- Settings that named a retired ClawBox AI model are moved to `deepseek-v4-flash`.
+- **One ClawBox AI model.** ClawBox AI is **DeepSeek V4 Flash** on every plan, for chat and for
+  pictures. The update moves every setting that named a retired ClawBox AI model, the Max plan's
+  own model or the separate picture model, to `deepseek-v4-flash`; a picture setting goes to a
+  vision fallback instead while Flash cannot see pictures. A model you chose from another provider
+  stays as it is.
 - Your data is preserved, and the edition lock is untouched.
 
 ### What works differently

@@ -1,7 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
-import { WHATS_NEW_GENERIC_IMAGE } from "../src/lib/whats-new";
 
 /**
  * "What's new in 4.4", in a real browser: a dialog of one slide per highlight
@@ -17,9 +16,9 @@ import { WHATS_NEW_GENERIC_IMAGE } from "../src/lib/whats-new";
  * its highlights scrolled inside a 320 px column and the offer was pushed off
  * the bottom of the screen beneath it.
  *
- * No 4.4 highlight has a screenshot or a live demo yet: each shows the generic
- * picture (WHATS_NEW_GENERIC_IMAGE), still, on the card and in the showcase.
- * The 4.3 demos stay covered by the showcase's component tests.
+ * No 4.4 highlight has a live demo yet: each shows its screenshot, still, on
+ * the card and in the showcase. The 4.3 demos stay covered by the showcase's
+ * component tests.
  */
 
 // A box with no ClawBox AI account, so the backup offer is due as well.
@@ -94,7 +93,7 @@ for (const size of [
 
     const dots = dialog.getByTestId("whats-new-dot");
     const total = await dots.count();
-    expect(total).toBe(7);
+    expect(total).toBe(5);
     for (let i = 0; i < total; i++) {
       const slide = dialog.getByTestId("whats-new-slide");
       await expect(slide).toHaveAttribute("data-slide", String(i));
@@ -166,14 +165,13 @@ for (const size of [
       const natural = await image.evaluate((img: HTMLImageElement) => img.naturalWidth);
       expect(box!.width).toBeLessThanOrEqual(natural + 1);
 
-      // The next feature's picture, by key; the previous one by its button.
-      // They share the generic picture, so the view's name tells them apart.
+      // The next feature's screenshot, by key; the previous one by its button.
       await page.keyboard.press("ArrowRight");
       await expect(view).toHaveAccessibleName(`Screenshot: ${SHOWCASE_TITLES[1]}`);
-      await expect(image).toHaveAttribute("src", WHATS_NEW_GENERIC_IMAGE);
+      await expect(image).toHaveAttribute("src", FULL_IMAGES[1]);
       await view.getByRole("button", { name: "Previous screenshot" }).click();
       await expect(view).toHaveAccessibleName(`Screenshot: ${SHOWCASE_TITLES[0]}`);
-      await expect(image).toHaveAttribute("src", WHATS_NEW_GENERIC_IMAGE);
+      await expect(image).toHaveAttribute("src", FULL_IMAGES[0]);
 
       // Escape closes the view, and only the view.
       await page.keyboard.press("Escape");
@@ -202,17 +200,16 @@ const RUN_STEPS = [
 
 /** The 4.4 highlights, in the notes' order. With no demo of its own, a highlight's chip is its title. */
 const SHOWCASE_CHIPS = [
-  "OpenClaw 2026.11.5, a one-way move",
-  "Check-ins become an automation job",
-  "One ClawBox AI model",
   "ClawBox Vault, passwords built in",
   "Organisation mode, for a company's staff",
-  "Your own AI engine as Local AI",
+  "A ClawBox Workstation as your AI engine",
   "A weekly update check, on Telegram too",
+  "Word, Excel and PowerPoint files in the chat",
 ];
 /** Their titles: the chips' own words, since none of them has a demo and a chip of its own. */
 const SHOWCASE_TITLES = SHOWCASE_CHIPS;
-const FULL_IMAGES = SHOWCASE_CHIPS.map(() => WHATS_NEW_GENERIC_IMAGE);
+const FULL_IMAGES = ["vault", "org-mode", "external-engine", "weekly-update", "office-files"]
+  .map((name) => `/whats-new/4.4/${name}-full.webp`);
 
 /** A box running an update to 4.4.0, as every route the update screens ask answers it. */
 async function mockRun(page: Page) {
@@ -269,10 +266,10 @@ test.describe("the update screen's What's new showcase", () => {
     await expect(showcase.getByTestId("whats-new-showcase-typed")).toContainText(SHOWCASE_TITLES[0]);
     await expect(showcase.getByTestId("whats-new-showcase-logo")).toBeVisible();
 
-    await showcase.getByRole("tab", { name: SHOWCASE_CHIPS[5] }).click();
-    await expect(showcase).toHaveAttribute("data-index", "5");
-    await expectStageImage(page, FULL_IMAGES[5]);
-    await expect(showcase.getByTestId("whats-new-showcase-live")).toHaveText(SHOWCASE_TITLES[5]);
+    await showcase.getByRole("tab", { name: SHOWCASE_CHIPS[2] }).click();
+    await expect(showcase).toHaveAttribute("data-index", "2");
+    await expectStageImage(page, FULL_IMAGES[2]);
+    await expect(showcase.getByTestId("whats-new-showcase-live")).toHaveText(SHOWCASE_TITLES[2]);
 
     const last = SHOWCASE_CHIPS.length - 1;
     await showcase.getByRole("tab", { name: SHOWCASE_CHIPS[last] }).click();

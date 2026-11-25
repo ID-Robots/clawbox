@@ -4,46 +4,41 @@ Previous release: v4.3.0, 6 November 2026. 301 commits.
 
 4.4 adds ClawBox Vault, a password manager built into ClawBox, and an
 organisation mode for a ClawBox that serves a company's staff. Local AI can run
-on an AI engine of your own on your network, and the box checks for updates
-every week and can tell you on Telegram. ClawBox AI is one model now, DeepSeek
-V4 Flash. On the OpenClaw edition the assistant moves to OpenClaw 2026.11.5, a
-one-way move, and its periodic check-in becomes an automation job. Updates are
-faster and steadier, and Wi-Fi, the hotspot, Memory Shard and installs on PCs
-get a long list of fixes.
+on an AI engine on your network, such as a ClawBox Workstation, the box checks
+for updates every week and can tell you on Telegram, and the chat reads Word,
+Excel and PowerPoint files. ClawBox AI is one model now, DeepSeek V4 Flash. On
+the OpenClaw edition the assistant moves to OpenClaw 2026.11.5, a one-way move,
+and its periodic check-in becomes an automation job: see Before you update.
+Updates are faster and steadier, and Wi-Fi, the hotspot, Memory Shard and
+installs on PCs get a long list of fixes.
 
 ## Highlights
 
-- **OpenClaw 2026.11.5, a one-way move.** On the OpenClaw edition the update
-  takes OpenClaw from 2026.10.9 to 2026.11.5 and moves the assistant's data to
-  its newer format. The move is one-way: after the update an older OpenClaw
-  core cannot open the data any more.
-- **Check-ins become an automation job.** On OpenClaw 2026.11.5 the
-  assistant's periodic check-in is an ordinary automation job. If your box had
-  a check-in, the update turns it into a job, on or off as it was, and
-  Unprompted check-ins in Settings → Harness switches that job without
-  restarting the assistant.
-- **One ClawBox AI model.** ClawBox AI is DeepSeek V4 Flash on every plan, for
-  chat and for pictures. The update moves every setting that named a retired
-  ClawBox AI model, such as the Max plan's own model, to deepseek-v4-flash. A
-  model you chose from another provider stays.
 - **ClawBox Vault, passwords built in.** A password manager built into
   ClawBox, opened by the owner from its desktop icon. Once you choose a vault
   PIN, the box's browser offers to save your logins and fills them in, and the
-  assistant can log in to a site for you without ever seeing the password.
-- **Organisation mode, for a company's staff.** A switch in Settings → System →
-  Users gives other users only Chat, Files and their own settings, each with a
-  limited assistant and a memory of their own. The owner picks the tools staff
-  may use, sets upload, storage and chat limits, and reads an audit log.
-- **Your own AI engine as Local AI.** Settings → Local AI → External engine runs
-  the chat on an OpenAI-compatible server you run on your network, such as
-  vLLM, SGLang or llama.cpp, instead of the model on the box. Without a ClawBox
-  AI sign-in, Prime Radiant, picture descriptions and the Memory Shard index
-  use it too.
+  assistant can sign in to a site for you without ever seeing the password.
+- **Organisation mode, for a company's staff.** A switch in Settings → System
+  → Users gives other users only Chat, Files and their own settings. Each
+  member of staff chats with a limited assistant that has a memory of their
+  own, and keeps files in a home folder of their own beside a Shared folder.
+  The owner gives staff chosen tools, sets upload, storage and chat limits,
+  and reads an audit log.
+- **A ClawBox Workstation as your AI engine.** Settings → Local AI → External
+  engine runs the chat on an OpenAI-compatible AI engine on your network, such
+  as a ClawBox Workstation built from NVIDIA DGX Sparks, instead of the model
+  on the box. On a Workstation of several Sparks, the owner sees each Spark
+  and the shared engine under Settings → System → Cluster.
 - **A weekly update check, on Telegram too.** Every Monday morning the box
   looks for a newer ClawBox and tells you once per version: on Telegram, with
-  an Update button, when a bot is connected, otherwise on the desktop. You can
-  send /update to the bot at any time, and the update still waits for you to
-  confirm it on the desktop or, where one is set up, in the approvals bot.
+  an Update button, when the bot can reach you, otherwise on the desktop. You
+  can send /update to the bot in a private chat at any time, and the update
+  still waits for you to confirm it on the desktop or, where one is set up, in
+  the approvals bot.
+- **Word, Excel and PowerPoint files in the chat.** The chat takes Word,
+  Excel, PowerPoint and OpenDocument attachments (.docx, .xlsx, .pptx, .odt,
+  .ods), and the box reads their text for the assistant. A password-protected
+  file is turned away with a note that says why.
 
 ## New features
 
@@ -122,7 +117,7 @@ get a long list of fixes.
 
 ### Weekly update check
 
-- **Check for updates every week**, in **Settings → System Update**, is on by
+- The **Weekly update check**, in **Settings → System Update**, is on by
   default. Every Monday around 10:00, box time, the box looks for a newer
   ClawBox on the branch it follows and tells you once per version: on Telegram
   with a few highlights and an **Update** button when a bot is connected,
@@ -350,7 +345,7 @@ get a long list of fixes.
 - On OpenClaw, the OpenClaw icon no longer leads to a dead address when the box
   is reached through a tunnel.
 
-## Upgrade notes
+## Before you update
 
 - Upgrade from 4.3.x, 4.2.x, 4.1.x or 4.0.x in **Settings → System Update**, or
   over SSH by running `sudo bash install.sh` in the ClawBox checkout. On the

@@ -120,10 +120,10 @@ describe("UpdateWhatsNewPanel", () => {
     expect(panel).toHaveAttribute("data-kind", "bundled");
     const list = within(panel).getByRole("list");
     expect(list).not.toHaveAttribute("lang");
-    expect(within(list).getAllByRole("listitem")).toHaveLength(7);
+    expect(within(list).getAllByRole("listitem")).toHaveLength(5);
     expect(within(list).getByText(de["whatsNew.vaultTitle"])).toBeInTheDocument();
     expect(within(list).getByText(de["whatsNew.orgModeBody"])).toBeInTheDocument();
-    expect(within(list).getByText(de["whatsNew.openclawMoveTitle"])).toBeInTheDocument();
+    expect(within(list).getByText(de["whatsNew.officeFilesTitle"])).toBeInTheDocument();
     expect(within(panel).getByRole("link")).toHaveAttribute("href", releasePageUrl(NONE_ON_LINE.version));
   });
 
