@@ -1709,7 +1709,7 @@ export const ja: Record<string, string> = {
   "whatsNew.externalEngineTitle": "自分の AI エンジンをローカル AI に",
   "whatsNew.externalEngineBody": "設定 → ローカル AI → 外部エンジンで、ClawBox 上のモデルの代わりに、ネットワーク上で動かしている OpenAI 互換サーバー（vLLM、SGLang、llama.cpp など）でチャットを動かせます。ClawBox AI にサインインしていなければ、Prime Radiant、画像の説明、Memory Shard のインデックスもこのエンジンを使います。",
   "whatsNew.weeklyUpdateTitle": "毎週のアップデート確認、Telegram にも",
-  "whatsNew.weeklyUpdateBody": "毎週月曜の午前に ClawBox が新しいバージョンを探し、バージョンごとに一度だけお知らせします。ボットが接続されていれば更新ボタン付きで Telegram に、なければデスクトップに表示します。いつでもボットに /update を送れますが、更新はデスクトップで、承認ボットがあればそこで確定するまで始まりません。",
+  "whatsNew.weeklyUpdateBody": "毎週月曜の午前に ClawBox が新しいバージョンを探し、バージョンごとに一度だけお知らせします。ボットが接続されていれば更新ボタン付きで Telegram に、なければデスクトップに表示します。いつでもボットに /update を送れますが、更新はデスクトップ、または承認ボットが設定されていればそのボットで確定するまで始まりません。",
   "whatsNew.clawaiModelTitle": "ClawBox AI のモデルはひとつに",
   "whatsNew.clawaiModelBody": "ClawBox AI はどのプランでも DeepSeek V4 Flash で、チャットにも画像にも使われます。アップデートは、Max プラン専用のモデルなど、提供を終えた ClawBox AI のモデルを指していた設定をすべて deepseek-v4-flash に切り替えます。ほかのプロバイダーで選んだモデルはそのままです。",
   "whatsNew.openclawMoveTitle": "OpenClaw 2026.11.5：元に戻せない移行",

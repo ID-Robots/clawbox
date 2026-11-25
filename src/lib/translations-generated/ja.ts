@@ -5263,7 +5263,7 @@ const table: Record<string, string> = {
   "whatsNew.vaultBody": "ClawBox に組み込まれたパスワードマネージャーで、オーナーがデスクトップのアイコンから開きます。保管庫の PIN を決めると、ClawBox のブラウザーがログイン情報の保存を提案して自動入力し、アシスタントはパスワードを一度も見ずにあなたの代わりにサイトへログインできます。",
   "whatsNew.vaultSummary": "ClawBox に組み込まれたパスワードマネージャー。ブラウザーがログイン情報を保存・入力し、アシスタントはパスワードを見ずにログインします。",
   "whatsNew.vaultTitle": "ClawBox Vault：パスワード管理を内蔵",
-  "whatsNew.weeklyUpdateBody": "毎週月曜の午前に ClawBox が新しいバージョンを探し、バージョンごとに一度だけお知らせします。ボットが接続されていれば更新ボタン付きで Telegram に、なければデスクトップに表示します。いつでもボットに /update を送れますが、更新はデスクトップで、承認ボットがあればそこで確定するまで始まりません。",
+  "whatsNew.weeklyUpdateBody": "毎週月曜の午前に ClawBox が新しいバージョンを探し、バージョンごとに一度だけお知らせします。ボットが接続されていれば更新ボタン付きで Telegram に、なければデスクトップに表示します。いつでもボットに /update を送れますが、更新はデスクトップ、または承認ボットが設定されていればそのボットで確定するまで始まりません。",
   "whatsNew.weeklyUpdateSummary": "毎週月曜に ClawBox が新しいバージョンを探してお知らせ。ボットがあれば Telegram に更新ボタン付きで届きます。",
   "whatsNew.weeklyUpdateTitle": "毎週のアップデート確認、Telegram にも",
   "wifi.availableNetworks": "利用可能なネットワーク",
