@@ -219,9 +219,12 @@ async function assertPortraitComposer(
       expect(box.x).toBeGreaterThanOrEqual(0);
       expect(box.right).toBeLessThanOrEqual(viewport.width);
       expect(box.bottom).toBeLessThanOrEqual(viewport.height);
-      expect(box.height).toBeGreaterThanOrEqual(40);
-      expect(box.width).toBeGreaterThanOrEqual(40);
+      expect(box.height).toBeGreaterThanOrEqual(44);
+      expect(box.width).toBeGreaterThanOrEqual(44);
     }
+    // One row: every control's vertical centre on the same line.
+    const centres = geometry.controls.map(box => box.y + box.height / 2);
+    expect(Math.max(...centres) - Math.min(...centres)).toBeLessThan(1.5);
     for (let i = 0; i < geometry.controls.length; i++) {
       for (const b of geometry.controls.slice(i + 1)) {
         const a = geometry.controls[i];
@@ -229,6 +232,8 @@ async function assertPortraitComposer(
       }
     }
   }
+  // The chat slides up on open; sample the composer once that has landed.
+  await expect.poll(() => page.getByTestId("chat-popup").evaluate(el => el.getAnimations().length)).toBe(0);
   await assertRow();
   await page.screenshot({ path: testInfo.outputPath("composer-idle.png") });
   await primary.locator("textarea").fill(locale === "bg" ? "Напиши кратък отговор" : "Schreibe eine kurze Antwort");
@@ -535,8 +540,8 @@ test.describe("a phone held upright 360x780", () => {
     }).toBe(true);
     const menuButton = page.getByTestId("chat-phone-menu-button");
     const buttonBox = (await menuButton.boundingBox())!;
-    expect(buttonBox.width).toBeGreaterThanOrEqual(40);
-    expect(buttonBox.height).toBeGreaterThanOrEqual(40);
+    expect(buttonBox.width).toBeGreaterThanOrEqual(44);
+    expect(buttonBox.height).toBeGreaterThanOrEqual(44);
     // The conversation has a reply, so its name stands in the middle.
     await expect(page.getByTestId("chat-phone-title")).toHaveText("ClawBox");
     await page.screenshot({ path: testInfo.outputPath("portrait-bar.png") });
@@ -556,7 +561,8 @@ test.describe("a phone held upright 360x780", () => {
     for (const box of menuControls) {
       expect(box.x).toBeGreaterThanOrEqual(0);
       expect(box.right).toBeLessThanOrEqual(360);
-      expect(Math.min(box.width, box.height)).toBeGreaterThanOrEqual(40);
+      expect(box.width).toBeGreaterThanOrEqual(44);
+      expect(box.height).toBeGreaterThanOrEqual(44);
     }
     // The conversation's text size, from the menu, and nothing around it.
     await menu.getByRole("button", { name: "Larger text" }).click();
@@ -568,8 +574,9 @@ test.describe("a phone held upright 360x780", () => {
 
     // "+" and the model pill each open a bottom sheet over the composer.
     for (const [opener, name] of [["composer-options-toggle", "Chat options"], ["chat-model-pill", "Model"]] as const) {
+      // Both openers are part of this fixture's composer: a missing one fails.
       const control = page.getByTestId(opener);
-      if (await control.count() === 0) continue;
+      await expect(control).toBeVisible();
       await control.click();
       const sheet = page.getByRole("dialog", { name });
       await expect(sheet).toBeVisible();
