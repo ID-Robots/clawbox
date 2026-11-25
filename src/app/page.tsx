@@ -39,7 +39,6 @@ import ToastHost from "@/components/ToastHost";
 import BackgroundTaskCards, { useBackgroundTasks } from "@/components/BackgroundTaskCards";
 import PowerApprovalPrompt, { POWER_APPROVAL_EVENT } from "@/components/PowerApprovalPrompt";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
-import AgentBrowserIcon from "@/components/AgentBrowserIcon";
 import GoogleChromeIcon from "@/components/GoogleChromeIcon";
 import PrimeRadiantIcon from "@/components/PrimeRadiantIcon";
 import { I18nProvider, useT } from "@/lib/i18n";
@@ -378,7 +377,17 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   }
 
   if (id === "browser") {
-    return <AgentBrowserIcon className={`${size} text-white`} />;
+    // A flat colour-block globe made for ClawBox, on the app's light tile.
+    const scaled = Math.round(px * 1.85);
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src="/agent-browser-flat-globe.png"
+        alt=""
+        draggable={false}
+        style={{ width: scaled, height: scaled, objectFit: "contain", maxWidth: "none", maxHeight: "none" }}
+      />
+    );
   }
 
   if (id === DESKTOP_CHROME_APP_ID) {
