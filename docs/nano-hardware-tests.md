@@ -514,6 +514,17 @@ Notes on what the brief asked for and what the box actually offers:
   is reported as a skip.
 - **The ClawBox edition.** The suite assumes the OpenClaw edition every lab
   board runs; on a Hermes-only board the gateway tests fail rather than skip.
+- **The kept state `85` leaves (known limits).** After an update that had
+  moved the OpenClaw core fails, the box serves the release's build over the
+  branch's checkout, and System Update says the update failed and offers it
+  again. Until that update runs, two things fail, both because the release's
+  build runs over the newer core, whichever commit is checked out:
+  Settings → Local AI's install (`68-local-ai-chat`), because the release's
+  dashboard passes `--profile-id`, which the newer core refuses while its
+  gateway runs; and, when doctor's migration was cut short, the gateway after
+  its next restart, which exits 78 on the databases it has not finished
+  migrating and is not restarted. One completed update clears both. Run
+  neither `68` nor `75` against that state.
 
 ### Secrets
 
