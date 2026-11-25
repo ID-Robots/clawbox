@@ -6029,6 +6029,46 @@ describe("updater", () => {
       ([entries]) => "update_needs_continuation" in entries && entries.update_needs_continuation === undefined,
     );
 
+    it("leaves no full update going that reads a later case's rebuild unit", async () => {
+      // A case that waits only on an early step leaves its run going, and the
+      // run goes on into the rebuild step. On a box the unit that step queues
+      // replaces this server; nothing replaces a test. A dispatch the fixture
+      // answered left the run in waitForRebuildToTakeOver, asking the rebuild
+      // unit's Result every 5 s through whichever case came next — and a case
+      // whose unit had failed got that run's "Rebuild failed — see …" over its
+      // own state and one more clear of its continuation flag.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        updater.resetUpdateState();
+        updater.startUpdate();
+        await vi.advanceTimersByTimeAsync(60_000);
+        const dispatches = mockExecFile.mock.calls
+          .filter(([, args]) => (args as string[]).join(" ").includes("--no-block rebuild_reboot"));
+        expect(dispatches).toHaveLength(1);
+
+        // What the next case does first: a reset, and a rebuild unit that failed.
+        updater.resetUpdateState();
+        setupExecFileMock({
+          [`show ${REBUILD_UNIT} -p Result`]: { stdout: "exit-code\n", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+        mockExecFile.mockClear();
+        mockSetMany.mockClear();
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(updater.getUpdateState().error).toBeUndefined();
+        expect(updater.getUpdateState().phase).toBe("idle");
+        expect(mockSetMany).not.toHaveBeenCalled();
+        const resultAsks = mockExecFile.mock.calls
+          .filter(([, args]) => (args as string[]).join(" ").includes(`${REBUILD_UNIT} -p Result`));
+        expect(resultAsks).toEqual([]);
+      } finally {
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
     it("shows the rebuild's own error line when the server came back before the rebuild unit ended", async () => {
       updater.resetUpdateState();
       const journal: JournalEntry[] = [
