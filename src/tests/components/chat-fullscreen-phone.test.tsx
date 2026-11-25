@@ -7,6 +7,7 @@ import {
   CHAT_TEXT_SCALE_STORAGE_KEY,
   resetChatPhoneLayoutMemory,
 } from "@/lib/chat-phone-layout";
+import { CHAT_MOBILE_BACK, mobileBackDepth, resetMobileBackForTests, runMobileBack } from "@/lib/mobile-back";
 
 // A jsdom mount of `ChatPopup` costs seconds under a full parallel run; every
 // component suite that mounts it declares both ceilings (see
@@ -67,6 +68,9 @@ class FakeGatewayWs {
     }
     const runId = `run-${sentFrames.length}`;
     this.respond(id, { runId, status: "started" });
+    // Only a sent message is answered, so an untouched chat stays empty (the
+    // portrait bar's title follows whether it has messages).
+    if (frame.method !== "chat.send") return;
     setTimeout(() => this.emit({
       type: "event",
       event: "chat",
@@ -93,11 +97,25 @@ class FakeGatewayWs {
   }
 }
 
+/** What `/setup-api/chat/model` answers; a test with pickers sets its own. */
+const NO_PICKERS = { options: [], activeOptionId: "" };
+let chatModelBody: Record<string, unknown> = NO_PICKERS;
+/** The bodies POSTed to `/setup-api/chat/model` — a model switch. */
+const modelSwitches: Record<string, unknown>[] = [];
+
 function installFetch() {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: unknown) => {
+    vi.fn(async (input: unknown, init?: RequestInit) => {
       const url = String(input);
+      if (url.includes("/setup-api/chat/model") && init?.method === "POST") {
+        const picked = JSON.parse(String(init.body ?? "{}")) as Record<string, unknown>;
+        modelSwitches.push(picked);
+        // The route answers with the box's new state.
+        const options = (chatModelBody.options ?? []) as { id: string; model?: string }[];
+        const now = options.find(o => o.model === picked.model);
+        return { ok: true, json: async () => ({ ...chatModelBody, activeOptionId: now?.id ?? "", activeModel: picked.model }) };
+      }
       if (url.includes("/setup-api/gateway/ws-config")) {
         return { ok: true, json: async () => ({ token: "t", wsUrl: "ws://localhost/gw" }) };
       }
@@ -105,7 +123,7 @@ function installFetch() {
         return { ok: true, json: async () => ({ active: "openclaw", edition: "openclaw" }) };
       }
       if (url.includes("/setup-api/chat/model")) {
-        return { ok: true, json: async () => ({ options: [], activeOptionId: "" }) };
+        return { ok: true, json: async () => chatModelBody };
       }
       if (url.includes("/setup-api/chat/attachments")) {
         return { ok: true, json: async () => ({ ok: true, name: "photo-1.png", path: STAGED_PATH }) };
@@ -133,6 +151,9 @@ function phone(props: Partial<React.ComponentProps<typeof ChatPopup>> = {}) {
 
 beforeEach(() => {
   sentFrames.length = 0;
+  modelSwitches.length = 0;
+  chatModelBody = NO_PICKERS;
+  resetMobileBackForTests();
   resetHarnessCache();
   window.localStorage.clear();
   resetChatPhoneLayoutMemory();
@@ -438,5 +459,318 @@ describe("on a big screen", () => {
     expect(screen.getByTestId("chat-header")).not.toHaveAttribute("hidden");
     expect(screen.getByTestId("chat-header").style.display).toBe("flex");
     expect(screen.getByTestId("chat-composer-row")).toBeInTheDocument();
+  });
+});
+
+/**
+ * A phone held upright (TASK-2778): one slim bar instead of the header (a menu
+ * button, and the conversation's name once it has one), a menu from the left
+ * with everything the header held, and a composer of one row — "+", the model,
+ * the microphone, Send — whose "+" and model each open a bottom sheet. The
+ * fullscreen mode has no part in it; landscape (every test above: jsdom's
+ * viewport is wider than tall) keeps all of it as it was.
+ */
+describe("a phone held upright", () => {
+  const originalMatchMedia = window.matchMedia;
+
+  function orient(portrait: boolean) {
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes("portrait") ? portrait : false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+  }
+
+  /** ClawBox AI with its effort levels, and Local AI beside it. */
+  const PICKERS = {
+    activeOptionId: "clawai",
+    activeModel: "deepseek/deepseek-v4-flash",
+    activeSource: "primary",
+    activeLabel: "ClawBox AI",
+    options: [
+      {
+        id: "clawai", label: "ClawBox AI", model: "deepseek/deepseek-v4-flash", provider: "clawai",
+        available: true, settingsSection: "ai", isLocal: false, thinkingLevels: ["off", "low", "medium", "high"],
+      },
+      {
+        id: "local", label: "Local AI", model: "llamacpp/gemma-4-e2b", provider: "llamacpp",
+        available: true, settingsSection: "local-ai", isLocal: true,
+      },
+    ],
+    primary: { available: true, label: "ClawBox AI", model: "deepseek/deepseek-v4-flash" },
+    local: { available: true, label: "Local AI", model: "llamacpp/gemma-4-e2b" },
+  };
+
+  beforeEach(() => orient(true));
+  afterEach(() => { window.matchMedia = originalMatchMedia; });
+
+  it("trades the header for one slim bar: the menu, and the title once there is a conversation", async () => {
+    phone();
+    await connected();
+
+    const bar = screen.getByTestId("chat-phone-bar");
+    const menu = within(bar).getByRole("button", { name: "Menu" });
+    expect(menu).toHaveAttribute("aria-haspopup", "dialog");
+    expect(menu).toHaveAttribute("aria-expanded", "false");
+    // The header's controls are gone from view and from the accessibility
+    // tree: tabs, new chat, text size, fullscreen and the Desktop pill.
+    expect(screen.getByTestId("chat-header")).toHaveAttribute("hidden");
+    expect(screen.queryByTestId("chat-header-strip")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("chat-fullscreen-toggle")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("chat-text-size-toggle")).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-popup")).toHaveAttribute("data-chat-portrait", "true");
+    // An empty chat has no title, only the greeting.
+    expect(screen.queryByTestId("chat-phone-title")).not.toBeInTheDocument();
+    expect(screen.getByText("chat.saySomething")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Hello" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+    expect(await screen.findByTestId("chat-phone-title")).toHaveTextContent("ClawBox");
+    // Upright neither reads nor writes the fullscreen choice.
+    expect(window.localStorage.getItem(CHAT_FULLSCREEN_STORAGE_KEY)).toBeNull();
+  });
+
+  it("leaves landscape's fullscreen choice where it was, and turning the phone brings that layout back", async () => {
+    window.localStorage.setItem(CHAT_FULLSCREEN_STORAGE_KEY, "0");
+    phone();
+    await connected();
+    expect(screen.getByTestId("chat-phone-bar")).toBeInTheDocument();
+    expect(screen.getByTestId("chat-header")).toHaveAttribute("hidden");
+
+    orient(false);
+    act(() => { window.dispatchEvent(new Event("resize")); });
+    expect(screen.queryByTestId("chat-phone-bar")).not.toBeInTheDocument();
+    // Landscape outside fullscreen, as stored: the full header and the row.
+    expect(screen.getByTestId("chat-header")).not.toHaveAttribute("hidden");
+    expect(screen.getByTestId("chat-composer-row")).toBeInTheDocument();
+    expect(window.localStorage.getItem(CHAT_FULLSCREEN_STORAGE_KEY)).toBe("0");
+
+    orient(true);
+    act(() => { window.dispatchEvent(new Event("resize")); });
+    expect(screen.getByTestId("chat-phone-bar")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-composer-row")).not.toBeInTheDocument();
+  });
+
+  it("leaves landscape's own fold and header peek as they were after a turn upright", async () => {
+    orient(false);
+    phone();
+    await connected();
+    // Landscape fullscreen (the default): peek the header, unfold the options.
+    fireEvent.click(screen.getByTestId("chat-header-toggle"));
+    fireEvent.click(screen.getByTestId("composer-options-toggle"));
+    expect(screen.getByTestId("chat-composer-row")).toBeInTheDocument();
+
+    orient(true);
+    act(() => { window.dispatchEvent(new Event("resize")); });
+    expect(screen.getByTestId("chat-phone-bar")).toBeInTheDocument();
+    orient(false);
+    act(() => { window.dispatchEvent(new Event("resize")); });
+
+    expect(screen.getByTestId("chat-header-toggle")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("chat-header")).not.toHaveAttribute("hidden");
+    expect(screen.getByTestId("composer-options-toggle")).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("chat-composer-row")).toBeInTheDocument();
+  });
+
+  it("opens a menu from the left with a new chat, the chats, the desktop and the text size", async () => {
+    const onClose = vi.fn();
+    phone({ onClose });
+    await connected();
+
+    const button = screen.getByTestId("chat-phone-menu-button");
+    fireEvent.click(button);
+    const menu = screen.getByRole("dialog", { name: "Menu" });
+    expect(menu).toHaveAttribute("aria-modal", "true");
+    expect(button).toHaveAttribute("aria-expanded", "true");
+    expect(button).toHaveAttribute("aria-controls", menu.id);
+    // Focus moved in, and the chat behind it is out of reach.
+    expect(menu).toContainElement(document.activeElement as HTMLElement);
+    expect(screen.getByTestId("chat-composer").closest("[inert]")).not.toBeNull();
+
+    expect(within(menu).getByRole("button", { name: "New chat" })).toBeEnabled();
+    const rows = within(menu).getAllByTestId("chat-phone-menu-chat");
+    expect(rows).toHaveLength(1);
+    const main = within(rows[0]).getByTestId("chat-phone-menu-select");
+    expect(main).toHaveTextContent("ClawBox");
+    expect(main).toHaveAttribute("aria-current", "true");
+    // Main's restart, as on its tab plate.
+    expect(within(rows[0]).getByRole("button", { name: "New session" })).toBeInTheDocument();
+    expect(within(menu).getByRole("group", { name: "Text size" })).toBeInTheDocument();
+
+    fireEvent.click(within(menu).getByRole("button", { name: "Show the desktop" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the menu on Escape, a tap beside it and the phone's Back, and gives focus back", async () => {
+    const onClose = vi.fn();
+    phone({ onClose });
+    await connected();
+    const button = screen.getByTestId("chat-phone-menu-button");
+
+    // No focus beforehand, as after a tap in Safari: the button takes it
+    // itself, so the menu has somewhere to hand it back.
+    expect(button).not.toHaveFocus();
+    fireEvent.click(button);
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Menu" })).not.toBeInTheDocument();
+    expect(button).toHaveFocus();
+    // The Escape stopped at the menu: the chat is still open.
+    expect(onClose).not.toHaveBeenCalled();
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByTestId("chat-composer").closest("[inert]")).toBeNull();
+
+    fireEvent.click(button);
+    // A tap on the menu itself is not a tap beside it.
+    fireEvent.click(screen.getByRole("dialog", { name: "Menu" }));
+    expect(screen.getByRole("dialog", { name: "Menu" })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("chat-phone-menu-backdrop"));
+    expect(screen.queryByRole("dialog", { name: "Menu" })).not.toBeInTheDocument();
+
+    // Back: the menu holds one level of page.tsx's back depth, under the
+    // chat's owner, so the page closes it before it closes the chat.
+    expect(mobileBackDepth()).toBe(0);
+    fireEvent.click(button);
+    expect(mobileBackDepth()).toBe(1);
+    act(() => { expect(runMobileBack(CHAT_MOBILE_BACK)).toBe(true); });
+    expect(screen.queryByRole("dialog", { name: "Menu" })).not.toBeInTheDocument();
+    expect(mobileBackDepth()).toBe(0);
+  });
+
+  it("starts, switches and closes chats from the menu, which closes behind each pick", async () => {
+    phone();
+    await connected();
+    const button = screen.getByTestId("chat-phone-menu-button");
+
+    fireEvent.click(button);
+    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
+    expect(screen.queryByRole("dialog", { name: "Menu" })).not.toBeInTheDocument();
+
+    fireEvent.click(button);
+    let rows = screen.getAllByTestId("chat-phone-menu-chat");
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toHaveAttribute("data-active", "true");
+    expect(within(rows[1]).getByTestId("chat-phone-menu-select")).toHaveTextContent("chat.tabUntitled");
+    // The open tab carries its close; main, not open, has no restart now.
+    expect(within(rows[1]).getByRole("button", { name: "Close tab" })).toBeInTheDocument();
+    expect(within(rows[0]).queryByRole("button", { name: "New session" })).not.toBeInTheDocument();
+
+    fireEvent.click(within(rows[0]).getByTestId("chat-phone-menu-select"));
+    expect(screen.queryByRole("dialog", { name: "Menu" })).not.toBeInTheDocument();
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.getAllByTestId("chat-phone-menu-chat")[0]).toHaveAttribute("data-active", "true"));
+
+    rows = screen.getAllByTestId("chat-phone-menu-chat");
+    fireEvent.click(within(rows[1]).getByTestId("chat-phone-menu-select"));
+    fireEvent.click(button);
+    await waitFor(() => expect(screen.getAllByTestId("chat-phone-menu-chat")[1]).toHaveAttribute("data-active", "true"));
+    fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+    expect(screen.queryByRole("dialog", { name: "Menu" })).not.toBeInTheDocument();
+    fireEvent.click(button);
+    expect(screen.getAllByTestId("chat-phone-menu-chat")).toHaveLength(1);
+  });
+
+  it("steps the conversation's text size from the menu", async () => {
+    phone();
+    await connected();
+    fireEvent.click(screen.getByTestId("chat-phone-menu-button"));
+    fireEvent.click(screen.getByRole("button", { name: "Larger text" }));
+    expect(screen.getByTestId("chat-transcript")).toHaveAttribute("data-chat-text-scale", "1.15");
+    expect(window.localStorage.getItem(CHAT_TEXT_SCALE_STORAGE_KEY)).toBe("1.15");
+  });
+
+  it("puts the composer on one row under the text: +, the model, then Send", async () => {
+    chatModelBody = PICKERS;
+    phone();
+    await connected();
+    const pill = await screen.findByTestId("chat-model-pill");
+
+    const primary = screen.getByTestId("chat-composer-primary");
+    const plus = screen.getByTestId("composer-options-toggle");
+    expect(primary.firstElementChild?.tagName).toBe("TEXTAREA");
+    expect(primary.children[1]).toBe(plus);
+    expect(primary.children[2]).toContainElement(pill);
+    expect(primary.lastElementChild).toBe(screen.getByTestId("chat-send"));
+    expect(plus).toHaveAttribute("aria-haspopup", "dialog");
+    // No row of pickers and paperclip under it, and no pills anywhere.
+    expect(screen.queryByTestId("chat-composer-row")).not.toBeInTheDocument();
+    expect(document.querySelectorAll(".chat-header-pills")).toHaveLength(0);
+    // The pill names the provider and the effort.
+    expect(pill).toHaveTextContent(/^ClawBox\s*Medium/);
+  });
+
+  it("opens the options as a bottom sheet from +, and a file picked there goes with the message", async () => {
+    phone();
+    await connected();
+    const plus = screen.getByTestId("composer-options-toggle");
+    fireEvent.click(plus);
+    const sheet = screen.getByRole("dialog", { name: "Chat options" });
+    expect(plus).toHaveAttribute("aria-expanded", "true");
+    expect(plus).toHaveAttribute("aria-controls", sheet.id);
+    expect(within(sheet).getByTestId("chat-new-app-toggle")).toBeInTheDocument();
+
+    const pick = vi.spyOn(HTMLInputElement.prototype, "click").mockImplementation(() => {});
+    fireEvent.click(within(sheet).getByRole("button", { name: "Attach file" }));
+    expect(pick).toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "Chat options" })).not.toBeInTheDocument();
+    const input = pick.mock.contexts[0] as HTMLInputElement;
+    expect(input.type).toBe("file");
+    const file = new File([new Uint8Array([1, 2, 3])], "photo.png", { type: "image/png" });
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => expect(document.body.textContent).toContain("photo-1.png"));
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "what is this?" } });
+    fireEvent.click(screen.getByTestId("chat-send"));
+    await waitFor(() => {
+      expect(sentMessages().find(m => m.includes("what is this?"))).toContain(`[Attached file: ${STAGED_PATH}]`);
+    });
+
+    // Escape and Back close it too.
+    fireEvent.click(plus);
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Chat options" })).not.toBeInTheDocument();
+    fireEvent.click(plus);
+    act(() => { runMobileBack(CHAT_MOBILE_BACK); });
+    expect(screen.queryByRole("dialog", { name: "Chat options" })).not.toBeInTheDocument();
+  });
+
+  it("opens the model sheet from the pill: the current choice ticked, the effort row, and a pick switches", async () => {
+    chatModelBody = PICKERS;
+    phone();
+    await connected();
+    const pill = await screen.findByTestId("chat-model-pill");
+    fireEvent.click(pill);
+    const sheet = screen.getByRole("dialog", { name: "Model" });
+    expect(pill).toHaveAttribute("aria-expanded", "true");
+
+    const providers = within(sheet).getByRole("group", { name: "Chat provider" });
+    const rows = within(providers).getAllByRole("button");
+    expect(rows.map(r => r.getAttribute("data-option-id"))).toEqual(["clawai", "local"]);
+    expect(rows[0]).toHaveAttribute("aria-pressed", "true");
+    expect(rows[1]).toHaveAttribute("aria-pressed", "false");
+
+    // The effort row: a pick there stays in the sheet and moves the pill.
+    const effort = within(sheet).getByRole("group", { name: "Reasoning effort" });
+    const high = within(effort).getAllByRole("button").find(o => o.getAttribute("data-option-id") === "high")!;
+    fireEvent.click(high);
+    await waitFor(() => expect(high).toHaveAttribute("aria-pressed", "true"));
+    expect(screen.getByRole("dialog", { name: "Model" })).toBeInTheDocument();
+    expect(pill).toHaveTextContent(/^ClawBox\s*High/);
+
+    // The provider already in use changes nothing and closes the sheet,
+    // which hands focus back to the pill.
+    fireEvent.click(rows[0]);
+    expect(screen.queryByRole("dialog", { name: "Model" })).not.toBeInTheDocument();
+    expect(modelSwitches).toHaveLength(0);
+    expect(pill).toHaveFocus();
+
+    // Another one goes through the picker's own switch.
+    fireEvent.click(pill);
+    fireEvent.click(within(screen.getByRole("group", { name: "Chat provider" })).getAllByRole("button")[1]);
+    expect(screen.queryByRole("dialog", { name: "Model" })).not.toBeInTheDocument();
+    await waitFor(() => expect(modelSwitches).toContainEqual(expect.objectContaining({ model: "llamacpp/gemma-4-e2b", provider: "llamacpp" })));
   });
 });

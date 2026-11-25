@@ -508,6 +508,8 @@ const table: Record<string, string> = {
   "chat.modelUnavailableZeroQuota": "{model} no está disponible en esta cuenta de {provider}: su límite de solicitudes es 0 (todavía no hay crédito de API ni cuota para él).",
   "chat.noChatModel": "Sin modelo de chat",
   "chat.openFullUi": "Abrir la interfaz completa",
+  "chat.phone.menu": "Menú",
+  "chat.phone.model": "Modelo",
   "chat.pillChatProvider": "Proveedor del chat",
   "chat.pillHermesModel": "Modelo de Hermes",
   "chat.pillProviderModel": "Modelo de {provider}",

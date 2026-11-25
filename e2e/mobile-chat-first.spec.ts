@@ -1,4 +1,4 @@
-import type { Page } from "@playwright/test";
+import type { Locator, Page, TestInfo } from "@playwright/test";
 import { expect, test } from "./helpers/coverage";
 import { installClawboxMocks } from "./helpers/clawbox";
 
@@ -176,6 +176,89 @@ const SETUP = {
 };
 
 const chatOpen = (page: Page) => expect(page.getByTestId("chat-popup")).toHaveCSS("pointer-events", "auto");
+
+/**
+ * A phone held upright (TASK-2778): no fold and no pills. The composer is one
+ * rounded box — the text across the top, then "+", the model pill, the
+ * microphone and Send on one row under it — and the long labels are read in
+ * the model sheet the pill opens.
+ */
+async function assertPortraitComposer(
+  page: Page,
+  composer: Locator,
+  viewport: { width: number; height: number },
+  modelLabel: string,
+  locale: string,
+  testInfo: TestInfo,
+) {
+  const primary = composer.locator(".chat-composer-primary");
+  async function assertRow() {
+    const geometry = await composer.evaluate(el => {
+      const row = el.querySelector(".chat-composer-primary")!;
+      const field = row.querySelector("textarea")!.getBoundingClientRect();
+      const order = [...row.children].map(node => node.getAttribute("data-testid") ?? node.tagName);
+      const controls = [...row.querySelectorAll("button")].map(node => {
+        const r = node.getBoundingClientRect();
+        return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+      });
+      return {
+        order, controls, fieldBottom: field.bottom, fieldWidth: field.width, rowWidth: row.getBoundingClientRect().width,
+        rows: el.children.length, pills: el.querySelectorAll(".header-dropdown-trigger").length,
+        scrollWidth: el.scrollWidth, width: el.clientWidth,
+      };
+    });
+    // Send keeps its place whether or not anything is typed, the microphone too.
+    expect(geometry.order).toEqual(["TEXTAREA", "composer-options-toggle", "DIV", "voice-record", "chat-send"]);
+    expect(geometry.rows).toBe(1);
+    expect(geometry.pills).toBe(0);
+    expect(geometry.fieldWidth).toBeGreaterThan(geometry.rowWidth * 0.8);
+    expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.width);
+    for (const box of geometry.controls) {
+      // Under the text, inside the screen, and a thumb's size.
+      expect(box.y).toBeGreaterThanOrEqual(geometry.fieldBottom - 0.5);
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.right).toBeLessThanOrEqual(viewport.width);
+      expect(box.bottom).toBeLessThanOrEqual(viewport.height);
+      expect(box.height).toBeGreaterThanOrEqual(44);
+      expect(box.width).toBeGreaterThanOrEqual(44);
+    }
+    // One row: every control's vertical centre on the same line.
+    const centres = geometry.controls.map(box => box.y + box.height / 2);
+    expect(Math.max(...centres) - Math.min(...centres)).toBeLessThan(1.5);
+    for (let i = 0; i < geometry.controls.length; i++) {
+      for (const b of geometry.controls.slice(i + 1)) {
+        const a = geometry.controls[i];
+        expect(a.right <= b.x + 0.5 || b.right <= a.x + 0.5 || a.bottom <= b.y + 0.5 || b.bottom <= a.y + 0.5).toBe(true);
+      }
+    }
+  }
+  // The chat slides up on open; sample the composer once that has landed.
+  await expect.poll(() => page.getByTestId("chat-popup").evaluate(el => el.getAnimations().length)).toBe(0);
+  await assertRow();
+  await page.screenshot({ path: testInfo.outputPath("composer-idle.png") });
+  await primary.locator("textarea").fill(locale === "bg" ? "Напиши кратък отговор" : "Schreibe eine kurze Antwort");
+  await expect(primary.getByTestId("chat-send")).toBeEnabled();
+  // Upright the microphone stays beside Send while the owner types.
+  await expect(page.getByTestId("voice-record")).toHaveCount(1);
+  await assertRow();
+  await page.screenshot({ path: testInfo.outputPath("composer-typing.png") });
+  // The pill opens the model sheet, the full label in it and inside the screen.
+  await page.getByTestId("chat-model-pill").click();
+  const sheet = page.getByTestId("chat-model-sheet");
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByText(modelLabel, { exact: true })).toBeVisible();
+  // Measured once its slide up from the bottom edge has landed.
+  await expect.poll(async () => {
+    const box = await sheet.boundingBox();
+    return box ? Math.round(box.y + box.height) : -1;
+  }).toBe(viewport.height);
+  const sheetBox = (await sheet.boundingBox())!;
+  expect(sheetBox.x).toBeGreaterThanOrEqual(0);
+  expect(sheetBox.x + sheetBox.width).toBeLessThanOrEqual(viewport.width);
+  await page.screenshot({ path: testInfo.outputPath("model-sheet.png") });
+  await page.keyboard.press("Escape");
+  await expect(sheet).toHaveCount(0);
+}
 // A closed chat is not rendered at all (ChatPopup returns null while !isOpen).
 const chatClosed = (page: Page) => expect(page.getByTestId("chat-popup")).toHaveCount(0);
 
@@ -218,6 +301,10 @@ for (const locale of ["bg", "de"]) {
         await expect(page.getByTestId("voice-record")).toBeEnabled();
         // The greeting turn is over, so the slot beside the field is at rest.
         await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
+        if (portrait) {
+          await assertPortraitComposer(page, composer, viewport, modelLabel, locale, testInfo);
+          return;
+        }
         // Folded by default — and the choice still legible without a tap.
         await expect(pills).toHaveCount(0);
         await expect(page.getByTestId("chat-pill-summary")).toBeVisible();
@@ -261,18 +348,9 @@ for (const locale of ["bg", "de"]) {
           // The whole composer: the input row alone while folded, the picker
           // row under it once unfolded.
           expect(geometry.rows).toBe(unfolded ? 2 : 1);
-          if (portrait) {
-            // fold control → field → microphone → Send, all on the input row,
-            // and no row of the microphone's own anywhere (TASK-1003).
-            expect(geometry.primaryOrder).toEqual(["composer-options-toggle", "TEXTAREA", "voice-record", "chat-send"]);
-            expect(geometry.voiceRow).toBeNull();
-            // Moving it must not shrink it below a thumb's reach.
-            expect(geometry.mic!.width).toBeGreaterThanOrEqual(44);
-            expect(geometry.mic!.height).toBeGreaterThanOrEqual(44);
-          } else {
-            expect(geometry.voiceRow).toBeNull();
-            expect(geometry.primaryOrder[2]).toBe(typing ? "chat-send" : "voice-record");
-          }
+          // Landscape only from here: upright has its own layout (above).
+          expect(geometry.voiceRow).toBeNull();
+          expect(geometry.primaryOrder[2]).toBe(typing ? "chat-send" : "voice-record");
           expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.width);
           for (const box of geometry.buttons) {
             expect(box.x).toBeGreaterThanOrEqual(0);
@@ -298,7 +376,7 @@ for (const locale of ["bg", "de"]) {
         await page.screenshot({ path: testInfo.outputPath("composer-idle.png") });
         await primary.locator("textarea").fill(locale === "bg" ? "Напиши кратък отговор" : "Schreibe eine kurze Antwort");
         await expect(primary.getByTestId("chat-send")).toBeVisible();
-        await expect(page.getByTestId("voice-record")).toHaveCount(portrait ? 1 : 0);
+        await expect(page.getByTestId("voice-record")).toHaveCount(0);
         await assertLayout(true);
         await page.screenshot({ path: testInfo.outputPath("composer-typing.png") });
         // Truncated values still open a full, usable picker inside the viewport
@@ -323,8 +401,11 @@ for (const locale of ["bg", "de"]) {
  * conversation gets the screen. Every folded control is one tap away, leaving
  * fullscreen is remembered across a reload, and the conversation's text size
  * steps without touching anything around it.
+ *
+ * Landscape only since TASK-2778: upright, the slim bar below is the only
+ * header and there is no fullscreen mode to leave.
  */
-for (const viewport of [{ width: 360, height: 780 }, { width: 740, height: 360 }]) {
+for (const viewport of [{ width: 740, height: 360 }]) {
   test.describe(`fullscreen chat ${viewport.width}x${viewport.height}`, () => {
     test.use({ viewport, hasTouch: true, isMobile: true });
 
@@ -429,6 +510,88 @@ for (const viewport of [{ width: 360, height: 780 }, { width: 740, height: 360 }
   });
 }
 
+/**
+ * A phone held upright (TASK-2778): one slim bar — the menu, and the title once
+ * there is a conversation — a menu from the left with everything the header
+ * held, and bottom sheets for "+" and the model, each a modal that Escape and
+ * a tap beside it close.
+ */
+test.describe("a phone held upright 360x780", () => {
+  test.use({ viewport: { width: 360, height: 780 }, hasTouch: true, isMobile: true });
+
+  test("trades the header for a slim bar and a menu from the left, and keeps every control reachable", async ({ page }, testInfo) => {
+    await installFakeGatewaySocket(page);
+    await installClawboxMocks(page, SETUP);
+    await page.goto("/");
+    await chatOpen(page);
+    await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
+
+    const bar = page.getByTestId("chat-phone-bar");
+    await expect(bar).toBeVisible();
+    await expect(page.getByTestId("chat-header")).toBeHidden();
+    await expect(page.getByTestId("chat-header-strip")).toHaveCount(0);
+    await expect(page.getByTestId("chat-fullscreen-toggle")).toHaveCount(0);
+    // The chat slides up from the bottom; measure the bar once it has landed.
+    await expect.poll(async () => {
+      const first = (await bar.boundingBox())?.y ?? -1;
+      await page.waitForTimeout(120);
+      const second = (await bar.boundingBox())?.y ?? -2;
+      return Math.abs(first - second) < 0.5 && Math.round(second) === 0;
+    }).toBe(true);
+    const menuButton = page.getByTestId("chat-phone-menu-button");
+    const buttonBox = (await menuButton.boundingBox())!;
+    expect(buttonBox.width).toBeGreaterThanOrEqual(44);
+    expect(buttonBox.height).toBeGreaterThanOrEqual(44);
+    // The conversation has a reply, so its name stands in the middle.
+    await expect(page.getByTestId("chat-phone-title")).toHaveText("ClawBox");
+    await page.screenshot({ path: testInfo.outputPath("portrait-bar.png") });
+
+    // The menu comes in from the left, over a backdrop, with what the header held.
+    await menuButton.click();
+    const menu = page.getByRole("dialog", { name: "Menu" });
+    await expect(menu).toBeVisible();
+    await expect.poll(async () => Math.round((await menu.boundingBox())?.x ?? -1)).toBe(0);
+    await expect(menu.getByRole("button", { name: "New chat" })).toBeEnabled();
+    await expect(menu.getByTestId("chat-phone-menu-chat")).toHaveCount(1);
+    await expect(menu.getByRole("button", { name: "Show the desktop" })).toBeInViewport();
+    const menuControls = await menu.evaluate(el => [...el.querySelectorAll("button")].map(b => {
+      const r = b.getBoundingClientRect();
+      return { x: r.x, right: r.right, width: r.width, height: r.height };
+    }));
+    for (const box of menuControls) {
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.right).toBeLessThanOrEqual(360);
+      expect(box.width).toBeGreaterThanOrEqual(44);
+      expect(box.height).toBeGreaterThanOrEqual(44);
+    }
+    // The conversation's text size, from the menu, and nothing around it.
+    await menu.getByRole("button", { name: "Larger text" }).click();
+    await expect(page.getByTestId("chat-transcript")).toHaveAttribute("data-chat-text-scale", "1.15");
+    await page.screenshot({ path: testInfo.outputPath("portrait-menu.png") });
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(menuButton).toBeFocused();
+
+    // "+" and the model pill each open a bottom sheet over the composer.
+    for (const [opener, name] of [["composer-options-toggle", "Chat options"], ["chat-model-pill", "Model"]] as const) {
+      // Both openers are part of this fixture's composer: a missing one fails.
+      const control = page.getByTestId(opener);
+      await expect(control).toBeVisible();
+      await control.click();
+      const sheet = page.getByRole("dialog", { name });
+      await expect(sheet).toBeVisible();
+      await expect.poll(async () => {
+        const box = await sheet.boundingBox();
+        return box ? Math.round(box.y + box.height) : -1;
+      }).toBe(780);
+      await page.screenshot({ path: testInfo.outputPath(`portrait-sheet-${opener}.png`) });
+      // A tap beside it closes it.
+      await page.mouse.click(180, 40);
+      await expect(sheet).toHaveCount(0);
+    }
+  });
+});
+
 test.describe("on a phone", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
@@ -455,11 +618,11 @@ test.describe("on a phone", () => {
     expect(box?.y ?? 0).toBeGreaterThan(844 / 2);
     await page.screenshot({ path: testInfo.outputPath("phone-chat.png") });
 
-    // Fullscreen chat folds the header into a strip (TASK-1157); the way to
-    // the desktop is one tap behind it.
+    // Upright the header is gone (TASK-2778); the way to the desktop is in the
+    // menu the slim bar opens.
     await expect(page.getByTestId("chat-popup-close")).toBeHidden();
-    await page.getByTestId("chat-header-toggle").click();
-    await page.getByTestId("chat-popup-close").click();
+    await page.getByTestId("chat-phone-menu-button").click();
+    await page.getByTestId("chat-phone-menu-desktop").click();
     await chatClosed(page);
     await expect(page.getByTestId("desktop-root")).toBeVisible();
     await page.screenshot({ path: testInfo.outputPath("phone-desktop.png") });
@@ -524,7 +687,7 @@ for (const { locale, viewport } of [
   test.describe(`portrait composer with a reply in flight, ${locale} ${viewport.width}x${viewport.height}`, () => {
     test.use({ viewport, hasTouch: true, isMobile: true });
 
-    test("puts the red Stop in Send's slot, with the microphone between it and the field", async ({ page }, testInfo) => {
+    test("puts the red Stop in Send's slot, with the microphone right before it", async ({ page }, testInfo) => {
       await page.addInitScript(() => { (window as unknown as { __holdReplies?: boolean }).__holdReplies = true; });
       await installFakeGatewaySocket(page);
       await installClawboxMocks(page, { ...SETUP, preferences: { ...SETUP.preferences, ui_language: locale } });
@@ -542,27 +705,25 @@ for (const { locale, viewport } of [
       const stop = primary.getByTestId("chat-stop");
       await expect(stop).toBeVisible();
       await expect(page.getByTestId("chat-send")).toHaveCount(0);
-      // The same slot Send had: the thumb does not move sideways, and it sits
-      // on the field's row, bottom-aligned with it (the row itself may move
-      // up or down as the cleared field shrinks back to one line).
+      // The same slot Send had: the thumb does not move sideways. Upright
+      // (TASK-2778) that slot ends the row under the text (the row itself may
+      // move up or down as the cleared field shrinks back to one line).
       const stopBox = (await stop.boundingBox())!;
       expect(Math.abs(stopBox.x - sendBox.x)).toBeLessThan(1);
       expect(Math.abs(stopBox.width - sendBox.width)).toBeLessThan(1);
       const fieldBox = (await field.boundingBox())!;
-      expect(Math.abs((stopBox.y + stopBox.height) - (fieldBox.y + fieldBox.height))).toBeLessThan(1);
+      expect(stopBox.y).toBeGreaterThanOrEqual(fieldBox.y + fieldBox.height - 0.5);
       await expect(stop).toHaveCSS("color", "rgb(239, 68, 68)");
 
-      // The microphone rides the same row now (TASK-1003), between the field
-      // and Stop — so the order across the row is field → microphone → Stop,
-      // and there is no row of its own left to check.
+      // The microphone rides the same row (TASK-1003), right before Stop — so
+      // the row reads … → microphone → Stop, and there is no row of its own
+      // left to check.
       await expect(page.getByTestId("chat-composer-voice-row")).toHaveCount(0);
       const micBox = (await primary.getByTestId("voice-record").boundingBox())!;
-      expect(micBox.x).toBeGreaterThanOrEqual(fieldBox.x + fieldBox.width);
-      expect(micBox.x - (fieldBox.x + fieldBox.width)).toBeLessThanOrEqual(12);
       expect(stopBox.x).toBeGreaterThanOrEqual(micBox.x + micBox.width);
       expect(stopBox.x - (micBox.x + micBox.width)).toBeLessThanOrEqual(12);
-      // Still on the field's row, not under it.
-      expect(Math.abs((micBox.y + micBox.height) - (fieldBox.y + fieldBox.height))).toBeLessThan(1);
+      // On Stop's row, not under it.
+      expect(Math.abs((micBox.y + micBox.height) - (stopBox.y + stopBox.height))).toBeLessThan(1);
       await page.screenshot({ path: testInfo.outputPath("portrait-in-flight.png") });
     });
   });

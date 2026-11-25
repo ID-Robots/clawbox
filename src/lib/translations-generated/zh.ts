@@ -508,6 +508,8 @@ const table: Record<string, string> = {
   "chat.modelUnavailableZeroQuota": "此 {provider} 账户无法使用 {model} — 它的请求上限为 0（还没有可用于它的 API 额度或配额）。",
   "chat.noChatModel": "未选择聊天模型",
   "chat.openFullUi": "打开完整界面",
+  "chat.phone.menu": "菜单",
+  "chat.phone.model": "模型",
   "chat.pillChatProvider": "聊天服务商",
   "chat.pillHermesModel": "Hermes 模型",
   "chat.pillProviderModel": "{provider} 模型",
