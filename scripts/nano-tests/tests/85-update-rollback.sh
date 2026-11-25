@@ -23,9 +23,10 @@
 #      the branch (install.sh openclaw_core_ahead_of_commit), so the release's
 #      build is served over the branch's checkout until the next update. That
 #      state must be exactly this: the checkout on NANO_SHA, the restored build
-#      whole and the release's, and no rollback target left in data/config.json
-#      for the dashboard to act on. On every edition but Hermes the checkout
-#      must never pin an older core than the one installed.
+#      the one the board started on, of the release's commit, and whole, and
+#      no rollback target left in data/config.json for the dashboard to act
+#      on. On every edition but Hermes the checkout must never pin an older
+#      core than the one installed.
 #
 # The core the board starts with is recorded. Only a board that starts with
 # the release's own core, updated to a branch that pins a newer one, exercises
@@ -170,17 +171,22 @@ elif core_newer "$CORE" "$BUILT_PIN" && [ "$HEAD1" != "$BUILT" ] \
   && [[ $IDENT == *"was built from $BUILT but the checkout is at $HEAD1"* ]]; then
   # Only the commit mismatch itself (scripts/verify-build-identity.sh). It
   # stops at that first mismatch, so the restored build is checked again
-  # against its own commit below.
+  # below: it must be the build the board started on, of the release's commit,
+  # and whole as that commit's.
   ok "checkout kept on ${HEAD1:0:12} with OpenClaw $CORE, newer than the $BUILT_PIN the restored build's commit ${BUILT:0:12} pins: the old build over the new checkout until the next update, by design"
   if [ "$HEAD1" != "${NANO_SHA:-}" ]; then
     not_ok "the kept checkout ${HEAD1:0:12} is not the commit under test ${NANO_SHA:-(NANO_SHA unset)}"
   fi
-  # shellcheck disable=SC2016  # expanded on the board
-  KEPT=$(board 'cd "$REPO" && bash scripts/verify-build-identity.sh --project-dir "$REPO" --expect-sha "$1" 2>&1 | tail -n 3' "$BUILT"); rc=$?
-  if [ "$rc" -eq 0 ]; then
-    ok "the restored build is whole and the release's: $(tail -n 1 <<<"$KEPT")"
+  if [ "$BUILT" != "$BUILT0" ] || [ "$BUILT" != "$HEAD0" ]; then
+    not_ok "the restored build ${BUILT:0:12} is not the release's: the update started from ${HEAD0:0:12}, serving a build of ${BUILT0:0:12}"
   else
-    not_ok "the restored build does not hold together as ${BUILT:0:12}'s: $(tr '\n' ' ' <<<"$KEPT" | cut -c1-200)"
+    # shellcheck disable=SC2016  # expanded on the board
+    KEPT=$(board 'cd "$REPO" && bash scripts/verify-build-identity.sh --project-dir "$REPO" --expect-sha "$1" 2>&1 | tail -n 3' "$BUILT"); rc=$?
+    if [ "$rc" -eq 0 ]; then
+      ok "the restored build is whole and the release's: $(tail -n 1 <<<"$KEPT")"
+    else
+      not_ok "the restored build does not hold together as ${BUILT:0:12}'s: $(tr '\n' ' ' <<<"$KEPT" | cut -c1-200)"
+    fi
   fi
   if [ "$TARGET" = absent ]; then
     ok "no rollback target is left in data/config.json for the dashboard to move the checkout back with"

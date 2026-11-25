@@ -322,6 +322,57 @@ for t in "$HERE"/tests/*; do
     done <<<"$patterns"' _ "$t" "$HERE/../.."
 done
 
+# ---- 85-update-rollback keeps the checkout only over the release's build -----
+# The real test against a stand-in lib.sh whose board answers from T85_*: the
+# update moved the core and failed, so the checkout stays on NANO_SHA, and the
+# build put back must be the one the board started on, the release's.
+export T85=$WORK/t85
+mkdir -p "$T85/tests"
+cp "$HERE/tests/85-update-rollback.sh" "$T85/tests/"
+cat > "$T85/lib.sh" <<'EOF'
+NANO_TEST_FAILED=0
+ok() { printf 'ok - %s\n' "$*"; }
+not_ok() { printf 'not ok - %s\n' "$*"; NANO_TEST_FAILED=1; }
+skip() { printf 'ok # SKIP %s\n' "$*"; }
+note() { printf '# %s\n' "$*"; }
+finish() { exit "$NANO_TEST_FAILED"; }
+ensure_on_release() { HEAD0=$T85_RELEASE; }
+start_app_update() { :; }
+api_error() { :; }
+wait_app_update() { "$2"; UPDATE_PHASE=failed UPDATE_ERROR="Rebuild failed"; }
+runtime_settled_line() { ok "settled"; }
+runtime_kept() { ok "runtime kept"; }
+runtime_chat_turn() { ok "chat turn answered"; }
+board_head() { echo "$NANO_SHA"; }
+build_identity_ok() {
+  echo "BUILD IDENTITY: FAIL — .next/build-info.json was built from $T85_BUILT but the checkout is at $NANO_SHA"
+  return 1
+}
+board() {
+  case "$1" in
+    *python3*) # the facts: at the start, then after the update
+      if [ -e "$T85/started" ]; then echo "openclaw 2026.11.5 $T85_BUILT 2026.10.9 2026.11.5 absent"; return; fi
+      : > "$T85/started"
+      echo "openclaw 2026.10.9 $T85_RELEASE 2026.10.9 2026.10.9 present" ;;
+    # The served build is whole as its own commit's, and as no other.
+    *verify-build-identity.sh*) [ "$2" = "$T85_BUILT" ] && echo "BUILD IDENTITY: OK — 2 artifact(s) built from ${2:0:7}" ;;
+    *'next build'*) echo "count 1" ;;
+    *) echo 200 ;;
+  esac
+}
+EOF
+t85() { # NAME BUILD-SERVED-AFTER
+  rm -f "$T85/started"
+  T85_RELEASE=1111111111111111111111111111111111111111 T85_BUILT=$2 NANO_BRANCH=fix/x \
+    bash "$T85/tests/85-update-rollback.sh" > "$WORK/t85-$1.out" 2>&1
+}
+t85 release 1111111111111111111111111111111111111111
+check "85: the checkout kept over the release's build after a core move passes" test $? -eq 0
+check "...as kept by design" contains "$WORK/t85-release.out" "ok - checkout kept on 0123456789ab"
+t85 other 2222222222222222222222222222222222222222
+check "85: a whole build of another commit put back under the kept checkout fails" test $? -eq 1
+check "...naming it as not the release's" contains "$WORK/t85-other.out" "not ok - the restored build 222222222222 is not the release's"
+
 # ---- long-tier tests are opt-in ----------------------------------------------
 L=$WORK/tests-long
 fixture "$L" 10-pass.sh 'echo "ok - fine"'
