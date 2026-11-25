@@ -697,7 +697,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     await pasteImages(term, images, { taker, viaCtrlV: true });
   }, [askForeground, pasteImages, sendToShell]);
 
-  /** Copy text; say so unless `quiet` (copy-on-select), and always say when it failed. */
+  /** Copy text; say so unless `quiet` (copy-on-select, the copy key), and always say when it failed. */
   const copyAndTell = useCallback((text: string, quiet = false) => {
     if (!text) return;
     void copyToClipboard(text).then((ok) => {
@@ -1011,7 +1011,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
           if (ev.type === "keydown") {
             ev.preventDefault();
             const sel = term.getSelection();
-            if (sel) copyAndTell(sel);
+            if (sel) copyAndTell(sel, true);
           }
           return false;
         }
