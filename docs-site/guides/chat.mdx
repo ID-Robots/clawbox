@@ -1,7 +1,7 @@
 ---
 title: "Chat"
 icon: "comments"
-summary: "The chat on your ClawBox — switching model mid-conversation, slash commands, the cards the assistant shows when it needs you, and spoken replies."
+summary: "The chat on your ClawBox: Word, Excel and PowerPoint files, the chat on a phone held upright, switching model mid-conversation, slash commands, the cards the assistant shows when it needs you, and spoken replies."
 ---
 
 Your ClawBox has two chat surfaces on the desktop, and they talk to the same assistant:
@@ -160,6 +160,158 @@ edition the box still answers out loud in the chat; replies on those channels st
 - **Files the assistant produced** appear as cards you can download, with their real name
   and size.
 
+## Word, Excel and PowerPoint files
+
+You can attach a Word, Excel or PowerPoint file in the chat and ask about it. The box takes
+the text out of the file and hands it to the assistant, so the answer comes from what the
+file says. You can also ask the assistant to make such a file for you. It is for anyone who
+uses the chat, on both editions, OpenClaw and Hermes.
+
+### Before you attach a file
+
+- The file is a **.docx** (Word), **.xlsx** (Excel), **.pptx** (PowerPoint), **.odt**
+  (OpenDocument text) or **.ods** (OpenDocument spreadsheet). An older .doc, .xls or .ppt
+  file is not read: open it on your computer and save it in the newer format first.
+- The file is smaller than 10 MB.
+- The file has no password.
+
+### Ask about a file
+
+<Steps>
+  <Step title="Click Attach file">
+    In the chat, click **Attach file** (the paperclip in the row under the message box). On a phone,
+    tap **+** first, then **Attach file**. Your device's file picker opens.
+  </Step>
+  <Step title="Pick the file">
+    Pick one file, or several. The name of each file shows above the message box. Click the
+    **×** beside a name to take that file off again.
+  </Step>
+  <Step title="Ask your question and send it">
+    Type what you want to know, for example *What does this offer cost in all?*, and send
+    it. The assistant answers from the text of the file. A spreadsheet reaches it as one
+    table per sheet, so you can ask about a sheet by its name.
+
+    <Frame caption="A Word file and its answer, on a phone held upright">
+      <img src="/images/4.4/chat-phone-word-file.webp" width="320" alt="The chat on a phone held upright. The slim bar at the top has the menu button and the chat's name, What is this offer for. Below it, a message with the file offer-acme.docx and the question What is this offer for, who prepared it, and what does it cost in all? The answer says it is an offer for Acme Ltd, prepared by Иван Иванов, 380 EUR in total, valid until 31 December. At the bottom, the rounded message box with a plus button, the ClawBox Medium pill, the orange microphone and Send." />
+    </Frame>
+  </Step>
+</Steps>
+
+### Ask the assistant to make a file
+
+<Steps>
+  <Step title="Ask for the file in plain words">
+    Say what should be in it and which kind of file you want, for example *Make a short Word
+    document with a thank-you note to Acme Ltd and send me the file.*
+  </Step>
+  <Step title="Wait for the card">
+    When the file is ready, the answer has a card with the name of the file and a download
+    button. Making a file takes longer than a plain answer.
+  </Step>
+  <Step title="Download the file">
+    Click the download button on the card. Your browser saves the file like any other
+    download.
+
+    <Frame caption="Three files the assistant made: a Word document, an Excel sheet and a PowerPoint deck">
+      <img src="/images/4.4/chat-phone-files-made.webp" width="320" alt="The chat on a phone held upright. Asked for a short Word document with a thank-you note to Acme Ltd, signed by Иван Иванов, the assistant answers with a card for thank-you-acme-2026-11-26.docx, 36 KB, with a download button. Below it, asked for an Excel file with the January and February desk lamp sales, a card for desk-lamp-sales-jan-feb-2026.xlsx, 5.0 KB. Then, asked for a PowerPoint file with two slides, a card for acme-spring-plan-2026-11-26.pptx, 29 KB." />
+    </Frame>
+  </Step>
+</Steps>
+
+<Note>
+Word and Excel files need nothing extra. The first time you ask for a PowerPoint file, the
+assistant first installs a small tool for it, so that answer takes longer and the box has to
+be online.
+</Note>
+
+### If a file does not work
+
+- **… could not be read, so it was not attached.** The box could not get the text out of
+  the file. The same line says why:
+  - *The file is password-protected, so its text cannot be read.* Save a copy without a
+    password and attach that.
+  - *The file is damaged or is not really a Word, Excel, PowerPoint or OpenDocument file.*
+    Open it on your computer, save it again as .docx, .xlsx or .pptx, and attach the new copy.
+  - *The file unpacks to more than the box reads from one document.* Split it, or save the
+    part you need on its own.
+- **… could not be attached. Upload failed: Unexpected end of form**: the file is bigger
+  than about 10 MB. Make it smaller, for example by saving it without its pictures or by
+  splitting it, and attach it again.
+- **… is too large to attach. This file is larger than the … upload limit for your account
+  on this ClawBox.** You are not the owner, and the owner has set a lower limit for your
+  account. Only the owner can change it: see [Users & Staff](/guides/users-and-staff).
+- **The assistant says the document is empty.** The file holds only pictures or empty
+  pages. The box reads the text of a document, not the pictures in it. To ask about a
+  picture, attach the picture itself.
+- **The assistant says it cannot open the file, or answers without reading it.** Ask again
+  and tell it to read the attached file first. A small on-device model misses files more
+  often than a cloud model: pick another one with the **Model** pill on a phone, or the
+  provider pill on a computer.
+
+## The chat on a phone held upright
+
+On a phone held upright, the chat fills the screen. Its controls fit into one slim bar at
+the top and one message box at the bottom, so the conversation gets the room. It is for
+anyone who chats with the box from a phone, on both editions, OpenClaw and Hermes. A phone
+held sideways, a tablet and a computer show the chat as before.
+
+### Before you start on a phone
+
+- The box runs ClawBox 4.4 or newer.
+- Open the box's address in your phone's browser and sign in. On a phone the box opens
+  straight into the chat.
+
+### Find your way around
+
+<Steps>
+  <Step title="Hold the phone upright">
+    At the top is one slim bar: **Menu** (three lines) on the left and, once the chat has
+    messages, the chat's name in the middle. At the bottom is one rounded message box.
+    Under the text are **+**, the model pill (for example **ClawBox Medium**), the
+    microphone and Send. While the assistant writes, Send turns into **Stop**.
+  </Step>
+  <Step title="Tap Menu">
+    The menu slides in from the left. It has **New chat**, your **Chats**, **Desktop** and
+    **Text size**. Tap a chat to open it. The chat you are in has a button on its right:
+    **×** closes that chat, and on the main **ClawBox** chat a round arrow starts a new
+    session instead. The **×** at the top closes the menu.
+
+    <Frame caption="The menu, slid in from the left">
+      <img src="/images/4.4/chat-phone-menu.webp" width="320" alt="The phone menu over the chat. At the top right a close button, then an orange New chat button. Under Chats: ClawBox, four chats named Log in to www.example.co…, and the open chat What is this offer for, highlighted with a close button. At the bottom Desktop, and Text size with A minus, 100% and A plus." />
+    </Frame>
+  </Step>
+  <Step title="Change the text size, or go to the desktop">
+    In the menu, **A−** and **A+** make the text of the chat smaller or larger. Tap the
+    percentage between them to go back to 100%. **Desktop** closes the chat and shows the
+    box's desktop. To come back, tap the chat button on the shelf at the bottom.
+  </Step>
+  <Step title="Tap + to attach a file">
+    **Chat options** slides up from the bottom, with **Attach file** and **Create app**. See
+    [Word, Excel and PowerPoint files](#word-excel-and-powerpoint-files) for what to do next.
+  </Step>
+  <Step title="Tap the model pill to change the model">
+    The **Model** sheet slides up from the bottom. It has the same choices as the pills on a
+    computer: the **Chat provider**, its models, and the **Reasoning effort**. It closes when
+    you pick one.
+  </Step>
+  <Step title="Hold the microphone to talk">
+    Hold it while you speak and let go to send, as described under [Voice](#voice). This
+    needs a secure (https) address: see below.
+  </Step>
+</Steps>
+
+### If the phone looks different
+
+- **The chat has a header with its name and model at the top, and a settings button beside
+  the message box, but no Menu.** The phone is held sideways, or the screen is as wide as a
+  tablet's. Turn the phone upright. If it still looks the same upright, the box runs a
+  version older than 4.4: see [Updating](/support/updating).
+- **The microphone does not record.** On a plain **http://** address the chat shows *Voice
+  input works over a secure (HTTPS) address*, and tapping the microphone opens **Use the
+  microphone over Remote Access**. Turn on Remote Access in **Settings → Remote Control**
+  (the **Open Remote Control** link takes you there), then open the box at its https
+  address. You can also send voice messages from Telegram.
+
 ## Coding runs in the chat
 
 When the assistant hands work to the [Coding Agent](/whats-new#the-coding-agent-on-a-live-chart),
@@ -179,3 +331,52 @@ chats you already have open are re-pointed at the new default once the agent ans
 again, so a conversation cannot keep running on the old model while the pills name the
 new one. If that could not be done, the box tells you rather than leaving it to be
 discovered.
+
+## Details
+
+### Word, Excel and PowerPoint files in detail
+
+- **What the box takes out.** From a document: the paragraphs in order, and a table row by
+  row with its cells separated by a bar (`|`). From a presentation: the text of each slide
+  under its slide number. From a spreadsheet: each sheet as comma separated values under
+  the sheet's name, with the values the file stores, so a date is the spreadsheet's date
+  number and a formula is its last result.
+- **When.** The text is taken out once, when the file arrives, and saved on the box beside
+  the file. A file whose text cannot be taken out is refused, and nothing of it stays on the
+  box. A document with no text at all (only pictures or empty pages) is not refused: the
+  assistant is told that it holds no text.
+- **How it reaches the assistant.** On Hermes the text goes into your message, up to
+  16 KB per file and 32 KB per message. Past that, the assistant is told where the rest is
+  and opens it itself. On OpenClaw the message tells the assistant where the text is, and it
+  reads it with its file tools.
+- **How much is read.** Up to 1,000,000 characters of text per document. A longer one is
+  cut, with a note that the document goes on. A sheet is read up to 20,000 rows or 400,000
+  cells. A file that unpacks to more than 160 MB, or one part of it to more than 64 MB, is
+  refused as too large.
+- **File size.** The chat's own ceiling is 25 MB per file. On ClawBox 4.4 a file over about
+  10 MB stops on the way, with *Upload failed: Unexpected end of form*. Users other than the
+  owner are also held to the owner's **Largest file per upload or chat attachment** (100 MB
+  unless the owner changes it) when it is the lower of the two.
+- **Passwords.** A Word, Excel or PowerPoint file with a password, or an OpenDocument file
+  saved with encryption, is refused.
+- **A dropped folder** that already holds a file named like the saved text (the document's
+  name with `.txt` added) is refused, with a message to rename one of the two.
+- **Making files.** Word and Excel files are made with tools that come with the box. For a
+  PowerPoint file the assistant installs a tool the first time it is asked. On both editions
+  the finished file comes back as a download card in the chat.
+
+### The upright phone layout in detail
+
+- The layout is used when the browser window is narrower than 768 pixels and at least as
+  tall as it is wide. A wider window, as on most tablets and on a large phone held sideways,
+  gets the computer layout. A smaller phone held sideways keeps the earlier phone layout,
+  with its own fullscreen choice, which the upright layout ignores.
+- The chats in the menu are the same list as the tabs on a computer, shared by every browser
+  signed in to the box. A chat that is answering has an orange dot, and one with a reply you
+  have not read has a green dot.
+- The menu and the two sheets each have an **×** to close them. The phone's Back button
+  closes an open menu or sheet before it closes the chat.
+- The **Model** sheet holds the same choices as the pills: the provider, that provider's
+  models, and the reasoning levels the provider takes.
+- On a Hermes box whose assistant cannot draw pictures itself, **Chat options** also has
+  **Generate a picture** when the box is signed in to ClawBox AI. Members of staff on an organisation box do not get **Create app**.
