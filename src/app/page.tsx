@@ -758,8 +758,8 @@ function ChromeDesktopInner() {
   // that opens AI Settings instead of ClawKeep.
   const clawboxLogin = useClawboxLogin(undefined, ownerApis);
   const clawAiAuthenticated = clawboxLogin.loggedIn;
-  // "What's new in 4.3" (TASK-1059, TASK-1195): a dialog shown after the box
-  // lands on 4.3 until the owner dismisses it, which the box records for every
+  // "What's new in 4.4" (TASK-1059, TASK-1195): a dialog shown after the box
+  // lands on 4.4 until the owner dismisses it, which the box records for every
   // browser. Asked again when the ClawBox AI tier changes, so an upgrade made
   // in the portal drops the plan section without a reload.
   const whatsNew = useWhatsNew(clawboxLogin.tier, ownerApis && viewerKnown && noticePolicy.whatsNew);
@@ -3609,7 +3609,7 @@ function ChromeDesktopInner() {
       {deskScreens && <MonitorIdentifyOverlay screens={deskScreens} />}
       {boxApis && <PowerApprovalPrompt />}
       <BoxSwitcherIndicator indicator={boxSwitcher.indicator} top={kioskBarInset + mainIns.top} onDone={boxSwitcher.dismiss} />
-      {/* "What's new in 4.3": a dialog over the desktop and the chat, with the
+      {/* "What's new in 4.4": a dialog over the desktop and the chat, with the
           notice column held back while it is up. */}
       {whatsNew.visible && whatsNew.state && (
         <WhatsNewCard state={whatsNew.state} onDismiss={whatsNew.dismiss} onEngage={engageWhatsNew} />

@@ -77,6 +77,19 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 
 ---
 
+## ✨ New in 4.4
+
+| | |
+|---|---|
+| 🔐 **ClawBox Vault, passwords built in** | A password manager built into ClawBox, opened by the owner from its desktop icon. Once you choose a vault PIN, the box's browser offers to save your logins and fills them in, and the assistant can sign in to a site for you without ever seeing the password. |
+| 🏢 **Organisation mode, for a company's staff** | A switch in **Settings → System → Users** gives other users only Chat, Files and their own settings. Each member of staff chats with a limited assistant that has a memory of their own and keeps files in a home folder of their own. The owner gives staff chosen tools, sets upload, storage and chat limits, and reads an audit log. |
+| 🔌 **A ClawBox Workstation as your AI engine** | **Settings → Local AI → External engine** runs the chat on an OpenAI-compatible AI engine on your network, such as a ClawBox Workstation built from NVIDIA DGX Sparks, instead of the model on the box. On a Workstation of several Sparks, once the others are listed in its settings, the owner sees each Spark and the shared engine under **Settings → System → Cluster**. |
+| 📅 **A weekly update check, on Telegram too** | Every Monday morning the box looks for a newer ClawBox and tells you once per version, on Telegram with an **Update** button when the bot can reach you, otherwise on the desktop. Send **/update** to the bot in a private chat at any time; the update still waits for you to confirm it. |
+| 📄 **Word, Excel and PowerPoint files in the chat** | The chat takes Word, Excel, PowerPoint and OpenDocument attachments (.docx, .xlsx, .pptx, .odt, .ods), and the box reads their text for the assistant. |
+
+Before you update: on the OpenClaw edition the move to OpenClaw 2026.11.5 is one-way and the periodic check-in becomes an automation job, and ClawBox AI is one model now, DeepSeek V4 Flash.
+Full detail, and how to upgrade: **[RELEASE-NOTES-4.4.0.md](RELEASE-NOTES-4.4.0.md)**.
+
 ## ✨ New in 4.3
 
 | | |
@@ -91,7 +104,7 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 🔁 **Switching between Anthropic accounts, fixed** | An account is no longer marked expired because the box was off or offline, an account whose organization switched off subscription access is left at once, and a failure counts only against the account the assistant was really using. |
 | 🛠️ **Smaller things** | **Settings → Appearance** sets the remote desktop to 1280 × 720, 1600 × 900 or 1920 × 1080. When the cloud voice does not answer, a spoken reply gives up in about 20 seconds and says so, and the chat shows coding runs started elsewhere without a reload. The Projects app and its GitHub backup are gone; your folders stay where they are and open in **Files**. |
 
-Full detail, and how to upgrade: **[RELEASE-NOTES-4.3.0.md](RELEASE-NOTES-4.3.0.md)**.
+Full detail: **[RELEASE-NOTES-4.3.0.md](RELEASE-NOTES-4.3.0.md)**.
 
 ## ✨ New in 4.2
 

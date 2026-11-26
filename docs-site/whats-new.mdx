@@ -15,6 +15,9 @@ the entry says so.
 Entries are grouped by release, newest first.
 
 <Columns cols={2}>
+  <Card title="4.4" href="#clawbox-44" icon="key">
+    ClawBox Vault, organisation mode, a ClawBox Workstation as your AI engine, a weekly update check and Office files in the chat.
+  </Card>
   <Card title="4.3" href="#clawbox-43" icon="sparkles">
     Screenshots, one shared browser, public app links, xAI Grok, Prime Radiant and updates that ask before they stop your agents.
   </Card>
@@ -37,12 +40,132 @@ Looking for your installed version? Open **Settings → About**. To update, open
 **Settings → System Update**.
 </Tip>
 
-## ClawBox 4.3
+## ClawBox 4.4
 
 <Note>
-**Release status:** 4.3.0 is being validated on beta devices before the stable release. A box on
-`main` is offered it as `v4.3.0` once it is released; see [Updating ClawBox](/support/updating).
+**Release status:** a box on `main` is offered 4.4.0 as `v4.4.0` once it is released; see
+[Updating ClawBox](/support/updating).
 </Note>
+
+ClawBox 4.4 adds ClawBox Vault, a password manager built into ClawBox, and an organisation
+mode for a ClawBox that serves a company's staff. Local AI can run on an AI engine on your
+network, such as a ClawBox Workstation, the box checks for updates every week and can tell you on
+Telegram, and the chat reads Word, Excel and PowerPoint files. Three changes happen on the way to
+4.4 and are listed under [Before you update to 4.4](#before-you-update-to-44): the OpenClaw
+2026.11.5 move, check-ins as an automation job, and one ClawBox AI model. After updating, the
+desktop shows a **What's new in 4.4** card. Choose **Got it** to hide it on all your browsers.
+
+### ClawBox Vault, passwords built in
+
+**ClawBox Vault** is a password manager built into ClawBox, opened by the owner from its desktop
+icon. An update in the app installs it on a ClawBox device; a PC set up with `install-x64.sh` gets
+it the next time its installer is run.
+Nothing is saved or filled until you choose a vault PIN of at least six characters. The box's own
+browser then offers **Save to ClawBox Vault?** when you sign in to a site and fills the logins you
+saved, and the assistant can sign in to a site for you without ever seeing the password. Every
+fill, save and delete is listed under **Activity**. ClawKeep does not back the vault up, and a
+factory reset removes it.
+
+### Organisation mode, for a company's staff
+
+**Organisation mode**, an owner-only switch in **Settings → System → Users**, gives other users
+only Chat, Files and their own settings. Each member of staff chats with a limited assistant of
+their own, with a memory other users cannot open, and their **Files** shows only their own home and a
+**Shared** folder. In the same place the owner chooses the **Tools for members of staff**, sets
+**Limits for other users** for uploads, home folders and chat messages, and reads the **Audit
+log**. The owner can also reset another user's password, and every other user can change their
+own in **Settings → Account**.
+
+### A ClawBox Workstation as your AI engine
+
+**Settings → Local AI → External engine** runs the chat on an OpenAI-compatible AI engine on your
+network, such as a ClawBox Workstation built from NVIDIA DGX Sparks, or a vLLM, SGLang or
+llama.cpp server, instead of the model on the box. On a Workstation of several Sparks, the owner
+sees each Spark and the shared engine in a **Cluster** tab under **Settings → System**, once the
+other Sparks are listed in the box's settings file. A Workstation gets its updates from a
+`workstation` channel of its own. On a box without a ClawBox AI sign-in, Prime Radiant, picture
+descriptions and the Memory Shard index use the External engine too, and **Your speech server** in
+**Settings → Local AI → Speech to text** can transcribe what you say on a server of your own.
+**Hide cloud AI providers** removes the cloud providers from Settings, the setup wizard and the
+chat's model picker.
+
+### A weekly update check, on Telegram too
+
+The **Weekly update check** in **Settings → System Update** is on by default. Every Monday around
+10:00, box time, the box looks for a newer ClawBox and tells you once per version: on Telegram,
+with an **Update** button, when the bot can reach you, otherwise on the desktop. The owner can
+send **/update** to the bot in a private chat at any time. The update starts only once you confirm
+it on the desktop, or with the button the approvals bot sends where one is set up. A tap on
+**Update** while agents are working says so and leaves them to finish.
+
+### Word, Excel and PowerPoint files in the chat
+
+The chat takes Word, Excel, PowerPoint and OpenDocument attachments (`.docx`, `.xlsx`, `.pptx`,
+`.odt`, `.ods`), and the box reads their text for the assistant, on both editions. A
+password-protected file is turned away with a note that says why.
+
+### Smaller things
+
+- OpenClaw is updated to 2026.11.5 and Hermes Agent to v0.23.3.
+- A Coding Agent folder project can list several git repositories; a run opens one pull request
+  per repository it changed.
+- The Coding Agent can use Claude Fable 5.2, Sonnet 5.5 and Haiku 5.5.
+- When the assistant drafts an email through a mail tool you granted, the chat can show the draft
+  for you to approve, with **Send**, **Keep as draft** and **Tell me what to change**. Off until
+  the owner turns it on in **Settings → Email**.
+- Memory search can use the larger Qwen3-Embedding-4B on a PC with an NVIDIA GPU.
+- In-app updates keep the chat down for much less time, reinstall only the OpenClaw plugins that
+  need it, and offer **Try again** after a failure. **Full update log** shows everything the
+  update printed.
+- **Linked ClawBoxes (experimental)**, off by default in **Settings → System Update → Advanced
+  options**, switches between your ClawBoxes with Ctrl+Shift+1…9.
+- **Linked ClawBoxes on several monitors (experimental).** The switch below it, **Linked
+  ClawBoxes use this ClawBox's monitors (experimental)**, is off by default too. With both on, a
+  box's own screen in kiosk mode lays out the other boxes' desktops by its own monitors: windows
+  maximise and snap on the monitor they are on, and the shelf, the chat and the icons stay on the
+  main monitor. Arrange the monitors in **Settings → Monitors** on this box. Opened on that
+  screen, the other box's **Settings → Monitors** shows them for reading only.
+- **A simpler chat on a phone held upright.** A slim bar at the top has a menu button. The menu
+  slides in from the left with New chat, your chats, Desktop and the text size. Under your
+  message, **+** holds attachments and more, and the model button picks the model. Held sideways,
+  the chat looks as before.
+- The Coding Agent and Agent Browser have new icons.
+- ClawBox installs on NVIDIA DGX Spark workstations with the PC installer.
+- A box whose Wi-Fi radio was switched off turns it back on, and the hotspot switch in Settings
+  matches what the box does.
+- A Memory Shard index pass is no longer cut off after two hours.
+
+### Before you update to 4.4
+
+- Update from 4.3.x, 4.2.x, 4.1.x or 4.0.x in **Settings → System Update**. On the OpenClaw edition
+  `sudo bash install.sh` over SSH works too; on the Hermes edition System Update is the only
+  route.
+- **The move to 4.4 is one-way on OpenClaw.** The update moves OpenClaw from 2026.10.9 to
+  2026.11.5 and the assistant's data to the newer format 2026.11.5 uses. After the update an older
+  OpenClaw core cannot open the data any more, so the box cannot go back to 4.3 or an earlier
+  release.
+- **On OpenClaw, check-ins become an automation job.** OpenClaw 2026.11.5 runs the assistant's
+  periodic check-in as an ordinary automation job. The update converts the check-in the box had,
+  on or off as you had it, and **Unprompted check-ins** in **Settings → Harness** switches that
+  job. ClawBox does not create the job itself, so a box set up fresh on this release has none
+  until one is created, and the row says so instead of showing a switch. A converted check-in is
+  delivered like any other automation, so the same update can reach you more than once.
+- **One ClawBox AI model.** ClawBox AI is **DeepSeek V4 Flash** on every plan, for chat and for
+  pictures. The update moves every setting that named a retired ClawBox AI model, the Max plan's
+  own model or the separate picture model, to `deepseek-v4-flash`; a picture setting goes to a
+  vision fallback instead while Flash cannot see pictures. A model you chose from another provider
+  stays as it is.
+- Your data is preserved, and the edition lock is untouched.
+
+### What works differently
+
+- ClawBox AI no longer has a separate model for the Max plan or for pictures.
+- Updating is the owner's alone: other users no longer see update notices, What's new or System
+  Update.
+
+## ClawBox 4.3
+
+**Released November 6, 2026**
 
 ClawBox 4.3 adds a Screenshot app and gives you and your assistant one shared browser. An
 app the Coding Agent built can now be shared through a public link. xAI Grok joins the AI
@@ -185,20 +308,12 @@ See [Multiple Anthropic Accounts](/guides/anthropic-accounts).
 - On a laptop, the tray shows the battery level beside the clock.
 - On the ClawBox desktop session, a **Google Chrome** icon opens your own Chrome as a window
   on the box's screen.
-- **Linked ClawBoxes on several monitors (experimental).** **Settings → System Update → Advanced
-  options → Linked ClawBoxes (experimental)** lets Ctrl+Shift+1 … 9 switch between your boxes in
-  the kiosk, each in a tab of its own. The switch below it, **Linked ClawBoxes use this ClawBox's
-  monitors (experimental)**, lays the other box's desktop out by the monitors you arranged on
-  this box in **Settings → Monitors**: windows maximise and snap on the monitor they are on, and
-  the shelf, the chat and the icons stay on the main monitor. On the other box, **Settings →
-  Monitors** then shows this box's monitors for reading only; arrange them on this box. Both
-  switches are off until you turn them on.
 - Pressing Stop in the chat leaves a grey "Stopped." line under the reply.
 - On Hermes, documents attached in the chat reach the assistant.
 - When ClawKeep refuses a backup, it says why, with the sizes involved.
 - On your own x64 machine, a Cloudflare Tunnel download that stalls no longer holds up the
   install.
-- OpenClaw is updated to 2026.11.5 and Hermes Agent to v0.23.1.
+- OpenClaw is updated to 2026.10.9 and Hermes Agent to v0.22.5.
 - Coding runs can also run on OpenAI, through the Codex CLI: connect an API key or a ChatGPT
   sign-in in the Coding Agent's settings. A run can tell the assistant that started it about a
   question or a blocker while it works, and the chat that started a run hears when it ends.
@@ -237,14 +352,9 @@ See [Multiple Anthropic Accounts](/guides/anthropic-accounts).
   `sudo bash install.sh` over SSH works too; on the Hermes edition System Update is the only
   route.
 - **The move to 4.3 is one-way on OpenClaw.** The update moves OpenClaw's data to the newer
-  format OpenClaw 2026.10.6 and later use (2026.11.5 moves it once more), so the box cannot go
-  back to an earlier release afterwards. An update that lacks the disk space for the move stops
-  before it changes OpenClaw and says how much it needs.
-- **On OpenClaw, check-ins are an automation job.** OpenClaw 2026.11.5 runs the assistant's
-  periodic check-in as an ordinary automation job. The update converts the check-in the box had,
-  on or off as you had it, and **Settings → Harness** switches that job. ClawBox does not create
-  the job itself, so a box set up fresh on this release has none until one is created, and the
-  row says so instead of showing a switch.
+  format OpenClaw 2026.10.6 and later use, so the box cannot go back to an earlier release
+  afterwards. An update that lacks the disk space for the move stops before it changes OpenClaw
+  and says how much it needs.
 - The update moves the box to Node.js 24.22.1 or newer, the October 2026 Node.js security
   release, on every edition.
 - Sites the assistant was signed in to in its old, separate browser need one sign-in in

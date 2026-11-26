@@ -37,7 +37,7 @@ export interface WhatsNewCardState {
 }
 
 /**
- * The "What's new in 4.3" card's state, for the desktop.
+ * The "What's new in 4.4" card's state, for the desktop.
  *
  * `refreshKey` asks the route again when it changes. The desktop passes the
  * ClawBox AI tier it already polls, so an owner who upgrades in the portal

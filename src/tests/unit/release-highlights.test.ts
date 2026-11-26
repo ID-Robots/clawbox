@@ -3,10 +3,10 @@
  * /updating screen's "What's new" panel.
  *
  * What is pinned here:
- *  - the real 4.3.0, 4.2.0, 4.1.0 and 4.0.0 notes in this checkout (which are
- *    also the GitHub release bodies) give their Highlights, joined across
- *    wrapped lines and without a single Markdown mark, and the 4.3.0 ones are
- *    word for word the desktop card's English copy;
+ *  - the real 4.4.0, 4.3.0, 4.2.0, 4.1.0 and 4.0.0 notes in this checkout
+ *    (which are also the GitHub release bodies) give their Highlights, joined
+ *    across wrapped lines and without a single Markdown mark, and the 4.4.0
+ *    ones are word for word the desktop card's English copy;
  *  - the 3.9 shape (`**Title** — body`) splits the same way;
  *  - notes with no Highlights section — the older "What's Changed" PR lists —
  *    give NOTHING, so the panel shows its fallback rather than PR titles;
@@ -26,11 +26,38 @@ import {
   splitHighlight,
   stripTags,
 } from "@/lib/release-highlights";
+import { whatsNewEn } from "@/lib/edition-translations/en-whats-new";
+import { WHATS_NEW_HIGHLIGHTS } from "@/lib/whats-new";
 
 const notes = (version: string) =>
   fs.readFileSync(path.join(process.cwd(), `RELEASE-NOTES-${version}.md`), "utf-8");
 
 describe("parseReleaseHighlights on the releases this repo shipped", () => {
+  it("reads the five 4.4.0 highlights, title and body, in order, word for word the card's English copy", () => {
+    const highlights = parseReleaseHighlights(notes("4.4.0"));
+    expect(highlights.map((h) => h.title)).toEqual([
+      "ClawBox Vault, passwords built in",
+      "Organisation mode, for a company's staff",
+      "A ClawBox Workstation as your AI engine",
+      "A weekly update check, on Telegram too",
+      "Word, Excel and PowerPoint files in the chat",
+    ]);
+    // Five, and nothing past the panel's cap was cut to get there.
+    expect(parseReleaseHighlights(notes("4.4.0"), 100)).toEqual(highlights);
+    expect(highlights.length).toBeLessThanOrEqual(MAX_HIGHLIGHTS);
+    expect(highlights.map((h) => ({ title: h.title, body: h.body }))).toEqual(
+      WHATS_NEW_HIGHLIGHTS.map((item) => ({ title: whatsNewEn[item.title], body: whatsNewEn[item.body] })),
+    );
+    // The changes an update makes on its way to 4.4 are the notes' "Before
+    // you update", not highlights.
+    expect(notes("4.4.0")).toMatch(/^## Before you update$/m);
+    for (const h of highlights) {
+      expect(`${h.title} ${h.body}`).not.toMatch(/\*\*|`|\s{2}|2026\.11\.5|deepseek/);
+      expect(h.title.length).toBeLessThan(MAX_TITLE_CHARS);
+      expect(h.body.length).toBeLessThan(MAX_BODY_CHARS);
+    }
+  });
+
   it("reads the eleven 4.3.0 highlights, title and body, in order, the panel's handful first", () => {
     const highlights = parseReleaseHighlights(notes("4.3.0"), 100);
     expect(highlights.map((h) => h.title)).toEqual([
@@ -103,7 +130,7 @@ describe("parseReleaseHighlights on the releases this repo shipped", () => {
     // and its fallback (the card's keys) must say the same thing.
     const { whatsNewEn } = await import("@/lib/edition-translations/en-whats-new");
     const { WHATS_NEW_HIGHLIGHTS } = await import("@/lib/whats-new");
-    expect(parseReleaseHighlights(notes("4.3.0"), 100)).toEqual(
+    expect(parseReleaseHighlights(notes("4.4.0"), 100)).toEqual(
       WHATS_NEW_HIGHLIGHTS.map((item) => ({ title: whatsNewEn[item.title], body: whatsNewEn[item.body] })),
     );
   });
