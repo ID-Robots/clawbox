@@ -80,9 +80,10 @@ things, and each works the same on OpenClaw and on Hermes:
 
 ### Before you start
 
-- **A ClawBox on an x64 computer that shows its desktop full screen on a screen connected
-  to it.** The ClawBox device has neither monitor mode nor kiosk mode, and looks and
-  works as before.
+- **A ClawBox installed on a PC that shows its desktop full screen on a screen connected
+  to it.** The ClawBox device has neither monitor mode nor kiosk mode. Linked ClawBoxes
+  works there too, in an ordinary browser window (see the tip under
+  [Switch between your ClawBoxes](#switch-between-your-clawboxes)).
 - **The right session on that computer.** Kiosk mode is the **ClawBox Kiosk** session,
   and monitor mode is the **ClawBox Desktop** session. They are set up once on that
   computer; an update does not switch them on (see Details).
@@ -177,7 +178,8 @@ comes up in an ordinary Chrome window, with Chrome's own tabs and address bar.
     **Advanced options**.
   </Step>
   <Step title="Turn on Linked ClawBoxes (experimental)">
-    Settings now has a page called **Linked ClawBoxes**.
+    Turn on the switch **Linked ClawBoxes (experimental)**. Settings now has a page called
+    **Linked ClawBoxes**.
     <Frame caption="Settings → System Update → Advanced options">
       <img src="/images/4.4/screens-linked-switches.webp" alt="Two switches. Linked ClawBoxes (experimental) is on. Linked ClawBoxes use this ClawBox's monitors (experimental) is off." />
     </Frame>
@@ -244,8 +246,10 @@ ClawBox in its own list: copy an address under **This ClawBox's address** and ad
   `sudo scripts/x64-migration/kiosk/install-kiosk-tabs.sh` adds the bar and the tabs to
   the kiosk, and `sudo scripts/x64-migration/kiosk/install-desktop-session.sh` installs
   the ClawBox Desktop session and makes it the one the screen starts (`--revert` goes
-  back to the kiosk). Both restart the computer unless you add `--no-restart`. On a
-  computer without a kiosk they stop and change nothing. An update never runs them: the
+  back to the kiosk). The second one restarts the computer unless you add `--no-restart`;
+  the first one restarts it only when it changed something while the kiosk is running,
+  and `--no-restart` skips that too. On a computer without a kiosk they stop and change
+  nothing. An update never runs them: the
   session a screen starts stays as you set it.
 - The kiosk's bar comes from the ClawBox Kiosk Tabs extension, which the kiosk's Chrome
   loads. The box's own sign in, setup and update pages get no bar. The ClawBox Desktop
@@ -257,8 +261,8 @@ ClawBox in its own list: copy an address under **This ClawBox's address** and ad
   in there.
 - **Linked ClawBoxes use this ClawBox's monitors (experimental)** works only through the
   kiosk's bar, and only while **Linked ClawBoxes (experimental)** is on. With it on, the
-  bar hands a linked box's page the shape of this screen's monitors: where each one sits,
-  its size, and which is the main one, nothing else. That box would then lay its desktop
+  bar hands a linked box's page the layout of this screen's monitors: where each one sits,
+  its size and name, which is the main one, and whether they mirror. That box would then lay its desktop
   out on them, and its **Monitors** page would only list them, for reading. But a box
   knows its monitors only in the ClawBox Desktop session, and the standard setup runs that
   session without the bar. In the ClawBox Kiosk session, where the bar runs, the box

@@ -28,7 +28,8 @@ everything else. This page is for the owner of the box.
   </Step>
   <Step title="Type a username">
     Under **Add a user**, type a name in **Username**, for example `ivan`. Use lower case letters,
-    digits, `-` and `_`, up to 32 characters, and start with a letter or `_`.
+    digits, `-` and `_`, up to 32 characters, and start with a letter. A few names are kept for the
+    system, such as `admin`; the form says so under the field.
   </Step>
   <Step title="Type a password">
     Type a password of at least 8 characters in **Choose a password**, and the same again in
@@ -167,7 +168,7 @@ MCP server yet**, add one first.
   </Step>
   <Step title="Allow writing, if you want to">
     Tick **Also allow its tools that create or edit** if your staff should be able to write with it,
-    for example a document. Without the tick they get read and search tools only.
+    for example a document. Without the tick, its tools that create or edit stay blocked.
   </Step>
   <Step title="Save">
     Press **Save**. You see **Saved**. The change applies to each member's assistant straight away.
@@ -243,7 +244,7 @@ Open **Tools for members of staff** and check three things. The server is ticked
 is included. If the server uses a credential, the person's row does not say **Not set**. The server
 does not say **Cannot be offered to staff**. If it does, the reason follows: most often the server
 is not a Streamable HTTP server (see Details below). Tools also work only while organisation mode is
-on. While it is off, the card says **Takes effect while organisation mode is on**.
+on. While it is off, the card says **Takes effect while organisation mode is on.**
 
 **An upload is refused.**
 Files names the file and says it is larger than the upload limit for their account, or says **Your
@@ -254,7 +255,7 @@ per user** in **Limits for other users**, or ask the person to delete files they
 The person has sent more messages than **Limits for other users** allows. On OpenClaw the chat says
 **You have reached your chat limit on this ClawBox**, with how many messages it allows and how long
 to wait. On Hermes the message can stay without an answer and no time is shown: wait a minute, or
-up to an hour if the hourly limit was reached. Then send it again. To allow more, raise **Chat messages per user, per minute** or **per hour**.
+up to an hour if the hourly limit was reached. Then send it again. To allow more, raise **Chat messages per user, per minute** or **Chat messages per user, per hour**.
 
 ## Details
 
@@ -268,8 +269,8 @@ needs HTTPS. A server whose address carries a credential cannot be offered eithe
 </Note>
 
 **Which tools staff get.** A server you do not tick is never offered to anyone on your staff. The
-list shows every MCP server your assistant has, on OpenClaw and on Hermes alike. Members of staff get
-read and search tools only, unless you tick **Also allow its tools that create or edit**. Tools that
+list shows every MCP server your assistant has, on OpenClaw and on Hermes alike. A server's tools that
+create or edit stay blocked for staff unless you tick **Also allow its tools that create or edit**. Tools that
 send, publish, pay, delete or run something stay blocked either way. Your own credentials for the
 server are never sent on a member's behalf. **Credential header** names the header that carries a
 member's credential; it is `Authorization` unless you change it.

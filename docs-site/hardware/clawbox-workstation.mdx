@@ -141,7 +141,7 @@ CLAWBOX_CLUSTER_PEERS="spark-b spark-c spark-d"
 
 List the other Sparks, not the one you are on (up to eight are read). Passwordless access is not
 enough on its own: the connection never asks a question, so a peer whose host key the ClawBox account
-has not yet trusted shows as offline ("host key not trusted"). Before you restart ClawBox, sign in as
+has not yet trusted shows as offline ("Its SSH host key is not trusted by this box."). Before you restart ClawBox, sign in as
 the account that runs ClawBox and connect to each peer once (`ssh spark-b true`), checking the host key
 fingerprint it shows before you accept it. Then confirm that `ssh -o BatchMode=yes spark-b true`
 finishes without a prompt.

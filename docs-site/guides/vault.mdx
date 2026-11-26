@@ -229,8 +229,8 @@ The vault app also locks itself after 15 minutes without use.
 
 ## Keep a copy of your passwords
 
-ClawKeep does not back up the vault. Your passwords stay on this box and nowhere else, and
-a factory reset removes them. If you want a copy, you have to make it yourself: see
+ClawKeep does not back up the vault. Your passwords stay on this box and nowhere else. If
+you want a copy, you have to make it yourself: see
 [Make your own copy](#make-your-own-copy) below.
 
 ## If it does not work
@@ -272,8 +272,8 @@ a factory reset removes them. If you want a copy, you have to make it yourself: 
     [Reset a forgotten PIN](#reset-a-forgotten-pin) below. If you would rather not,
     contact ClawBox support (see **Need a hand?** on the [home page](/)).
 
-    A wrong PIN shows *wrong PIN*. After several wrong tries the vault asks you to wait
-    (*Too many attempts. Try again in …*) before the next one.
+    A wrong PIN shows *wrong PIN*. After five wrong tries the vault asks you to wait:
+    *Too many attempts. Try again in 30 s.* Each further wrong try makes the wait longer.
   </Accordion>
 </AccordionGroup>
 
@@ -294,6 +294,7 @@ it gets one status back, and it tells you what that means:
 | `locked` | The extension is locked (**Browser → Lock extension**, or **Lock** in the vault's window in the browser). |
 | `extension_offline` | The box's browser is closed, or it is unpaired. |
 | `timeout` | The browser did not answer within 20 seconds. |
+| `error` | The browser could not finish the fill. |
 
 Before the vault has a PIN, every request gets "not set up" instead, and the assistant
 tells you to choose a PIN.
@@ -304,8 +305,8 @@ tells you to choose a PIN.
   itself (`localhost`).
 - Only the site a login belongs to. A login for `example.com` also fits
   `login.example.com`; a login saved for the exact address is offered first.
-- Only the page itself, or a frame of the same site inside it. A login form inside
-  another site's frame is refused.
+- Only the page itself, or a frame inside it with exactly the same address as the page. A
+  login form inside a frame from any other address is refused.
 
 ### Passwords on screen and on the clipboard
 
@@ -323,7 +324,7 @@ Everything is in the folder `~/.clawbox-vault` on the box:
 - `state.json`: the PIN (stored as a hash, never in plain text) and the browser's pairing.
 
 The **Files** app, the assistant's file and command tools and the **Coding Agent** are
-not allowed into this folder.
+not allowed into this folder. A factory reset does not remove it.
 
 ### Make your own copy
 
