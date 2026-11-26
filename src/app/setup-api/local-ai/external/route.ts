@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { get } from "@/lib/config-store";
 import { requireSession } from "@/lib/route-auth";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import { getActiveHarness } from "@/lib/harness";
 import {
   HERMES_MIN_CONTEXT_WINDOW,
@@ -80,6 +81,12 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   const unauthorized = await requireSession(request, { ownerOnly: true });
   if (unauthorized) return unauthorized;
+  // The owner's cookie also rides on a POST from another origin of the same
+  // site (another box's `*.clawbox.tech` name): a Save from there would point
+  // the box's chat at that page's server.
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "The external engine can only be saved from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: Record<string, unknown>;
   try {
     body = await request.json();

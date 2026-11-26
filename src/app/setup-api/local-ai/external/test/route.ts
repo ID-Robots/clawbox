@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import { parseExternalApiKey, validateExternalEngineInput } from "@/lib/external-engine-shared";
 import {
   NO_KEY_PLACEHOLDER,
@@ -24,6 +25,11 @@ import {
 export async function POST(request: Request) {
   const unauthorized = await requireSession(request, { ownerOnly: true });
   if (unauthorized) return unauthorized;
+  // Same rule as Save: a page on another origin of the same site must not
+  // make the box send requests to an address of its choosing.
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "The external engine can only be tested from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: Record<string, unknown>;
   try {
     body = await request.json();

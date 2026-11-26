@@ -23,9 +23,10 @@ function sign(claims: Record<string, unknown>): string {
 
 const BODY = { baseUrl: "http://192.0.2.10:8000/v1", modelId: "Qwen/Qwen3-32B", apiKey: "sk-test-placeholder-0123456789" };
 
-function req(method: string, url: string, who: { cookie?: string; bearer?: string }): Request {
+function req(method: string, url: string, who: { cookie?: string; bearer?: string; origin?: string }): Request {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (who.cookie) headers.cookie = `clawbox_session=${who.cookie}`;
+  if (who.origin) headers.origin = who.origin;
   if (who.bearer) headers.authorization = `Bearer ${who.bearer}`;
   return new Request(`http://localhost${url}`, {
     method,
@@ -102,6 +103,29 @@ describe("external engine routes: owner only", () => {
       expect((await handler()(req(method, url, {}))).status, name).toBe(401);
     }
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("answers the owner's cookie on a Save or Test from another origin 403 cross_origin, and sends nothing", async () => {
+    // Another box's tunnel name is the same site, so the browser attaches the
+    // owner's SameSite=Lax cookie to its POST.
+    const external = await import("@/app/setup-api/local-ai/external/route");
+    const test = await import("@/app/setup-api/local-ai/external/test/route");
+    for (const [name, handler, url] of [
+      ["POST external (Save)", external.POST, "/setup-api/local-ai/external"],
+      ["POST external/test (Test)", test.POST, "/setup-api/local-ai/external/test"],
+    ] as const) {
+      const res = await handler(req("POST", url, { cookie: sign({}), origin: "https://another-box.clawbox.tech" }));
+      expect(res.status, name).toBe(403);
+      expect(await res.json(), name).toMatchObject({ code: "cross_origin" });
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("still lets the owner's own page Test an engine", async () => {
+    const test = await import("@/app/setup-api/local-ai/external/test/route");
+    const res = await test.POST(req("POST", "/setup-api/local-ai/external/test", { cookie: sign({}), origin: "http://localhost" }));
+    expect(res.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it("lets the owner through", async () => {
