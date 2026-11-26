@@ -264,7 +264,7 @@ Only MCP servers that use the **Streamable HTTP** transport can be offered to st
 OpenClaw, an entry that has a `url` but no `transport` counts as SSE: add
 `"transport": "streamable-http"` to it in `openclaw.json`. On Hermes, a server that runs a local
 command, or uses SSE, cannot be offered: give it the `url` of a Streamable HTTP endpoint, without a
-`command`, in `config.yaml`, and remove `transport: sse` if the entry has it. Changing the entry does
+`command`, in `config.yaml`, and remove `transport: sse` and any `cwd` (working folder) the entry has. Changing the entry does
 not change the server: a server that only speaks SSE still cannot be offered. A
 plain-HTTP address works only for a server on the ClawBox itself (`127.0.0.1`, not `localhost`). Anything else
 needs HTTPS. A server whose address carries a credential cannot be offered either.
