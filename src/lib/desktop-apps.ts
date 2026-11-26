@@ -67,7 +67,7 @@ export const apps: AppDef[] = [
   // service's own page behind the owner-only route (src/lib/vault-proxy.ts),
   // so the app is the owner's alone (OWNER_ONLY_APP_IDS) on every edition. A
   // product name, so it carries no translation key.
-  { id: "vault", name: "ClawBox Vault", color: "#14532d", type: "vault", pinned: true, defaultWidth: 1040, defaultHeight: 720 },
+  { id: "vault", name: "Vault", color: "#f97316", type: "vault", pinned: true, defaultWidth: 1040, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#f8fafc", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   // The web itself: a start page with a search box, opened as an EXTERNAL

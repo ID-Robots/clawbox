@@ -376,6 +376,21 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     );
   }
 
+  if (id === "vault") {
+    // The Vault artwork is its own orange rounded tile (password dots and a
+    // claw), drawn a touch larger than the app's matching orange tile.
+    const scaled = Math.round(px * 1.35);
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src="/vault-app.png"
+        alt=""
+        draggable={false}
+        style={{ width: scaled, height: scaled, objectFit: "contain", maxWidth: "none", maxHeight: "none" }}
+      />
+    );
+  }
+
   if (id === "browser") {
     // A flat colour-block globe made for ClawBox, on the app's light tile.
     const scaled = Math.round(px * 1.85);

@@ -413,7 +413,7 @@ describe("the vault's folder is one of the box's secret folders", () => {
 describe("the desktop app is the owner's alone", () => {
   it("is on the desktop, with a window on both surfaces and a glyph", () => {
     const app = apps.find((a) => a.id === VAULT_DESKTOP_APP_ID);
-    expect(app).toMatchObject({ id: "vault", name: "ClawBox Vault", type: "vault" });
+    expect(app).toMatchObject({ id: "vault", name: "Vault", type: "vault" });
     expect(APP_GLYPHS.vault).toBe("key");
     expect(read("src", "app", "page.tsx")).toMatch(/case "vault":\s*return <VaultApp \/>;/);
     expect(read("src", "app", "app", "[id]", "page.tsx")).toMatch(/case "vault":\s*return <VaultApp \/>;/);

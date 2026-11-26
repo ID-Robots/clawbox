@@ -16,7 +16,7 @@ import { VAULT_PROXY_PREFIX } from "@/lib/vault-proxy";
 export const VAULT_FRAME_SRC = `${VAULT_PROXY_PREFIX}/`;
 
 /** A product name, like the app's own (src/lib/desktop-apps.ts): not translated. */
-const VAULT_TITLE = "ClawBox Vault";
+const VAULT_TITLE = "Vault";
 
 export default function VaultApp() {
   return (
