@@ -8,10 +8,6 @@ An update gives your ClawBox new features and fixes. This page is for the owner 
 both editions, OpenClaw and Hermes. An update keeps your data: settings, AI keys, chats and
 channel tokens stay as they are.
 
-<Frame caption="The System Update app: what is installed, what is waiting, and one button to take it">
-  <img src="/images/4.0/system-update.png" alt="The System Update window reporting that a rebuild is available because the build being served was made from a different commit than the code on disk, with an Update everything button and rows for the ClawBox device and the agent." />
-</Frame>
-
 ## Before you start
 
 - Sign in to the ClawBox desktop with the owner account. Members of staff cannot update the box.
@@ -161,17 +157,25 @@ chat, you get a confirmation to approve first.
 
 ## If it does not work
 
-- **The box restarted or lost power during the update.** System Update says which step was
-  running when it stopped, and shows **Resume update**. That continues from that step. When no
-  step is known, the button says **Start the update again**. **Dismiss** clears the result, and
-  the next update starts from the top.
+- **The update stopped, or takes much longer than usual.** When it takes longer than usual, the
+  screen says so, and that nothing has been lost. If the box does not come back by itself,
+  restart it. The desktop unlocks by itself on the next start. After a restart or a power cut,
+  System Update says which step was running when it stopped, and shows **Resume update**. That
+  continues from that step. When no step is known, the button says **Start the update again**.
+  **Dismiss** clears the result, and the next update starts from the top.
 - **A step failed.** The screen says **Update failed**, marks the step in red and says why. Click
   **Try again**. If it stops at the same step, see
   [Troubleshooting](/support/troubleshooting#an-update-is-stuck-failed-or-rolled-back).
-- **It takes much longer than usual.** The screen says so, and that nothing has been lost. If the
-  box does not come back by itself, restart it. The desktop unlocks by itself on the next start.
-- **The bot answers /update with a pairing code.** Your Telegram account is not approved for the
-  bot yet. Approve it on the ClawBox screen, then send **/update** again.
+- **The bot does not answer /update, or answers with a pairing code.** Send **/update** in your
+  own private chat with the bot, not in a group. A pairing code means your Telegram account is
+  not approved for the bot yet. Approve it on the ClawBox screen (see
+  [Messaging channels](/guides/messaging-channels)), then send **/update** again. Other answers
+  from the bot are explained in [Telegram answers](#telegram-answers).
+
+## Details
+
+### Telegram answers
+
 - **/update in a group does nothing.** Send it in your private chat with the bot. On Hermes the
   bot tells you so in your private chat. On OpenClaw it does not answer in the group at all.
 - **The bot says the box is already waiting for you to confirm something else, or you just
@@ -183,8 +187,6 @@ chat, you get a confirmation to approve first.
   from an older message.
 - **The bot says ClawBox could not reach the update server.** Check the box's internet
   connection, then send **/update** again later.
-
-## Details
 
 ### How agent runs are counted
 
