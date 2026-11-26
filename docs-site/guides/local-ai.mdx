@@ -91,6 +91,8 @@ update puts it back: it is the one model ClawBox installs on every box.
 - **Whisper** comes in several sizes. Bigger is more accurate and slower, and the box keeps
   using the current one until the new one has finished downloading.
 
+<div id="memory-search-model-06b-or-4b" style={{ scrollMarginTop: "7rem" }} />
+
 ## Memory search model: 0.6B or 4B
 
 Memory search on the box runs **Qwen3-Embedding-0.6B** unless you pick otherwise. On a PC
@@ -159,60 +161,109 @@ a later default.
 
 ## External engine
 
-If you already run a bigger model somewhere else — an inference cluster, or a
-vLLM, SGLang or llama.cpp server on a computer on your network — the box can use it
-as its Local AI instead of the model on the box. Open **Settings → Local AI →
-External engine → Set up** and fill in:
+If you already run a bigger AI model on another computer, your box can use it for the
+chat instead of the small model on the box. That computer can be a
+[ClawBox Workstation](/hardware/clawbox-workstation) (NVIDIA DGX Spark), an inference
+cluster, or a vLLM, SGLang or llama.cpp server on your network. This is for owners who run
+such a server. It works on both editions, OpenClaw and Hermes.
 
-| Field | What to enter |
-|---|---|
-| **Base URL** | The address of the OpenAI-compatible API, usually ending in `/v1` — for example `http://192.0.2.10:8000/v1`. No user name, password or query in it. |
-| **API key** | The key the server asks for, or leave it empty if it needs none. It is kept on the box in a file only the box can read and is never shown again; the field says when one is saved. |
-| **Model id** | Exactly as the server lists it under `/models` (for example `Qwen/Qwen3-32B`). |
-| **Context window** | How many tokens the model takes, as the server runs it. |
-| **Max output tokens** | The longest reply to ask for. |
-| **The model accepts images** | Tick it for a vision model. |
-| **The model reasons (thinking levels)** | Tick it for a reasoning model — one that takes `reasoning_effort` and answers its thinking as `reasoning_content`, such as a DeepSeek-class model behind vLLM or SGLang. The chat then offers **Off, Low, Medium and High** for it: Low, Medium and High are sent as they are, Off as `none`, and the reply shows its reasoning. Off by default; leave it off if the server rejects `reasoning_effort`. |
+### Before you start
 
-**Test** asks the server's `GET /models` and writes nothing. It tells you in plain words
-when the server cannot be reached, refuses the key, or does not list that model — and in
-the last case shows the models it does list, so you can pick one. With the reasoning box
-unticked, Test also sends the server one tiny question at low effort, and when the answer
-comes back with reasoning it suggests ticking the box (it never ticks it for you). **Save and use** runs
-the same check, then makes the engine the chat's model: the chat header and the provider
-list name its model, and you can still switch between it and a cloud model in the chat
-header as with the on-device model.
+- You need the **owner** account of the box.
+- The AI server must be running, and your box must be able to reach it over your network.
+- Have three things from the server at hand: its address (it usually ends in `/v1`), the
+  exact name of the model it runs, and its API key if it asks for one.
+- On **Hermes**, the model must take at least **64,000 tokens** at once (its context
+  window). A smaller one is refused.
+- On **OpenClaw**, **Local-only mode** must be off.
 
-When the engine is already connected before the box's first setup — for example by
-whoever prepared the box — the setup wizard's AI step offers it, already selected.
-**Continue with** *its model* makes it the chat's model and goes on to Telegram, without
-installing or starting the model on the box. **Connect a different AI provider instead**
-opens the usual list, with a way back to the engine.
+### Connect the engine
 
-While an external engine is selected, the model on the box is **not started for chat** —
-not at boot, not on the first message and not by the assistant restarting — and Ollama, if
-it is installed, is stopped too. Speech, speech to text and memory search keep running on
-the box as before. **Remove** puts back what Local AI was before you saved: the on-device
-model, as the chat's model when it was, or nothing — and Ollama running again when it was.
+<Steps>
+  <Step title="Open Local AI">
+    Open **Settings** and click **Local AI** in the list on the left. Scroll down to the
+    **External engine** card. It says *No external engine is set up.*
+  </Step>
+  <Step title="Click Set up">
+    Click **Set up**. A form opens.
+  </Step>
+  <Step title="Type the address">
+    In **Base URL**, type the server's address, for example `http://192.0.2.10:8000/v1`.
+  </Step>
+  <Step title="Type the API key, if there is one">
+    In **API key**, type the key the server asks for. Leave it empty if the server needs none.
+  </Step>
+  <Step title="Type the model's name">
+    In **Model id**, type the model's name exactly as the server lists it, for example
+    `Qwen/Qwen3-32B`.
+  </Step>
+  <Step title="Set the context window">
+    In **Context window (tokens)**, type how many tokens the model takes as the server runs
+    it. The form starts at 32768. On Hermes, type 64000 or more.
+  </Step>
+  <Step title="Set the reply length (OpenClaw)">
+    In **Max output tokens**, type the longest reply you want. The form starts at 4096, which
+    is fine if you are not sure. On Hermes this field is greyed out: Hermes decides it.
+  </Step>
+  <Step title="Tick what the model can do (OpenClaw)">
+    Tick **The model accepts images** for a model that can read pictures, and **The model
+    reasons (thinking levels)** for a reasoning model. If you are not sure, leave both off.
+    On Hermes both are greyed out.
+  </Step>
+  <Step title="Click Test">
+    Click **Test**. When all is well, a green line says *The engine answers and lists* and
+    the model's name. Test only asks; it changes nothing on the box.
+    <Frame caption="The External engine form after a good Test, on an OpenClaw box">
+      <img src="/images/4.4/workstation-engine-form.webp" alt="The External engine card in Settings, Local AI: Base URL http://localhost:8000/v1, an empty API key, Model id Qwen/Qwen3-32B, context window 131072, max output tokens 4096, both boxes unticked, the Test, Save and use and Cancel buttons, and a green line saying the engine answers and lists Qwen/Qwen3-32B" />
+    </Frame>
+  </Step>
+  <Step title="Click Save and use">
+    Click **Save and use**. The card now says *Local AI answers with* and the model's name,
+    and a green line says *Saved. The chat now uses* that model.
+    <Frame caption="The engine is saved and in use">
+      <img src="/images/4.4/workstation-engine-saved.webp" alt="The External engine card after saving: Local AI answers with Qwen3-32B, the engine's address, its context window, a line saying the engine answers and lists the model, the Edit and Remove buttons, and a green line saying the chat now uses Qwen3-32B" />
+    </Frame>
+  </Step>
+  <Step title="Open the chat">
+    Open the chat. The model picker at the top of the chat shows the engine's model, and the
+    replies now come from your server.
+  </Step>
+</Steps>
 
-The address must be the engine's own server. Link-local and cloud-metadata addresses
-(169.254.x.x, fe80::…) and 0.0.0.0 are refused, whether typed or behind a name; addresses on
-this machine, your network or the internet are fine.
+To change a setting later, click **Edit** on the card, change it, then click **Test** and
+**Save and use** again.
 
-<Note>
-**Hermes:** the engine works the same way, with two differences. Hermes needs a context
-window of at least 64,000 tokens, so a smaller one is refused. And Hermes decides the
-reply length and how it sends images itself, so **Max output tokens** and **The model
-accepts images** are not used there; nor is the reasoning box, because Hermes sends the
-level picked in the chat to the engine as `reasoning_effort` on every turn (`none` for
-None) by itself. **Local-only mode** is not available while an
-external engine is selected on either edition: it promises that nothing leaves the box,
-and an external engine is somewhere else.
-</Note>
+### Stop using the engine
 
-The full prompt and tool set go to an external engine, like a cloud model — the short
-prompt the on-device model gets is only for a small model on the box. How the engine is
-wired into each assistant is in [AI Providers](/technical/ai-providers#external-ai-engine).
+<Steps>
+  <Step title="Click Remove">
+    In **Settings → Local AI**, on the **External engine** card, click **Remove**.
+  </Step>
+  <Step title="Confirm">
+    Click **Remove and go back to the previous Local AI**. A green line says *Removed. Local
+    AI is back to what it was before.* and the card says *No external engine is set up.*
+  </Step>
+</Steps>
+
+### If it does not work
+
+- **"Could not reach the engine."** The box cannot get to the server. Check that the server
+  is running, that the address and its port are right, and that the box and the server are
+  on the same network. Then click **Test** again.
+- **"The engine does not list this model id."** The server does not run a model by that
+  name. Under *It lists:* the card shows buttons for the models the server does run. Click
+  the right one, then click **Test** again.
+- **"Hermes needs a context window of at least 64,000 tokens."** You see this on Hermes when
+  you click **Save and use** (Test does not check it). Type 64000 or more in **Context window
+  (tokens)**. A model that cannot take that much cannot be used on Hermes.
+- **Test or Save and use stays greyed out.** If a yellow note says *This address is plain
+  HTTP*, your API key would travel unencrypted. Use an address that starts with `https://`,
+  or tick **Send the key over this unencrypted connection** if the server is on a network
+  you trust. If only **Save and use** is greyed out and the note says *Local-only mode is
+  on*, turn Local-only mode off first.
+
+More about each field and what the box does while the engine is in use is under
+[Details](#details) at the end of this page.
 
 ## What the hardware can run
 
@@ -226,3 +277,68 @@ unified memory) runs models up to roughly 200B parameters locally. See
 Bringing your own local model is supported through Ollama and llama.cpp — see
 [AI Providers](/technical/ai-providers#local-models-ollama--llamacpp) for how the local
 lanes are wired.
+
+## Details
+
+### External engine fields
+
+| Field | What to enter |
+|---|---|
+| **Base URL** | The address of the OpenAI-compatible API, usually ending in `/v1`, for example `http://192.0.2.10:8000/v1`. No user name, password or query in it. |
+| **API key** | The key the server asks for, or leave it empty if it needs none. It is kept on the box in a file only the box can read and is never shown again; the field says when one is saved. To take a saved key off, tick **Remove the saved key**. |
+| **Model id** | Exactly as the server lists it under `/models` (for example `Qwen/Qwen3-32B`). |
+| **Context window (tokens)** | How many tokens the model takes, as the server runs it: a whole number, at least 1024 (at least 64,000 on Hermes). |
+| **Max output tokens** | The longest reply to ask for: a whole number between 256 and the context window. |
+| **The model accepts images** | Tick it for a vision model. |
+| **The model reasons (thinking levels)** | Tick it for a reasoning model: one that takes `reasoning_effort` and answers its thinking as `reasoning_content`, such as a DeepSeek-class model behind vLLM or SGLang. The chat then offers **Off, Low, Medium and High** for it: Low, Medium and High are sent as they are, Off as `none`, and the reply shows its reasoning. Off by default; leave it off if the server rejects `reasoning_effort`. |
+
+### Test, and Save and use
+
+**Test** asks the server's `GET /models` and writes nothing. It tells you in plain words
+when the server cannot be reached, refuses the key, or does not list that model, and in
+the last case shows the models it does list, so you can pick one. On OpenClaw, with the
+reasoning box unticked, Test also sends the server one tiny question at low effort, and
+when the answer comes back with reasoning it suggests ticking the box (it never ticks it
+for you). **Save and use** runs the same check, then makes the engine the chat's model: the
+chat header and the provider list name its model, and you can still switch between it and
+a cloud model in the chat header as with the on-device model.
+
+### When the engine is there before the first setup
+
+When the engine is already connected before the box's first setup (for example by
+whoever prepared the box), the setup wizard's AI step offers it, already selected.
+**Continue with** *its model* makes it the chat's model and goes on to Telegram, without
+installing or starting the model on the box. **Connect a different AI provider instead**
+opens the usual list, with a way back to the engine.
+
+### What the box does while the engine is in use
+
+While an external engine is selected, the model on the box is **not started for chat**:
+not at boot, not on the first message and not by the assistant restarting. Ollama, if
+it is installed, is stopped too. Speech, speech to text and memory search keep running on
+the box as before. **Remove** puts back what Local AI was before you saved: the on-device
+model, as the chat's model when it was, or nothing, and Ollama running again when it was.
+
+**Local-only mode** is not available while an external engine is selected on either
+edition: it promises that nothing leaves the box, and an external engine is somewhere else.
+
+The full prompt and tool set go to an external engine, like a cloud model. The short
+prompt the on-device model gets is only for a small model on the box. How the engine is
+wired into each assistant is in [AI Providers](/technical/ai-providers#external-ai-engine).
+
+### Addresses the engine may have
+
+The address must be the engine's own server. Link-local and cloud-metadata addresses
+(169.254.x.x, fe80::…) and 0.0.0.0 are refused, whether typed or behind a name; addresses on
+this machine, your network or the internet are fine. An API key goes to a plain `http://`
+address on another machine only after you tick **Send the key over this unencrypted
+connection**; an address on the box itself (`localhost`, `127.0.0.1`) needs no tick.
+
+### The engine on Hermes
+
+The engine works the same way on Hermes, with two differences. Hermes needs a context
+window of at least 64,000 tokens, so a smaller one is refused when you save. And Hermes
+decides the reply length and how it sends images itself, so **Max output tokens** and **The
+model accepts images** are not used there; nor is the reasoning box, because Hermes sends
+the level picked in the chat to the engine as `reasoning_effort` on every turn (`none` for
+None) by itself.
