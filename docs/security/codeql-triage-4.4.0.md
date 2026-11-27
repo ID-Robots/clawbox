@@ -3,7 +3,9 @@
 The open CodeQL alerts on the 4.4.0 release PR (#1578, beta → main): 22
 alerts, each given a verdict by reading the code. **4 are REAL, 10 are BY
 DESIGN and 8 are TEST/DEV-ONLY.** The four REAL alerts share one cause and are
-fixed for 4.4.1 (section 4). No alert was dismissed on GitHub.
+fixed for 4.4.1 (section 4). An audit for the same cause found it on other
+setup-api routes CodeQL did not flag, and 4.4.1 fixes those too (section 4,
+"The same gap on other routes"). No alert was dismissed on GitHub.
 
 ## 1. What was read
 
@@ -103,6 +105,38 @@ and the update branch) and passes with the fix.
 
 4.4.0 is a bug-fix-only release, so it ships without this change. The fix
 lands in 4.4.1.
+
+### The same gap on other routes
+
+CodeQL flags a route only when a request value reaches a sink it models. The
+cause above does not depend on the sink: any state-changing setup-api route
+the owner's cookie opens, and that did not call `isSameOriginRequest`, did the
+bidding of a page on another origin of the same site. So every setup-api
+route with a POST, PUT, PATCH or DELETE handler was read at the same commit.
+About 80 routes already called the guard, and the Prime Radiant routes get it
+through src/lib/prime-radiant/route-helpers.ts. 125 route files remained.
+
+| Outcome | Routes | Why |
+|---|---|---|
+| **Fixed in 4.4.1** | 91 route files, 103 handlers (the list is `ROUTES` in src/tests/routes/setup-api-cross-origin.test.ts) | Opened by the owner's cookie and called only by the box's own pages. Among them: system (hostname, password, power profile, desktop), network (Wi-Fi scan, connect and update, tunnel, remote control), updates (run, OpenClaw core), setup (progress, complete, reset), AI providers and models (sign-in flows, keys, default, local AI), chat channels (Telegram, WhatsApp, Discord, e-mail approvals), ClawKeep and Memory Shard, coding agent (settings, GitHub, drafts, lifecycle, notes, files), Files, apps, browser, chat, VNC. |
+| Not changed: own credential | `local-ai/llamacpp`, `local-ai/ollama`, `local-ai/embed`, `local-ai/anthropic/*`, `staff-mcp/[server]`, `update/chat-command` | Not opened by the session cookie. The loopback proxies check a service bearer (`LOOPBACK_PROXY_PREFIXES` in src/proxy.ts), and `update/chat-command` answers only the MCP bearer. A page on another origin holds neither. |
+| Not changed: the agent calls it | `apps/install`, `apps/uninstall`, `browser`, `clawkeep/backup`, `code`, `coding-agent/run`, `kill`, `resume`, `stop`, `team`, `team/stop`, `media/image`, `media/audio`, `email/configure`, `email/send`, `email/chat-reply`, `hermes/models`, `hermes/skills/install`, `hermes/skills/uninstall`, `kv`, `preferences`, `system/power`, `update/request`, `vision/describe`, `webapps` | The box's MCP server (mcp/tools, mcp/clawbox-cli.ts) or a chat-channel plugin writes to these with the MCP bearer, and 4.4.1 does not change them. The guard would not refuse those callers, because they send no `Origin`. The cookie path is still open to another origin, so these routes are a follow-up. |
+| Not changed: nothing to change | `chat/transcribe`, `tts/sample` | They return audio or text and store nothing. A page on another origin cannot read the answer. |
+
+Each fixed handler checks the origin first, before it reads the body or
+answers 401/403 for a missing owner. The coding-agent lifecycle routes are
+the exception: they check it inside the run factory's `act`, the way
+`coding-agent/message` already did. A handler that took no argument now takes
+the request. Calls inside the app that pass one handler's `Request` to another
+send no `Origin`, so they still pass. Lab scripts that send a cookie set
+`Origin` to the address they post to, so they pass too.
+
+src/tests/routes/setup-api-cross-origin.test.ts sends each fixed handler a
+foreign `Origin` and then a `Sec-Fetch-Site: same-site` with no Origin. It
+expects 403 `cross_origin` both times, and no fetch leaves the process. All
+206 cases fail against the route files at the commit above and pass with the
+fix. The existing tests of those routes still pass, after their calls to
+handlers that used to take no argument were changed to pass a `Request`.
 
 ### CodeQL after the fix
 
