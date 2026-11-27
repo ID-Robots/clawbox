@@ -521,15 +521,28 @@ SH
 
 migrate_openclaw_state() {
   local point=$1 rc=0 out
+  # install.sh's blockers, plus the two this desktop has met: a maintenance
+  # lease lost under a multi-GB agent database, and inputs that changed.
+  local blockers='requires stopped-writer maintenance|Legacy session store requires migration|startup migrations did not complete|Skipped historical transcript directive migration|lease was lost|migration inputs changed'
   echo 'Running openclaw doctor --fix --non-interactive (state migrations for the new core)...'
   out=$(as_owner /usr/bin/env OPENCLAW_SERVICE_REPAIR_POLICY=external \
     "$NPM_PREFIX/bin/openclaw" doctor --fix --non-interactive </dev/null 2>&1) || rc=$?
   printf '%s\n' "$out"
   printf '%s\n' "$out" | as_owner /bin/bash -c 'cat >"$1"' _ "$point/doctor.log" || true
+  # Doctor refreshed a stale configured plugin in this same run, the plugin's
+  # migration obligation changed under it, and it asks for doctor --fix again
+  # (install.sh's openclaw_install retries this failure class once too). One
+  # more pass, never two, and not over a blocker; its verdict is the step's.
+  if [ "$rc" -ne 0 ] && ! grep -qiE "$blockers" <<<"$out" && grep -qF 'Plugin migration obligations changed during migration input publication' <<<"$out"; then
+    echo 'Running openclaw doctor --fix --non-interactive once more (doctor asked for it after a plugin migration obligation changed)...'
+    rc=0
+    out=$(as_owner /usr/bin/env OPENCLAW_SERVICE_REPAIR_POLICY=external \
+      "$NPM_PREFIX/bin/openclaw" doctor --fix --non-interactive </dev/null 2>&1) || rc=$?
+    printf '%s\n' "$out"
+    printf '%s\n' "$out" | as_owner /bin/bash -c 'cat >>"$1"' _ "$point/doctor.log" || true
+  fi
   [ "$rc" -eq 0 ] || return 1
-  # install.sh's blockers, plus the two this desktop has met: a maintenance
-  # lease lost under a multi-GB agent database, and inputs that changed.
-  if printf '%s\n' "$out" | grep -qiE 'requires stopped-writer maintenance|Legacy session store requires migration|startup migrations did not complete|Skipped historical transcript directive migration|lease was lost|migration inputs changed'; then
+  if printf '%s\n' "$out" | grep -qiE "$blockers"; then
     return 1
   fi
 }
