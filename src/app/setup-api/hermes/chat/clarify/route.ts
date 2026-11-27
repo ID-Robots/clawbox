@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { WebSocket } from "ws";
 import { DASHBOARD_WS_ORIGIN, dashboardWsTicket } from "@/lib/hermes-dashboard-auth";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 // ── Answering the question the agent stopped to ask ────────────────────────
 //
@@ -250,6 +251,9 @@ async function answerPendingClarify(
 //
 // Body: { requestId, answer, questionId? }
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: { requestId?: unknown; answer?: unknown; questionId?: unknown };
   try {
     body = await request.json();

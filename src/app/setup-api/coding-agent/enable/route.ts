@@ -34,6 +34,7 @@ import {
   setTeamDynamic,
 } from "@/lib/coding-agent";
 import { PR_BODY_TASK_MODES } from "@/lib/coding-pr-body";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -164,6 +165,9 @@ function forbidden() {
  *          or 403 without an owner session
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) return forbidden();
 
   let body: unknown;

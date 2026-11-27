@@ -39,6 +39,7 @@ import {
   setHermesDiscordAllowlist,
   setHermesDiscordToken,
 } from "@/lib/hermes-discord";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -324,6 +325,9 @@ async function syncGuilds(harness: string): Promise<NextResponse> {
  * own answer; the tick is the invite wait's own and is never asked that way.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const job = await routeAsSettingsJob(request, {
     path: "/setup-api/discord/configure",
   kind: CHANNEL_SETUP_KIND,

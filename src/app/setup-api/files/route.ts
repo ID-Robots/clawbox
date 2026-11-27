@@ -16,6 +16,7 @@ import { issueZipTicket, redeemZipTicket, uniqueArchiveNames } from "@/lib/zip-t
 import { contentDisposition } from "@/lib/content-disposition";
 import { guardedMove, memberHomeChanged, type GuardedMove, noteLanded, uploadWritingUnder, userUploadGuard, type UploadBound, type UploadGuard } from "@/lib/user-upload-guard";
 import { isUploadTempName, uploadTempPath } from "@/lib/upload-temp";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -493,6 +494,9 @@ export async function GET(req: NextRequest) {
 // POST /setup-api/files?dir=relative/path
 // Body: multipart (file upload) OR JSON { action: "mkdir", name: "..." }
 export async function POST(req: NextRequest) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const scoped = await filesFenceFor(req);
   if (!scoped.ok) return scoped.response;
   const { fence, limitedUser } = scoped;
@@ -785,6 +789,9 @@ function resolveAction(fence: FilesFence, filePath: unknown): NextResponse {
 // Body: raw binary file (application/octet-stream)
 // Streams directly to disk — handles large files without buffering
 export async function PUT(req: NextRequest) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const scoped = await filesFenceFor(req);
   if (!scoped.ok) return scoped.response;
   const { fence, limitedUser } = scoped;

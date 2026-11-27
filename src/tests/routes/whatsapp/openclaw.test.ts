@@ -291,7 +291,7 @@ describe("/setup-api/whatsapp/pair — OpenClaw", () => {
 
   it("cancels", async () => {
     const { DELETE } = await import("@/app/setup-api/whatsapp/pair/route");
-    const body = await (await DELETE()).json();
+    const body = await (await DELETE(new Request("http://localhost/", { method: "DELETE" }))).json();
 
     expect(body.phase).toBe("idle");
   });

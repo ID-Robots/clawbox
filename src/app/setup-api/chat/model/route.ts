@@ -97,6 +97,7 @@ import {
   readSubscriptionSurfaceIds,
   subscriptionOnlyProviders,
 } from "@/lib/subscription-surface";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -1274,6 +1275,9 @@ export async function GET() {
  * made in between waits, and then reads the box as the sign-out left it.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   return withProviderChangeLock(() => postChatModel(request));
 }
 

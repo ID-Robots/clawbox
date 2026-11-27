@@ -13,6 +13,7 @@ import { getLlamaCppProvisioningStatus, resolveConfiguredLlamaCppAlias } from "@
 import { getEmbedProvisioningStatus } from "@/lib/embed-server";
 import { peekMemoryStatus } from "@/lib/clawkeep-memory";
 import { externalEngineSummary, readExternalEngine } from "@/lib/external-engine";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /** Is llama.cpp answering right now? Same probe the llamacpp status route uses. */
 async function llamaCppRunning(baseUrl: string): Promise<string | null> {
@@ -94,6 +95,9 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: unknown;
   try {
     body = await req.json();

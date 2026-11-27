@@ -4,6 +4,7 @@ import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { hasPersonSession } from "@/lib/owner-session";
 import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -146,6 +147,9 @@ export async function GET(request: NextRequest) {
  * contained by exactly the rule the listing uses.
  */
 export async function POST(request: NextRequest) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Creating a folder needs a signed-in browser session.", kind: "owner_only" },

@@ -11,6 +11,7 @@ import {
   readChatModelStateUnfiltered,
   POST as setChatModel,
 } from "@/app/setup-api/chat/model/route";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * "Make this provider the default."
@@ -39,6 +40,9 @@ import {
  * ones added after this file was written.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: { provider?: unknown };
   try {
     body = await request.json();

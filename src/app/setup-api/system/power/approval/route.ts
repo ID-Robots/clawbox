@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { hasPersonSession } from "@/lib/owner-session";
 import { isApprovalAction, pendingPowerApproval, PowerApprovalConflict, resolvePowerApproval } from "@/lib/power-approval";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 const forbidden = () => NextResponse.json({ error: "Only the owner can confirm power requests" }, { status: 403 });
@@ -14,6 +15,9 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(req))) return forbidden();
   let body;
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid body" }, { status: 400 }); }

@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
 import { cancelCliLogin } from "@/lib/hermes-cli-login";
 import { dashboardUnreachable, isValidSessionId, ownerGate, readJsonBody, relayJson } from "../shared";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 // Abandon an in-flight OAuth session (panel unmounted, user hit Start over).
 // Best-effort on the panel's side, but routed anyway so the dashboard doesn't
@@ -11,6 +12,9 @@ import { dashboardUnreachable, isValidSessionId, ownerGate, readJsonBody, relayJ
 const CANCEL_KEYS = ["ok", "status", "message"] as const;
 
 export async function DELETE(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const gate = await ownerGate(request);
   if (gate) return gate;
 

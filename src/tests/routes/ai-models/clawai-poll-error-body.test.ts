@@ -77,7 +77,7 @@ async function finalise() {
     { status: 200 },
   )));
   const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-  await POST();
+  await POST(new Request("http://localhost/", { method: "POST" }));
   // The finalise runs off the request lifecycle, as the box's sign-in task:
   // wait for the ending it writes onto the session.
   await vi.waitFor(() => expect(mockWriteSession.mock.calls.some(([session]) => {
@@ -210,7 +210,7 @@ describe("the device-code finaliser never stores a raw response body", () => {
     const stored = mockWriteSession.mock.calls.at(-1)?.[0];
     mockReadSession.mockResolvedValue(stored as never);
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const next = await POST();
+    const next = await POST(new Request("http://localhost/", { method: "POST" }));
     expect(await next.json()).toEqual({ status: "error", error: sentence });
   });
 

@@ -10,6 +10,7 @@ import {
   isValidEnvValue,
   setHermesSecret,
 } from "@/lib/hermes-skill-secrets";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 // TASK-452 — the missing half of "this skill needs an API key".
 //
@@ -68,6 +69,9 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const blocked = await hermesSkillsGuard();
   if (blocked) return blocked;
 

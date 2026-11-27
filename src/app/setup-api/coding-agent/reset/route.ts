@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hasPersonSession } from "@/lib/owner-session";
 import { getCodingAgentStatus, resetCodingAgentSetup } from "@/lib/coding-agent";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +27,9 @@ export const dynamic = "force-dynamic";
  * @returns 200 with the re-read status, or 403 without an owner session.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Resetting the coding agent needs a signed-in browser session.", kind: "owner_only" },

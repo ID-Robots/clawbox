@@ -36,6 +36,7 @@ import {
 } from "@/lib/email-approval-telegram";
 import { hasPersonSession } from "@/lib/owner-session";
 import { readTelegramBotsInUse, telegramBotId } from "@/lib/telegram-bot-identity";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -86,6 +87,9 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) return forbidden();
 
   let body: { enabled?: unknown; botToken?: unknown };
@@ -201,6 +205,9 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) return forbidden();
   // Order matters only in that the switch must not survive the token: an
   // enabled flag with no bot behind it is the "nobody is ever asked" state.

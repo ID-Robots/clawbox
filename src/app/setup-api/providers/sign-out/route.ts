@@ -9,6 +9,7 @@ import {
   signOutRefusal,
   type ProviderSignOutRefusal,
 } from "@/lib/provider-sign-out";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /** Each refusal's status: the owner's to fix (409), the box's (500/502), or no such row (404). */
 const REFUSAL_STATUS: Record<ProviderSignOutRefusal, number> = {
@@ -59,6 +60,9 @@ const REFUSAL_STATUS: Record<ProviderSignOutRefusal, number> = {
  *   restarted to let go of the sign-in it is running with.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Signing out of an AI provider needs a signed-in browser session.", kind: "owner_only" },

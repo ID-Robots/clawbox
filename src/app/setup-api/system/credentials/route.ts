@@ -11,6 +11,7 @@ import { checkRateLimit, clientIp, resetRateLimit } from "@/lib/rate-limit";
 import { hasOwnerPassword } from "@/lib/system-password";
 import { requireSession } from "@/lib/route-auth";
 import { startRootStep } from "@/lib/root-step-runner";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -55,6 +56,9 @@ function remainingSessionSeconds(req: Request): number | null {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const ip = clientIp(request);
 
   if (!checkRateLimit("password", ip, PASSWORD_RATE_LIMIT)) {

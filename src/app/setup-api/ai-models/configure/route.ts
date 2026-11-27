@@ -183,6 +183,7 @@ import { logSafe } from "@/lib/log-safe";
 import { deepseekPluginOnDisk, installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
 import { canonicalPluginId, clearPluginRepair, readPluginRepairs } from "@/lib/plugin-repair";
 import { installedOpenclawCoreAtLeast, installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
@@ -2483,6 +2484,9 @@ function alignChannelAudio(): Promise<void> {
  * this way and are always saved in the request.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const tasks = await import("@/lib/provider-auth-tasks");
   const background = await tasks.backgroundAskOf(request);
   if (!background) return configureNow(request);

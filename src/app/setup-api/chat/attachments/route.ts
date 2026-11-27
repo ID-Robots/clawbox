@@ -17,6 +17,7 @@ import { isOfficeDocumentName, officeTextPath } from "@/lib/office-documents";
 import { extractOfficeText, type OfficeTextResult } from "@/lib/office-text";
 import { uploadTooLargeMessage } from "@/lib/user-limits";
 import { readUserLimits, uploadLimitBytes } from "@/lib/user-limits-server";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -360,6 +361,9 @@ function safeRelativePath(raw: string): string[] | null {
 // one path the turn names, so the agent opens the folder with its structure
 // intact instead of a heap of loose files.
 export async function POST(req: NextRequest) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const contentType = req.headers.get("content-type") ?? "";
   if (!contentType.includes("multipart/form-data")) {
     return NextResponse.json({ error: "Expected multipart/form-data" }, { status: 400 });

@@ -10,6 +10,7 @@ import {
   type BackgroundJobId,
 } from "@/lib/background-jobs";
 import { hasPersonSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * The three background jobs and their switches (TASK-609).
@@ -34,6 +35,9 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(req))) {
     return NextResponse.json({ ok: false, code: "owner_only" }, { status: 403 });
   }

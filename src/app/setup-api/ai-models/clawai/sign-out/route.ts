@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { hasPersonSession } from "@/lib/owner-session";
 import { providerAuthStartResponse, runningProviderAuthTask, startProviderSignOutTask } from "@/lib/provider-auth-tasks";
 import { CLAWAI_ROW, resolveSignOutTarget, signOutOfProvider, signOutRefusal } from "@/lib/provider-sign-out";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * "Sign out of ClawBox AI" — the ClawBox AI row's sign-out as PR #1369 shipped
@@ -27,6 +28,9 @@ import { CLAWAI_ROW, resolveSignOutTarget, signOutOfProvider, signOutRefusal } f
  *   provider's sign-out (src/lib/provider-sign-out.ts).
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Signing out of ClawBox AI needs a signed-in browser session.", kind: "owner_only" },

@@ -32,6 +32,7 @@ import { disarmLocalToolSearch, localToolSearchArmOps, localToolSearchDisarmNeed
 import { disarmLocalCompactionModel, isClawboxCompactionModel } from "@/lib/local-compaction-model";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { clawboxAiNonChatModelReason, isClawboxAiNonChatModelRef } from "@/lib/clawbox-ai-models";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 const SAVED_PRIMARY_KEY = "local_only_saved_primary";
 const SAVED_FALLBACKS_KEY = "local_only_saved_fallbacks";
@@ -395,6 +396,9 @@ export async function GET() {
  * they must not overlap (src/lib/local-ai-transition-lock.ts).
  */
 export function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   return withLocalAiTransitionLock(() => postLocalOnly(request));
 }
 

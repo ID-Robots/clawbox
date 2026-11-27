@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { computeNextRunMs, readScheduleSnapshot, writeSchedule } from "@/lib/clawkeep";
 import { refresh as refreshScheduler } from "@/lib/clawkeep-scheduler";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +35,9 @@ export async function GET() {
  * (TASK-1211 — see `writeSchedule`).
  */
 export async function PUT(request: NextRequest) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const body = await request.json().catch(() => ({}));
   try {
     const { schedule, armedAtMs, quotaHoldSinceMs } = await writeSchedule(body);

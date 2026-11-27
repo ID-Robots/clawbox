@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { getPairingManager } from "@/lib/whatsapp-pairing";
 import { getOpenclawWhatsappPairing } from "@/lib/openclaw-whatsapp";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +38,9 @@ async function activePairing() {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   try {
     const pairing = await activePairing();
 
@@ -69,7 +73,10 @@ export async function GET() {
   }
 }
 
-export async function DELETE() {
+export async function DELETE(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   try {
     return NextResponse.json({ supported: true, ...(await activePairing()).stop() });
   } catch (err) {

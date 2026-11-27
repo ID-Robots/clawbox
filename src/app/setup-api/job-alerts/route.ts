@@ -12,6 +12,7 @@ import {
   type JobAlertsStatus,
 } from "@/lib/job-alerts";
 import { hasOwnerSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * The scheduled-job alerts (src/lib/job-alerts.ts): the owner's switch, who is
@@ -76,6 +77,9 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasOwnerSession(req))) return ownerOnly();
   let body: unknown;
   try {

@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { dismissSettledUpdate } from "@/lib/updater";
 import { requireSession } from "@/lib/route-auth";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * POST — forget the settled update run the server is still holding.
@@ -18,6 +19,9 @@ import { requireSession } from "@/lib/route-auth";
  * from it, so answering 200 there would be a dismissal that did not happen.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const unauthorized = await requireSession(request);
   if (unauthorized) return unauthorized;
 

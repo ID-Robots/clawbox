@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { getAll, set } from "@/lib/config-store";
 import { parseSetupProgressStep } from "@/lib/setup-progress";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * What a caller may send: a step outside this wizard is a bad request.
@@ -16,6 +17,9 @@ function parseRequestedStep(value: unknown): number | null {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: { step?: unknown };
   try {
     body = await request.json();

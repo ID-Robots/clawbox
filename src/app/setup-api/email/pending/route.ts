@@ -62,6 +62,7 @@ import {
 import { retireChatPrompt } from "@/lib/email-approval";
 import { hasPersonSession } from "@/lib/owner-session";
 import { sendMail, SmtpError } from "@/lib/smtp-client";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -93,6 +94,9 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) return forbidden();
 
   let body: { action?: unknown; id?: unknown; drafts?: unknown };

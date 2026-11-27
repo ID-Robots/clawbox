@@ -9,6 +9,7 @@ import {
   writeClawAiSession,
 } from "@/lib/clawai-connect";
 import { providerAuthBusyMessage, providerAuthMetaOf, runningProviderAuthTask } from "@/lib/provider-auth-tasks";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +33,9 @@ interface UpstreamDeviceStartResponse {
 }
 
 export async function POST(request: NextRequest) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   // A ClawBox AI change already running on this box (TASK-2148). A sign-in
   // finishing: a new code would overwrite the session that task reports to,
   // and its token would be a second sign-in over the first. A sign-out: it

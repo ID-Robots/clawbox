@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { execWifiNmcli } from "@/lib/wifi-radio";
 import { logSafe } from "@/lib/log-safe";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -11,6 +12,9 @@ const AP_PROFILE = "ClawBox-Setup";
 const SSID_MAX_OCTETS = 32;
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: { ssid?: string; password?: string; action?: "update" | "forget" };
   try { body = await request.json(); } catch { return NextResponse.json({ error: "Invalid JSON" }, { status: 400 }); }
 

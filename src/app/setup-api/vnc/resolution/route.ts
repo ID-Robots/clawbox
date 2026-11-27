@@ -13,6 +13,7 @@ import {
   normalizeVncResolution,
 } from "@/lib/vnc-resolution";
 import { writeVncResolutionEnv } from "@/lib/vnc-resolution-server";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 const exec = promisify(execFile);
 const PREF_KEY = `pref:${VNC_RESOLUTION_PREF}`;
@@ -40,6 +41,9 @@ export async function GET(req: Request) {
 // saved without a restart; one whose last restart failed is restarted again,
 // and a failed restart answers 500 (the value itself stays saved).
 export async function POST(req: Request) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const denied = await requireSession(req);
   if (denied) return denied;
 

@@ -3,6 +3,7 @@ import { CodingAgentError, httpStatusForCodingError, resolveWorkingDirectory } f
 import { listProjectDir, MAX_TREE_WRITE_BYTES, readProjectFile, writeProjectFile } from "@/lib/coding-project-tree";
 import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -103,6 +104,9 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) {
     return NextResponse.json({ error: "Editing a project's files needs a signed-in browser session.", kind: "owner_only" }, { status: 403 });
   }

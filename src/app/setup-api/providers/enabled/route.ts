@@ -5,6 +5,7 @@ import { logSafe } from "@/lib/log-safe";
 import { hasPersonSession } from "@/lib/owner-session";
 import { setProviderEnabled } from "@/lib/provider-enablement";
 import { readProviderStatus } from "@/lib/provider-status";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * "Switch this provider off (or back on)."
@@ -24,6 +25,9 @@ import { readProviderStatus } from "@/lib/provider-status";
  * so) and 404 for an id this harness has no row for.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Changing an AI provider's switch needs a signed-in browser session.", kind: "owner_only" },

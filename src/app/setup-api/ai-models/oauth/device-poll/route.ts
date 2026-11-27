@@ -14,6 +14,7 @@ import {
   OPENAI_REDIRECT_URI,
   OPENAI_TOKEN_URL,
 } from "@/lib/oauth-config";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -189,7 +190,10 @@ async function pollOpenAI(stored: StoredState): Promise<NextResponse> {
   return NextResponse.json({ status: "pending" });
 }
 
-export async function POST() {
+export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   try {
     await sweepStaleHandoffTokens();
 

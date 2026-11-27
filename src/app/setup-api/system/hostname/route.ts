@@ -8,6 +8,7 @@ import { get, set } from "@/lib/config-store";
 import { gatewayIsAbsent, restartGateway, setControlUiAllowedOrigins } from "@/lib/openclaw-config";
 import { getReachableIpv4 } from "@/lib/system-info";
 import { startRootStep } from "@/lib/root-step-runner";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 const execFileAsync = promisify(execFile);
 
@@ -44,6 +45,9 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: { hostname?: string };
   try {
     body = await request.json();

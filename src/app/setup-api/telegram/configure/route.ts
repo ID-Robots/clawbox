@@ -16,6 +16,7 @@ import {
 } from "@/lib/hermes-telegram";
 import { readApprovalBotToken } from "@/lib/email-approval";
 import { readActiveTelegramBot, telegramBotId } from "@/lib/telegram-bot-identity";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -68,6 +69,9 @@ function notServingYet(reset: boolean, pending = false): NextResponse {
  * corner card, followed by Settings, and ending with this route's own answer.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const job = await routeAsSettingsJob(request, {
     path: "/setup-api/telegram/configure",
   kind: CHANNEL_SETUP_KIND,

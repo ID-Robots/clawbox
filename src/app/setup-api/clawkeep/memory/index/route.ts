@@ -4,6 +4,7 @@ import { getMemoryStatus, resolveIndexMode, startMemoryIndex, stopMemoryIndex } 
 import { estimateFullReindex } from "@/lib/memory-reindex-advice";
 import { getMemoryShardEnabled } from "@/lib/memory-shard";
 import { confirmed, confirmRequired, memoryShardWriter } from "@/lib/memory-shard-writer";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -40,6 +41,9 @@ function switchedOff() {
 }
 
 export async function POST(request: NextRequest) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const writer = await memoryShardWriter(request, "Starting an index run");
   if (!writer.ok) return writer.response;
   // The owner's switch, not a preference: switching Memory Shard off has to
@@ -111,6 +115,9 @@ export async function POST(request: NextRequest) {
  * No confirm: stopping costs nothing and undoes nothing.
  */
 export async function DELETE(request: NextRequest) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const writer = await memoryShardWriter(request, "Stopping an index run");
   if (!writer.ok) return writer.response;
   try {

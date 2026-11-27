@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { refreshSubscriptionLink, unlinkSubscription } from "@/lib/subscription-link";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -37,7 +38,10 @@ export async function GET() {
  * serving that account's hostname. A ClawBox AI token still on the box keeps
  * its tunnel.
  */
-export async function DELETE() {
+export async function DELETE(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   try {
     const wasLinked = await unlinkSubscription();
     const { revokeNamedTunnelWithoutAccount } = await import("@/lib/portal-heartbeat");

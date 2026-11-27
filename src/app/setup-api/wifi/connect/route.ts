@@ -9,10 +9,14 @@ import {
 import { set } from "@/lib/config-store";
 import { switchHotspotOffAfterWifiJoin } from "@/lib/hotspot-env";
 import { requireSession } from "@/lib/route-auth";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   // WifiStep is step 1, before any password can exist, so this takes the
   // bootstrap carve-out. Post-password it needs a session: joining the box to
   // an attacker-chosen SSID takes it off the owner's LAN, and a WPA password

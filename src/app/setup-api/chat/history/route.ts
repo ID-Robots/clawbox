@@ -4,6 +4,7 @@ import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { clearTranscript, readTranscript, type TranscriptRecord } from "@/lib/harness/transcript-store";
 import { hasLiveTurn } from "@/lib/harness/hermes-live-turn";
 import { transcriptKeyFor } from "@/lib/chat-scope-server";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -135,6 +136,9 @@ export async function GET(req: NextRequest) {
 // forget; without this the screen would refill with the previous conversation
 // on the next refresh while the agent had no idea what any of it referred to.
 export async function DELETE(req: NextRequest) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await transcriptLivesHere())) {
     return NextResponse.json(WRONG_STORE, { status: 409 });
   }

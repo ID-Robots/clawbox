@@ -3,6 +3,7 @@ import { CodingAgentError, httpStatusForCodingError, resolveWorkingDirectory } f
 import { clearRunNotes, MAX_RUN_NOTES_CHARS, readRunNotes, RUN_NOTES_DIR, RUN_NOTES_FILE, RunNotesError, writeRunNotes } from "@/lib/coding-run-notes";
 import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -91,6 +92,9 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) return ownerOnly();
   const read = await readCappedJson(request);
   if (!read.ok) {
@@ -116,6 +120,9 @@ export async function PUT(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) return ownerOnly();
   const url = new URL(request.url);
   const project = await resolveProject(url.searchParams.get("projectId"), url.searchParams.get("directory"));
