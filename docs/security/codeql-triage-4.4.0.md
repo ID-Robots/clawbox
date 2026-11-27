@@ -118,25 +118,27 @@ through src/lib/prime-radiant/route-helpers.ts. 125 route files remained.
 
 | Outcome | Routes | Why |
 |---|---|---|
-| **Fixed in 4.4.1** | 91 route files, 103 handlers (the list is `ROUTES` in src/tests/routes/setup-api-cross-origin.test.ts) | Opened by the owner's cookie and called only by the box's own pages. Among them: system (hostname, password, power profile, desktop), network (Wi-Fi scan, connect and update, tunnel, remote control), updates (run, OpenClaw core), setup (progress, complete, reset), AI providers and models (sign-in flows, keys, default, local AI), chat channels (Telegram, WhatsApp, Discord, e-mail approvals), ClawKeep and Memory Shard, coding agent (settings, GitHub, drafts, lifecycle, notes, files), Files, apps, browser, chat, VNC. |
+| **Fixed in 4.4.1** | 91 route files, 103 handlers (the list is `ROUTES` in src/tests/routes/setup-api-cross-origin.test.ts) | Opened by the owner's cookie and called only by the box's own pages. Among them: system (hostname, password, power profile, desktop), network (Wi-Fi scan, connect and update, tunnel, remote control), updates (run, OpenClaw core), setup (progress, complete, reset), AI providers and models (sign-in flows, keys, default, local AI), chat channels (Telegram, WhatsApp, Discord, e-mail approvals), ClawKeep and Memory Shard, coding agent (on/off switch, GitHub backup, reset, drafts, start/pause, run history, notes, project files), Files, apps, browser, chat, VNC. |
 | Not changed: own credential | `local-ai/llamacpp`, `local-ai/ollama`, `local-ai/embed`, `local-ai/anthropic/*`, `staff-mcp/[server]`, `update/chat-command` | Not opened by the session cookie. The loopback proxies check a service bearer (`LOOPBACK_PROXY_PREFIXES` in src/proxy.ts), and `update/chat-command` answers only the MCP bearer. A page on another origin holds neither. |
-| Not changed: the agent calls it | `apps/install`, `apps/uninstall`, `browser`, `clawkeep/backup`, `code`, `coding-agent/run`, `kill`, `resume`, `stop`, `team`, `team/stop`, `media/image`, `media/audio`, `email/configure`, `email/send`, `email/chat-reply`, `hermes/models`, `hermes/skills/install`, `hermes/skills/uninstall`, `kv`, `preferences`, `system/power`, `update/request`, `vision/describe`, `webapps` | The box's MCP server (mcp/tools, mcp/clawbox-cli.ts) or a chat-channel plugin writes to these with the MCP bearer, and 4.4.1 does not change them. The guard would not refuse those callers, because they send no `Origin`. The cookie path is still open to another origin, so these routes are a follow-up. |
+| Not changed: the agent calls it | `apps/install`, `apps/uninstall`, `browser`, `clawkeep/backup`, `code`, `coding-agent/run`, `kill`, `resume`, `stop`, `team`, `team/stop`, `media/image`, `media/audio`, `email/configure`, `email/send`, `email/chat-reply`, `hermes/models`, `hermes/skills/install`, `hermes/skills/uninstall`, `kv`, `preferences`, `system/power`, `update/request`, `vision/describe`, `webapps` | The box's MCP server (mcp/tools, mcp/clawbox-cli.ts) or a chat-channel plugin writes to these with the MCP bearer, and 4.4.1 does not change them. The guard would not refuse those callers, because they send no `Origin`. The cookie path is still open to another origin, so these routes are a follow-up. The ones that matter most there are `system/power` (an owner request shuts the box down at once) and `email/send` (mail from the owner's account). |
 | Not changed: nothing to change | `chat/transcribe`, `tts/sample` | They return audio or text and store nothing. A page on another origin cannot read the answer. |
 
 Each fixed handler checks the origin first, before it reads the body or
 answers 401/403 for a missing owner. The coding-agent lifecycle routes are
 the exception: they check it inside the run factory's `act`, the way
 `coding-agent/message` already did. A handler that took no argument now takes
-the request. Calls inside the app that pass one handler's `Request` to another
-send no `Origin`, so they still pass. Lab scripts that send a cookie set
+the request. Calls inside the app that hand a handler a `Request` they build
+themselves send no `Origin`, so they still pass. Lab scripts that send a cookie set
 `Origin` to the address they post to, so they pass too.
 
 src/tests/routes/setup-api-cross-origin.test.ts sends each fixed handler a
 foreign `Origin` and then a `Sec-Fetch-Site: same-site` with no Origin. It
 expects 403 `cross_origin` both times, and no fetch leaves the process. All
 206 cases fail against the route files at the commit above and pass with the
-fix. The existing tests of those routes still pass, after their calls to
-handlers that used to take no argument were changed to pass a `Request`.
+fix. The calls to handlers that used to take no argument now pass a `Request`.
+The touched-route test run reports 3,161 passed and 1 failed. The failing test,
+`harness-swap.test.ts` ("does not ask the network for a swap back to an OpenClaw
+core that is already installed"), also fails on the baseline `41f759c0d`.
 
 ### CodeQL after the fix
 
