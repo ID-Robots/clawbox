@@ -542,7 +542,7 @@ migrate_openclaw_state() {
     printf '%s\n' "$out" | as_owner /bin/bash -c 'cat >>"$1"' _ "$point/doctor.log" || true
   fi
   [ "$rc" -eq 0 ] || return 1
-  if printf '%s\n' "$out" | grep -qiE "$blockers"; then
+  if grep -qiE "$blockers" <<<"$out"; then
     return 1
   fi
 }
@@ -697,7 +697,7 @@ reapply_owner_core_patches() {
     out=$(as_owner "$INSTALL_HOME/bin/$helper" "$live" 2>&1) || rc=$?
     [ -z "$out" ] || printf '%s\n' "$out"
     [ "$rc" -eq 0 ] && continue
-    if printf '%s\n' "$out" | grep -q '^Review required:'; then
+    if grep -q '^Review required:' <<<"$out"; then
       echo "CLAWBOX-WARN[core-patch-skipped]: $helper does not apply to the installed OpenClaw core and was skipped ($(printf '%s\n' "$out" | grep -m1 '^Review required:'))"
       continue
     fi
