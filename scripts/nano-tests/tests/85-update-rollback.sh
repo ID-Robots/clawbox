@@ -13,7 +13,8 @@
 #   2. The owner's path: pin the update branch to the branch under test
 #      (NANO_BRANCH) and POST /setup-api/update/run.
 #   3. Every `next build` the update starts is SIGKILLed, as the OOM killer
-#      would.
+#      would. The build cache is dropped first, so that build runs cold and
+#      cannot end between two polls.
 #   4. The update must end `failed` with a reason, NOT `completed`, and the box
 #      must be left working: the dashboard serves /login, the gateway settles,
 #      the build it serves names the commit it has checked out (no drift: the
@@ -140,6 +141,19 @@ kill_builds() {
     note "killed $n next build process(es), as an OOM kill would"
   fi
 }
+
+# The update's build must start cold. A board that built the commit under test
+# before it was put on the release (every suite run does) carries that build's
+# cache into the update (.next/cache moves from build to build), and `next
+# build` then ends in seconds: quicker than one poll of wait_app_update, so no
+# tick sees it, the update completes and nothing was killed. Without the cache
+# the build takes minutes, as on a box that never built this commit.
+# shellcheck disable=SC2016  # expanded on the board
+if board 'rm -rf "$REPO/.next/cache" && [ ! -e "$REPO/.next/cache" ]' >/dev/null; then
+  note "build cache dropped: the update's next build starts cold"
+else
+  note "the build cache could not be dropped: a warm next build may end before it is seen"
+fi
 
 if start_app_update "$NANO_BRANCH"; then
   ok "update to $NANO_BRANCH started through /setup-api/update/run"
