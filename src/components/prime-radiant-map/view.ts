@@ -40,6 +40,8 @@ export interface MapViewEvents {
   onFrame(): void;
   onCommunities(communities: Int32Array, insights: GraphInsights): void;
   onSettled(settled: boolean): void;
+  /** The owner took the map in hand (drag, zoom, pan, a flight) and the turn stopped. */
+  onSpinStopped(): void;
   onContextLost(): void;
   /** The layout cannot run at all (its code failed to load): no positions will come. */
   onLayoutFailed(): void;
@@ -104,7 +106,8 @@ export class MapView {
   private distance = 800;
   private zoom = 1;
   private target = new Float64Array(3);
-  private spin: boolean;
+  /** The slow turn: set by the Map ({@link setSpin}), stopped by the owner's hand ({@link interact}); a flat view never turns. */
+  private spin = false;
   private fitting = true;
   private fit = { x: 0, y: 0, z: 0, r: 100 };
   private flight: { t0: number; from: number[]; to: number[] } | null = null;
@@ -157,7 +160,6 @@ export class MapView {
     private readonly events: MapViewEvents,
   ) {
     this.kind = renderer.kind;
-    this.spin = this.kind === "webgl";
     const on = (target: EventTarget, type: string, fn: (e: never) => void, opts?: AddEventListenerOptions) => {
       target.addEventListener(type, fn as EventListener, opts);
       this.cleanup.push(() => target.removeEventListener(type, fn as EventListener, opts));
@@ -327,9 +329,18 @@ export class MapView {
     this.changed();
   }
 
-  /** The owner took the wheel: no more turning or reframing on our own. */
+  /** Turn on its own, or stand still: the rotation button's (and, on a new view, the remembered) choice. */
+  setSpin(on: boolean): void {
+    this.spin = on && this.kind === "webgl";
+    this.invalidate();
+  }
+
+  /** The owner took the wheel: no more turning or reframing on our own (the rotation button is told). */
   interact(): void {
-    this.spin = false;
+    if (this.spin) {
+      this.spin = false;
+      this.events.onSpinStopped();
+    }
     this.fitting = false;
   }
 
@@ -342,8 +353,8 @@ export class MapView {
     this.changed();
   }
 
-  /** Fly to the given nodes (all of them in view), or frame one up close. */
-  flyTo(nodes: readonly number[]): void {
+  /** Fly to the given nodes (all of them in view), or frame one up close; `stopTurn` false keeps the slow turn (a search as it is typed). */
+  flyTo(nodes: readonly number[], stopTurn = true): void {
     if (nodes.length === 0 || this.n === 0) return;
     this.dropHover();
     let x = 0, y = 0, z = 0;
@@ -358,7 +369,8 @@ export class MapView {
     let r = 0;
     for (const i of nodes) r = Math.max(r, Math.hypot(this.pos[i * 3] - x, this.pos[i * 3 + 1] - y, this.pos[i * 3 + 2] - z));
     r = Math.max(r + 20, 70);
-    this.interact();
+    if (stopTurn) this.interact();
+    else this.fitting = false;
     if (this.kind === "2d") {
       this.target.set([x, y, 0]);
       this.zoom = this.fitZoom(r);

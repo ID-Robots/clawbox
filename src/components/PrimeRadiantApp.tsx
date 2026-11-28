@@ -104,6 +104,8 @@ export default function PrimeRadiantApp() {
   const backToMap = useRef(false);
   /** The page whose history Pages shows, opened from that page's own view (null: no history open). */
   const [historyPage, setHistoryPage] = useState<string | null>(null);
+  /** The Map's focus mode: header, tabs and footer step aside for the graph (the Map's button or Escape brings them back). */
+  const [mapFocus, setMapFocus] = useState(false);
   /** The page Browse shows; Search, Review, Lint and History open one here too. */
   const [browsePage, setBrowsePage] = useState<string | null>(null);
   /** Bumped by anything that changed the vault, so every tab re-reads. */
@@ -260,6 +262,7 @@ export default function PrimeRadiantApp() {
   const toIngest = useCallback(() => showTab("ingest"), [showTab]);
 
   const ready = phase === "ready" && status?.initialised;
+  const focused = !!ready && tab === "map" && mapFocus;
 
   // The tab strip scrolls sideways on a narrow window: its edges fade where
   // more tabs wait, so the owner can see it does (B11), and the open tab is
@@ -304,7 +307,7 @@ export default function PrimeRadiantApp() {
       data-help-bounds
     >
       {/* On a phone the counts drop under the title and wrap, rather than being cut at the window's edge. */}
-      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-5 pt-4 pb-3 border-b border-white/[0.06]">
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-5 pt-4 pb-3 border-b border-white/[0.06]" hidden={focused}>
         <div className="flex items-center gap-2 min-w-0">
           <PrimeRadiantIcon className="w-5 h-5 shrink-0" />
           <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{PRODUCT_NAME}</h1>
@@ -345,6 +348,7 @@ export default function PrimeRadiantApp() {
           ref={tabStrip}
           onScroll={measureTabStrip}
           className="flex gap-1 px-3 py-2 border-b border-white/[0.06] overflow-x-auto"
+          hidden={focused}
           role="tablist"
           aria-label={t("primeRadiant.tabsLabel")}
           data-overflow={[tabOverflow.left && "left", tabOverflow.right && "right"].filter(Boolean).join(" ") || undefined}
@@ -373,7 +377,7 @@ export default function PrimeRadiantApp() {
       )}
 
       <main
-        className={`flex-1 min-h-0 px-5 py-4 ${ready && tab === "map" ? "overflow-hidden flex flex-col" : "overflow-y-auto"}`}
+        className={`flex-1 min-h-0 ${focused ? "p-2" : "px-5 py-4"} ${ready && tab === "map" ? "overflow-hidden flex flex-col" : "overflow-y-auto"}`}
         role={ready ? "tabpanel" : undefined}
       >
         {error && phase === "ready" && (
@@ -402,7 +406,7 @@ export default function PrimeRadiantApp() {
 
         {ready && status && (
           <>
-            {status.plugin.state === "conflict" && (tab === "browse" || tab === "map") && (
+            {status.plugin.state === "conflict" && (tab === "browse" || (tab === "map" && !focused)) && (
               <p className="mb-3 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200" data-testid="prime-radiant-wiring-conflict">
                 {t(
                   status.plugin.conflicts.every((c) => c === "plugin-writes")
@@ -436,7 +440,7 @@ export default function PrimeRadiantApp() {
                     </p>
                   }
                 >
-                  <PrimeRadiantMap revision={revision} onOpenPage={openFromMap} onIngest={toIngest} />
+                  <PrimeRadiantMap revision={revision} onOpenPage={openFromMap} onIngest={toIngest} focusMode={focused} onFocusModeChange={setMapFocus} />
                 </Suspense>
               </div>
             )}
@@ -489,7 +493,7 @@ export default function PrimeRadiantApp() {
         )}
       </main>
       {ready && (
-        <footer className="px-5 py-2 border-t border-white/[0.06] text-[11px] text-[var(--text-muted)] flex items-center justify-between gap-2">
+        <footer className="px-5 py-2 border-t border-white/[0.06] text-[11px] text-[var(--text-muted)] flex items-center justify-between gap-2" hidden={focused}>
           <span className="truncate">
             {status?.lint.ok ? t("primeRadiant.lintOk") : t("primeRadiant.lintIssues", { errors: status?.lint.errors ?? 0, warnings: status?.lint.warnings ?? 0 })}
           </span>

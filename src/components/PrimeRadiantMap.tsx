@@ -33,6 +33,9 @@ interface Props {
   revision: number;
   onOpenPage: (path: string) => void;
   onIngest: () => void;
+  /** Focus mode: the app hides its own header, tabs and footer, the Map its row and chips. */
+  focusMode?: boolean;
+  onFocusModeChange?: (on: boolean) => void;
 }
 
 type Mode = MapKind | "none";
@@ -62,6 +65,8 @@ interface Model {
   adj: Int32Array;
   /** The most connected pages, which keep a label. */
   hubs: number[];
+  /** Each page's place by connections, busiest first: the density slider keeps the front of the line. */
+  rank: Int32Array;
 }
 
 interface Analysis {
@@ -95,6 +100,30 @@ const HUB_LABELS = 20;
 const MATCH_LABELS = 12;
 const LIST_LIMIT = 300;
 const CHIPS = 6;
+/**
+ * The density slider (0–100) on a log scale: the far left keeps the 50 most
+ * connected pages, the far right every page, the middle about √(50 · pages).
+ */
+const DENSITY_FEWEST = 50;
+const DENSITY_KEY = "clawbox.primeRadiant.mapDensity";
+const SPIN_KEY = "clawbox.primeRadiant.mapSpin";
+
+/** The Map's slider and turn, remembered on this browser. */
+function remembered(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function remember(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Storage refused (a private window): the choice lasts this visit.
+  }
+}
 
 /** Colour k: the palette, then golden-angle hues. */
 function rgb(k: number): [number, number, number] {
@@ -155,10 +184,10 @@ export function toModel(g: VaultGraph): Model {
     adj[fill[ends[e * 2]]++] = ends[e * 2 + 1];
     adj[fill[ends[e * 2 + 1]]++] = ends[e * 2];
   }
-  const hubs = Array.from({ length: n }, (_, i) => i)
-    .filter((i) => degree[i] > 0)
-    .sort((a, b) => degree[b] - degree[a] || a - b)
-    .slice(0, HUB_LABELS);
+  const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => degree[b] - degree[a] || a - b);
+  const rank = new Int32Array(n);
+  order.forEach((i, k) => (rank[i] = k));
+  const hubs = order.filter((i) => degree[i] > 0).slice(0, HUB_LABELS);
   return {
     revision: g.revision,
     truncated: g.truncated,
@@ -180,6 +209,7 @@ export function toModel(g: VaultGraph): Model {
     offsets,
     adj,
     hubs,
+    rank,
   };
 }
 
@@ -224,6 +254,9 @@ const summaries = new Map<string, string | null>();
 const SUMMARY_CACHE = 500;
 const summaryKey = (revision: string | null, id: string) => `${revision ?? ""}\n${id}`;
 
+/** The verified pages of one vault revision (the page list reads the whole vault): once per revision, kept between visits. */
+let verifiedKept: { revision: string | null; ids: ReadonlySet<string> } | null = null;
+
 function keepSummary(key: string, text: string | null): void {
   summaries.delete(key);
   summaries.set(key, text);
@@ -234,7 +267,7 @@ function prefersFlat(): boolean {
   return typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
 }
 
-export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Props) {
+export default function PrimeRadiantMap({ revision, onOpenPage, onIngest, focusMode = false, onFocusModeChange }: Props) {
   const { t } = useT();
   const stableT = useStableT();
   const [data, setData] = useState<{ model: Model; analysis: Analysis | null } | null>(null);
@@ -251,6 +284,18 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
   const [settled, setSettled] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
   const [insightsOpen, setInsightsOpen] = useState(false);
+  /** 0 keeps the most connected pages only, 100 every page; the middle is where a first visit starts. */
+  const [density, setDensity] = useState(() => {
+    const v = Number(remembered(DENSITY_KEY) ?? NaN);
+    return Number.isInteger(v) && v >= 0 && v <= 100 ? v : 50;
+  });
+  /** The slow turn as it is now; a new view starts as the button last left it (stopped for an owner who prefers less motion). */
+  const [spin, setSpin] = useState(() => {
+    const v = remembered(SPIN_KEY);
+    return v === null ? !prefersFlat() : v === "1";
+  });
+  /** Verified pages by path (the graph does not carry them): the slider never hides one. */
+  const [verifiedFor, setVerifiedFor] = useState(() => verifiedKept);
   /** Bumped when a summary arrives (they are kept outside React, in `summaries`). */
   const [, setSummaryArrived] = useState(0);
   /** The summary that could not be read, so the card stops saying it is reading. */
@@ -310,6 +355,26 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
       });
     return () => ctl.abort();
   }, [revision, reload, stableT]);
+
+  // The verified pages, from the page list (500 a request) once the graph is in; unread, the slider ranks by connections alone.
+  useEffect(() => {
+    if (!model || verifiedFor?.revision === model.revision) return;
+    const ctl = new AbortController();
+    (async () => {
+      const ids = new Set<string>();
+      for (let offset = 0, total = 1; offset < total; ) {
+        const got = await prJson<{ total: number; pages: Array<{ path: string }> }>(`${API}/pages?verified=true&limit=500&offset=${offset}`, { signal: ctl.signal });
+        if (!Array.isArray(got?.pages) || got.pages.length === 0) break;
+        for (const p of got.pages) ids.add(p.path);
+        offset += got.pages.length;
+        total = got.total;
+      }
+      if (ctl.signal.aborted) return;
+      verifiedKept = { revision: model.revision, ids };
+      setVerifiedFor(verifiedKept);
+    })().catch(() => {});
+    return () => ctl.abort();
+  }, [model, verifiedFor]);
 
   // The picked page's summary: asked for once it is picked, never with the graph (thousands of pages).
   useEffect(() => {
@@ -374,6 +439,10 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
         setData((d) => (d && d.model === model && communities.length === model.n ? { ...d, analysis: { communities, insights } } : d));
       },
       onSettled: setSettled,
+      // A drag, zoom, pan or flight stopped the turn: the button says so; the remembered choice stays the button's.
+      onSpinStopped() {
+        setSpin(false);
+      },
       onContextLost() {
         setMode("2d");
       },
@@ -436,11 +505,41 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
     return out.sort((a, b) => model.degree[b] - model.degree[a] || a - b);
   }, [model, needle, hidden]);
 
-  const states = useMemo(() => {
+  /** This revision's verified pages, else the last set known (a newer revision, a list that could not be read). */
+  const verified = useMemo(() => {
+    const out: number[] = [];
+    if (!model || !verifiedFor) return out;
+    for (const id of verifiedFor.ids) {
+      const i = model.index.get(id);
+      if (i !== undefined) out.push(i);
+    }
+    return out;
+  }, [model, verifiedFor]);
+
+  // Only shows and hides pages: the layout (every page) and the camera stay as they are on every step.
+  const densityNow = useDeferredValue(density);
+  /**
+   * The pages the slider keeps: the most connected, every verified page, and the picked page with its
+   * neighbours. Until some verified list is known (still reading, or it could not be read) every page shows.
+   */
+  const shown = useMemo(() => {
     if (!model) return null;
+    const keep = model.n > DENSITY_FEWEST && verifiedFor ? Math.round(DENSITY_FEWEST * Math.pow(model.n / DENSITY_FEWEST, densityNow / 100)) : model.n;
+    const out = new Uint8Array(model.n);
+    for (let i = 0; i < model.n; i++) out[i] = model.rank[i] < keep ? 1 : 0;
+    for (const i of verified) out[i] = 1;
+    if (selected !== null) {
+      out[selected] = 1;
+      for (let k = model.offsets[selected]; k < model.offsets[selected + 1]; k++) out[model.adj[k]] = 1;
+    }
+    return out;
+  }, [model, densityNow, verified, verifiedFor, selected]);
+
+  const states = useMemo(() => {
+    if (!model || !shown) return null;
     const s = new Uint8Array(model.n);
     const focus = selected !== null || matches !== null;
-    for (let i = 0; i < model.n; i++) s[i] = hidden.has(model.domainOf[i]) ? STATE_HIDDEN : focus ? STATE_DIM : 0;
+    for (let i = 0; i < model.n; i++) s[i] = hidden.has(model.domainOf[i]) || !shown[i] ? STATE_HIDDEN : focus ? STATE_DIM : 0;
     const light = (i: number, flag: number) => {
       if (!(s[i] & STATE_HIDDEN)) s[i] = flag;
     };
@@ -451,23 +550,29 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
       for (const i of matches) light(i, STATE_MATCH);
     }
     return s;
-  }, [model, selected, matches, hidden]);
+  }, [model, selected, matches, hidden, shown]);
 
+  /** The edges between shown pages, and how many pages, links and related hints are on screen. */
   const edges = useMemo(() => {
-    if (!model) return null;
-    const keep = (e: number) => !hidden.has(model.domainOf[model.ends[e * 2]]) && !hidden.has(model.domainOf[model.ends[e * 2 + 1]]);
+    if (!model || !shown) return null;
+    const on = (i: number) => shown[i] === 1 && !hidden.has(model.domainOf[i]);
+    let pages = 0, links = 0, related = 0;
+    for (let i = 0; i < model.n; i++) if (on(i)) pages++;
     const visible: number[] = [];
     const weak: number[] = [];
     const lit: number[] = [];
     for (let e = 0; e < model.ends.length / 2; e++) {
-      if (!keep(e)) continue;
       const a = model.ends[e * 2], b = model.ends[e * 2 + 1];
+      if (!on(a) || !on(b)) continue;
+      const w = model.weights[e];
+      if (w >= LINK_WEIGHT) links++;
+      else if (isRelatedWeight(w)) related++;
       // A related hint (a shared topic or domain, not a link) is drawn fainter.
-      (isRelatedWeight(model.weights[e]) ? weak : visible).push(a, b);
+      (isRelatedWeight(w) ? weak : visible).push(a, b);
       if (selected !== null && (a === selected || b === selected)) lit.push(a, b);
     }
-    return { visible: Uint32Array.from(visible), lit: Uint32Array.from(lit), weak: Uint32Array.from(weak) };
-  }, [model, hidden, selected]);
+    return { visible: Uint32Array.from(visible), lit: Uint32Array.from(lit), weak: Uint32Array.from(weak), pages, links, related };
+  }, [model, hidden, selected, shown]);
 
   // Hand the view what React decided. Declared after the view's own effect, so a new view gets all three.
   useEffect(() => {
@@ -480,15 +585,19 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
     if (edges) viewRef.current?.setEdges(edges.visible, edges.lit, edges.weak);
   }, [edges, mode, model]);
   useEffect(() => {
+    viewRef.current?.setSpin(spin);
+  }, [spin, mode, model]);
+  useEffect(() => {
     matchCursor.current = -1;
-    if (matches && matches.length > 0) viewRef.current?.flyTo(matches.slice(0, 500));
+    // Typing only looks: the turn stops when a result is picked.
+    if (matches && matches.length > 0) viewRef.current?.flyTo(matches.slice(0, 500), false);
   }, [matches]);
 
   const labels = useMemo(() => {
-    if (!model) return [];
-    const first = [...(selected !== null ? [selected] : []), ...(matches ?? []).slice(0, MATCH_LABELS).filter((i) => i !== selected)];
-    return [...first, ...model.hubs.filter((i) => !hidden.has(model.domainOf[i]) && !first.includes(i))];
-  }, [model, hidden, selected, matches]);
+    if (!model || !shown) return [];
+    const first = [...(selected !== null ? [selected] : []), ...(matches ?? []).filter((i) => shown[i]).slice(0, MATCH_LABELS).filter((i) => i !== selected)];
+    return [...first, ...model.hubs.filter((i) => shown[i] && !hidden.has(model.domainOf[i]) && !first.includes(i))];
+  }, [model, hidden, selected, matches, shown]);
   useEffect(() => {
     labelOrder.current = labels;
     labelWidths.current.clear();
@@ -529,13 +638,24 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
     if (!view || !model) return;
     const step: Record<string, [number, number]> = { ArrowLeft: [-24, 0], ArrowRight: [24, 0], ArrowUp: [0, -24], ArrowDown: [0, 24] };
     if (e.key === "Enter" && selected !== null) onOpenPage(model.ids[selected]);
-    else if (e.key === "Escape") setSelectedId(null);
+    // With nothing picked out, Escape is focus mode's (the Map's own key handler below).
+    else if (e.key === "Escape" && selected !== null) setSelectedId(null);
     else if (step[e.key]) view.orbit(...step[e.key]);
     else if (e.key === "+" || e.key === "=") view.zoomBy(0.85);
     else if (e.key === "-" || e.key === "_") view.zoomBy(1 / 0.85);
     else if (e.key === "0") view.resetView();
     else return;
     e.preventDefault();
+  };
+
+  // Remembered from the change itself, never from inside a state updater.
+  const changeDensity = (v: number) => {
+    setDensity(v);
+    remember(DENSITY_KEY, String(v));
+  };
+  const toggleSpin = () => {
+    setSpin(!spin);
+    remember(SPIN_KEY, spin ? "0" : "1");
   };
 
   if (error && !model) {
@@ -582,6 +702,9 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
   const dot = (k: number) => css(model.domains[k] === "" ? GREY : rgb(k));
   const pill = "inline-flex items-center gap-1.5 rounded-full border border-white/[0.1] bg-black/60 px-2.5 py-1 text-[11px] text-[var(--text-secondary)] backdrop-blur hover:bg-black/80 hover:text-[var(--text-primary)] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed";
   const overlay = "rounded-xl border border-white/[0.1] bg-[var(--win-ground,#0d1117)] shadow-xl";
+  /** Some pages are off the canvas (the slider or a hidden domain): the chip says how many of all are shown. */
+  const partial = mode !== "none" && edges !== null && edges.pages < model.n;
+  const densityText = t("primeRadiant.map.densityValue", { shown: edges?.pages ?? model.n, total: model.n });
   // Escape folds an overlay away and hands the focus back to the button that opened it.
   const onLegendKey = (e: KeyboardEvent<HTMLElement>) => {
     if (e.key !== "Escape") return;
@@ -597,8 +720,17 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
   };
 
   return (
-    <div className="h-full min-h-[420px] flex flex-col gap-2" data-testid="prime-radiant-map" data-mode={mode}>
-      <div className="flex items-center gap-2" data-testid="prime-radiant-map-toolbar">
+    <div
+      className="h-full min-h-[420px] flex flex-col gap-2"
+      data-testid="prime-radiant-map"
+      data-mode={mode}
+      data-focus={focusMode || undefined}
+      // Escape that nothing inside took (a picked page, an open legend) leaves focus mode.
+      onKeyDown={(e) => {
+        if (focusMode && e.key === "Escape" && !e.defaultPrevented) onFocusModeChange?.(false);
+      }}
+    >
+      <div className="flex items-center gap-2" hidden={focusMode} data-testid="prime-radiant-map-toolbar">
         <div className="relative flex-1 min-w-0">
           <span className="material-symbols-rounded absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">search</span>
           <input
@@ -720,13 +852,15 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
           </div>
         </div>
 
-        <div className="pointer-events-none absolute left-2 top-2 flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]" data-testid="prime-radiant-map-status">
+        <div className="pointer-events-none absolute left-2 top-2 flex max-w-[calc(100%-15rem)] flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-muted)]" hidden={focusMode} data-testid="prime-radiant-map-status">
           <span className="rounded-full bg-black/40 px-2 py-0.5">
-            {t("primeRadiant.map.summary", { pages: model.n, links: model.links })}
+            {partial
+              ? t("primeRadiant.map.summaryShown", { pages: edges.pages, totalPages: model.n, links: edges.links, totalLinks: model.links })
+              : t("primeRadiant.map.summary", { pages: model.n, links: model.links })}
             {model.related > 0 && (
               <span className="pointer-events-auto" title={t("primeRadiant.map.relatedHint")} data-testid="prime-radiant-map-related">
                 {" · "}
-                {t("primeRadiant.map.related", { n: model.related })}
+                {partial ? t("primeRadiant.map.relatedShown", { n: edges.related, total: model.related }) : t("primeRadiant.map.related", { n: model.related })}
               </span>
             )}
           </span>
@@ -739,15 +873,59 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
           {mode === "2d" && <span className="rounded-full bg-black/40 px-2 py-0.5">{t("primeRadiant.map.flat")}</span>}
         </div>
         {model.truncated && (
-          <p className="pointer-events-none absolute left-2 top-8 text-[11px] text-amber-200">{t("primeRadiant.map.truncated", { n: model.n })}</p>
+          <p className="pointer-events-none absolute left-2 top-8 text-[11px] text-amber-200" hidden={focusMode}>{t("primeRadiant.map.truncated", { n: model.n })}</p>
         )}
         {mode === "none" && (
           <p className="absolute inset-x-0 top-1/3 text-center text-xs text-[var(--text-muted)]">{t("primeRadiant.map.noCanvas")}</p>
         )}
 
+        {/* The slider, the turn and focus mode: on the map in focus mode too; a picked page's card sits under them. */}
+        <div className="absolute right-2 top-2 z-20 flex items-center gap-1.5" data-testid="prime-radiant-map-controls">
+          {mode !== "none" && (
+            <label className={pill} title={densityText}>
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">filter_list</span>
+              <span className="sr-only">{t("primeRadiant.map.density")}</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={density}
+                onChange={(e) => changeDensity(Number(e.target.value))}
+                aria-valuetext={densityText}
+                className="w-24 cursor-pointer accent-[var(--coral-bright)]"
+                data-testid="prime-radiant-map-density"
+              />
+            </label>
+          )}
+          {mode === "webgl" && (
+            <button
+              type="button"
+              className={pill}
+              onClick={toggleSpin}
+              aria-label={t(spin ? "primeRadiant.map.spinOn" : "primeRadiant.map.spinOff")}
+              title={t(spin ? "primeRadiant.map.spinOn" : "primeRadiant.map.spinOff")}
+              data-testid="prime-radiant-map-spin"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{spin ? "sync" : "sync_disabled"}</span>
+            </button>
+          )}
+          {onFocusModeChange && (
+            <button
+              type="button"
+              className={pill}
+              onClick={() => onFocusModeChange(!focusMode)}
+              aria-label={t(focusMode ? "primeRadiant.map.focusOff" : "primeRadiant.map.focusOn")}
+              title={t(focusMode ? "primeRadiant.map.focusOff" : "primeRadiant.map.focusOn")}
+              data-testid="prime-radiant-map-focus"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{focusMode ? "close_fullscreen" : "open_in_full"}</span>
+            </button>
+          )}
+        </div>
         {card !== null && (
           <div
-            className={`${CARD_SURFACE} absolute right-2 top-2 z-20 flex w-[17rem] max-w-[calc(100%-1rem)] max-h-[calc(100%-1rem)] flex-col gap-2 p-3 !bg-black/75 backdrop-blur`}
+            className={`${CARD_SURFACE} absolute right-2 top-11 z-20 flex w-[17rem] max-w-[calc(100%-1rem)] max-h-[calc(100%-3.25rem)] flex-col gap-2 p-3 !bg-black/75 backdrop-blur`}
             data-testid="prime-radiant-map-selected"
           >
             <div className="flex shrink-0 items-start gap-2">
@@ -779,7 +957,7 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
           </div>
         )}
 
-        <div className="absolute left-2 bottom-2 z-10 flex max-w-[calc(100%-1rem)] flex-col items-start gap-1.5">
+        <div className="absolute left-2 bottom-2 z-10 flex max-w-[calc(100%-1rem)] flex-col items-start gap-1.5" hidden={focusMode}>
           {legendOpen && (
             <div
               id={legendId}
@@ -837,11 +1015,11 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
           </button>
         </div>
 
-        <p className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 hidden @3xl:block whitespace-nowrap rounded-full bg-black/50 px-2 py-0.5 text-[10px] text-[var(--text-muted)]">
+        <p className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 hidden @3xl:block whitespace-nowrap rounded-full bg-black/50 px-2 py-0.5 text-[10px] text-[var(--text-muted)]" hidden={focusMode}>
           {t(mode === "webgl" ? "primeRadiant.map.hint" : "primeRadiant.map.hintFlat")}
         </p>
 
-        <div className="absolute right-2 bottom-2 z-10 flex max-w-[calc(100%-1rem)] flex-col items-end gap-1.5">
+        <div className="absolute right-2 bottom-2 z-10 flex max-w-[calc(100%-1rem)] flex-col items-end gap-1.5" hidden={focusMode}>
           {insightsOpen && insights && (
             <section
               id={insightsId}
