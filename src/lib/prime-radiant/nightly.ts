@@ -689,11 +689,14 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
 /** The longest the golden step may take; past it the questions not judged yet wait for the next night. */
 const GOLDEN_STEP_MS = 20 * 60_000;
 
-/** Memory Shard's index of the vault, when it is there; else no hits (the claims' words alone answer). */
+/**
+ * Memory Shard's index of the vault, when it is there; else no hits (the claims' words alone answer).
+ * Strict: an index that is there but cannot be searched (the embedder is down) throws, so the question is recorded as search-failed.
+ */
 async function shardSearch(vault: string, question: string, signal?: AbortSignal): Promise<readonly GoldenHit[]> {
   const { searchPrimeRadiant, vaultIndexingAllowed } = await import("./shard-index");
   if (!(await vaultIndexingAllowed(vault))) return [];
-  return searchPrimeRadiant(question, 8, signal, vault);
+  return searchPrimeRadiant(question, 8, signal, vault, { strict: true });
 }
 
 /** 8. the golden questions, against `main` as the night left it. Never throws. */

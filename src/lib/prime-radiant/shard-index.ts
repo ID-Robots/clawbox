@@ -1325,30 +1325,45 @@ function loadVectors(db: DatabaseSync, file: string): VectorCache | null {
  * Search the vault. Answers [] when there is no index yet, or when it was
  * built with another embedder (the next run rebuilds it); throws
  * `EmbeddingUnavailableError` when the query cannot be embedded.
+ *
+ * `strict` (the nightly golden check): an index that is there but cannot
+ * answer — built for another embedder than the one resolved now (the embedder
+ * is down and the source flipped), holding no vectors, or of another width —
+ * throws too, so the caller can tell "the vector search could not run" from
+ * "it ran and found nothing". No index file at all stays [].
  */
 export async function searchPrimeRadiant(
   query: string,
   limit: number,
   signal?: AbortSignal,
   vault: string = vaultDir(),
+  options: { strict?: boolean } = {},
 ): Promise<VaultSearchHit[]> {
   const text = query.trim();
   if (!text) return [];
   const want = Math.max(1, Math.min(50, Math.trunc(limit) || 1));
   const file = vaultIndexPathFor(vault);
   const db = await openForRead(file);
-  if (!db) return [];
+  const cannot = (why: string): VaultSearchHit[] => {
+    if (options.strict) throw new Error(`The vault index cannot be searched: ${why}.`);
+    return [];
+  };
+  // Only a confirmed missing file is "nothing to search"; one that is there (or cannot be inspected) and cannot be opened is an index that cannot answer.
+  if (!db) {
+    const missing = await fs.stat(file).then(() => false, (err: NodeJS.ErrnoException) => err?.code === "ENOENT" || err?.code === "ENOTDIR");
+    return missing ? [] : cannot("it could not be opened");
+  }
   try {
     const embedder = await resolveMemoryEmbedder();
-    if (metaGet(db, "identity") !== storeIdentity(embedder, vault)) return [];
+    if (metaGet(db, "identity") !== storeIdentity(embedder, vault)) return cannot("it was built for another embedder");
     // The query text leaves the box too when the embedder is the cloud one.
     const embedding = embedMemoryTexts([redacted(text)], "query", signal, embedder);
     embedding.catch(() => {});
     const cache = loadVectors(db, file);
-    if (!cache) return [];
+    if (!cache) return cannot("it holds no vectors");
     const [raw] = await embedding;
     const q = raw ? truncateVector(raw) : raw;
-    if (!q || q.length !== cache.dim) return [];
+    if (!q || q.length !== cache.dim) return cannot("the query has no vector of its width");
 
     // Every row scored, then read best first until `want` distinct pages and
     // claims are held: a page can fill more chunks than any fixed pool, and a

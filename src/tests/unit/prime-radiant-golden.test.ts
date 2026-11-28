@@ -37,6 +37,7 @@ import { addGoldenQuestion, deleteGoldenQuestion, GoldenError, readGoldenQuestio
 import { readCosts } from "@/lib/prime-radiant/ingest-store";
 import { vaultDir } from "@/lib/prime-radiant/paths";
 import { listReviewItems } from "@/lib/prime-radiant/review-store";
+import { withStateDb } from "@/lib/prime-radiant/state-db";
 import { ensureVault, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
 import { claim, frontmatter, pageText } from "../helpers/prime-radiant-fixtures";
 
@@ -569,55 +570,72 @@ describe("golden questions: the nightly score", () => {
     expect(r.notes.join(" ")).toMatch(/spending cap/);
   });
 
-  it("raises no regression for a question the search failed on, and keeps the last verdict in the list", async () => {
+  it("does not judge a question the vector search failed on: left out of the %, no review item, its last verdict kept, the night says so", async () => {
     await seedPages();
     await addGoldenQuestion(PRICE_Q, { domains: [] });
-    await runGoldenScore({ runId: "run-0000000000e1", client: judge(), online: true, now: () => NOW });
+    await addGoldenQuestion(OFFICE_Q, { domains: [] });
+    const first = await runGoldenScore({ runId: "run-0000000000e1", client: judge(), online: true, now: () => NOW });
+    expect(first.tally).toMatchObject({ asked: 2, correct: 2, percent: 100 });
     await vaultOperation("test: new price", async (tx) => {
       await tx.write("concepts/blue-widget.md", pageText({ title: "Blue widget", claims: [{ ...PRICE, text: "The blue widget costs 14 EUR per unit." }, STOCK] }));
     });
-    const down = async () => {
-      throw new Error("embeddings unavailable");
+    // The embedder is down for the price question only.
+    const down = async (question: string): Promise<[]> => {
+      if (question.includes("blue widget")) throw new Error("embedder answered 503");
+      return [];
     };
-    const r = await runGoldenScore({ runId: "run-0000000000e2", client: judge(), online: true, search: down, now: () => new Date(NOW.getTime() + 86_400_000) });
-    expect(r.tally.wrong).toBe(1);
+    const calls: string[] = [];
+    const r = await runGoldenScore({ runId: "run-0000000000e2", client: judge(calls), online: true, search: down, now: () => new Date(NOW.getTime() + 86_400_000) });
+    // Only the question whose search ran was sent to the judge; the other is neither right nor wrong.
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).not.toContain("blue widget");
+    expect(r.tally).toMatchObject({ asked: 2, correct: 1, wrong: 0, missing: 0, failed: 1, percent: 100 });
     expect(r.regressions).toEqual([]);
-    expect(r.notes.join(" ")).toMatch(/search failed/);
+    expect(r.notes.join(" ")).toMatch(/vector search could not run for 1 golden question/);
     expect(listReviewItems(vaultDir(), { status: "open" }).items).toEqual([]);
+    // It is on record as search-failed with no verdict, and the list keeps the verdict it had.
+    const rows = withStateDb(vaultDir(), (db) => db.prepare("SELECT question_id, verdict, search_failed FROM golden_results WHERE score_id = ?").all("run-0000000000e2")) as Array<{ question_id: string; verdict: string | null; search_failed: number }>;
+    expect(rows.filter((x) => x.search_failed === 1)).toHaveLength(1);
+    expect(rows.find((x) => x.search_failed === 1)?.verdict).toBeNull();
+    expect(Object.values(readLatestVerdicts()).map((v) => v.verdict)).toEqual(["correct", "correct"]);
+  });
 
-    // A night the judge leaves the question out keeps its verdict beside it.
-    const silent: FlashClient = {
-      model: "deepseek-v4-flash",
-      async complete() {
-        return { text: "[]", model: "deepseek-v4-flash", usage: { promptTokens: 1, completionTokens: 1, cacheHitTokens: 0 } };
-      },
+  it("skips the night, keeping the last score, when the vector search failed for every question — never a drop in the score", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    await runGoldenScore({ runId: "run-0000000000c1", client: judge(), online: true, now: () => NOW });
+    const down = async () => {
+      throw new Error("embedder answered 503");
     };
-    await addGoldenQuestion(OFFICE_Q, { domains: [] });
-    const third = await runGoldenScore({ runId: "run-0000000000e3", client: judge(), online: true, now: () => new Date(NOW.getTime() + 2 * 86_400_000) });
-    expect(third.tally.asked).toBe(2);
-    await runGoldenScore({ runId: "run-0000000000e4", client: silent, online: true, now: () => new Date(NOW.getTime() + 3 * 86_400_000) });
-    const verdicts = Object.values(readLatestVerdicts()).map((v) => v.verdict).sort();
-    expect(verdicts).toEqual(["correct", "wrong"]);
+    const calls: string[] = [];
+    const r = await runGoldenScore({ runId: "run-0000000000c2", client: judge(calls), online: true, search: down, now: () => new Date(NOW.getTime() + 86_400_000) });
+    expect(calls).toEqual([]);
+    expect(r.skipped).toBe("search_unavailable");
+    expect(r.scoreId).toBeNull();
+    expect(r.notes.join(" ")).toMatch(/vector search could not run for 1 golden question/);
+    expect(readGoldenHistory().map((h) => h.percent)).toEqual([100]);
   });
 
   it("keeps a failed-search night out of the baseline: the regression is raised the night the search works again", async () => {
     await seedPages();
     await addGoldenQuestion(PRICE_Q, { domains: [] });
+    await addGoldenQuestion(OFFICE_Q, { domains: [] });
     const day = (n: number) => () => new Date(NOW.getTime() + n * 86_400_000);
     await runGoldenScore({ runId: "run-0000000000d1", client: judge(), online: true, now: day(0) });
-    // The price really changes; that night the search is down.
+    // The price really changes; that night the search is down for it.
     await vaultOperation("test: new price", async (tx) => {
       await tx.write("concepts/blue-widget.md", pageText({ title: "Blue widget", claims: [{ ...PRICE, text: "The blue widget costs 14 EUR per unit." }, STOCK] }));
     });
-    const down = async () => {
-      throw new Error("embeddings unavailable");
+    const down = async (question: string): Promise<[]> => {
+      if (question.includes("blue widget")) throw new Error("embeddings unavailable");
+      return [];
     };
     const second = await runGoldenScore({ runId: "run-0000000000d2", client: judge(), online: true, search: down, now: day(1) });
-    expect(second.tally.wrong).toBe(1);
+    expect(second.tally.wrong).toBe(0);
     expect(second.regressions).toEqual([]);
-    // The list shows what that night answered…
-    expect(Object.values(readLatestVerdicts()).map((v) => v.verdict)).toEqual(["wrong"]);
-    // …but the next night, with the search back, still compares with the last verdict a working search gave.
+    // The list keeps what the question was last judged…
+    expect(Object.values(readLatestVerdicts()).map((v) => v.verdict)).toEqual(["correct", "correct"]);
+    // …and the next night, with the search back, compares with that verdict.
     const third = await runGoldenScore({ runId: "run-0000000000d3", client: judge(), online: true, search: async () => [], now: day(2) });
     expect(third.regressions).toHaveLength(1);
     expect(listReviewItems(vaultDir(), { status: "open" }).items).toHaveLength(1);
@@ -640,6 +658,21 @@ describe("golden questions: the nightly score", () => {
     expect(calls).toEqual([]);
     expect(r.skipped).toBe("model_unavailable");
     expect(readGoldenHistory()).toEqual([]);
+  });
+
+  it("does not take the night's own timeout cutting a search short for a failed search", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    const ctl = new AbortController();
+    const cut = async () => {
+      ctl.abort(); // the night's budget runs out during the search, which then rejects
+      throw new Error("aborted");
+    };
+    const calls: string[] = [];
+    const r = await runGoldenScore({ client: judge(calls), online: true, search: cut, signal: ctl.signal, now: () => NOW });
+    expect(calls).toEqual([]);
+    expect(r.skipped).toBe("model_unavailable");
+    expect(r.notes.join(" ")).not.toMatch(/vector search could not run/);
   });
 
   it("counts a question the judge left out as not judged, never as wrong", async () => {

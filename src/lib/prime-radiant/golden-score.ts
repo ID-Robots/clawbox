@@ -21,12 +21,15 @@
  * keep their turn for the next night. A question answered `correct`
  * last time and `wrong` now becomes a `lint` review item for its owner (no run
  * id: it never holds a night) — unless the search failed for it that night:
- * an answer from the claims' words alone is no proof the wiki changed. Such
- * a verdict is stored (`search_failed`) and shown, but it is never the
- * baseline the next night compares with: that stays the last verdict a
- * working search gave, so a real regression is still raised once the search
- * works again. The night's signal reaches every search, and none starts once
- * it has fired.
+ * an answer from the claims' words alone is no proof the wiki changed, and an
+ * embedder outage is no wrong answer. Such a question is not judged at all: it
+ * is stored (`search_failed`) with no verdict, left out of the percentage
+ * (counted with the questions not judged), raises no review item, and keeps
+ * the verdict it had in the list and as the baseline the next night compares
+ * with, so a real regression is still raised once the search works again;
+ * the night's notes say how many it was. When the search failed for every
+ * question the check is skipped (`search_unavailable`) and stores no score.
+ * The night's signal reaches every search, and none starts once it has fired.
  *
  * The history is in the state database (state v9: `golden_scores`,
  * `golden_results`); `goldenStatus` reads it for the status route without
@@ -84,7 +87,7 @@ export const GOLDEN_TREND_POINTS = 14;
 const MODEL_REFUSALS = new Set(["no_credential", "no_engine", "auth", "refused", "allowance", "aborted"]);
 
 export interface GoldenScoreResult {
-  /** Why nothing was asked: `offline`, `disabled`, `no_questions`, `model_unavailable`, `allowance_spent`. */
+  /** Why nothing was asked: `offline`, `disabled`, `no_questions`, `search_unavailable`, `model_unavailable`, `allowance_spent`. */
   skipped: string | null;
   /**
    * The spent ClawBox AI allowance the judge stopped on. The questions it did
@@ -182,14 +185,19 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
     let hits: readonly GoldenHit[] = [];
     if (options.search) {
       hits = await options.search(redactText(q.question).text, options.signal).catch(() => {
-        searchFailed.add(q.id);
+        // The night's own timeout cutting a search short is no failure of the search: nothing more is judged then.
+        if (!options.signal?.aborted) searchFailed.add(q.id);
         return [];
       });
     }
     evidence.set(q.id, goldenEvidence(q.question, pages, { hits, now: at, answeredBy: { claimId: q.claimId, page: q.page } }).map(redactEvidence));
   }
+  // A question the vector search could not run for is not judged: the claims' words alone are no answer to score.
+  const judgeable = asked.filter((q) => !searchFailed.has(q.id));
   if (searchFailed.size > 0) {
-    result.notes.push(`The vault search failed for ${searchFailed.size} golden question(s); they were answered from the claims' words alone and raise no regression tonight.`);
+    result.notes.push(
+      `The vector search could not run for ${searchFailed.size} golden question(s) (the embedder or the vault index was unavailable); they were not judged, are left out of the score and raise no review item${judgeable.length === 0 ? ", so the check was skipped" : ""}.`,
+    );
   }
 
   const client = options.client ?? (await flashClient());
@@ -314,8 +322,8 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
   }
 
   // A batch that fails is split, never a reason to leave the later batches unasked.
-  for (let start = 0; start < asked.length && !halted(); start += GOLDEN_LIMITS.batch) {
-    await judge(asked.slice(start, start + GOLDEN_LIMITS.batch));
+  for (let start = 0; start < judgeable.length && !halted(); start += GOLDEN_LIMITS.batch) {
+    await judge(judgeable.slice(start, start + GOLDEN_LIMITS.batch));
   }
   for (const [kind, count] of outages) {
     result.notes.push(
@@ -330,18 +338,21 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
   const spentText = spent ? allowanceSpentText(spent, { now: now().getTime() }) : "";
   if (verdicts.size === 0) {
     // Nothing judged is no score: an outage must not read as 0 % correct, nor hide the last real score.
-    const skipped = emptyResult(spent ? ALLOWANCE_SPENT : "model_unavailable");
+    const skipped = emptyResult(spent ? ALLOWANCE_SPENT : judgeable.length === 0 ? "search_unavailable" : "model_unavailable");
     skipped.allowance = spent;
     skipped.calls = result.calls;
     skipped.usdEstimate = Math.round(result.usdEstimate * 1e6) / 1e6;
     skipped.notes.push(...result.notes);
-    skipped.notes.push(
-      spent
-        ? `The golden-question judge stopped: ${spentText}. Tonight's questions wait for the next night.`
-        : refusal
-          ? `${client.engine === "local" ? "The model on this box" : "ClawBox AI"} refused the golden-question judge (${refusal}); the check was skipped.`
-          : "No golden question could be judged tonight; the check was skipped.",
-    );
+    // Every question's search failed: no judge was asked, and the note above says why.
+    if (judgeable.length > 0) {
+      skipped.notes.push(
+        spent
+          ? `The golden-question judge stopped: ${spentText}. Tonight's questions wait for the next night.`
+          : refusal
+            ? `${client.engine === "local" ? "The model on this box" : "ClawBox AI"} refused the golden-question judge (${refusal}); the check was skipped.`
+            : "No golden question could be judged tonight; the check was skipped.",
+      );
+    }
     return skipped;
   }
   // Past a spent allowance — or the local-only AI lock going on part way

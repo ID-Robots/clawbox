@@ -424,6 +424,51 @@ describe("the incremental reindex hook", () => {
     expect((await searchPrimeRadiant("widgets", 5)).length).toBeGreaterThan(0);
   });
 
+  it("strict: an index that is there but cannot answer throws instead of answering no hit; no index at all stays empty", async () => {
+    await seed();
+    // No index yet: nothing to search, strict or not.
+    expect(await searchPrimeRadiant("widgets", 5, undefined, undefined, { strict: true })).toEqual([]);
+    await reindexPrimeRadiantVault();
+    expect((await searchPrimeRadiant("widgets", 5, undefined, undefined, { strict: true })).length).toBeGreaterThan(0);
+    // The embedder resolved now is not the one the index was built for.
+    embed.model = "stub-c";
+    expect(await searchPrimeRadiant("widgets", 5)).toEqual([]);
+    await expect(searchPrimeRadiant("widgets", 5, undefined, undefined, { strict: true })).rejects.toThrow(/cannot be searched: it was built for another embedder/);
+    // The embedder refusing the query throws as it always did.
+    embed.model = "stub-a";
+    embed.fail = true;
+    await expect(searchPrimeRadiant("widgets", 5, undefined, undefined, { strict: true })).rejects.toThrow(/HTTP 502/);
+  });
+
+  it("strict: an index file that is there but cannot be opened throws too", async () => {
+    await seed();
+    await reindexPrimeRadiantVault();
+    // A root user opens a 000 file anyway; there is nothing to prove then.
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const file = vaultIndexPathFor(vaultDir());
+    fs.chmodSync(file, 0o000);
+    try {
+      expect(await searchPrimeRadiant("widgets", 5)).toEqual([]);
+      await expect(searchPrimeRadiant("widgets", 5, undefined, undefined, { strict: true })).rejects.toThrow(/could not be opened/);
+    } finally {
+      fs.chmodSync(file, 0o600);
+    }
+  });
+
+  it("strict: a folder the index cannot be looked for in is not 'no index' — only a missing file is", async () => {
+    await seed();
+    await reindexPrimeRadiantVault();
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const dir = path.dirname(vaultIndexPathFor(vaultDir()));
+    fs.chmodSync(dir, 0o000);
+    try {
+      expect(await searchPrimeRadiant("widgets", 5)).toEqual([]);
+      await expect(searchPrimeRadiant("widgets", 5, undefined, undefined, { strict: true })).rejects.toThrow(/could not be opened/);
+    } finally {
+      fs.chmodSync(dir, 0o700);
+    }
+  });
+
   it("coalesces paths queued while a run is going", async () => {
     await seed();
     const [a, b] = await Promise.all([
