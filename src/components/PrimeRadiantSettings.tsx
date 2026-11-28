@@ -31,7 +31,11 @@ interface SettingsAnswer {
     structureCompany?: number;
   };
   nightly: { nextRunAt: number | null };
+  /** What each `inMemory` switch holds now, bytes. Absent on a server from before the switches. */
+  memory?: Record<InMemoryKey, number>;
 }
+
+type InMemoryKey = keyof Settings["inMemory"];
 
 interface NightlyAnswer {
   running: string | null;
@@ -52,6 +56,8 @@ interface Draft {
   domains: Array<{ name: string; owner: string }>;
   structure: boolean;
   company: string;
+  /** Null on a server from before the switches. */
+  inMemory: Settings["inMemory"] | null;
 }
 
 function draftOf(s: Settings): Draft {
@@ -68,6 +74,7 @@ function draftOf(s: Settings): Draft {
     // Absent on a server from before the structure pass.
     structure: s.structure?.enabled ?? true,
     company: s.structure?.company ?? "",
+    inMemory: s.inMemory ? { ...s.inMemory } : null,
   };
 }
 
@@ -77,7 +84,8 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
  * Settings: the nightly pass (on/off, its time, the folders it re-reads), the
  * contradiction pass, the domains and their owners,
  * the ingest exclude list, how many model calls run at once and how big the
- * search index may grow — and the
+ * search index may grow, what is kept in memory (each switch with what it
+ * holds now) — and the
  * nightly pass itself: Run now, the last nights with the tokens each used, and
  * a Merge button for a night that was held for review once its items are
  * settled.
@@ -136,6 +144,7 @@ export default function PrimeRadiantSettings({ revision = 0, onChanged }: { revi
         },
         ...(indexLimit ? { search: { indexLimitMb } } : {}),
         ...(answer.settings.structure ? { structure: { enabled: draft.structure, company: draft.company.trim() } } : {}),
+        ...(draft.inMemory ? { inMemory: draft.inMemory } : {}),
         domains,
       }));
       setAnswer(next);
@@ -284,6 +293,32 @@ export default function PrimeRadiantSettings({ revision = 0, onChanged }: { revi
               <p className="text-[11px] text-[var(--text-muted)]">
                 {t("primeRadiant.settings.searchIndexLimitBody", { n: answer.defaults.search.indexLimitMb })}
               </p>
+            </section>
+          )}
+
+          {draft.inMemory && (
+            <section className={`${CARD_SURFACE} p-4 space-y-3`} data-testid="prime-radiant-memory">
+              <h3 className={SECTION_LABEL}>{t("primeRadiant.settings.memoryTitle")}</h3>
+              <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.memoryBody")}</p>
+              {([
+                ["pages", t("primeRadiant.settings.memoryPages")],
+                ["pageBodies", t("primeRadiant.settings.memoryPageBodies")],
+                ["searchVectors", t("primeRadiant.settings.memorySearchVectors")],
+              ] as const).map(([key, label]) => {
+                const held = answer.memory?.[key] ?? 0;
+                return (
+                  <div key={key} className="space-y-0.5">
+                    <Toggle label={label} checked={draft.inMemory![key]} onChange={(v) => set({ inMemory: { ...draft.inMemory!, [key]: v } })} testId={`prime-radiant-memory-${key}`} />
+                    {answer.settings.inMemory?.[key] && answer.memory && (
+                      <p className="pl-6 text-[11px] text-[var(--text-muted)]" data-testid={`prime-radiant-memory-${key}-held`}>
+                        {held > 0
+                          ? t("primeRadiant.settings.memoryHeld", { mb: new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(held / 1_048_576) })
+                          : t("primeRadiant.settings.memoryNotYet")}
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
             </section>
           )}
 

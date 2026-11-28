@@ -193,6 +193,7 @@ need ClawBox AI.
 | **Model calls at once** | How many writing requests run in parallel during an import. Lower it if the service reports too many requests. |
 | **Skip code projects** | On by default. A code project found inside a folder you add is not read; a project folder you add yourself always is. |
 | **Folders never read** | Folder names an import skips. **Restore the default list** brings back the shipped list. A list you never changed follows the shipped list as it grows; a list you changed is kept as it is. |
+| **Memory** | Three switches, all off by default, that keep wiki data in the box's memory so a large wiki opens faster: each page's details and facts, page text as well, and the search index. Each one shows the memory it holds while it is on (on a wiki of 10,000 pages, roughly 70–180 MB for the details and facts, about as much again for the text, and 60–80 MB for the search index). Switching one off frees its memory at once; an edit made anywhere, in the app, by the nightly pass or in the files themselves, shows on the next read. |
 
 ## Usage
 

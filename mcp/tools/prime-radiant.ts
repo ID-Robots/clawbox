@@ -747,11 +747,11 @@ function registerReadTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_settings",
-    "Read Prime Radiant's settings: nightly schedule, contradiction pass, search index limit (MB), domains and owners, golden-question check, daily questions (per owner, languages, sending), import excludes, parallelism, nightly folders — with defaults and limits.",
+    "Read Prime Radiant's settings: nightly schedule, contradiction pass, search index limit (MB), domains and owners, golden-question check, daily questions (per owner, languages, sending), import excludes, parallelism, nightly folders, what is kept in memory (in_memory: pages, page text, search vectors, each with the MB it holds now) — with defaults and limits.",
     {},
     { ...READ, maxChars: 8_000 },
     async () => {
-      const s = await pr<{ settings?: Record<string, unknown>; defaults?: Record<string, unknown>; limits?: unknown; nightly?: { nextRunAt?: number } }>("GET", "/settings");
+      const s = await pr<{ settings?: Record<string, unknown>; defaults?: Record<string, unknown>; limits?: unknown; nightly?: { nextRunAt?: number }; memory?: Record<string, number> }>("GET", "/settings");
       const defaults = s.defaults ?? {};
       return json({
         settings: s.settings,
@@ -759,6 +759,7 @@ function registerReadTools(reg: Registrar): void {
         defaults: { ...defaults, ingest: { ...((defaults.ingest as Record<string, unknown>) ?? {}), exclude: "(the built-in list — reset ingest_exclude to restore it)" } },
         limits: s.limits,
         next_nightly_run: isoOf(s.nightly?.nextRunAt) ?? "off",
+        ...(s.memory ? { in_memory_mb: Object.fromEntries(Object.entries(s.memory).map(([k, v]) => [k, Math.round((v / 1_048_576) * 10) / 10])) } : {}),
       });
     },
   );
@@ -1278,7 +1279,7 @@ function registerPassTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_settings_update",
-    "Change the Prime Radiant settings the user asked for: nightly schedule, contradiction pass, search index limit, domains and owners, golden-question check, daily questions per owner and owners' languages, exclude list, parallelism, skip code projects, nightly folders.",
+    "Change the Prime Radiant settings the user asked for: nightly schedule, contradiction pass, search index limit, domains and owners, golden-question check, daily questions per owner and owners' languages, exclude list, parallelism, skip code projects, nightly folders, what is kept in memory (pages, page text, search vectors; each off by default).",
     {
       nightly_enabled: zOptBool("Run the nightly pass on its schedule."),
       nightly_time: z.string().regex(TIME_RE, "HH:MM, 24-hour").optional().describe("When the nightly pass runs, box time, HH:MM."),
@@ -1294,11 +1295,14 @@ function registerPassTools(reg: Registrar): void {
       golden_max_questions: z.number().int().min(1).max(500).optional().describe("Most golden questions one night checks."),
       daily_per_owner: z.number().int().min(1).max(20).optional().describe("Most daily questions an owner gets a day."),
       owner_languages: zOptList(100, 100, `The whole list of owners' languages, each owner=code (${DAILY_LANGUAGES.join(", ")}).`),
+      in_memory_pages: zOptBool("Keep every page's details and facts in memory: the wiki answers faster (prime_radiant_settings shows the MB)."),
+      in_memory_page_bodies: zOptBool("Keep page text in memory too: faster still, more memory."),
+      in_memory_search_vectors: zOptBool("Keep the search index's vectors loaded instead of dropping them when search is idle."),
       reset: z.array(zEnumOf(
-        ["nightly", "contradictions", "domains", "ingest_exclude", "ingest_parallel", "skip_code_projects", "nightly_folders", "search_index_limit_mb", "golden", "daily_per_owner", "owner_languages"],
+        ["nightly", "contradictions", "domains", "ingest_exclude", "ingest_parallel", "skip_code_projects", "nightly_folders", "search_index_limit_mb", "golden", "daily_per_owner", "owner_languages", "in_memory"],
         "A setting to put back to its default.",
       ))
-        .max(11)
+        .max(12)
         .optional()
         .describe("Settings to put back to their defaults."),
       confirm: zConfirm("Must be true. Set it only when the user asked for these settings."),
@@ -1308,6 +1312,7 @@ function registerPassTools(reg: Registrar): void {
       nightly_enabled?: boolean; nightly_time?: string; contradictions_enabled?: boolean; search_index_limit_mb?: number;
       domains?: string[]; ingest_exclude?: string[]; ingest_parallel?: number; skip_code_projects?: boolean; nightly_folders?: string[]; reset?: string[]; confirm: true;
       golden_enabled?: boolean; golden_max_questions?: number; daily_per_owner?: number; owner_languages?: string[];
+      in_memory_pages?: boolean; in_memory_page_bodies?: boolean; in_memory_search_vectors?: boolean;
     }) => {
       const patch: Record<string, Record<string, unknown> | unknown[] | null> = {};
       const section = (name: string) => (patch[name] && !Array.isArray(patch[name]) ? patch[name] : (patch[name] = {})) as Record<string, unknown>;
@@ -1322,6 +1327,9 @@ function registerPassTools(reg: Registrar): void {
       if (a.golden_enabled !== undefined) section("golden").enabled = a.golden_enabled;
       if (a.golden_max_questions !== undefined) section("golden").maxQuestions = a.golden_max_questions;
       if (a.daily_per_owner !== undefined) section("verification").perOwner = a.daily_per_owner;
+      if (a.in_memory_pages !== undefined) section("inMemory").pages = a.in_memory_pages;
+      if (a.in_memory_page_bodies !== undefined) section("inMemory").pageBodies = a.in_memory_page_bodies;
+      if (a.in_memory_search_vectors !== undefined) section("inMemory").searchVectors = a.in_memory_search_vectors;
       if (a.owner_languages !== undefined) {
         const bad = a.owner_languages.find((l) => !OWNER_LANGUAGE_RE.test(l));
         if (bad) throw new ToolError("BAD_ARGUMENT", `"${bad.slice(0, 60)}" is not owner=language.`, `Write each as the owner's name, =, then one of ${DAILY_LANGUAGES.join(", ")}.`);
@@ -1342,6 +1350,7 @@ function registerPassTools(reg: Registrar): void {
         else if (r === "golden") patch.golden = null;
         else if (r === "daily_per_owner") section("verification").perOwner = null;
         else if (r === "owner_languages") section("verification").languages = null;
+        else if (r === "in_memory") patch.inMemory = null;
       }
       if (Object.keys(patch).length === 0) throw new ToolError("BAD_ARGUMENT", "No setting to change was given.", "Pass the settings the user asked to change.");
       const r = await pr<{ settings?: { ingest?: { exclude?: unknown[] } } & Record<string, unknown>; nightly?: { nextRunAt?: number } }>("PUT", "/settings", { body: patch });

@@ -64,6 +64,8 @@ import {
   VERIFIED_BOOST,
   _resetVaultIndexCacheForTests,
   _setVaultMaxChunksForTests,
+  heldVectorBytes,
+  loadVaultVectors,
   migrateVaultVectors,
   pageIndexUnits,
   planVaultChunks,
@@ -71,6 +73,7 @@ import {
   readPageVectors,
   reindexPrimeRadiantPaths,
   reindexPrimeRadiantVault,
+  releaseVaultVectors,
   scheduleReindexAfterCommit,
   vaultIndexingAllowed,
   searchPrimeRadiant,
@@ -778,5 +781,47 @@ describe("the index size budget", () => {
     expect(await vaultIndexStatus()).toMatchObject({ limitBytes: 64 * 1024 * 1024, maxChunks: Math.floor((64 * 1024 * 1024) / q8BlobBytes(5)) });
     writeSettings({ search: null });
     expect(vaultIndexBudgetBytes()).toBe(VAULT_INDEX_BUDGET_BYTES);
+  });
+});
+
+describe("inMemory.searchVectors", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("off, the loaded vectors are dropped when search is idle; on, they stay loaded; switched off, they are freed at once", async () => {
+    await seed();
+    await reindexPrimeRadiantVault();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    expect(heldVectorBytes()).toBe(0);
+    await searchPrimeRadiant("who makes widgets?", 5);
+    expect(heldVectorBytes()).toBeGreaterThan(0);
+    vi.advanceTimersByTime(10 * 60 * 1000 + 1);
+    expect(heldVectorBytes()).toBe(0);
+
+    writeSettings({ inMemory: { searchVectors: true } });
+    // Switched on: loaded without waiting for a search, and never dropped when idle.
+    await loadVaultVectors();
+    expect(heldVectorBytes()).toBeGreaterThan(0);
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(heldVectorBytes()).toBeGreaterThan(0);
+    expect((await searchPrimeRadiant("who makes widgets?", 5))[0]).toMatchObject({ path: "entities/acme-widgets.md" });
+    vi.advanceTimersByTime(60 * 60 * 1000);
+    expect(heldVectorBytes()).toBeGreaterThan(0);
+
+    writeSettings({ inMemory: { searchVectors: false } });
+    releaseVaultVectors();
+    expect(heldVectorBytes()).toBe(0);
+    // Off again: today's rule.
+    await searchPrimeRadiant("who makes widgets?", 5);
+    vi.advanceTimersByTime(10 * 60 * 1000 + 1);
+    expect(heldVectorBytes()).toBe(0);
+  });
+
+  it("loads nothing when there is no index yet", async () => {
+    await seed();
+    writeSettings({ inMemory: { searchVectors: true } });
+    await loadVaultVectors();
+    expect(heldVectorBytes()).toBe(0);
   });
 });

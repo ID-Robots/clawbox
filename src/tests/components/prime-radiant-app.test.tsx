@@ -214,6 +214,8 @@ let skipCodeProjects: boolean;
 let olderOpusServer: boolean;
 /** The search index size limit, MB, on a server that has the setting (null: an older one). */
 let searchIndexLimitMb: number | null;
+/** The `inMemory` switches the settings GET answers, with what each holds (null: a server from before them). */
+let inMemory: { on: { pages: boolean; pageBodies: boolean; searchVectors: boolean }; memory: Record<string, number> } | null;
 /** The structure pass's settings section; null: a server from before it. */
 let structureSettings: { enabled: boolean; company: string; enrichTop: number; modelFallback: number } | null;
 /** What `POST init` says its one-time memory-wiki repair did. */
@@ -347,6 +349,7 @@ function installFetch() {
         golden: { enabled: true, maxQuestions: 50 }, verification: { perOwner: 5, outbound: false, languages: [] },
         ...(searchIndexLimitMb !== null ? { search: { indexLimitMb: searchIndexLimitMb } } : {}),
         ...(structureSettings ? { structure: structureSettings } : {}),
+        ...(inMemory ? { inMemory: inMemory.on } : {}),
       };
       return ok({
         settings, defaults: searchIndexLimitMb !== null ? { ...settings, search: { indexLimitMb: 160 } } : settings,
@@ -359,6 +362,7 @@ function installFetch() {
         },
         nightly: { nextRunAt: null }, rates: {},
         ...(olderOpusServer ? { opusSource: "subscription" } : {}),
+        ...(inMemory ? { memory: inMemory.memory } : {}),
       });
     }
     return ok({}, 404);
@@ -422,6 +426,7 @@ beforeEach(() => {
   skipCodeProjects = true;
   olderOpusServer = false;
   searchIndexLimitMb = null;
+  inMemory = null;
   structureSettings = null;
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
   window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
@@ -1113,6 +1118,37 @@ describe("PrimeRadiantApp", () => {
     await waitFor(() => {
       const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
       expect(put?.body).not.toHaveProperty("search");
+    });
+  });
+
+  it("shows the Memory switches, what each one on holds now, and saves them", async () => {
+    inMemory = { on: { pages: true, pageBodies: false, searchVectors: true }, memory: { pages: 183.4 * 1_048_576, pageBodies: 0, searchVectors: 0 } };
+    await mount();
+    await openTab("settings");
+    const pages = await screen.findByTestId("prime-radiant-memory-pages");
+    expect(pages).toBeChecked();
+    expect(screen.getByTestId("prime-radiant-memory-pageBodies")).not.toBeChecked();
+    expect(screen.getByTestId("prime-radiant-memory-pages-held")).toHaveTextContent("About 183.4 MB in memory now.");
+    expect(screen.queryByTestId("prime-radiant-memory-pageBodies-held")).toBeNull();
+    expect(screen.getByTestId("prime-radiant-memory-searchVectors-held")).toHaveTextContent("Not loaded yet: it fills on first use.");
+    fireEvent.click(screen.getByTestId("prime-radiant-memory-pageBodies"));
+    fireEvent.click(screen.getByTestId("prime-radiant-memory-searchVectors"));
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect((put?.body as { inMemory: unknown }).inMemory).toEqual({ pages: true, pageBodies: true, searchVectors: false });
+    });
+  });
+
+  it("offers no Memory switches to a server from before them, and sends none", async () => {
+    await mount();
+    await openTab("settings");
+    await screen.findByTestId("prime-radiant-settings-save");
+    expect(screen.queryByTestId("prime-radiant-memory")).toBeNull();
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect(put?.body).not.toHaveProperty("inMemory");
     });
   });
 
