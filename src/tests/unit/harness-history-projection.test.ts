@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { projectGatewayHistory } from "@/lib/harness/openclaw-gateway-adapter";
+import { readLiveReply } from "@/lib/chat-transcript-reconcile";
 
 /**
  * The golden fixture for the history projection.
@@ -223,5 +224,71 @@ describe("a provider's refusal stored as the assistant's row (TASK-2261)", () =>
     }], null);
     expect(page.messages).toEqual([expect.objectContaining({ role: "system" })]);
     expect(page.messages[0].text).toMatch(/cannot look at pictures right now/);
+  });
+});
+
+/**
+ * TASK-2857: a picture an assistant reply attached showed while the turn ran
+ * and vanished once the chat repainted from the stored transcript. The live
+ * reply names the file on a `MEDIA:` line; the box's `chat.history` returns
+ * the same reply with that line taken out of the text and the file as a block
+ * of its own, served from the gateway's media tree. The rows below are that
+ * shape as a lab box returned it (OpenClaw 2026.11.5), ids replaced.
+ */
+describe("media the stored transcript moved out of the reply text", () => {
+  const outgoing = (id: string) => `/api/chat/media/outgoing/agent%3Amain%3Amain/${id}/full`;
+  const IMAGE = outgoing("0b1c2d3e-0000-4000-8000-000000000001");
+  const AUDIO = outgoing("0b1c2d3e-0000-4000-8000-000000000002");
+  const VIDEO = outgoing("0b1c2d3e-0000-4000-8000-000000000003");
+
+  it("keeps the picture the live reply showed", () => {
+    const live = readLiveReply({
+      role: "assistant",
+      content: [{ type: "text", text: "Here is the map again.\nMEDIA:/home/clawbox/.openclaw/workspace/map.png" }],
+    });
+    expect(live.images).toHaveLength(1);
+
+    const { messages } = projectGatewayHistory([
+      user("show me the img again", 100),
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Here is the map again." },
+          {
+            type: "image",
+            artifactId: "artifact_managed_image_0b1c2d3e-0000-4000-8000-000000000001",
+            url: IMAGE,
+            openUrl: IMAGE,
+            alt: "map.png",
+            mimeType: "image/png",
+            width: 192,
+            height: 192,
+            sizeBytes: 22137,
+          },
+        ],
+        timestamp: 200,
+      },
+    ], null);
+    expect(messages[1]).toMatchObject({ role: "assistant", text: "Here is the map again.", images: [IMAGE] });
+  });
+
+  it("keeps a recording and a video the same way", () => {
+    const { messages } = projectGatewayHistory([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Here are the files." },
+          { type: "audio", url: AUDIO, openUrl: AUDIO, fileName: "tone.wav", mimeType: "audio/wav", playback: "native", sizeBytes: 8044 },
+          { type: "video", url: VIDEO, openUrl: VIDEO, fileName: "clip.mp4", mimeType: "video/mp4", playback: "native", sizeBytes: 2247 },
+        ],
+        timestamp: 300,
+      },
+    ], null);
+    expect(messages[0]).toMatchObject({
+      text: "Here are the files.",
+      images: [],
+      audio: [AUDIO],
+      files: [`${VIDEO}#name=clip.mp4&size=2247`],
+    });
   });
 });

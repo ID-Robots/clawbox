@@ -348,6 +348,7 @@ export function extractFileAttachments(msg: unknown): { images: string[]; files:
     kind?: unknown;
     name?: string | null;
     size?: number | null;
+    image?: boolean;
   }> = [];
   const m = msg as { content?: unknown; mediaUrl?: unknown; mediaUrls?: unknown };
   if (typeof m.mediaUrl === "string") sources.push({ url: m.mediaUrl });
@@ -357,7 +358,15 @@ export function extractFileAttachments(msg: unknown): { images: string[]; files:
   if (Array.isArray(m.content)) {
     for (const block of m.content) {
       if (!block || typeof block !== "object") continue;
-      const b = block as { type?: unknown; attachment?: unknown };
+      const b = block as { type?: unknown; attachment?: unknown; url?: unknown };
+      // The stored transcript replaces a reply's `MEDIA:` line with a block of
+      // its own — `{ type: "image" | "video", url: "/api/chat/media/outgoing/…" }`
+      // — so a picture the live reply showed is only here after a re-read.
+      if ((b.type === "image" || b.type === "video") && typeof b.url === "string") {
+        const r = block as Record<string, unknown>;
+        sources.push({ url: b.url, image: b.type === "image", name: attachmentName(r), size: attachmentSize(r) });
+        continue;
+      }
       if (b.type !== "attachment" || !b.attachment || typeof b.attachment !== "object") continue;
       const a = b.attachment as Record<string, unknown>;
       if (typeof a.url !== "string") continue;
@@ -370,12 +379,12 @@ export function extractFileAttachments(msg: unknown): { images: string[]; files:
       });
     }
   }
-  for (const { url, kind, mimeType, name, size } of sources) {
+  for (const { url, kind, mimeType, name, size, image } of sources) {
     const source = url.trim();
     if (!acceptableSource(source)) continue;
     // Audio has its own extractor and its own player.
     if (kind === "audio" || mimeType?.startsWith("audio/") || isAudioMedia(source)) continue;
-    if (isImageMedia(source)) images.push(mediaUrl(source));
+    if (image || isImageMedia(source)) images.push(mediaUrl(source));
     else files.push(withFileMeta(mediaUrl(source), name ?? null, size ?? null));
   }
   return { images: [...new Set(images)], files: boundedFiles(files) };
@@ -476,7 +485,13 @@ export function extractAudioAttachments(msg: unknown): string[] {
   const urls: string[] = [];
   for (const block of content) {
     if (!block || typeof block !== "object") continue;
-    const b = block as { type?: unknown; attachment?: unknown };
+    const b = block as { type?: unknown; attachment?: unknown; url?: unknown };
+    // A `MEDIA:` line the stored transcript turned into a block of its own
+    // (see `extractFileAttachments`): a gateway media URL, played as it is.
+    if (b.type === "audio" && typeof b.url === "string" && acceptableSource(b.url.trim())) {
+      urls.push(mediaUrl(b.url.trim()));
+      continue;
+    }
     if (b.type !== "attachment" || !b.attachment || typeof b.attachment !== "object") continue;
     const a = b.attachment as { url?: unknown; kind?: unknown; mimeType?: unknown };
     if (typeof a.url !== "string" || !a.url) continue;
