@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { EMBED_PENDING_RE, EMBED_SHORTCODE_RE, embedAttributes, withoutEmbedShortcodes } from "@/lib/speech-text";
 
 function isSafeHref(url: string): boolean {
   try {
@@ -149,9 +150,185 @@ type MdBlock =
   | { kind: "heading"; level: number; text: string }
   | { kind: "table"; header: string[] | null; rows: string[][] }
   | { kind: "list"; items: { marker: string; text: string }[] }
+  | { kind: "embed"; attrs: EmbedAttrs | null }
   | { kind: "para"; lines: string[] };
 
+type EmbedAttrs = ReturnType<typeof embedAttributes>;
+
 const FENCE_RE = /^\s*```/;
+
+/**
+ * Where an `[embed … /]` (speech-text.ts) starts on this line, and what it is:
+ * whole, or — while the reply is still `streaming` — its half-written tail
+ * (`attrs: null`, drawn as nothing so it never flashes; a settled reply is
+ * never cut). The match may run on over the following lines. An opener inside
+ * a closed inline code span is skipped, like a fenced one.
+ */
+const EMBED_OPENER_RE = /\[embed\s/i;
+const EMBED_OPENER_TAIL_RE = /\[(?:e|em|emb|embe|embed)$/i;
+const hasEmbedOpener = (line: string) => EMBED_OPENER_RE.test(line) || EMBED_OPENER_TAIL_RE.test(line);
+const EMBED_AT_RE = new RegExp(EMBED_SHORTCODE_RE.source, "iy");
+const EMBED_PENDING_AT_RE = new RegExp(`^${EMBED_PENDING_RE.source}`, "i");
+function findEmbed(lines: string[], i: number, streaming: boolean): { at: number; length: number; attrs: EmbedAttrs | null } | null {
+  const line = lines[i];
+  if (!hasEmbedOpener(line)) return null;
+  const rest = lines.slice(i).join("\n");
+  const opener = /\[e/gi;
+  let m: RegExpExecArray | null;
+  while ((m = opener.exec(line)) !== null) {
+    const ticks = line.slice(0, m.index).split("`").length - 1;
+    if (ticks % 2 === 1 && line.indexOf("`", m.index) !== -1) continue;
+    const tail = rest.slice(m.index);
+    EMBED_AT_RE.lastIndex = 0;
+    const whole = EMBED_AT_RE.exec(tail);
+    if (whole) return { at: m.index, length: whole[0].length, attrs: embedAttributes(whole[1] ?? whole[2] ?? "") };
+    if (streaming && EMBED_PENDING_AT_RE.test(tail)) return { at: m.index, length: tail.length, attrs: null };
+  }
+  return null;
+}
+
+/** The labels an embed card shows; the caller translates them, like `tableLabel`. */
+export type EmbedLabels = { play: string; openOnYouTube: string; untitled: string };
+
+const YOUTUBE_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+
+/** `90`, `90s`, `1m30s`, `1h2m3s` as whole seconds; anything else is no start. */
+function youTubeStart(value: string | null): number | null {
+  const m = value?.match(/^(?:(\d{1,3})h)?(?:(\d{1,4})m)?(?:(\d{1,6})s?)?$/);
+  if (!m || !value) return null;
+  const seconds = Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0);
+  return seconds > 0 ? seconds : null;
+}
+
+/**
+ * The video an https YouTube link points at, and its start time. Every other
+ * parameter is dropped: the card's URLs are rebuilt from the checked id, never
+ * copied from the reply.
+ */
+function youTubeVideo(url: string): { id: string; start: number | null } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" || parsed.port || parsed.username || parsed.password) return null;
+  const host = parsed.hostname.toLowerCase();
+  const path = parsed.pathname.split("/").filter(Boolean);
+  let id: string | undefined;
+  if (host === "youtu.be") {
+    if (path.length === 1) id = path[0];
+  } else if (["youtube.com", "www.youtube.com", "m.youtube.com"].includes(host)) {
+    if (path.length === 1 && path[0] === "watch") id = parsed.searchParams.get("v") ?? undefined;
+    else if (path.length === 2 && ["shorts", "live", "embed"].includes(path[0])) id = path[1];
+  } else if (["youtube-nocookie.com", "www.youtube-nocookie.com"].includes(host)) {
+    if (path.length === 2 && path[0] === "embed") id = path[1];
+  }
+  if (!id || !YOUTUBE_ID_RE.test(id)) return null;
+  const hashT = new URLSearchParams(parsed.hash.slice(1)).get("t");
+  const start = youTubeStart(parsed.searchParams.get("start") ?? parsed.searchParams.get("t") ?? hashT);
+  return { id, start };
+}
+
+/**
+ * A YouTube card: thumbnail, title, Play. The player frame is not in the page
+ * until Play is pressed (OpenClaw's Control UI does the same), and the watch
+ * link is always there for a video that will not play inline.
+ */
+function YouTubeEmbed(
+  { id, start, title, labels, spaced }: { id: string; start: number | null; title: string; labels: EmbedLabels; spaced: boolean },
+) {
+  const [playing, setPlaying] = useState(false);
+  const watch = `https://www.youtube.com/watch?v=${id}${start ? `&t=${start}s` : ""}`;
+  return (
+    <div data-testid="chat-embed-youtube" className={`${spaced ? "mt-2" : ""} w-full max-w-[420px]`}>
+      <div className="relative w-full overflow-hidden rounded-lg bg-black" style={{ aspectRatio: "16 / 9" }}>
+        {playing ? (
+          <iframe
+            src={`https://www.youtube-nocookie.com/embed/${id}?autoplay=1${start ? `&start=${start}` : ""}`}
+            title={title || "YouTube"}
+            allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+            allowFullScreen
+            referrerPolicy="strict-origin-when-cross-origin"
+            sandbox="allow-scripts allow-same-origin allow-presentation allow-popups allow-popups-to-escape-sandbox"
+            className="absolute inset-0 h-full w-full border-0"
+          />
+        ) : (
+          <button
+            type="button"
+            data-testid="chat-embed-youtube-play"
+            onClick={() => setPlaying(true)}
+            aria-label={title ? `${labels.play}: ${title}` : labels.play}
+            className="absolute inset-0 h-full w-full cursor-pointer border-0 bg-transparent p-0"
+          >
+            <img src={`https://i.ytimg.com/vi/${id}/hqdefault.jpg`} alt="" loading="lazy" className="h-full w-full object-cover" />
+            <span
+              aria-hidden="true"
+              className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1 rounded-full bg-black/70 py-1.5 pl-2.5 pr-3.5 text-[13px] font-semibold text-white"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 22 }}>play_arrow</span>
+              {labels.play}
+            </span>
+          </button>
+        )}
+      </div>
+      {title && <div className="mt-1 text-[13px] font-medium">{title}</div>}
+      <a href={watch} target="_blank" rel="noopener noreferrer" className="text-xs text-[#f97316] underline">
+        {labels.openOnYouTube}
+      </a>
+    </div>
+  );
+}
+
+/**
+ * One `[embed … /]`, by what it points at. The reply is untrusted text, so the
+ * URL decides only WHICH of these is drawn and never reaches markup as typed:
+ *   - an https YouTube video: the card above;
+ *   - a hosted Canvas document (`ref=`, or a `/__openclaw__/canvas/…` URL): a
+ *     titled card. OpenClaw's Control UI fetches those over its authenticated
+ *     gateway socket; this chat has no such channel, and framing the path
+ *     here would be answered by the gateway catch-all with the Control UI
+ *     shell (token and all), or by nothing on Hermes;
+ *   - any other https page: its title as an ordinary link, no frame;
+ *   - anything else (javascript:, data:, http:, garbage): the title as text.
+ */
+function EmbedBlock({ attrs, labels, spaced }: { attrs: EmbedAttrs; labels: EmbedLabels; spaced: boolean }) {
+  const title = attrs.title ?? "";
+  const className = spaced ? "mt-2" : "";
+  const video = attrs.url ? youTubeVideo(attrs.url) : null;
+  if (video) return <YouTubeEmbed id={video.id} start={video.start} title={title} labels={labels} spaced={spaced} />;
+  let href: string | null = null;
+  let hosted = Boolean(attrs.ref);
+  if (attrs.url) {
+    try {
+      const parsed = new URL(attrs.url, "https://localhost");
+      if (parsed.pathname.startsWith("/__openclaw__/canvas/")) hosted = true;
+      const absolute = new URL(attrs.url);
+      if (absolute.protocol === "https:" && !absolute.username && !absolute.password) href = absolute.href;
+    } catch {
+      // Not an absolute URL: at most a hosted document, never a link.
+    }
+  }
+  if (hosted) {
+    return (
+      <div
+        data-testid="chat-embed-hosted"
+        className={`${className} inline-flex max-w-full items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-[13px]`}
+      >
+        <span aria-hidden="true" className="material-symbols-rounded text-white/50" style={{ fontSize: 18 }}>widgets</span>
+        <span className="font-medium">{title || labels.untitled}</span>
+      </div>
+    );
+  }
+  if (href) {
+    return (
+      <div className={className}>
+        <a href={href} target="_blank" rel="noopener noreferrer" className="text-[#f97316] underline break-all">{title || attrs.url}</a>
+      </div>
+    );
+  }
+  return title ? <div className={className}>{title}</div> : null;
+}
 /**
  * `<details>`, the ONE piece of HTML this renderer admits.
  *
@@ -270,7 +447,10 @@ function splitTableRow(line: string): string[] {
   return cells;
 }
 
-function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
+/** A line that is nothing but a list, heading or quote marker. */
+const LONE_MARKER_RE = /^\s*(?:[-*+]|\d{1,9}[.)]|#{1,6}|>)?\s*$/;
+
+function parseBlocks(text: string, detailsLabel: string, embeds: boolean, streaming: boolean): MdBlock[] {
   const lines = text.split("\n");
   const blocks: MdBlock[] = [];
   let para: string[] = [];
@@ -300,10 +480,32 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
       continue;
     }
 
+    // `[embed … /]` is its own block, wherever on the line it starts and
+    // however many lines its attributes run over. A `<details>` that opens
+    // earlier on the line keeps it: its body comes back through here.
+    const detailsStart = line.search(DETAILS_OPEN_RE);
+    const embed = embeds ? findEmbed(lines, i, streaming) : null;
+    if (embed && (detailsStart === -1 || embed.at < detailsStart)) {
+      const before = line.slice(0, embed.at);
+      if (before.trim()) {
+        // The prose before it is scanned as a line of its own, so a bullet or
+        // a heading stays one; a bare marker ("- ") was the card's own and goes.
+        lines.splice(i, 1, ...(LONE_MARKER_RE.test(before) ? [] : [before.trimEnd()]), line.slice(embed.at));
+        i--;
+        continue;
+      }
+      flushPara();
+      blocks.push({ kind: "embed", attrs: embed.attrs });
+      const consumed = lines.slice(i).join("\n").slice(0, embed.at + embed.length);
+      i += consumed.split("\n").length - 1;
+      const after = lines[i].slice(consumed.length - consumed.lastIndexOf("\n") - 1).trimStart();
+      if (embed.attrs && after) lines.splice(i + 1, 0, after);
+      continue;
+    }
+
     // `<details>` is consumed at BLOCK level, like a fence, and for the same
     // reason: its body holds blank lines, lists and code, and splitting on
     // paragraphs first would tear it into pieces with the tags left in them.
-    const detailsStart = line.search(DETAILS_OPEN_RE);
     if (detailsStart !== -1) {
       // Prose can share the line with the tag: keep it in the paragraph it
       // belongs to rather than swallowing it into the disclosure.
@@ -342,7 +544,7 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
       // again — unless it opens another block, in which case it is scanned as
       // a line of its own so that one folds too instead of printing its tags.
       if (after.trim()) {
-        if (DETAILS_OPEN_RE.test(after)) lines.splice(i + 1, 0, after);
+        if (DETAILS_OPEN_RE.test(after) || (embeds && hasEmbedOpener(after))) lines.splice(i + 1, 0, after);
         else para.push(after);
       }
       continue;
@@ -362,7 +564,8 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
 
     if (TABLE_ROW_RE.test(line)) {
       const rowLines: string[] = [];
-      while (i < lines.length && TABLE_ROW_RE.test(lines[i])) {
+      // A row holding an `[embed … /]` ends the table and is scanned again.
+      while (i < lines.length && TABLE_ROW_RE.test(lines[i]) && !(rowLines.length && embeds && findEmbed(lines, i, streaming))) {
         rowLines.push(lines[i]);
         i++;
       }
@@ -388,6 +591,8 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
       flushPara();
       const items: { marker: string; text: string }[] = [];
       while (i < lines.length) {
+        // An item holding an `[embed … /]` ends the list and is scanned again.
+        if (items.length && embeds && findEmbed(lines, i, streaming)) break;
         const bullet = lines[i].match(BULLET_RE);
         const ordered = bullet ? null : lines[i].match(ORDERED_RE);
         if (bullet) items.push({ marker: "•", text: bullet[1] });
@@ -426,11 +631,13 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
  * would make appending a turn reshuffle what is open.
  */
 function DetailsBlock(
-  { summary, body, tableLabel, detailsLabel, spaced }: {
+  { summary, body, tableLabel, detailsLabel, embedLabels, streaming, spaced }: {
     summary: string;
     body: string;
     tableLabel: string;
     detailsLabel: string;
+    embedLabels: EmbedLabels | undefined;
+    streaming: boolean;
     spaced: boolean;
   },
 ) {
@@ -460,7 +667,7 @@ function DetailsBlock(
       </button>
       {open && body && (
         <div data-testid="chat-markdown-details-body" className="mt-1 pl-4 border-l border-white/10">
-          {renderText(body, tableLabel, detailsLabel)}
+          {renderText(body, tableLabel, detailsLabel, embedLabels, streaming)}
         </div>
       )}
     </div>
@@ -471,9 +678,20 @@ function DetailsBlock(
  * `tableLabel` names the scroll container a wide table sits in. It arrives from
  * the caller because this module is a pure renderer with no access to `t` —
  * the same way `audioLabel` is handed `t("chat.audioReply")`.
+ *
+ * `embedLabels` turns on OpenClaw's `[embed … /]` (EmbedBlock): only the
+ * assistant's chat bubbles pass them, the surface the shortcode is for.
+ * `streaming` says the text is a reply still arriving, so a half-written
+ * shortcode at its end is held back instead of flashing.
  */
-export function renderText(text: string, tableLabel = "Table", detailsLabel = "Details") {
-  return parseBlocks(text, detailsLabel).map((block, i) => {
+export function renderText(
+  text: string,
+  tableLabel = "Table",
+  detailsLabel = "Details",
+  embedLabels?: EmbedLabels,
+  streaming = false,
+) {
+  return parseBlocks(text, detailsLabel, Boolean(embedLabels), streaming).map((block, i) => {
     // The first block sits flush against the top of the bubble; every later
     // one keeps the spacing its kind had before.
     const spaced = i > 0;
@@ -490,9 +708,14 @@ export function renderText(text: string, tableLabel = "Table", detailsLabel = "D
             body={block.body}
             tableLabel={tableLabel}
             detailsLabel={detailsLabel}
+            embedLabels={embedLabels}
+            streaming={streaming}
             spaced={spaced}
           />
         );
+      case "embed":
+        // A half-streamed shortcode draws nothing until it is whole.
+        return block.attrs && embedLabels ? <EmbedBlock key={i} attrs={block.attrs} labels={embedLabels} spaced={spaced} /> : null;
       case "heading":
         return block.level <= 2 ? (
           <h2 key={i} className={`font-bold text-sm ${spaced ? "mt-2.5" : ""} mb-1`}>{renderInline(block.text, `h-${i}`)}</h2>
@@ -585,7 +808,8 @@ export function renderText(text: string, tableLabel = "Table", detailsLabel = "D
  * out loud than it looks on screen.
  */
 export function plainTextForLabel(text: string, max = 100): string {
-  const flat = text
+  // An `[embed … /]` is drawn, not read: its title at most.
+  const flat = withoutEmbedShortcodes(text)
     // The one HTML the renderer consumes (see DETAILS_OPEN_RE): the tags are
     // layout, never words, and read out they are "less than details greater
     // than". The summary and the body stay — they are the aside's own text.

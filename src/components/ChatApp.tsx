@@ -283,7 +283,7 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail,
             ))}
           </div>
         )}
-        {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))}
+        {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"), { play: t("chat.embed.play"), openOnYouTube: t("chat.embed.openOnYouTube"), untitled: t("chat.embed.untitled") })}
         {msg.role === 'system' && msg.actions && <ChatNoticeActions actions={msg.actions} t={t} onOpenProviders={onOpenProviders} onSwitchTo={onSwitchTo} />}
         {files.length > 0 && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
@@ -362,7 +362,7 @@ const ChatAppStreamingBubble = memo(function ChatAppStreamingBubble({ text, t }:
             still agree, which is the property that matters; there is no
             `dropUnfinishedDirective` equivalent for media, and the
             mascot chat accepts the same token. */}
-        {renderText(streamingDraftRefsText(streamingEmailRefsText(splitMediaDirectives(text).text)), t("chat.table"), t("chat.detailsSummary"))}
+        {renderText(streamingDraftRefsText(streamingEmailRefsText(splitMediaDirectives(text).text)), t("chat.table"), t("chat.detailsSummary"), { play: t("chat.embed.play"), openOnYouTube: t("chat.embed.openOnYouTube"), untitled: t("chat.embed.untitled") }, true)}
         <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
       </div>
     </div>

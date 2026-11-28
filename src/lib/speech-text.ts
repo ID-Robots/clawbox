@@ -14,6 +14,58 @@
 /** The most one spoken reply says; the rest is on screen. */
 export const SPEECH_MAX_CHARS = 1500;
 
+/**
+ * OpenClaw's rich-render shortcode, `[embed url="…" title="…" /]` (its
+ * reference/rich-output-protocol.md): self-closing, values in double or
+ * single quotes. Two alternatives: quoted values first, so a title such as
+ * "Trailer [HD]" still closes the shortcode, then OpenClaw's own looser
+ * `\[embed\s+([^\]]*?)\/\]`. Values are capped in length so a hostile reply
+ * cannot make a match scan the whole text from every opener.
+ * Here, not in chat-markdown.tsx, because this file has no imports and is
+ * read by the speak route too; the chat renderer takes it from here so the
+ * screen and the voice agree on what counts as one.
+ */
+export const EMBED_SHORTCODE_RE =
+  /\[embed((?:\s+[A-Za-z_][\w-]*\s*=\s*(?:"[^"]{0,2048}"|'[^']{0,2048}'))+)\s*\/\]|\[embed(\s[^\]]{0,2048}?)\/\]/gi;
+
+/**
+ * The tail of a reply still STREAMING that may yet become a shortcode: `[e`
+ * up to the closing `/`, attribute by attribute. Anything that cannot grow
+ * into one ("[embed shortcode] …") does not match and stays text. Only the
+ * renderer's streaming pass uses it: a settled reply is never cut.
+ */
+export const EMBED_PENDING_RE =
+  /\[(?:e|em|emb|embe|embed(?:\s+[A-Za-z_][\w-]*\s*=\s*(?:"[^"]*"|'[^']*'))*(?:\s+[A-Za-z_][\w-]*(?:\s*=\s*(?:"[^"]*|'[^']*)?)?)?\s*\/?)$/i;
+
+/**
+ * A shortcode's attributes, blank values dropped. Only the names the chat
+ * reads are kept, each written under its own fixed key: the reply is
+ * untrusted, so a name out of it is never used as a property name.
+ */
+export function embedAttributes(raw: string): { url?: string; ref?: string; title?: string } {
+  const attrs: { url?: string; ref?: string; title?: string } = {};
+  for (const m of raw.matchAll(/([A-Za-z_][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+    const value = (m[2] ?? m[3] ?? "").trim();
+    if (!value) continue;
+    const name = m[1].toLowerCase();
+    if (name === "url") attrs.url = value;
+    else if (name === "ref") attrs.ref = value;
+    else if (name === "title") attrs.title = value;
+  }
+  return attrs;
+}
+
+/**
+ * Text with each shortcode reduced to its title, and a half-written one at
+ * the very end (a reply still arriving) dropped: neither is ever read out.
+ */
+export function withoutEmbedShortcodes(text: string): string {
+  return text
+    .replace(EMBED_SHORTCODE_RE, (_m, quoted?: string, loose?: string) =>
+      ` ${embedAttributes(quoted ?? loose ?? "").title ?? ""} `)
+    .replace(EMBED_PENDING_RE, " ");
+}
+
 export function speechTextFor(markdown: string, maxChars: number = SPEECH_MAX_CHARS): string {
   let text = markdown
     // Directive lines carry nothing to say: `MEDIA:<path>` (chat-media.ts)
@@ -21,7 +73,10 @@ export function speechTextFor(markdown: string, maxChars: number = SPEECH_MAX_CH
     // a sentence that starts "Email: the invoice went out" is still read.
     .replace(/^\s*MEDIA:.*$/gm, " ")
     .replace(/^\s*EMAIL:\s*\S+\s*$/gm, " ")
-    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/```[\s\S]*?```/g, " ");
+  // An embed is drawn, not read: its title at most (before the URL rule
+  // below would leave the rest of the shortcode behind as words).
+  text = withoutEmbedShortcodes(text)
     .replace(/`([^`]*)`/g, "$1")
     // Images become nothing; links become their label.
     .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")
