@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import PrimeRadiantMap from "@/components/PrimeRadiantMap";
@@ -43,6 +44,8 @@ const ISOLATED = {
 };
 
 let graph: Record<string, unknown>;
+/** What `GET pages?verified=true` lists. */
+let verifiedPaths: string[];
 let glCalls: Array<[string, unknown[]]>;
 /** What `GET pages/<path>?view=summary` answers, by page; a page not listed answers 404. */
 let summaryOf: Record<string, string | null>;
@@ -94,6 +97,7 @@ function installFetch() {
     const ok = (json: unknown, code = 200) => ({ ok: code < 400, status: code, json: async () => json });
     if (url.startsWith("/setup-api/preferences")) return ok({ ui_language: "en" });
     if (url === "/setup-api/prime-radiant/graph") return ok(graph);
+    if (url.startsWith("/setup-api/prime-radiant/pages?verified=true")) return ok({ total: verifiedPaths.length, pages: verifiedPaths.map((path) => ({ path })) });
     const page = /^\/setup-api\/prime-radiant\/pages\/(.+)\?view=summary$/.exec(url);
     if (page) {
       const id = decodeURIComponent(page[1]);
@@ -106,6 +110,8 @@ function installFetch() {
 
 beforeEach(() => {
   graph = GRAPH;
+  verifiedPaths = [];
+  window.localStorage.clear();
   summaryOf = {};
   summaryGate = null;
   glCalls = [];
@@ -590,6 +596,153 @@ describe("PrimeRadiantMap", () => {
     await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 6"));
   });
 
+  /** 200 pages in a chain, page 0 the most connected and page 199 the least. */
+  const CHAIN = {
+    revision: "7".repeat(40),
+    truncated: false,
+    nodes: Array.from({ length: 200 }, (_, i) => ({ id: `notes/p${i}.md`, title: `Page ${i}`, domain: "acme-sales", degree: 200 - i, sources: 0 })),
+    edges: Array.from({ length: 199 }, (_, i) => [i, i + 1, 1]),
+  };
+  const shownOf = (states: Uint8Array) => [...states.keys()].filter((i) => !(states[i] & STATE_HIDDEN));
+
+  it("shows the most connected pages from a slider in the middle, fewer to the left and all to the right, without laying out again", async () => {
+    graph = CHAIN;
+    verifiedPaths = ["notes/p150.md"];
+    const setStates = vi.spyOn(MapView.prototype, "setStates");
+    const setEdges = vi.spyOn(MapView.prototype, "setEdges");
+    const load = vi.spyOn(MapView.prototype, "load");
+    const view = render(
+      <I18nProvider>
+        <PrimeRadiantMap revision={0} onOpenPage={vi.fn()} onIngest={vi.fn()} />
+      </I18nProvider>,
+    );
+    const status = () => screen.getByTestId("prime-radiant-map-status");
+    // √(50 · 200) = 100 of the busiest, and the verified page 150 however few links it has.
+    await waitFor(() => expect(status()).toHaveTextContent("Pages: 101 of 200 · Links: 99 of 199"), { timeout: 15_000 });
+    const slider = screen.getByRole("slider", { name: "Pages shown (the most connected first)" });
+    expect(slider).toHaveValue("50");
+    expect(slider).toHaveAttribute("aria-valuetext", "101 of 200 pages");
+    expect(shownOf(lastStates(setStates))).toEqual([...Array.from({ length: 100 }, (_, i) => i), 150]);
+    // Links only between shown pages.
+    const visible = setEdges.mock.calls[setEdges.mock.calls.length - 1][0] as Uint32Array;
+    expect(visible).toHaveLength(99 * 2);
+    expect([...visible].every((i) => i < 100)).toBe(true);
+
+    fireEvent.change(slider, { target: { value: "0" } });
+    await waitFor(() => expect(status()).toHaveTextContent("Pages: 51 of 200"));
+    expect(shownOf(lastStates(setStates))).toEqual([...Array.from({ length: 50 }, (_, i) => i), 150]);
+    fireEvent.change(slider, { target: { value: "100" } });
+    await waitFor(() => expect(status()).toHaveTextContent("Pages: 200 · Links: 199"));
+    expect(shownOf(lastStates(setStates))).toHaveLength(200);
+    // Shown and hidden only: one layout for the whole drag.
+    expect(load).toHaveBeenCalledTimes(1);
+
+    // Remembered on this browser.
+    fireEvent.change(slider, { target: { value: "0" } });
+    view.unmount();
+    render(
+      <I18nProvider>
+        <PrimeRadiantMap revision={0} onOpenPage={vi.fn()} onIngest={vi.fn()} />
+      </I18nProvider>,
+    );
+    expect(await screen.findByRole("slider", { name: "Pages shown (the most connected first)" }, { timeout: 15_000 })).toHaveValue("0");
+  });
+
+  it("still finds a page the slider hides, and shows it with its neighbours once picked", async () => {
+    graph = { ...CHAIN, revision: "8".repeat(40) };
+    const setStates = vi.spyOn(MapView.prototype, "setStates");
+    render(
+      <I18nProvider>
+        <PrimeRadiantMap revision={0} onOpenPage={vi.fn()} onIngest={vi.fn()} />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 100 of 200"), { timeout: 15_000 });
+    fireEvent.keyDown(screen.getByTestId("prime-radiant-map-canvas"), { key: "Escape" });
+    fireEvent.change(screen.getByTestId("prime-radiant-map-search"), { target: { value: "page 180" } });
+    const result = await screen.findByTestId("prime-radiant-map-result");
+    expect(result).toHaveTextContent("Page 180");
+    await waitFor(() => expect(lastStates(setStates)[180]).toBe(STATE_HIDDEN));
+    fireEvent.click(result);
+    await waitFor(() => expect(lastStates(setStates)[180]).toBe(STATE_SELECTED));
+    expect(lastStates(setStates)[179]).toBe(STATE_MATCH);
+    expect(lastStates(setStates)[181]).toBe(STATE_MATCH);
+    expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 103 of 200");
+  });
+
+  it("stops and starts the turn from one button that says which, and remembers it", async () => {
+    const setSpin = vi.spyOn(MapView.prototype, "setSpin");
+    const view = await mount();
+    const button = screen.getByTestId("prime-radiant-map-spin");
+    expect(button).toHaveAccessibleName("Rotation on: stop it");
+    expect(button.textContent).toBe("sync");
+    await waitFor(() => expect(setSpin).toHaveBeenLastCalledWith(true));
+    fireEvent.click(button);
+    expect(button).toHaveAccessibleName("Rotation off: start it");
+    expect(button.textContent).toBe("sync_disabled");
+    await waitFor(() => expect(setSpin).toHaveBeenLastCalledWith(false));
+    // Taking the map in hand no longer stops or starts it: the button decides.
+    const canvas = screen.getByTestId("prime-radiant-map-canvas");
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 160, clientY: 120 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 160, clientY: 120 });
+    expect(button).toHaveAccessibleName("Rotation off: start it");
+    view.unmount();
+    setSpin.mockClear();
+    await mount();
+    expect(screen.getByTestId("prime-radiant-map-spin")).toHaveAccessibleName("Rotation off: start it");
+    await waitFor(() => expect(setSpin).toHaveBeenLastCalledWith(false));
+  });
+
+  it("keeps the turn stopped for an owner who prefers less motion", async () => {
+    vi.mocked(window.matchMedia).mockImplementation((query: string) => ({ matches: query.includes("reduced-motion"), media: query } as MediaQueryList));
+    const setSpin = vi.spyOn(MapView.prototype, "setSpin");
+    await mount();
+    await waitFor(() => expect(setSpin).toHaveBeenCalled());
+    expect(setSpin.mock.calls.every(([on]) => on === false)).toBe(true);
+    // A flat map has no turn to offer; the slider stays.
+    expect(screen.queryByTestId("prime-radiant-map-spin")).toBeNull();
+    expect(screen.getByTestId("prime-radiant-map-density")).toBeInTheDocument();
+  });
+
+  it("puts the chrome around the graph away in focus mode and brings it back with the button or Escape", async () => {
+    vi.spyOn(MapView.prototype, "pick").mockReturnValue(3);
+    function Focusable() {
+      const [on, setOn] = useState(false);
+      return <PrimeRadiantMap revision={0} onOpenPage={vi.fn()} onIngest={vi.fn()} focusMode={on} onFocusModeChange={setOn} />;
+    }
+    render(
+      <I18nProvider>
+        <Focusable />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 6"), { timeout: 15_000 });
+    const canvas = screen.getByTestId("prime-radiant-map-canvas");
+    fireEvent.keyDown(canvas, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("prime-radiant-map-selected")).toBeNull());
+    const chrome = ["toolbar", "status", "legend-toggle", "insights-toggle"].map((id) => screen.getByTestId(`prime-radiant-map-${id}`));
+    const controls = ["density", "spin", "focus"].map((id) => screen.getByTestId(`prime-radiant-map-${id}`));
+    const focus = screen.getByTestId("prime-radiant-map-focus");
+    expect(focus).toHaveAccessibleName("Focus mode: give the map the whole window");
+    fireEvent.click(focus);
+    chrome.forEach((el) => expect(el).not.toBeVisible());
+    controls.forEach((el) => expect(el).toBeVisible());
+    expect(focus).toHaveAccessibleName("Leave focus mode (Esc)");
+    // Escape first lets go of a picked page; the next one leaves focus mode.
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
+    expect(await screen.findByTestId("prime-radiant-map-selected")).toBeVisible();
+    fireEvent.keyDown(canvas, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("prime-radiant-map-selected")).toBeNull());
+    chrome.forEach((el) => expect(el).not.toBeVisible());
+    fireEvent.keyDown(canvas, { key: "Escape" });
+    chrome.forEach((el) => expect(el).toBeVisible());
+    // The button both ways.
+    fireEvent.click(focus);
+    chrome.forEach((el) => expect(el).not.toBeVisible());
+    fireEvent.click(focus);
+    chrome.forEach((el) => expect(el).toBeVisible());
+  });
+
   it("draws a 5,000-page graph with the same two calls", async () => {
     const n = 5000;
     const nodes = Array.from({ length: n }, (_, i) => ({ id: `concepts/p${i}.md`, title: `Page ${i}`, domain: `d${i % 12}`, degree: 0, sources: 0 }));
@@ -601,7 +754,8 @@ describe("PrimeRadiantMap", () => {
         <PrimeRadiantMap revision={0} onOpenPage={vi.fn()} onIngest={vi.fn()} />
       </I18nProvider>,
     );
-    await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 5000"));
+    // The slider starts in the middle: √(50 · 5000) of the most connected pages are shown.
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 500 of 5000"));
     await waitFor(() => expect(glCalls.some(([k, a]) => k === "drawArraysInstanced" && a[3] === n)).toBe(true));
     const draws = glCalls.filter(([k]) => k === "drawArraysInstanced" || k === "drawElements");
     // Per frame: one node call and one edge call, whatever the size.

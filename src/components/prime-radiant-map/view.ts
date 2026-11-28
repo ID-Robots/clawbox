@@ -104,7 +104,8 @@ export class MapView {
   private distance = 800;
   private zoom = 1;
   private target = new Float64Array(3);
-  private spin: boolean;
+  /** The slow turn: the Map's rotation button decides it ({@link setSpin}); a flat view never turns. */
+  private spin = false;
   private fitting = true;
   private fit = { x: 0, y: 0, z: 0, r: 100 };
   private flight: { t0: number; from: number[]; to: number[] } | null = null;
@@ -157,7 +158,6 @@ export class MapView {
     private readonly events: MapViewEvents,
   ) {
     this.kind = renderer.kind;
-    this.spin = this.kind === "webgl";
     const on = (target: EventTarget, type: string, fn: (e: never) => void, opts?: AddEventListenerOptions) => {
       target.addEventListener(type, fn as EventListener, opts);
       this.cleanup.push(() => target.removeEventListener(type, fn as EventListener, opts));
@@ -323,13 +323,17 @@ export class MapView {
     this.zoom = c.zoom;
     this.target.set(c.target);
     this.fitting = false;
-    this.spin = false;
     this.changed();
   }
 
-  /** The owner took the wheel: no more turning or reframing on our own. */
+  /** Turn on its own, or stand still: the owner's choice, kept until they change it. */
+  setSpin(on: boolean): void {
+    this.spin = on && this.kind === "webgl";
+    this.invalidate();
+  }
+
+  /** The owner took the wheel: no more reframing on our own (the turn is the rotation button's). */
   interact(): void {
-    this.spin = false;
     this.fitting = false;
   }
 

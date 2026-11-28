@@ -568,6 +568,21 @@ describe("PrimeRadiantApp", () => {
     expect(screen.getByTestId("prime-radiant-tab-map")).toHaveAttribute("aria-selected", "true");
   });
 
+  it("gives the Map the window in focus mode: header, tabs and footer step aside until the button or Escape", async () => {
+    await mount();
+    const focus = await screen.findByTestId("prime-radiant-map-focus");
+    const chrome = () => [screen.getByTestId("prime-radiant-subtitle"), screen.getByRole("tablist", { hidden: true }), screen.getByTestId("prime-radiant-refresh")];
+    chrome().forEach((el) => expect(el).toBeVisible());
+    fireEvent.click(focus);
+    chrome().forEach((el) => expect(el).not.toBeVisible());
+    expect(screen.getByTestId("prime-radiant-map-focus")).toBeVisible();
+    fireEvent.keyDown(screen.getByTestId("prime-radiant-map-focus"), { key: "Escape" });
+    chrome().forEach((el) => expect(el).toBeVisible());
+    fireEvent.click(screen.getByTestId("prime-radiant-map-focus"));
+    fireEvent.click(screen.getByTestId("prime-radiant-map-focus"));
+    chrome().forEach((el) => expect(el).toBeVisible());
+  });
+
   it("opens a page with its facts, confidence, sources and backlinks", async () => {
     await mount();
     await openTab("browse");
