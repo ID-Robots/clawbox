@@ -14,6 +14,7 @@ import {
   MODEL_ROLES,
   modelRoleOf,
   RELATIVE_MODEL_COST,
+  ROLE_AUTO_EFFORT,
   relativeModelCost,
   resolveRoleRun,
   ROLE_AUTO,
@@ -23,20 +24,27 @@ import {
   roleMaxTurns,
   roleModelOptions,
   roleModelsFrom,
+  roleModelsUnderLock,
   roleModelsView,
   weakerEffort,
   type RoleModels,
 } from "@/lib/coding-role-models";
 import { ANTHROPIC_MODELS, CODING_PROVIDERS, DEFAULT_ANTHROPIC_MODEL, ECONOMY_MODELS, economyModelForProvider, isRecordableModel, OPENAI_MODELS } from "@/lib/coding-provider";
 import { EFFORT_LEVELS } from "@/lib/coding-agent";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a box not yet migrated still names (TASK-2261). */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 
 describe("the vocabulary", () => {
   it("restates the runner's effort levels, weakest first, exactly", () => {
     expect([...ROLE_EFFORT_LEVELS]).toEqual([...EFFORT_LEVELS]);
   });
 
-  it("names a cheaper model per provider: Sonnet on Anthropic, the plan's flash tier on ClawBox AI", () => {
-    expect(ECONOMY_MODELS.anthropic).toBe("claude-sonnet-5");
+  it("names a cheaper model per provider: Haiku on Anthropic, the plan's flash tier on ClawBox AI", () => {
+    expect(ECONOMY_MODELS.anthropic).toBe("claude-haiku-5-5");
+    // Cheaper than the worker's own default, or "economy" would save nothing.
+    expect(RELATIVE_MODEL_COST[ECONOMY_MODELS.anthropic]).toBeLessThan(RELATIVE_MODEL_COST[ROLE_DEFAULT_MODELS.anthropic.worker]);
     expect(ECONOMY_MODELS["clawbox-ai"]).toBe("deepseek-v4-flash");
     // The Anthropic one is a model a caller may name too — never a typo that
     // fails a planner several minutes in.
@@ -45,10 +53,11 @@ describe("the vocabulary", () => {
 
   it("lets a ClawBox AI record carry its economy model and nothing else", () => {
     expect(isRecordableModel("clawbox-ai", "deepseek-v4-flash")).toBe(true);
-    expect(isRecordableModel("clawbox-ai", "deepseek-v4-pro[1m]")).toBe(false);
+    expect(isRecordableModel("clawbox-ai", `${RETIRED_CHAT_ID}[1m]`)).toBe(false);
     expect(isRecordableModel("clawbox-ai", "claude-opus-5-5")).toBe(false);
     expect(isRecordableModel("anthropic", "claude-opus-5")).toBe(true);
     expect(isRecordableModel("anthropic", "claude-fable-5-1")).toBe(true);
+    expect(isRecordableModel("anthropic", "claude-fable-5-2")).toBe(true);
     expect(isRecordableModel("anthropic", null)).toBe(false);
   });
 
@@ -73,9 +82,11 @@ describe("the vocabulary", () => {
 });
 
 describe("the models a role may name", () => {
-  it("is the coding fence on Anthropic — Fable 5.1 included — and the flash tier alone on ClawBox AI", () => {
+  it("is the coding fence on Anthropic — the Fable models and the 5.5 generation included — and the flash tier alone on ClawBox AI", () => {
     expect([...roleModelOptions("anthropic")]).toEqual([...ANTHROPIC_MODELS]);
-    expect(roleModelOptions("anthropic")).toContain("claude-fable-5-1");
+    for (const id of ["claude-fable-5-2", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5"]) {
+      expect(roleModelOptions("anthropic"), id).toContain(id);
+    }
     expect([...roleModelOptions("clawbox-ai")]).toEqual(["deepseek-v4-flash"]);
   });
 
@@ -99,7 +110,7 @@ describe("the models a role may name", () => {
   it("never offers the Max-plan-only pro tier, under any spelling", () => {
     for (const provider of CODING_PROVIDERS) {
       expect(roleModelOptions(provider).some((m) => m.includes("pro"))).toBe(false);
-      expect(isRoleModelId(provider, "deepseek-v4-pro")).toBe(false);
+      expect(isRoleModelId(provider, RETIRED_CHAT_ID)).toBe(false);
     }
   });
 
@@ -137,6 +148,12 @@ describe("relative cost", () => {
     expect(cost("claude-sonnet-5")).toBeLessThan(cost("claude-opus-5-5"));
     expect(cost("claude-opus-5")).toBeLessThanOrEqual(cost("claude-opus-5-5"));
     expect(cost("claude-opus-5-5")).toBeLessThanOrEqual(cost("claude-fable-5-1"));
+    // The 5.5 generation: Haiku under Sonnet, Sonnet level with the Sonnet it
+    // replaced, Fable 5.2 above Opus and no dearer than Fable 5.1.
+    expect(cost("claude-haiku-5-5")).toBeLessThan(cost("claude-sonnet-5-5"));
+    expect(cost("claude-sonnet-5-5")).toBe(cost("claude-sonnet-5"));
+    expect(cost("claude-opus-5-5")).toBeLessThan(cost("claude-fable-5-2"));
+    expect(cost("claude-fable-5-2")).toBeLessThanOrEqual(cost("claude-fable-5-1"));
   });
 
   it("reads a missing model as the provider's default, and says null where nobody can tell", () => {
@@ -154,13 +171,16 @@ describe("relative cost", () => {
 describe("the defaults — a box that never chose", () => {
   // Every provider × every role, with nothing stored: the planner on the
   // provider's best model, a worker and a reviewer on its middle one; ClawBox
-  // AI on its flash tier throughout, never the pro tier.
+  // AI on its flash tier throughout, never the pro tier. Anthropic since
+  // 2026-11-10: Sonnet 5.5 writes (it matched Opus 5.5 on both benchmark tasks
+  // at about a quarter of the cost), Opus 5.5 reviews, Fable 5.2 plans.
   const EXPECTED = {
-    anthropic: { planner: "claude-fable-5-1", worker: "claude-opus-5-5", reviewer: "claude-opus-5-5" },
+    anthropic: { planner: "claude-fable-5-2", worker: "claude-sonnet-5-5", reviewer: "claude-opus-5-5" },
     openai: { planner: "gpt-6-astra", worker: "gpt-5.6-sol", reviewer: "gpt-5.6-sol" },
     "clawbox-ai": { planner: "deepseek-v4-flash", worker: "deepseek-v4-flash", reviewer: "deepseek-v4-flash" },
+    local: { planner: "local-engine", worker: "local-engine", reviewer: "local-engine" },
   } as const;
-  const OWNER_MODEL = { anthropic: DEFAULT_ANTHROPIC_MODEL, openai: "gpt-6-astra", "clawbox-ai": null } as const;
+  const OWNER_MODEL = { anthropic: DEFAULT_ANTHROPIC_MODEL, openai: "gpt-6-astra", "clawbox-ai": null, local: null } as const;
 
   for (const provider of CODING_PROVIDERS) {
     for (const role of MODEL_ROLES) {
@@ -170,7 +190,8 @@ describe("the defaults — a box that never chose", () => {
           provider,
           tier: "default",
           model: EXPECTED[provider][role],
-          effort: role === "worker" ? "ultracode" : "xhigh",
+          // A reader starts at `high` on Anthropic (ROLE_AUTO_EFFORT), at the cap elsewhere.
+          effort: role === "worker" ? "ultracode" : provider === "anthropic" ? "high" : "xhigh",
           auto: true,
         });
         expect(ROLE_DEFAULT_MODELS[provider][role]).toBe(EXPECTED[provider][role]);
@@ -185,10 +206,36 @@ describe("the defaults — a box that never chose", () => {
   it("gives planning the provider's most capable model, never less than the others", () => {
     for (const provider of CODING_PROVIDERS) {
       const cost = (role: (typeof MODEL_ROLES)[number]) => relativeModelCost(provider, ROLE_DEFAULT_MODELS[provider][role])!;
-      expect(cost("planner")).toBe(Math.max(...roleModelOptions(provider).map((m) => relativeModelCost(provider, m)!)));
+      // Not "the dearest on the list": Fable 5.2 lists BELOW the Fable 5.1 it
+      // replaced, and the planner's default follows the newer one. Never
+      // cheaper than the model a run nobody chose for lands on, though.
+      expect(cost("planner")).toBeGreaterThanOrEqual(relativeModelCost(provider, null) ?? 1);
       expect(cost("planner")).toBeGreaterThanOrEqual(cost("worker"));
       expect(cost("planner")).toBeGreaterThanOrEqual(cost("reviewer"));
     }
+  });
+
+  it("starts an Anthropic reader at high with no effort stored — and honours a stored one up to the cap", () => {
+    // Fable 5.2 wrote the same plan at high as at xhigh, in 4 minutes instead
+    // of 9 and for $2.47 instead of $4.39 (2026-11-10).
+    expect(ROLE_AUTO_EFFORT.anthropic).toEqual({ planner: "high", reviewer: "high" });
+    for (const role of ["planner", "reviewer"] as const) {
+      expect(resolveRoleRun(role, "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", {}).effort).toBe("high");
+      expect(resolveRoleRun(role, "anthropic", DEFAULT_ANTHROPIC_MODEL, "max", {}).effort).toBe("high");
+      // Never ABOVE the owner's own: a box set to low or medium plans at that.
+      expect(resolveRoleRun(role, "anthropic", DEFAULT_ANTHROPIC_MODEL, "low", {}).effort).toBe("low");
+      expect(resolveRoleRun(role, "anthropic", DEFAULT_ANTHROPIC_MODEL, "medium", {}).effort).toBe("medium");
+      // The owner's own choice for the role stands, up to the reading cap.
+      expect(resolveRoleRun(role, "anthropic", DEFAULT_ANTHROPIC_MODEL, "low", { [role]: { effort: "xhigh" } }).effort).toBe("xhigh");
+      expect(resolveRoleRun(role, "anthropic", DEFAULT_ANTHROPIC_MODEL, "low", { [role]: { effort: "ultracode" } }).effort).toBe("xhigh");
+      // A role the owner moved to Anthropic from another team provider starts there too.
+      expect(resolveRoleRun(role, "clawbox-ai", null, "ultracode", { [role]: { provider: "anthropic" } }).effort).toBe("high");
+      // Nothing was measured on the other providers: their readers keep the cap.
+      expect(resolveRoleRun(role, "clawbox-ai", null, "ultracode", {}).effort).toBe("xhigh");
+      expect(resolveRoleRun(role, "openai", "gpt-6-astra", "ultracode", {}).effort).toBe("xhigh");
+    }
+    // A worker is never touched: it writes at the owner's effort.
+    expect(resolveRoleRun("worker", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", {}).effort).toBe("ultracode");
   });
 
   it("is not the economy tier anywhere a cheaper model exists (the OpenAI planner on luna was the bug)", () => {
@@ -197,7 +244,7 @@ describe("the defaults — a box that never chose", () => {
   });
 
   it("is the role's default whatever model the team's runs would carry", () => {
-    expect(resolveRoleRun("worker", "anthropic", "claude-opus-5", "high", {}).model).toBe("claude-opus-5-5");
+    expect(resolveRoleRun("worker", "anthropic", "claude-opus-5", "high", {}).model).toBe("claude-sonnet-5-5");
     expect(resolveRoleRun("planner", "openai", "gpt-5.2", "high", {}).model).toBe("gpt-6-astra");
   });
 
@@ -263,13 +310,14 @@ describe("old settings — the tier-only shape a box may already hold", () => {
 
   it("resolves on the team's own provider exactly as before", () => {
     const stored = roleModelsFrom(OLD);
-    expect(resolveRoleRun("planner", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", stored)).toEqual({ provider: "anthropic", tier: "standard", model: DEFAULT_ANTHROPIC_MODEL, effort: "xhigh", auto: false });
+    // No effort stored for the role: an Anthropic reader starts at `high`.
+    expect(resolveRoleRun("planner", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", stored)).toEqual({ provider: "anthropic", tier: "standard", model: DEFAULT_ANTHROPIC_MODEL, effort: "high", auto: false });
     expect(resolveRoleRun("planner", "clawbox-ai", null, "ultracode", stored)).toEqual({ provider: "clawbox-ai", tier: "standard", model: null, effort: "xhigh", auto: false });
     // A stored `max` for a reader is held at the cap; with no model stored the
     // reviewer is on its role's default.
     expect(resolveRoleRun("reviewer", "clawbox-ai", null, "low", stored)).toEqual({ provider: "clawbox-ai", tier: "default", model: "deepseek-v4-flash", effort: "xhigh", auto: true });
     expect(resolveRoleRun("reviewer", "openai", "gpt-6-astra", "low", stored)).toEqual({ provider: "openai", tier: "default", model: "gpt-5.6-sol", effort: "xhigh", auto: true });
-    expect(resolveRoleRun("worker", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", stored)).toEqual({ provider: "anthropic", tier: "economy", model: "claude-sonnet-5", effort: "low", auto: false });
+    expect(resolveRoleRun("worker", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", stored)).toEqual({ provider: "anthropic", tier: "economy", model: "claude-haiku-5-5", effort: "low", auto: false });
   });
 
   it("keeps a stored tier on every provider: economy the cheaper model, standard the team's own", () => {
@@ -294,8 +342,8 @@ describe("a provider and a model per role — mixed providers", () => {
   };
 
   it("puts each role on its own provider and model", () => {
-    expect(resolveRoleRun("planner", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "anthropic", tier: "chosen", model: "claude-fable-5-1", effort: "xhigh", auto: false });
-    expect(resolveRoleRun("worker", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "anthropic", tier: "default", model: "claude-opus-5-5", effort: "ultracode", auto: true });
+    expect(resolveRoleRun("planner", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "anthropic", tier: "chosen", model: "claude-fable-5-1", effort: "high", auto: false });
+    expect(resolveRoleRun("worker", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "anthropic", tier: "default", model: "claude-sonnet-5-5", effort: "ultracode", auto: true });
     expect(resolveRoleRun("reviewer", "anthropic", DEFAULT_ANTHROPIC_MODEL, "ultracode", MIXED)).toEqual({ provider: "clawbox-ai", tier: "chosen", model: "deepseek-v4-flash", effort: "xhigh", auto: false });
   });
 
@@ -315,7 +363,7 @@ describe("a provider and a model per role — mixed providers", () => {
 
   it("takes a tier on the role's provider", () => {
     const stored: RoleModels = { reviewer: { provider: "anthropic", model: "economy" }, planner: { provider: "clawbox-ai", model: "standard" } };
-    expect(resolveRoleRun("reviewer", "clawbox-ai", null, "high", stored)).toMatchObject({ provider: "anthropic", model: "claude-sonnet-5", tier: "economy" });
+    expect(resolveRoleRun("reviewer", "clawbox-ai", null, "high", stored)).toMatchObject({ provider: "anthropic", model: "claude-haiku-5-5", tier: "economy" });
     expect(resolveRoleRun("planner", "anthropic", DEFAULT_ANTHROPIC_MODEL, "high", stored)).toMatchObject({ provider: "clawbox-ai", model: null, tier: "standard" });
   });
 
@@ -387,7 +435,7 @@ describe("the owner's edits", () => {
       { planner: { provider: "anthropic", model: "deepseek-v4-flash" } },
       { planner: { provider: "openai", model: "claude-opus-5-5" } },
       { planner: { provider: "anthropic", model: "gpt-6-astra" } },
-      { reviewer: { provider: "clawbox-ai", model: "deepseek-v4-pro" } },
+      { reviewer: { provider: "clawbox-ai", model: RETIRED_CHAT_ID } },
       { planner: { provider: ROLE_AUTO, model: "claude-opus-5-5" } },
       // A model id with no provider anywhere.
       { worker: { model: "claude-fable-5-1" } },
@@ -421,7 +469,7 @@ describe("the owner's edits", () => {
     // the provider the owner chose stays.
     expect(roleModelsFrom({
       planner: { model: "claude-fable-5-1" },
-      reviewer: { provider: "clawbox-ai", model: "deepseek-v4-pro", effort: "high" },
+      reviewer: { provider: "clawbox-ai", model: RETIRED_CHAT_ID, effort: "high" },
       worker: { provider: "openai", model: "gpt-5" },
       // A role until 2026-10-30: a choice stored for it goes whole.
       bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" },
@@ -439,5 +487,32 @@ describe("the owner's edits", () => {
     expect(view.planner).toEqual({ provider: ROLE_AUTO, model: ROLE_AUTO, effort: ROLE_AUTO });
     expect(view.reviewer).toEqual({ provider: ROLE_AUTO, model: "standard", effort: ROLE_AUTO });
     expect(view.worker).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: ROLE_AUTO });
+  });
+});
+
+describe("the roles under the local-only AI lock (TASK-2501 PR-E)", () => {
+  it("takes every cloud pin off — its model with it — and keeps efforts and tiers", () => {
+    const stored: RoleModels = {
+      planner: { provider: "anthropic", model: "claude-fable-5-2", effort: "high" },
+      worker: { provider: "openai", model: "economy" },
+      reviewer: { provider: "clawbox-ai" },
+    };
+    expect(roleModelsUnderLock(stored)).toEqual({ planner: { effort: "high" }, worker: { model: "economy" } });
+  });
+
+  it("keeps a role already on the box's engine as it is, and changes nothing it was given", () => {
+    const stored: RoleModels = { worker: { provider: "local", model: "local-engine", effort: "medium" } };
+    const before = JSON.stringify(stored);
+    expect(roleModelsUnderLock(stored)).toEqual(stored);
+    expect(JSON.stringify(stored)).toBe(before);
+  });
+
+  it("runs every role on the engine's one model when the team is on the box's engine", () => {
+    for (const role of MODEL_ROLES) {
+      expect(resolveRoleRun(role, "local", null, "xhigh", roleModelsUnderLock({ [role]: { provider: "anthropic", model: "claude-opus-5-5" } }))).toMatchObject({ provider: "local", model: "local-engine" });
+    }
+    expect(roleModelOptions("local")).toEqual(["local-engine"]);
+    expect(isRoleModelId("local", "claude-opus-5-5")).toBe(false);
+    expect(relativeModelCost("local", "local-engine")).toBe(1);
   });
 });

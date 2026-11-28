@@ -28,7 +28,7 @@ fi
 
 if [ ! -f "$MODEL_PATH" ]; then
   if [ ! -x "$HF_BIN" ]; then
-    echo "[llamacpp] Missing local model at ${MODEL_PATH} and Hugging Face CLI at ${HF_BIN}. Run the llama.cpp install step to provision Gemma 4 offline."
+    echo "[llamacpp] Missing local model at ${MODEL_PATH} and Hugging Face CLI at ${HF_BIN}. Run the llama.cpp install step to provision the local model."
     exit 1
   fi
   echo "[llamacpp] Downloading ${HF_REPO}/${HF_FILE}"
@@ -73,6 +73,101 @@ case "$LLAMACPP_REASONING" in
     ;;
 esac
 echo "[llamacpp] reasoning=${LLAMACPP_REASONING}"
+
+# Speculative decoding, off unless .env asks. A model with its own
+# multi-token-prediction head (the -MTP GGUFs) drafts for itself with
+# `draft-mtp`; an EAGLE-3 or plain draft model is a second GGUF in the same
+# model directory, named by LLAMACPP_SPEC_DRAFT_FILE. Measured on a DGX Spark:
+# Qwen3.6-35B-A3B from 66.9 to 94.4 tok/s with draft-mtp and a draft length of
+# 2. Anything llama-server would refuse starts the model WITHOUT speculation,
+# never not at all: a typo in .env must not cost the box its local model.
+SPEC_ARGS=()
+LLAMACPP_SPEC_TYPE="${LLAMACPP_SPEC_TYPE:-none}"
+case "$LLAMACPP_SPEC_TYPE" in
+  none|"") ;;
+  draft-mtp)
+    SPEC_ARGS=(--spec-type draft-mtp)
+    ;;
+  draft-eagle3|draft-simple)
+    SPEC_DRAFT_FILE="${LLAMACPP_SPEC_DRAFT_FILE:-}"
+    # One path segment, so the draft can only come from the model directory.
+    if [ -n "$SPEC_DRAFT_FILE" ] && [ "$SPEC_DRAFT_FILE" = "${SPEC_DRAFT_FILE##*/}" ] \
+      && [ "$SPEC_DRAFT_FILE" != "." ] && [ "$SPEC_DRAFT_FILE" != ".." ] \
+      && [ -f "${MODEL_DIR}/${SPEC_DRAFT_FILE}" ]; then
+      SPEC_ARGS=(--spec-type "$LLAMACPP_SPEC_TYPE" --spec-draft-model "${MODEL_DIR}/${SPEC_DRAFT_FILE}")
+    else
+      echo "[llamacpp] LLAMACPP_SPEC_TYPE=${LLAMACPP_SPEC_TYPE} needs LLAMACPP_SPEC_DRAFT_FILE, a GGUF in ${MODEL_DIR}; starting without speculative decoding"
+    fi
+    ;;
+  *)
+    echo "[llamacpp] Invalid LLAMACPP_SPEC_TYPE='${LLAMACPP_SPEC_TYPE}' (expected none|draft-mtp|draft-eagle3|draft-simple); starting without speculative decoding"
+    ;;
+esac
+# The binary must know what .env asks for: an older llama-server (a reused
+# checkout, a box that never reached the pin) exits on an argument it does not
+# know. Asked of the binary on every start, never remembered.
+if [ "${#SPEC_ARGS[@]}" -gt 0 ]; then
+  SPEC_HELP="$("$BIN_PATH" --help 2>&1 || true)"
+  if ! grep -q -- "--spec-type .*${LLAMACPP_SPEC_TYPE}" <<<"$SPEC_HELP" \
+    || { [ "${SPEC_ARGS[2]:-}" = "--spec-draft-model" ] && ! grep -q -- "--spec-draft-model" <<<"$SPEC_HELP"; }; then
+    echo "[llamacpp] ${BIN_PATH} does not support --spec-type ${LLAMACPP_SPEC_TYPE}; starting without speculative decoding"
+    SPEC_ARGS=()
+  fi
+fi
+if [ "${#SPEC_ARGS[@]}" -gt 0 ] && [ -n "${LLAMACPP_SPEC_DRAFT_N_MAX:-}" ]; then
+  if ! grep -q -- "--spec-draft-n-max" <<<"$SPEC_HELP"; then
+    echo "[llamacpp] ${BIN_PATH} does not support --spec-draft-n-max; using its default draft length"
+  elif [[ "$LLAMACPP_SPEC_DRAFT_N_MAX" =~ ^[0-9]+$ ]] && [ "$LLAMACPP_SPEC_DRAFT_N_MAX" -ge 1 ] && [ "$LLAMACPP_SPEC_DRAFT_N_MAX" -le 16 ]; then
+    SPEC_ARGS+=(--spec-draft-n-max "$LLAMACPP_SPEC_DRAFT_N_MAX")
+  else
+    echo "[llamacpp] Invalid LLAMACPP_SPEC_DRAFT_N_MAX='${LLAMACPP_SPEC_DRAFT_N_MAX}' (expected 1-16); using llama-server's default"
+  fi
+fi
+if [ "${#SPEC_ARGS[@]}" -gt 0 ]; then
+  echo "[llamacpp] speculative decoding: ${SPEC_ARGS[*]}"
+fi
+
+# How llama-server holds the model's weights, from .env (install.sh seeds mmap
+# on a Jetson). llama.cpp's own default moved from mmap to auto, and auto turns
+# mmap off for a CUDA integrated GPU: Gemma's 2.1 GB of CPU-side tensors then
+# sit in pinned host memory the kernel cannot reclaim. Measured on an 8 GB Orin
+# Nano, lowest MemAvailable: 390 MB with auto (the measurement's own memory
+# guard stopped it; a box has no such guard for the chat server), 2251 MB with
+# mmap, which keeps them in the page cache.
+# Passed as LLAMA_ARG_LOAD_MODE, which every pinned build reads and a build
+# older than the option ignores, so no --help is asked. Only the values every
+# pinned build takes: db7d8b2 has no `auto`, and llama-server exits on an
+# LLAMA_ARG_* value it does not know. With no valid value, a Jetson (the marker
+# the installers use) still gets mmap, valid at every pinned build and
+# db7d8b2's own default: the seeded key is the owner's dial, not the only
+# guard. Anywhere else the binary keeps its default. An inherited
+# LLAMA_ARG_LOAD_MODE is left as it is unless .env names a valid mode.
+# Exported last, after the --help above, and decided on every start.
+TEGRA_RELEASE="${LLAMACPP_TEGRA_RELEASE:-/etc/nv_tegra_release}"
+case "${LLAMACPP_LOAD_MODE-}" in
+  none|mmap|mlock|mmap+mlock|dio)
+    echo "[llamacpp] load-mode=${LLAMACPP_LOAD_MODE}"
+    export LLAMA_ARG_LOAD_MODE="$LLAMACPP_LOAD_MODE"
+    ;;
+  *)
+    if [ -z "${LLAMACPP_LOAD_MODE+set}" ]; then
+      LOAD_MODE_WHY="LLAMACPP_LOAD_MODE not set"
+    elif [ -z "$LLAMACPP_LOAD_MODE" ]; then
+      LOAD_MODE_WHY="LLAMACPP_LOAD_MODE is empty"
+    else
+      LOAD_MODE_WHY="invalid LLAMACPP_LOAD_MODE='${LLAMACPP_LOAD_MODE}' (expected none|mmap|mlock|mmap+mlock|dio)"
+    fi
+    if [ -n "${LLAMA_ARG_LOAD_MODE+set}" ]; then
+      echo "[llamacpp] load-mode='${LLAMA_ARG_LOAD_MODE}' from the inherited LLAMA_ARG_LOAD_MODE: ${LOAD_MODE_WHY}"
+    elif [ -e "$TEGRA_RELEASE" ]; then
+      echo "[llamacpp] load-mode=mmap, the Jetson fallback: ${LOAD_MODE_WHY}"
+      export LLAMA_ARG_LOAD_MODE=mmap
+    else
+      echo "[llamacpp] load-mode=binary default: ${LOAD_MODE_WHY}"
+    fi
+    ;;
+esac
+
 exec "$BIN_PATH" \
   --host "$HOST" \
   --port "$PORT" \
@@ -84,4 +179,5 @@ exec "$BIN_PATH" \
   --ctx-size "$CTX_SIZE" \
   --n-gpu-layers "$N_GPU_LAYERS" \
   --reasoning "$LLAMACPP_REASONING" \
-  --jinja
+  --jinja \
+  "${SPEC_ARGS[@]}"

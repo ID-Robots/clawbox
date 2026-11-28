@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  chatProviderPillLabel,
   lastModelSegment,
   shortModelPillLabel,
   REASONING_PILL_ICON,
@@ -13,7 +14,7 @@ describe("lastModelSegment", () => {
   });
 
   it("passes a bare id through unchanged", () => {
-    expect(lastModelSegment("deepseek-v4-pro")).toBe("deepseek-v4-pro");
+    expect(lastModelSegment("deepseek-v4-flash")).toBe("deepseek-v4-flash");
   });
 });
 
@@ -25,7 +26,7 @@ describe("shortModelPillLabel", () => {
   it("drops a leading vendor token the provider pill already shows", () => {
     expect(shortModelPillLabel("claude-fable-5", "Claude")).toBe("fable-5");
     expect(shortModelPillLabel("gemini-2.5-flash", "Gemini")).toBe("2.5-flash");
-    expect(shortModelPillLabel("deepseek-v4-pro", "DeepSeek")).toBe("v4-pro");
+    expect(shortModelPillLabel("deepseek-v4-flash", "DeepSeek")).toBe("v4-flash");
   });
 
   it("drops a trailing vendor token too (OpenAI Codex ids end with the vendor)", () => {
@@ -56,7 +57,7 @@ describe("shortModelPillLabel", () => {
     // OpenRouter's pill says "OpenRouter", so the vendor prefix here is the
     // only thing naming the vendor and must survive.
     expect(shortModelPillLabel("claude-haiku-4-5", "OpenRouter")).toBe("claude-haiku-4-5");
-    expect(shortModelPillLabel("deepseek-v4-pro", "ClawBox")).toBe("deepseek-v4-pro");
+    expect(shortModelPillLabel("deepseek-v4-flash", "ClawBox")).toBe("deepseek-v4-flash");
   });
 
   it("only strips whole tokens, never a prefix of one", () => {
@@ -162,5 +163,30 @@ describe("header pill width budget", () => {
     expect(rowWidth("Gemini", "2.5 Flash", "Medium")).toBeLessThanOrEqual(LABEL_BUDGET_PX);
     // Longest Hermes level word is no worse than "Medium".
     expect(rowWidth("Claude", "fable-5", "Minimal")).toBeLessThanOrEqual(LABEL_BUDGET_PX);
+  });
+});
+
+describe("chatProviderPillLabel", () => {
+  it("names the local model the box runs, without the Local suffix", () => {
+    // The route labels the Local AI row after its model ("Qwen 3.6 Local" on a
+    // DGX Spark); the pill printed "Gemma 4" from a table keyed on one model.
+    expect(chatProviderPillLabel("Qwen 3.6 Local")).toBe("Qwen 3.6");
+    expect(chatProviderPillLabel("Gemma 4 Local")).toBe("Gemma 4");
+    expect(chatProviderPillLabel("Ollama Local")).toBe("Ollama");
+  });
+
+  it("keeps the compact names of the cloud providers", () => {
+    expect(chatProviderPillLabel("Anthropic Claude")).toBe("Claude");
+    expect(chatProviderPillLabel("OpenAI Codex")).toBe("Codex");
+    expect(chatProviderPillLabel("ClawBox AI")).toBe("ClawBox");
+  });
+
+  it("answers null for a label it does not shorten, so the caller keeps the full one", () => {
+    expect(chatProviderPillLabel("Local AI")).toBeNull();
+    expect(chatProviderPillLabel("")).toBeNull();
+  });
+
+  it("leaves the model pill the part of the model the provider pill does not say", () => {
+    expect(shortModelPillLabel("qwen3.6-35b-a3b-mtp", chatProviderPillLabel("Qwen 3.6 Local"))).toBe("35b-a3b-mtp");
   });
 });

@@ -97,6 +97,11 @@ describe("the owner's edit and clear", () => {
     expect(readRunNotes(project)).toBe("");
   });
 
+  it("saves notes that only mention a credential field in quotes, as before", async () => {
+    const notes = 'The login form rejects password: "must be at least 8 characters" until the field has a digit.';
+    await expect(writeRunNotes(project, notes)).resolves.toBe(notes);
+  });
+
   it("clears, and an empty save is a clear too", async () => {
     await writeRunNotes(project, "- one");
     clearRunNotes(project);
@@ -123,6 +128,20 @@ describe("what a run's prompt carries", () => {
     // One line: a run in a project with no notes keeps a one-line system prompt.
     expect(LESSON_CHANNEL_BRIEF).not.toContain("\n");
   });
+
+  it("is not asked for lessons a full project could not keep", async () => {
+    const { LESSON_ROOM_CHARS, MAX_RUN_NOTES_CHARS, runNotesHaveRoom, mergeLessons } = await import("@/lib/coding-run-notes");
+    expect(runNotesHaveRoom("")).toBe(true);
+    expect(runNotesHaveRoom("- Tests: bun run test")).toBe(true);
+    // Four of an owner's projects sat at 3,950 to 3,980 of 4,000 characters:
+    // every lesson their runs proposed was refused as `full`.
+    const full = `- ${"x".repeat(MAX_RUN_NOTES_CHARS - 30)}`;
+    expect(runNotesHaveRoom(full)).toBe(false);
+    expect(mergeLessons(full, ["A lesson of ordinary length that no longer fits in these notes."]).refused).toEqual([expect.objectContaining({ reason: "full" })]);
+    // The edge: exactly a lesson's worth of room left is room.
+    expect(runNotesHaveRoom("n".repeat(MAX_RUN_NOTES_CHARS - LESSON_ROOM_CHARS))).toBe(true);
+    expect(runNotesHaveRoom("n".repeat(MAX_RUN_NOTES_CHARS - LESSON_ROOM_CHARS + 1))).toBe(false);
+  });
 });
 
 describe("vetting one lesson", () => {
@@ -134,6 +153,13 @@ describe("vetting one lesson", () => {
     expect(vetLesson(42)).toMatchObject({ ok: false, refusal: { reason: "not_text" } });
     expect(vetLesson("use bun")).toMatchObject({ ok: false, refusal: { reason: "too_short" } });
     expect(vetLesson("x".repeat(MAX_LESSON_CHARS + 1))).toMatchObject({ ok: false, refusal: { reason: "too_long" } });
+  });
+
+  it("keeps a lesson that only mentions a credential field in quotes, as before", () => {
+    for (const lesson of [
+      'The signup check refuses token: "expired session" until the page reloads',
+      'The secret: "rotate monthly" policy applies to the deploy keys',
+    ]) expect(vetLesson(lesson)).toEqual({ ok: true, lesson });
   });
 
   it("drops a credential by shape, and never quotes it back", () => {

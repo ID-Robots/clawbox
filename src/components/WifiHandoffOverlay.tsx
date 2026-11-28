@@ -27,13 +27,15 @@ interface WifiHandoffOverlayProps {
  */
 export default function WifiHandoffOverlay({ ssid, targetUrl, graceMs = 4000 }: WifiHandoffOverlayProps) {
   const { t } = useT();
+  // `wifi=connected`: the wizard there shows where the box is now (SetupWizard).
+  const setupUrl = `${targetUrl.replace(/\/+$/, "")}/setup?wifi=connected`;
 
   // Cross-origin <img> probe (the box reappears at a new address a fetch can't
   // reach), then redirect to its setup page on the home network.
   const phase = useReconnect({
     probe: (attempt) => imgProbe(targetUrl, attempt),
     onReady: () => {
-      window.location.href = `${targetUrl}/setup`;
+      window.location.href = setupUrl;
     },
     graceMs,
     readyDelayMs: 1500,
@@ -41,7 +43,6 @@ export default function WifiHandoffOverlay({ ssid, targetUrl, graceMs = 4000 }: 
 
   const completed = phase === "ready";
   const phaseIndex = completed ? 1 : 0;
-  const setupUrl = `${targetUrl.replace(/\/+$/, "")}/setup`;
   let prettyUrl = targetUrl;
   try {
     prettyUrl = new URL(targetUrl).host;

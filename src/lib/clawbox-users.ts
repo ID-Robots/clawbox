@@ -33,15 +33,16 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import { promisify } from "util";
 import path from "@/lib/runtime-path";
-import { DATA_DIR, get, set } from "@/lib/config-store";
+import { DATA_DIR, get, getKnown, set } from "@/lib/config-store";
 import { getSystemUsername, isSafePasswordChars } from "@/lib/auth";
-import { DISPATCH_VERDICT_LINE, rootStepJournalArgs } from "@/lib/root-step-journal";
+import { DISPATCH_VERDICT_LINE, readRootStepJournalTail } from "@/lib/root-step-journal";
 import { rootStepRepairCommand, startRootStep } from "@/lib/root-step-runner";
 import { createSerialLock } from "@/lib/serial-lock";
 import { USERS_CONFIG_KEY, parseUserRegistry, type ClawboxUserRecord } from "@/lib/session-identity";
 import { checkUsername, USER_PASSWORD_MAX, USER_PASSWORD_MIN } from "@/lib/username-rules";
 import { removeDesktopState } from "@/lib/desktop-state-store";
 import { forgetUserLanguage } from "@/lib/user-language";
+import { forgetUserPreferences } from "@/lib/user-preferences";
 
 const execFile = promisify(execFileCb);
 
@@ -111,7 +112,7 @@ export class UserAdminError extends Error {
   }
 }
 
-/** How much of the step's journal is read for its reason: the step prints one "Error:" line and exits. */
+/** How much of the step's journal is read for its reason, from its end: the step prints one "Error:" line and exits. */
 const STEP_JOURNAL_LINES = 80;
 /** A reason longer than this is cut: it is one line under a form, not a log viewer. */
 const DETAIL_MAX = 300;
@@ -126,11 +127,12 @@ const DETAIL_MAX = 300;
 export async function rootStepReason(step: string, sinceMs: number): Promise<string | null> {
   let out: string;
   try {
-    ({ stdout: out } = await execFile(
-      "/usr/bin/journalctl",
-      rootStepJournalArgs(step, { sinceMs, lines: STEP_JOURNAL_LINES }),
-      { timeout: 5_000, maxBuffer: 256 * 1024 },
-    ));
+    out = await readRootStepJournalTail(step, {
+      sinceMs,
+      lines: STEP_JOURNAL_LINES,
+      timeoutMs: 5_000,
+      maxBuffer: 256 * 1024,
+    });
   } catch {
     return null;
   }
@@ -168,6 +170,11 @@ async function explainStepFailure(
   kind: "create" | "remove",
   secret?: string,
 ): Promise<UserAdminError> {
+  // A step this PC's install does not have at all (TASK-2418): no command
+  // repairs that, so none is named — the runner's own sentence says so.
+  if ((err as { rootStepNotImplemented?: unknown } | null)?.rootStepNotImplemented === true) {
+    return new UserAdminError("root_step_unavailable", (err as Error).message);
+  }
   // Duck-typed (several suites mock the runner whole): the launcher could not
   // even be asked — not installed, not granted, or too old for the step.
   const unavailable = err as { rootStepUnavailable?: unknown; repairCommand?: unknown } | null;
@@ -227,6 +234,26 @@ async function writeRegistry(records: ClawboxUserRecord[]): Promise<void> {
 
 function newSessionVersion(): string {
   return crypto.randomBytes(16).toString("hex");
+}
+
+/**
+ * Give `username` a new session version, so every cookie minted for them
+ * before is dead — what a password change does to the owner's sessions with
+ * `session_generation`. The new version, or null for a name the registry does
+ * not hold.
+ */
+export async function rotateUserSessionVersion(username: string): Promise<string | null> {
+  return withUsersLock(async () => {
+    // An unreadable store is not "no such user": `listUsers` would read it as
+    // empty and the caller would take the old cookies for revoked.
+    const { value, known } = await getKnown(USERS_CONFIG_KEY);
+    if (!known) throw new Error("the user registry could not be read");
+    const users = parseUserRegistry(value, getSystemUsername());
+    if (!users.some((u) => u.username === username)) return null;
+    const sv = newSessionVersion();
+    await writeRegistry(users.map((u) => (u.username === username ? { ...u, sv } : u)));
+    return sv;
+  });
 }
 
 /**
@@ -330,6 +357,25 @@ export async function createUser(username: unknown, password: unknown): Promise<
       throw new UserAdminError("user_exists", "An account or group with that name already exists on this box.");
     }
 
+    // A name used before starts clean: whatever an earlier account of this
+    // name left — its desktop preferences, its UI language — is cleared here,
+    // where removal could not, before the account exists to read it. If it
+    // cannot be cleared, the account is not created.
+    try {
+      await forgetUserPreferences(name);
+      await forgetUserLanguage(name);
+      // An earlier account's MCP credentials (src/lib/staff-mcp.ts) must never
+      // become the new account's.
+      const { forgetStaffMcpUserStrict } = await import("@/lib/staff-mcp");
+      await forgetStaffMcpUserStrict(name);
+    } catch (err) {
+      console.error("[clawbox-users] could not clear an earlier account's settings:", err instanceof Error ? err.message : err);
+      throw new UserAdminError(
+        "create_failed",
+        "The account could not be created: settings an earlier account of this name left behind could not be cleared. Try again.",
+      );
+    }
+
     try {
       await fs.mkdir(path.dirname(USER_ADD_INPUT_PATH), { recursive: true });
       await fs.writeFile(USER_ADD_INPUT_PATH, userAddRecord(name, password as string), { mode: 0o600 });
@@ -417,6 +463,11 @@ export async function removeUser(username: string, opts: { currentUser: string }
     await forgetUserLanguage(removable).catch((err) => {
       console.error("[clawbox-users] could not forget the user's language:", err instanceof Error ? err.message : err);
     });
+    // And their own desktop preferences on an organisation box
+    // (src/lib/user-preferences.ts), for the same reason.
+    await forgetUserPreferences(removable).catch((err) => {
+      console.error("[clawbox-users] could not forget the user's preferences:", err instanceof Error ? err.message : err);
+    });
     // And their chat (src/lib/user-chats.ts): the same name later starts with
     // an empty conversation, never this one's. Loaded here: it reaches the
     // harness's stores, which nothing else in this module needs.
@@ -482,7 +533,154 @@ export async function userHelperAvailable(): Promise<boolean> {
   });
 }
 
+/**
+ * What changing a ClawBox user's own password came to:
+ *   - `ok` — changed;
+ *   - `wrong` — the current password is not theirs (or the account is not a
+ *     ClawBox user's, which the helper answers the same way);
+ *   - `invalid` — the new password is outside the rules
+ *     (`USER_PASSWORD_MIN`–`USER_PASSWORD_MAX`, no control characters);
+ *   - `unavailable` — the helper could not be asked (no grant: sudo's 1), or
+ *     is one from before the `passwd` verb (it refuses an unknown verb with
+ *     its usage, 64): the box needs an update for its root-owned helper;
+ *   - `failed` — the helper checked everything and chpasswd still refused.
+ * Never throws.
+ */
+export type UserPasswordChange = "ok" | "wrong" | "invalid" | "unavailable" | "failed";
+
+/** The helper's answers for a new password outside the rules, and for chpasswd refusing (config/clawbox-user-helper.sh). */
+const HELPER_BAD_NEW_PASSWORD = 65;
+const HELPER_CHPASSWD_FAILED = 66;
+
+/**
+ * Change a ClawBox user's OWN Linux password (Settings → Account), through the
+ * root-owned helper's `passwd` verb: the current password is checked as root
+ * with unix_chkpwd before chpasswd runs, and both travel on STDIN only.
+ * Never the owner's — their password is `system/credentials`'.
+ */
+export async function changeUserPassword(username: string, current: string, next: string): Promise<UserPasswordChange> {
+  if (checkUsername(username) !== "ok" || username === getSystemUsername()) return "wrong";
+  if (typeof current !== "string" || !current || !isSafePasswordChars(current)) return "wrong";
+  if (
+    typeof next !== "string"
+    || next.length < USER_PASSWORD_MIN
+    || next.length > USER_PASSWORD_MAX
+    || !isSafePasswordChars(next)
+  ) {
+    return "invalid";
+  }
+  return new Promise((resolve) => {
+    try {
+      const child = spawn("/usr/bin/sudo", ["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "passwd"], {
+        stdio: ["pipe", "ignore", "ignore"],
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      });
+      child.on("error", () => resolve("unavailable"));
+      child.on("close", (code) => {
+        if (code === HELPER_OK) resolve("ok");
+        else if (code === HELPER_AUTH_ERR) resolve("wrong");
+        else if (code === HELPER_BAD_NEW_PASSWORD) resolve("invalid");
+        else if (code === HELPER_CHPASSWD_FAILED) resolve("failed");
+        else resolve("unavailable");
+      });
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(`${username}\n${current}\n${next}\n`);
+    } catch {
+      resolve("unavailable");
+    }
+  });
+}
+
 /** {@link checkUserPassword} as a yes/no: true only for a password the helper confirmed. */
 export async function verifyUserPassword(username: string, password: string): Promise<boolean> {
   return (await checkUserPassword(username, password)) === "ok";
+}
+
+/**
+ * The owner RESETS a ClawBox user's password (Settings → System → Users,
+ * TASK-2377), through the root-owned helper's `setpasswd` verb: no current
+ * password (the owner is the administrator), the same membership and password
+ * rules as {@link changeUserPassword}, the username and the new password on
+ * STDIN only. Never the owner's own password — that is `system/credentials`'.
+ * `wrong` here means the account is not a ClawBox user's. Never throws.
+ */
+export async function resetUserPassword(username: string, next: string): Promise<UserPasswordChange> {
+  if (checkUsername(username) !== "ok" || username === getSystemUsername()) return "wrong";
+  if (
+    typeof next !== "string"
+    || next.length < USER_PASSWORD_MIN
+    || next.length > USER_PASSWORD_MAX
+    || !isSafePasswordChars(next)
+  ) {
+    return "invalid";
+  }
+  return new Promise((resolve) => {
+    try {
+      const child = spawn("/usr/bin/sudo", ["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "setpasswd"], {
+        stdio: ["pipe", "ignore", "ignore"],
+        timeout: 20_000,
+        killSignal: "SIGKILL",
+      });
+      child.on("error", () => resolve("unavailable"));
+      child.on("close", (code) => {
+        if (code === HELPER_OK) resolve("ok");
+        else if (code === HELPER_AUTH_ERR) resolve("wrong");
+        else if (code === HELPER_BAD_NEW_PASSWORD) resolve("invalid");
+        else if (code === HELPER_CHPASSWD_FAILED) resolve("failed");
+        else resolve("unavailable");
+      });
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(`${username}\n${next}\n`);
+    } catch {
+      resolve("unavailable");
+    }
+  });
+}
+
+/**
+ * A ClawBox user's home folder as the account database names it (`getent
+ * passwd`), or null when there is no such account or the lookup failed. The
+ * name is checked first, and it travels as its own argv element.
+ */
+export async function userHomeDir(username: string): Promise<string | null> {
+  if (checkUsername(username) !== "ok") return null;
+  try {
+    const { stdout } = await execFile(GETENT_BIN, ["passwd", username], { timeout: 5_000 });
+    const fields = String(stdout).trim().split("\n")[0]?.split(":") ?? [];
+    if (fields[0] !== username) return null;
+    const home = fields[5] ?? "";
+    return path.isAbsolute(home) && home !== "/" ? home : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What asking the helper for a user's home came to: `ok`, `refused` (not a ClawBox user), `unavailable`. */
+export type HomeAccessResult = "ok" | "refused" | "unavailable";
+
+/**
+ * Let the web server (the owner's account) reach a ClawBox user's home, so the
+ * Files app can serve a member of staff their own home on an organisation box
+ * (src/lib/files-scope.ts). The helper's `home_access` verb lays a POSIX ACL
+ * for the owner's account on that home (config/clawbox-user-helper.sh); the
+ * username travels on STDIN. Never throws.
+ */
+export async function grantHomeAccess(username: string): Promise<HomeAccessResult> {
+  if (checkUsername(username) !== "ok" || username === getSystemUsername()) return "refused";
+  return new Promise((resolve) => {
+    try {
+      const child = spawn("/usr/bin/sudo", ["-n", "/usr/local/libexec/clawbox/clawbox-user-helper.sh", "home_access"], {
+        stdio: ["pipe", "ignore", "ignore"],
+        timeout: 120_000,
+        killSignal: "SIGKILL",
+      });
+      child.on("error", () => resolve("unavailable"));
+      child.on("close", (code) => resolve(code === HELPER_OK ? "ok" : code === HELPER_AUTH_ERR ? "refused" : "unavailable"));
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(`${username}\n`);
+    } catch {
+      resolve("unavailable");
+    }
+  });
 }

@@ -19,6 +19,22 @@ vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async (
 vi.mock("@/lib/browser-sessions", () => ({ closeSessionsForRun: vi.fn(async () => 0) }));
 vi.mock("@/lib/project-icon", () => ({ ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })) }));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
+// The box's own engine answers (TASK-2501 PR-E): under the lock it is the only
+// provider, and a queued run on it is the one that must still start.
+const cloudLocked = vi.hoisted(() => vi.fn(async () => false));
+vi.mock("@/lib/ai-cloud-lock", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ai-cloud-lock")>()),
+  isCloudAiLocked: cloudLocked,
+}));
+vi.mock("@/lib/feature-engine", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/feature-engine")>()),
+  cloudAiLockOn: cloudLocked,
+}));
+const resolveLocalEngine = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/local-engine", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/local-engine")>()),
+  resolveLocalEngine,
+}));
 
 type Lib = typeof import("@/lib/coding-agent");
 
@@ -80,6 +96,18 @@ beforeEach(async () => {
   installWrapper();
   for (const name of ["alpha", "beta", "gamma", "delta"]) folder(name);
   chatNotice.mockClear();
+  cloudLocked.mockReset().mockResolvedValue(false);
+  resolveLocalEngine.mockReset().mockResolvedValue({
+    kind: "clawext",
+    model: "dsv41-flash",
+    modelRef: "clawext/dsv41-flash",
+    chatUrl: "http://192.0.2.9:8899/v1/chat/completions",
+    authorization: "Bearer engine-secret-key",
+    contextTokens: 1_000_000,
+    maxOutputTokens: 32_000,
+    parallel: 1,
+    imageInput: false,
+  });
   vi.resetModules();
   lib = await import("@/lib/coding-agent");
 });
@@ -192,6 +220,30 @@ describe("a run beyond the limit", () => {
     expect(failed.error).toMatch(/^Its turn in the queue came, and it could not start: /);
     // Its chat hears it failed; the two that ran end through finishRun's notice instead.
     expect(chatNotice.mock.calls.map(([r]) => [r.id, r.status])).toEqual([[gone.run.id, "failed"]]);
+  });
+
+  it("does not hold a run on the box's own engine behind a queued cloud run the lock refuses", async () => {
+    // The owner queued a cloud run and then turned the local-only AI lock on
+    // (TASK-2501 PR-E). The cloud entry's turn comes with the lock on, and it
+    // cannot start — but the run they asked for afterwards, on the box's own
+    // engine, can. Its place in the queue is behind an entry that will never
+    // move, so the pass has to go past that entry rather than retry it.
+    const busy = await lib.startOrQueueRun({ task: "one", directory: "alpha", source: "owner" });
+    const cloud = await lib.startOrQueueRun({ task: "two", directory: "beta", source: "owner", provider: "clawbox-ai" });
+    expect(cloud.run).toMatchObject({ status: "queued", provider: "clawbox-ai" });
+    // The lock goes on `ai_cloud_lock` and every reader follows it.
+    cloudLocked.mockResolvedValue(true);
+    const local = await lib.startOrQueueRun({ task: "three", directory: "gamma", source: "owner", provider: "local" });
+    expect(local.run).toMatchObject({ status: "queued", provider: "local" });
+    expect([lib.queuePosition(cloud.run.id), lib.queuePosition(local.run.id)]).toEqual([1, 2]);
+
+    fs.writeFileSync(flag, "go");
+    await finished(busy.run.id);
+    await vi.waitFor(() => { expect(lib.getRun(local.run.id)?.status).toBe("completed"); }, { timeout: 20_000 });
+    // The cloud run kept its place, waiting for the lock rather than being
+    // settled failed by a turn it could never have taken.
+    expect(lib.getRun(cloud.run.id)).toMatchObject({ status: "queued", error: null });
+    expect(lib.queuePosition(cloud.run.id)).toBe(1);
   });
 
   it("refuses what a start would refuse, at once, rather than queueing it", async () => {

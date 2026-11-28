@@ -11,7 +11,10 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
+import re
 import shutil
+import stat
 import tempfile
 import threading
 import time
@@ -485,6 +488,74 @@ def _resolve_staging(cfg: Config) -> tuple[Path, bool]:
     return Path(tempfile.mkdtemp(prefix="clawkeep-")), True
 
 
+#: Where a run records its ephemeral staging dir, in the data dir. Written
+#: right after mkdtemp and removed with the dir, so one that is still there at
+#: the next run's start names the staging dir of a run that died before its
+#: `finally` (SIGKILL, a power cut).
+STAGING_RECORD_NAME = "staging-dir"
+
+#: The name `_resolve_staging` gives an ephemeral staging dir: mkdtemp's eight
+#: characters after the prefix. Checked on a recorded path before it is removed.
+_STAGING_NAME = re.compile(r"clawkeep-[a-z0-9_]{8}")
+
+
+def _staging_record() -> Path:
+    return token.data_dir() / STAGING_RECORD_NAME
+
+
+def _recorded_staging() -> list[str]:
+    try:
+        text = _staging_record().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return []
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _record_staging(paths: list[str]) -> None:
+    record = _staging_record()
+    if paths:
+        # Whole or not at all: a write cut short must not lose the dirs recorded.
+        tmp = record.with_name(record.name + ".tmp")
+        tmp.write_text("".join(f"{p}\n" for p in paths), encoding="utf-8")
+        os.replace(tmp, record)
+    else:
+        record.unlink(missing_ok=True)
+
+
+def _sweep_stale_staging() -> None:
+    """Remove the staging dirs earlier runs of this data dir recorded and never
+    removed — an archive can be as big as the box's whole state.
+
+    Called with the run lock held, so the runs that recorded them are not alive.
+    Only a recorded dir is ever touched, and only while it is a directory of
+    this user's with the staging name: never a configured output_dir, a restore
+    or encryption temp dir, another data dir's staging, or a link. One that
+    could not be removed stays recorded for the next run.
+    """
+    try:
+        kept: list[str] = []
+        for name in _recorded_staging():
+            path = Path(name)
+            try:
+                st = path.lstat()
+                if (
+                    stat.S_ISDIR(st.st_mode)
+                    and st.st_uid == os.getuid()
+                    and path.is_absolute()
+                    and _STAGING_NAME.fullmatch(path.name)
+                ):
+                    shutil.rmtree(path)
+                    log.warning("removed the staging dir an earlier backup left behind: %s", path)
+            except FileNotFoundError:
+                pass  # its dir is already gone
+            except OSError as e:
+                kept.append(name)
+                log.warning("could not remove the staging dir an earlier backup left behind: %s", e)
+        _record_staging(kept)
+    except OSError as e:
+        log.warning("could not read or update the staging record: %s", e)
+
+
 def _retention_keep_last() -> int:
     """Read `retentionKeepLast` from schedule.json in the data dir.
 
@@ -597,6 +668,7 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
     sidecar manifest after a successful upload. The TS bridge passes it
     through from the UI's "Name this backup" field.
     """
+    _sweep_stale_staging()
     st = state.load()
     # Whatever the last run was refused for, this run answers for itself: every
     # branch below that saves `st` saves it without the old refusal, and the
@@ -685,6 +757,11 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
     staging, ephemeral = _resolve_staging(cfg)
     archive: openclaw.Archive | None = None
     try:
+        if ephemeral:
+            try:
+                _record_staging([*_recorded_staging(), str(staging)])
+            except OSError as e:
+                log.warning("could not record the staging dir %s: %s", staging, e)
         _stamp_step(st, STEP_ARCHIVING)
         try:
             # WHICH backend builds the archive is the device's edition's
@@ -992,13 +1069,13 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
             except OSError as e:
                 log.warning("failed to remove encrypted archive %s: %s", enc_candidate, e)
         if ephemeral:
+            # With everything in it: an archive that failed its verification
+            # (`archive` is None then) or a partial one is still on disk.
             try:
-                staging.rmdir()
-            except OSError:
-                # Non-empty (e.g. verify left a temp dir, or the user pointed
-                # output_dir at a shared location even though we treated it as
-                # ephemeral) — best-effort, leave it for the OS to reap.
-                pass
+                shutil.rmtree(staging)
+                _record_staging([p for p in _recorded_staging() if p != str(staging)])
+            except OSError as e:
+                log.warning("failed to remove staging dir %s: %s", staging, e)
 
 
 def run_idle(cfg: Config, token: str) -> int:

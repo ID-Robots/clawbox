@@ -24,6 +24,7 @@
 // precisely where that turns into a leak on an 8 GB box.
 
 import { sanitizeErrorPayload } from "./safe-error-text";
+import { OFFICE_ACCEPT } from "./office-documents";
 
 // -- Limits ------------------------------------------------------------------
 //
@@ -129,7 +130,7 @@ export type StagingFailure = {
    * The last three are a DROP's: a folder over the drop's limits, a folder
    * with nothing this box can take, and a folder that staged only in part.
    */
-  reason: "tooLarge" | "rejected" | "session" | "box" | "imagesOnly" | "noPictures" | "dropTooBig" | "emptyFolder" | "folderPartial";
+  reason: "tooLarge" | "rejected" | "session" | "box" | "imagesOnly" | "noPictures" | "dropTooBig" | "emptyFolder" | "folderPartial" | "unreadable";
   /** A vetted message from the box, when it gave one that is safe to show. */
   detail: string | null;
   /** Numbers the line names beside the file (`{count}`, `{total}`, `{size}`). */
@@ -154,6 +155,12 @@ export function classifyStagingFailure(status: number | undefined, payload: unkn
   // request that did not come from it. Same cause, so the same sentence: "this
   // box can look at pictures, but not documents yet".
   if (status === 415) return { reason: "imagesOnly", detail };
+  // An office document whose text the box could not take out — password-
+  // protected, damaged, or not what its name says (src/lib/office-text.ts).
+  // The box's sentence says which; the line says the file was not attached.
+  if (status === 422 && (payload as { code?: unknown } | null)?.code === "unreadable_document") {
+    return { reason: "unreadable", detail };
+  }
   if (status === 401 || status === 403) return { reason: "session", detail };
   if (typeof status === "number" && status >= 400 && status < 500) return { reason: "rejected", detail };
   // No status at all means the request never completed — a dropped connection
@@ -216,7 +223,7 @@ export function attachmentAcceptAttribute(
 ): string {
   const parts: string[] = [];
   if (caps.canAttachImages) parts.push("image/*");
-  if (caps.canAttachDocuments) parts.push(".pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css");
+  if (caps.canAttachDocuments) parts.push(`.pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css,${OFFICE_ACCEPT}`);
   return parts.join(",");
 }
 

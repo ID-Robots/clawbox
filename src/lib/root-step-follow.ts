@@ -15,7 +15,8 @@ import { promisify } from "util";
 import { startRootStep } from "@/lib/root-step-runner";
 import { monotonicNow } from "@/lib/monotonic-clock";
 import { isJournalNoise } from "@/lib/journal-noise";
-import { DISPATCH_VERDICT_LINE, rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
+import { DISPATCH_VERDICT_LINE, readRootStepJournalTail, rootStepUnit } from "@/lib/root-step-journal";
+import { explainRootStepFailure } from "@/lib/root-steps";
 
 const execFile = promisify(execFileCb);
 
@@ -148,11 +149,9 @@ async function journalLines(
   { keepIndent = false }: { keepIndent?: boolean } = {},
 ): Promise<string[]> {
   try {
-    const { stdout } = await execFile(
-      "/usr/bin/journalctl",
-      rootStepJournalArgs(step, { sinceMs, lines }),
-      { timeout: 10_000 },
-    );
+    // The NEWEST `lines` of the run: `--since T -n N` alone is its first N on
+    // the boxes' journalctl (root-step-journal.ts).
+    const stdout = await readRootStepJournalTail(step, { sinceMs, lines, timeoutMs: 10_000 });
     return stdout
       .split(/\r?\n/)
       .map((l) => (keepIndent ? l.replace(/\s+$/, "") : l.trim()))
@@ -259,7 +258,10 @@ export function failureReason(lines: readonly string[]): string | null {
 }
 
 async function failureLine(step: string, sinceMs: number): Promise<string | null> {
-  return failureReason(await journalLines(step, sinceMs, 40));
+  const line = failureReason(await journalLines(step, sinceMs, 40));
+  // An x86 root side's refusal of a step it does not have, said as what it is
+  // rather than as its terse journal line (TASK-2418).
+  return line === null ? null : explainRootStepFailure(step, line);
 }
 
 function running(active: string): boolean {

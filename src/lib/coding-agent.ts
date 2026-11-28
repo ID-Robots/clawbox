@@ -65,10 +65,12 @@ import { cachedWorkflowTelemetry, type WorkflowTelemetry } from "@/lib/coding-wo
  */
 
 import { execFile, spawn, type ChildProcess } from "child_process";
+import { CLOUD_AI_LOCKED_CODE, isCloudAiLocked, isCloudAiLockedError, isCloudAiLockedSync } from "@/lib/ai-cloud-lock";
 import { StringDecoder } from "string_decoder";
 import fs from "fs";
 import os from "os";
 import path, { untraced } from "@/lib/runtime-path";
+import { CAPABILITY_DROP_ARGS, CAPABILITY_DROP_COMMAND } from "@/lib/capability-drop";
 import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet, setMany as configSetMany } from "@/lib/config-store";
 import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, pruneArtifacts, removeArtifacts, writeRunReport, type PrunedArtifact } from "@/lib/coding-agent-artifacts";
@@ -166,9 +168,19 @@ import {
   offeredProviders,
   resolveRunProvider,
   runsOnCodex,
+  runsOnLocalEngine,
+  lockedConnectedProviders,
+  lockedDefaultProvider,
+  lockedProviderRefusal,
+  providersUnderLock,
   DEFAULT_OPENAI_MODEL,
   type CodingProvider,
 } from "@/lib/coding-provider";
+// The local-only AI lock (TASK-2501), read by its stored value and FAILING
+// CLOSED, and the box's own engine a `local` run answers from (PR-E).
+import { cloudAiLockOn } from "@/lib/feature-engine";
+import { localCodingEngine } from "@/lib/local-anthropic-route";
+import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 import { getAnthropicConnection, verifyAnthropicKey, type AnthropicSource } from "@/lib/coding-anthropic";
 import {
   buildCodexArgs,
@@ -196,12 +208,13 @@ import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME
 import { chosenProjectFolderFrom, defaultProjectFolder, ensureDefaultProjectFolder, PROJECT_FOLDER_CONFIG_KEY, projectFolderFrom } from "@/lib/project-folder";
 import { beginRunStart, isProjectBeingRemoved } from "@/lib/coding-project-removal-lock";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
+import { isSettledTeamStatus } from "@/lib/coding-team-status";
 import { registerServerApp } from "@/lib/app-proxy";
 import { registerOrStartServerApp } from "@/lib/app-server-start";
 import { APP_ID_RE } from "@/lib/code-projects";
 import { taskTitle } from "@/lib/task-title";
 import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
-import { CLAWAI_PLAN_TIER_KEY, clawaiEntitlementTier } from "@/lib/clawai-plan-tier";
+import { planEntitlementFromStore } from "@/lib/plan-entitlement";
 import {
   concretePrefix,
   deriveAllowRule,
@@ -222,6 +235,7 @@ import {
   isReservedSecretName,
   MAX_SECRETS,
   recordRunSecretsHanded,
+  releaseRunSecretNames,
   releaseRunSecrets,
   resolveSecretsForRun,
   SECRET_INJECT_CONFIG_KEY,
@@ -235,6 +249,7 @@ import { appendSecretAudit, SECRETS_AUDIT_FILE_NAME } from "@/lib/secrets-audit"
 import { forgetRunSecrets, redactForRun, registerRunSecrets } from "@/lib/secret-redact";
 import { CLAWBOX_READ_ONLY_TOOLS, RUN_READ_PROFILE } from "@/lib/clawbox-run-read-tools";
 import { CLAWBOX_READ_ONLY_ENTRY, resolveRunMcpPlan, type RunMcpPlan } from "@/lib/project-mcp-servers";
+import { listProjectFolders as listMultiFolderProjects, readProjectFolders as readMultiFolderList, type ProjectFolder } from "@/lib/project-folders";
 import {
   anotherAccountLikely,
   accountsSnapshot,
@@ -319,14 +334,16 @@ import {
   PR_BODY_TASK_MODES,
   type PrBodyTaskMode,
 } from "@/lib/coding-pr-body";
-import { adoptOwnBranchWork, ownBranchWork, readCheckout } from "@/lib/coding-team-worktree";
+import { adoptOwnBranchWork, gitIn, ownBranchWork, readCheckout, worktreeAppId } from "@/lib/coding-team-worktree";
 import {
   addRunWorktree,
   commitsAhead,
   deleteRunBranch,
+  bringBaseHome,
   mergeRunBranch,
   removeRunWorktree,
   restoreRunWorktree,
+  runWorktreePath,
   worktreeHasChanges,
   type MergeHomeBlocker,
 } from "@/lib/coding-run-worktree";
@@ -370,6 +387,7 @@ import {
 } from "@/lib/coding-deliverable";
 import { checkDeliverable, type DeliverableSandbox } from "@/lib/coding-deliverable-check";
 import { commitRunWork, headCommitShort, lastCommit, type LastCommit, newestCommitSince } from "@/lib/coding-git";
+import { healWorktreePaths } from "@/lib/coding-worktree-heal";
 import {
   CODING_AGENT_GIT_EMAIL_CONFIG_KEY,
   CODING_AGENT_GIT_NAME_CONFIG_KEY,
@@ -409,7 +427,7 @@ import {
   RUN_NICE,
 } from "@/lib/coding-run-unit";
 import { cpuBudgetBrief, hostCpuCount, MAX_CPU_BUDGET, onBatteryPower, RUN_CPU_BUDGET_ENV, runCpuBudget } from "@/lib/coding-run-cpu";
-import { LESSON_CHANNEL_BRIEF, readRunNotes, runNotesBlock, settleRunNotes } from "@/lib/coding-run-notes";
+import { LESSON_CHANNEL_BRIEF, readRunNotes, runNotesBlock, runNotesHaveRoom, settleRunNotes } from "@/lib/coding-run-notes";
 import { looksVisual, mentionsPullRequest } from "@/lib/coding-diet";
 import {
   applyRoleModelsPatch,
@@ -421,6 +439,7 @@ import {
   ROLE_AUTO,
   roleMaxTurns,
   roleModelsFrom,
+  roleModelsUnderLock,
   roleModelsView,
   type ModelRole,
   type RoleModels,
@@ -1181,15 +1200,11 @@ const SCOPE_LEFTOVER_CHECK_MS = 1_500;
  * ambient and inheritable capability set. See the header: the web server holds
  * CAP_NET_ADMIN and CAP_NET_RAW ambiently and every child would otherwise keep
  * them. `--no-new-privs` is here for the same reason — a run has no business
- * regaining through a setuid binary what these flags just took away.
+ * regaining through a setuid binary what these flags just took away. The two
+ * live in scripts/capability-drop.js, shared with the web server's own helper
+ * programs; re-exported here for this module's callers.
  */
-export const CAPABILITY_DROP_COMMAND = "setpriv";
-export const CAPABILITY_DROP_ARGS: readonly string[] = [
-  "--ambient-caps=-all",
-  "--inh-caps=-all",
-  "--no-new-privs",
-  "--",
-];
+export { CAPABILITY_DROP_COMMAND, CAPABILITY_DROP_ARGS };
 
 /** Claude Code tools the run may use at all (`--tools`). No WebFetch/WebSearch:
  *  the appliance is offline-first and the task is local code. The sub-agent
@@ -1344,6 +1359,9 @@ export const HELPER_MODEL: Readonly<Record<CodingProvider, string>> = {
   // A Codex run is never handed `--agents` (Codex has no such flag); the entry
   // is the provider's economy model so the table stays whole.
   openai: "gpt-5.6-luna",
+  // The alias the wrapper fills with the engine's one model
+  // (ANTHROPIC_DEFAULT_HAIKU_MODEL on the `local` branch of scripts/claude-ds).
+  local: "haiku",
 };
 
 /** The helpers that run a command: a read-only run has no shell to hand them. */
@@ -1581,7 +1599,11 @@ const HARD_HOME_SUBTREES: readonly string[] = PROTECTED_HOME_DIRS;
  * settings panel can judge a rule too; `fileDenyRules` below is what actually
  * leaves a deny rule out of one run's argv.
  */
-const HARNESS_STATE_SUBTREES: readonly string[] = [".claude", ".claude-ds"];
+//
+// `.claude-ds-local` is a `local` run's own (harnessStateDir, TASK-2501 PR-E):
+// a `~/.claude-ds/**` rule does not reach it, so it is named. No project in it
+// opens (SOFT_HOME_SUBTREES names none), so it is always denied whole.
+const HARNESS_STATE_SUBTREES: readonly string[] = [".claude", ".claude-ds", ".claude-ds-local"];
 
 /**
  * Everything Claude Code's file tools are denied outside the working folder,
@@ -2101,6 +2123,14 @@ export interface CodingRun {
    */
   worktree: RunWorktree | null;
   /**
+   * A run on a MULTI-FOLDER project (TASK-2757, src/lib/project-folders.ts):
+   * `directory` is then a plain folder, `<project>/.clawbox/worktrees/<runId>`,
+   * holding one git worktree per listed repository, side by side, and
+   * `worktree` is null. Absent on every other run, which is what keeps a
+   * single-folder run's record — and behaviour — exactly what it was.
+   */
+  multiFolder?: RunMultiFolder;
+  /**
    * What this run has to LEAVE BEHIND before the box calls it finished.
    *
    * `status: "completed"` used to mean one thing only: Claude Code emitted a
@@ -2263,6 +2293,34 @@ export interface RunWorktree {
    * the commits away from the request they are open as).
    */
   result?: RunWorktreeResult | null;
+}
+
+/** One repository of a multi-folder run: its worktree, and what came of it. */
+export interface RunFolder extends RunWorktree {
+  /** The folder's name in the owner's project folder — and the subfolder of the run's directory it is checked out in. */
+  name: string;
+  /** The newest commit on its branch once the run settled, or null when it left nothing there. */
+  commit: string | null;
+  /**
+   * The pull request opened for it, when its repository changed and pull
+   * requests are on. `behind`: the last push of new commits to it failed, so
+   * the request does not hold all of the branch.
+   */
+  pr: { number: number; url: string; behind?: boolean } | null;
+  /**
+   * Why this repository's work must not go out — set when the run committed
+   * on a branch of its own there that could not be brought onto `branch`:
+   * then the branch is not the work, and neither a pull request nor a merge
+   * home is made from it; the copy is kept.
+   */
+  held?: string;
+}
+
+/** A multi-folder run's copies: the project they belong to, and one entry per repository. */
+export interface RunMultiFolder {
+  /** The project's own folder — what `projectDirectoryOf` answers for this run. */
+  project: string;
+  folders: RunFolder[];
 }
 
 /**
@@ -2541,6 +2599,16 @@ export interface CodingAgentStatus {
   providers: readonly CodingProvider[];
   /** The providers the owner connected to the coding agent (a subset of `providers`, never empty): what a team's roles may be pinned to. */
   connectedProviders: CodingProvider[];
+  /**
+   * The local-only AI lock (TASK-2501): on, every run is on the box's own
+   * engine (`provider` reads `local`, `providers` and `connectedProviders`
+   * hold it alone) and no run draws pictures or speaks clips
+   * (`generateMedia` reads false). The stored choices are kept, and come back
+   * when the lock is lifted.
+   */
+  cloudAiLocked: boolean;
+  /** The model a `local` run answers on (the box's engine), or null when the box has no engine fit for a run. */
+  localEngineModel: string | null;
   /** How hard a run thinks per turn. */
   effort: CodingEffort;
   /** The levels the app should show — see OFFERED_EFFORT_LEVELS. */
@@ -2709,6 +2777,39 @@ export class CodingAgentError extends Error {
   constructor(readonly kind: CodingAgentErrorKind, message: string, readonly wait = false) {
     super(message);
     this.name = "CodingAgentError";
+  }
+}
+
+/** Why a cloud run does not go on under the local-only AI lock (TASK-2501). */
+const CODING_AGENT_CLOUD_LOCKED =
+  "Local-only AI is on: this run's model is in the cloud (Anthropic, OpenAI or ClawBox AI), so it does not go on while the lock is on. Start a new run on the box's own engine (provider \"local\").";
+
+/**
+ * Refuse a coding run on a cloud provider under the local-only AI lock: a
+ * `not_ready` CodingAgentError, like any other missing piece, carrying the
+ * lock's `code` for the routes to pass on. A run on the box's own engine
+ * (`local`, TASK-2501 PR-E) is not refused; with no provider named the box's
+ * default answers, and under the lock that is `local` (lockedDefaultProvider).
+ */
+async function assertCodingAgentUnlocked(provider?: CodingProvider): Promise<void> {
+  if (provider === undefined || providersUnderLock(true).includes(provider)) return;
+  if (await isCloudAiLocked()) {
+    throw Object.assign(new CodingAgentError("not_ready", lockedProviderRefusal(provider)), { code: CLOUD_AI_LOCKED_CODE });
+  }
+}
+
+/**
+ * The same refusal, answered SYNCHRONOUSLY (TASK-2501 PR-E): the last question
+ * a spawn path asks, for the steps that must not await again before the child
+ * exists. `assertCodingAgentUnlocked` awaits its read, so a caller that asked
+ * it and then awaited anything else — secrets, a worktree, an account — was
+ * checking a lock that may have gone on in between; this is the check that
+ * holds no gap after it.
+ */
+function assertCodingAgentUnlockedSync(provider?: CodingProvider): void {
+  if (provider === undefined || providersUnderLock(true).includes(provider)) return;
+  if (isCloudAiLockedSync()) {
+    throw Object.assign(new CodingAgentError("not_ready", lockedProviderRefusal(provider)), { code: CLOUD_AI_LOCKED_CODE });
   }
 }
 
@@ -2987,6 +3088,9 @@ export function harnessStateDir(provider: CodingProvider): string {
   // An `openai` run is Codex, whose state is the coding agent's own CODEX_HOME
   // under the box's data folder (src/lib/coding-openai.ts) — never ~/.codex.
   if (runsOnCodex(provider)) return codexHome();
+  // A `local` run keeps a state of its own: its settings carry the deny rules
+  // the wrapper writes for it (scripts/claude-ds), which are not ClawBox AI's.
+  if (runsOnLocalEngine(provider)) return process.env.CLAUDE_DS_LOCAL_CONFIG_DIR || path.join(homeDir(), ".claude-ds-local");
   return process.env.CLAUDE_DS_CONFIG_DIR || path.join(homeDir(), ".claude-ds");
 }
 
@@ -3040,6 +3144,17 @@ export async function getRoleModels(): Promise<RoleModels> {
 }
 
 /**
+ * The per-role choices a run STARTS with: the stored ones, and under the
+ * local-only AI lock without any role pinned to a cloud provider
+ * (`roleModelsUnderLock`). Never written back — the settings still show and
+ * edit what the owner stored.
+ */
+async function getRunRoleModels(): Promise<RoleModels> {
+  const [roles, locked] = await Promise.all([getRoleModels(), cloudAiLockOn()]);
+  return locked ? roleModelsUnderLock(roles) : roles;
+}
+
+/**
  * The owner's edit to the per-role choices, checked WHOLE before anything is
  * written — the enable route calls `checkRoleModelsPatch` in its
  * refuse-before-any-write block and this after it.
@@ -3074,20 +3189,22 @@ export async function checkRoleModelsPatch(patch: unknown): Promise<string | nul
  * verdict the spawn gate reaches for that provider — nothing new is checked.
  */
 export async function teamRoleModelMap(): Promise<TeamRoleModelMap> {
-  const config = await configGetAll();
+  const [config, locked] = await Promise.all([configGetAll(), cloudAiLockOn()]);
   const readiness = await readinessWith(
     config.clawai_token,
     config[HARNESS_FAULT_CONFIG_KEY],
-    codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]),
+    lockedDefaultProvider(codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]), locked),
+    locked,
   );
-  return roleModelMapFrom(config, readiness);
+  return roleModelMapFrom(config, readiness, locked);
 }
 
 /** The map off one config snapshot and the readiness already worked out from it — so the status pays for neither twice. */
-function roleModelMapFrom(config: Record<string, unknown>, readiness: CodingHarnessReadiness): TeamRoleModelMap {
-  const ownerProvider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
+function roleModelMapFrom(config: Record<string, unknown>, readiness: CodingHarnessReadiness, locked: boolean): TeamRoleModelMap {
+  const ownerProvider = lockedDefaultProvider(codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]), locked);
   const ownerEffort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
-  const stored = roleModelsFrom(config[CODING_AGENT_ROLE_MODELS_CONFIG_KEY]);
+  const storedRoles = roleModelsFrom(config[CODING_AGENT_ROLE_MODELS_CONFIG_KEY]);
+  const stored = locked ? roleModelsUnderLock(storedRoles) : storedRoles;
   const shared = sharedProblems(readiness);
   const map = {} as TeamRoleModelMap;
   for (const role of MODEL_ROLES) {
@@ -3212,6 +3329,9 @@ function adoptHistoryPolicy(raw: unknown): { policy: HistoryPolicy; rewritten: P
 }
 
 /** What the box keeps of finished runs. Absent means standard — see coding-run-history.ts. */
+/** The providers whose runs are Claude Code, each with a state folder of its own (harnessStateDir). */
+const CLAUDE_CODE_STATE_PROVIDERS = ["clawbox-ai", "anthropic", "local"] as const satisfies readonly CodingProvider[];
+
 export async function getHistoryPolicy(): Promise<HistoryPolicy> {
   const { policy, rewritten } = adoptHistoryPolicy(await configGet(CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY));
   await rewritten;
@@ -3220,11 +3340,12 @@ export async function getHistoryPolicy(): Promise<HistoryPolicy> {
 
 /**
  * The Claude Code settings files whose transcripts a run leaves behind: the
- * box's own harness folder (ClawBox AI runs) and the default one an Anthropic
- * run uses — harnessStateDir, both ways. One file when both are the same.
+ * box's own harness folder (ClawBox AI runs), the default one an Anthropic
+ * run uses and a `local` run's own — harnessStateDir, every Claude Code way.
+ * One file where two are the same.
  */
 export function harnessSettingsFiles(): string[] {
-  return [...new Set((["clawbox-ai", "anthropic"] as const).map((p) => path.join(harnessStateDir(p), "settings.json")))];
+  return [...new Set(CLAUDE_CODE_STATE_PROVIDERS.map((p) => path.join(harnessStateDir(p), "settings.json")))];
 }
 
 export interface HistoryRetentionChange {
@@ -3797,6 +3918,12 @@ export async function listProjects(): Promise<{ directory: string | null; projec
       if (first && !first.startsWith(".") && kinds.get(first)?.kind !== "worktree" && !parentByName.has(first)) workedIn.add(first);
     }
   }
+  // A multi-folder project's home (src/lib/project-folders.ts) is a project by
+  // its list, with or without a history of its own — it may be a plain folder
+  // made only to hold its runs.
+  for (const name of Object.keys(await listMultiFolderProjects().catch(() => ({})))) {
+    if (workedIn.size < MAX_PROJECT_FOLDERS && kinds.get(name)?.kind !== "worktree" && !parentByName.has(name)) workedIn.add(name);
+  }
   for (const folder of folders.names) {
     candidates.push({ base: folders.base, folder, kind: "folder", fromRun: workedIn.has(folder) });
   }
@@ -4084,11 +4211,12 @@ export async function clearHarnessFault(): Promise<void> {
 }
 
 export async function checkReadiness(): Promise<CodingHarnessReadiness> {
-  const config = await configGetAll();
+  const [config, locked] = await Promise.all([configGetAll(), cloudAiLockOn()]);
   return readinessWith(
     config.clawai_token,
     config[HARNESS_FAULT_CONFIG_KEY],
-    codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]),
+    lockedDefaultProvider(codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]), locked),
+    locked,
   );
 }
 
@@ -4120,8 +4248,8 @@ const CODEX_MISSING =
  * unconnected on the other. `ready` is the box's half plus the DEFAULT
  * provider's, because that is the run a caller who names nothing gets.
  */
-async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider: CodingProvider): Promise<CodingHarnessReadiness> {
-  const [wrapperInstalled, claudePath, setprivPath, anthropic, openai, scope] = await Promise.all([
+async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider: CodingProvider, locked: boolean): Promise<CodingHarnessReadiness> {
+  const [wrapperInstalled, claudePath, setprivPath, anthropic, openai, scope, localEngine] = await Promise.all([
     isExecutableFile(wrapperPath()),
     findExecutableOnPath("claude"),
     findExecutableOnPath(CAPABILITY_DROP_COMMAND),
@@ -4130,6 +4258,9 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
     // Cached for a minute inside the module, so a status poll pays for the bus
     // round trip at most once a minute.
     probeSystemdRun(),
+    // The box's own engine, for `local` (TASK-2501 PR-E): a store read, and
+    // for an Ollama model one `show` — no inference.
+    localCodingEngine(),
   ]);
   const claudeInstalled = claudePath !== null;
   const capabilityDropAvailable = setprivPath !== null;
@@ -4170,6 +4301,10 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
   const faultProblem = fault ? harnessFaultProblem(fault) : null;
   if (faultProblem) shared.push(faultProblem);
   const credentialProblem = (id: CodingProvider): string[] => {
+    // Under the local-only AI lock a cloud provider cannot run at all, whatever
+    // it holds: the lock's words, before any credential's.
+    if (locked && !providersUnderLock(true).includes(id)) return [lockedProviderRefusal(id)];
+    if (runsOnLocalEngine(id)) return localEngine.ok ? [] : [localEngine.error];
     if (id === "anthropic") return anthropic.connected ? [] : [ANTHROPIC_MISSING];
     if (id === "openai") {
       // The CLI first: a connected account with nothing to run it on is the
@@ -4234,7 +4369,10 @@ function sharedProblems(readiness: CodingHarnessReadiness): string[] {
 
 /** The owner's default provider. Anything unrecognised reads as ClawBox AI. */
 export async function getCodingProvider(): Promise<CodingProvider> {
-  return codingProviderFrom(await configGet(CODING_AGENT_PROVIDER_CONFIG_KEY));
+  const [stored, locked] = await Promise.all([configGet(CODING_AGENT_PROVIDER_CONFIG_KEY), cloudAiLockOn()]);
+  // Under the local-only AI lock the box's engine, whatever is stored: the
+  // stored choice is kept for the day the lock is lifted.
+  return lockedDefaultProvider(codingProviderFrom(stored), locked);
 }
 
 /**
@@ -4248,6 +4386,9 @@ export async function getCodingProvider(): Promise<CodingProvider> {
 export async function setCodingProvider(provider: string): Promise<CodingProvider> {
   if (!isCodingProvider(provider)) {
     throw new CodingAgentError("invalid", `Provider must be one of: ${CODING_PROVIDERS.join(", ")}.`);
+  }
+  if (!providersUnderLock(await cloudAiLockOn()).includes(provider)) {
+    throw new CodingAgentError("invalid", lockedProviderRefusal(provider));
   }
   await configSet(CODING_AGENT_PROVIDER_CONFIG_KEY, provider);
   return provider;
@@ -4271,6 +4412,9 @@ export async function setConnectedProviders(raw: unknown): Promise<{ providers: 
   if (raw.length === 0) {
     throw new CodingAgentError("invalid", "At least one provider must stay connected: runs need an account to start on.");
   }
+  const allowed = providersUnderLock(await cloudAiLockOn());
+  const refused = providers.find((id) => !allowed.includes(id));
+  if (refused) throw new CodingAgentError("invalid", lockedProviderRefusal(refused));
   await configSet(CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY, providers);
   const current = codingProviderFrom(await configGet(CODING_AGENT_PROVIDER_CONFIG_KEY));
   if (!providers.includes(current)) await configSet(CODING_AGENT_PROVIDER_CONFIG_KEY, providers[0]);
@@ -4290,8 +4434,9 @@ export async function setConnectedProviders(raw: unknown): Promise<{ providers: 
 
 /** The connected providers as stored (the default provider alone on a record from before the list). */
 export async function getConnectedProviders(): Promise<CodingProvider[]> {
-  const config = await configGetAll();
-  return connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]));
+  const [config, locked] = await Promise.all([configGetAll(), cloudAiLockOn()]);
+  // Under the lock the box's engine alone: what a role may be pinned to then.
+  return lockedConnectedProviders(connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY])), locked);
 }
 
 /**
@@ -4334,6 +4479,16 @@ function normalizeRequestedModel(provider: unknown, raw: unknown): string | null
  * "Claude Code is not installed": a sentence for the owner, not a retry.
  */
 async function assertProviderReady(provider: CodingProvider): Promise<void> {
+  // The lock is checked here too, and last before anything spawns: whatever
+  // route a cloud provider reached this far by, the run does not start.
+  if (!providersUnderLock(await cloudAiLockOn()).includes(provider)) {
+    throw Object.assign(new CodingAgentError("not_ready", lockedProviderRefusal(provider)), { code: CLOUD_AI_LOCKED_CODE });
+  }
+  if (runsOnLocalEngine(provider)) {
+    const engine = await localCodingEngine();
+    if (!engine.ok) throw new CodingAgentError("not_ready", engine.error);
+    return;
+  }
   if (provider === "anthropic") {
     const anthropic = await getAnthropicConnection();
     if (!anthropic.connected) throw new CodingAgentError("not_ready", ANTHROPIC_MISSING);
@@ -4354,24 +4509,29 @@ async function assertProviderReady(provider: CodingProvider): Promise<void> {
 export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
   // One read of config.json for every setting the status carries — the app
   // polls this, and each getter above opens and parses the file on its own.
-  const config = await configGetAll();
+  // The lock is its own read: it fails CLOSED on a store it cannot read,
+  // which a snapshot that came back empty cannot say.
+  const [config, locked] = await Promise.all([configGetAll(), cloudAiLockOn()]);
   const enabled = codingAgentEnabledFrom(config[CODING_AGENT_CONFIG_KEY]);
   const defaultDirectory = defaultDirectoryFrom(config[CODING_AGENT_DIR_CONFIG_KEY]);
   const effort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
-  const provider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
-  const [readiness, projectFolders] = await Promise.all([
-    readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY], provider),
+  const storedProvider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
+  const provider = lockedDefaultProvider(storedProvider, locked);
+  const [readiness, projectFolders, localEngine] = await Promise.all([
+    readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY], provider, locked),
     readFolderNames(defaultDirectory),
+    localCodingEngine(),
   ]);
-  const connectedProviders = connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], provider);
+  const connectedProviders = lockedConnectedProviders(connectedProvidersFrom(config[CODING_AGENT_CONNECTED_PROVIDERS_CONFIG_KEY], storedProvider), locked);
   return {
     enabled,
     // Off the SAME config snapshot as everything else here — the app polls
-    // this route, and `readClawaiEntitlementTier` would open the file again
-    // for two keys we already hold. `clawaiEntitlementTier` is the one rule
-    // for reading the plan/badge pair, so this cannot disagree with the
-    // routes that refuse on it.
-    planGate: planGateFor(clawaiEntitlementTier(config[CLAWAI_PLAN_TIER_KEY], config.clawai_tier)),
+    // this route, and `readPlanEntitlement` would open the file again for keys
+    // we already hold. `planEntitlementFromStore` is the same rule over the
+    // snapshot — the ClawBox AI plan/badge pair, or a subscription linked for
+    // its plan alone (TASK-2501) — so this cannot disagree with the routes
+    // that refuse on it.
+    planGate: planGateFor(planEntitlementFromStore(config).tier),
     defaultDirectory,
     suggestedDirectory: suggestedDefaultDirectory(),
     ready: enabled && readiness.ready,
@@ -4392,8 +4552,9 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // A retired value is rewritten in the background; the status does not wait.
     historyRetention: adoptHistoryPolicy(config[CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY]).policy.mode,
     historyLiveKept: MAX_RUNS_KEPT,
-    // One switch over the two keys: on only when both are.
-    generateMedia: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]) && generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
+    // One switch over the two keys: on only when both are. Off under the
+    // local-only AI lock: pictures and clips are drawn by ClawBox AI's cloud.
+    generateMedia: !locked && generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]) && generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
     teamDynamic: config[CODING_TEAM_DYNAMIC_CONFIG_KEY] === true,
     // The home, so a harness-project rule is still on the list the panels
@@ -4421,8 +4582,11 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
       openaiConnected: readiness.openaiConnected,
       connected: connectedProviders,
       defaultProvider: provider,
+      locked,
     }),
     connectedProviders,
+    cloudAiLocked: locked,
+    localEngineModel: localEngine.ok ? localEngine.engine.model : null,
     effort,
     // Always include whatever is actually set. A box that stored "high"
     // before the picker narrowed to three would otherwise show a row with
@@ -4434,7 +4598,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // never chose answers all "auto" and runs on the role defaults.
     roleModels: roleModelsView(roleModelsFrom(config[CODING_AGENT_ROLE_MODELS_CONFIG_KEY])),
     // Off the same snapshot and the readiness above: no second probe per poll.
-    roleModelMap: roleModelMapFrom(config, readiness),
+    roleModelMap: roleModelMapFrom(config, readiness, locked),
     projectFolders,
     // The ceiling a writing run gets — a safety net the panel no longer
     // edits (SCA3), so no range travels with it.
@@ -4765,6 +4929,9 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // worktree on it is no worktree at all and the run is read as one working
     // in its folder — which is what every record written before this is.
     worktree: parseRunWorktree((raw as { worktree?: unknown }).worktree),
+    // Only on a multi-folder run, and only as strict as the worktree above:
+    // every path in it reaches `git worktree remove`.
+    ...parseRunMultiFolder((raw as { multiFolder?: unknown }).multiFolder),
     // Only a deliverable this code could have written counts; anything else on
     // a hand-edited record is no deliverable at all, the way parsePauseReason
     // treats a reason it does not recognise. A record that loses its
@@ -4860,6 +5027,29 @@ function parseRunWorktree(raw: unknown): RunWorktree | null {
   };
 }
 
+/** A multi-folder run's copies off disk, as a spread: `{}` for every other run, so its record has no such key at all. */
+function parseRunMultiFolder(raw: unknown): { multiFolder?: RunMultiFolder } {
+  if (!raw || typeof raw !== "object") return {};
+  const m = raw as { project?: unknown; folders?: unknown };
+  if (typeof m.project !== "string" || !path.isAbsolute(m.project) || !Array.isArray(m.folders)) return {};
+  const folders: RunFolder[] = [];
+  for (const f of m.folders) {
+    const wt = parseRunWorktree(f);
+    const name = (f as { name?: unknown } | null)?.name;
+    if (!wt || typeof name !== "string" || !name) continue;
+    const commit = (f as { commit?: unknown }).commit;
+    const pr = (f as { pr?: { number?: unknown; url?: unknown } | null }).pr;
+    folders.push({
+      ...wt,
+      name,
+      commit: typeof commit === "string" && commit ? commit : null,
+      pr: pr && typeof pr.number === "number" && typeof pr.url === "string" ? { number: pr.number, url: pr.url, ...((pr as { behind?: unknown }).behind === true ? { behind: true } : {}) } : null,
+      ...(typeof (f as { held?: unknown }).held === "string" && (f as { held: string }).held ? { held: (f as { held: string }).held } : {}),
+    });
+  }
+  return folders.length ? { multiFolder: { project: m.project, folders } } : {};
+}
+
 /** Every blocker this box words a next step for; anything else off disk is not one. */
 const MERGE_HOME_BLOCKERS: readonly MergeHomeBlocker[] = ["not_on_base", "dirty", "conflict", "failed", "stopped"];
 
@@ -4894,8 +5084,8 @@ function parseWorktreeResult(raw: unknown): RunWorktreeResult | null {
  * question everywhere until a run could have a worktree, and a surface that
  * kept asking it would file every run under a folder named after the run.
  */
-export function projectDirectoryOf(run: Pick<CodingRun, "directory" | "worktree">): string {
-  return run.worktree?.project ?? run.directory;
+export function projectDirectoryOf(run: Pick<CodingRun, "directory" | "worktree" | "multiFolder">): string {
+  return run.worktree?.project ?? run.multiFolder?.project ?? run.directory;
 }
 
 function normalizeMedia(raw: unknown): RunMedia {
@@ -5654,6 +5844,9 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     settings: { effort: run.effort, maxTurns: run.maxTurns },
     commandMayHaveSideEffects: false,
     timeout: setInterval(() => {
+      // The local-only AI lock (TASK-2501), asked every minute: a cloud run
+      // already going when it went on is paused (pauseCloudRunUnderLock).
+      if (!runsOnLocalEngine(run.provider)) void pauseCloudRunUnderLock(run, state).catch(() => {});
       const idleFor = Date.now() - run.lastActivityAt;
       if (idleFor < RUN_IDLE_TIMEOUT_MS) return;
       state.timedOut = true;
@@ -5832,6 +6025,7 @@ function cloneRun(run: CodingRun): CodingRun {
     // Nested, so it needs its own copy: a shared object here would let a route
     // holding a clone see the watcher's later writes — and mutate them.
     pr: run.pr ? { ...run.pr, checks: { ...run.pr.checks } } : null,
+    ...(run.multiFolder ? { multiFolder: { project: run.multiFolder.project, folders: run.multiFolder.folders.map((f) => ({ ...f, pr: f.pr ? { ...f.pr } : null })) } } : {}),
     // Nested for the same reason `pr` is: a route holding a clone must not see
     // — or be able to write — the loop's own later rounds.
     review: run.review ? { ...run.review, checks: run.review.checks.map((c) => ({ ...c })) } : null,
@@ -5905,9 +6099,9 @@ export interface RunHistorySummary {
   transcripts: HarnessTranscriptState[];
 }
 
-/** The Claude Code folders a run's transcript lands in (both providers'). */
+/** The Claude Code folders a run's transcript lands in (every Claude Code provider's). */
 function harnessTranscriptDirs(): string[] {
-  return [...new Set((["clawbox-ai", "anthropic"] as const).map((p) => path.join(harnessStateDir(p), "projects")))];
+  return [...new Set(CLAUDE_CODE_STATE_PROVIDERS.map((p) => path.join(harnessStateDir(p), "projects")))];
 }
 
 export async function runHistorySummary(): Promise<RunHistorySummary> {
@@ -6205,6 +6399,13 @@ export async function resolveWorkingDirectory(input: {
   const home = path.resolve(homeDir());
 
   if (projectId) {
+    // A MULTI-FOLDER project (src/lib/project-folders.ts) is a folder project
+    // named by its id: its home is that folder in the owner's project folder.
+    // A code project of the same id still wins, so nothing that resolved before
+    // resolves differently now.
+    if (!(validateProjectId(projectId) && fs.existsSync(projectPath(projectId))) && (await readMultiFolderList(projectId))) {
+      return resolveWorkingDirectory({ directory: projectId });
+    }
     if (!validateProjectId(projectId)) throw new CodingAgentError("invalid", "Invalid project id.");
     const dir = path.resolve(projectPath(projectId));
     if (!dir.startsWith(projectsRoot + path.sep)) throw new CodingAgentError("invalid", "Invalid project id.");
@@ -6359,7 +6560,7 @@ export const NO_HELPERS_BRIEF =
  * auto-merge sentence only for a run that can open a pull request or was
  * asked about one.
  */
-export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolean; visual?: boolean; pullRequest?: boolean; noHelpers?: boolean }): string {
+export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolean; visual?: boolean; pullRequest?: boolean; noHelpers?: boolean; seesImages?: boolean }): string {
   const helpers = opts.noHelpers ? NO_HELPERS_BRIEF : leanHelpersBrief(opts.reviewedSeparately);
   // A team's run is told the opposite of PR_AUTO_MERGE_BRIEF, in its place: a
   // team goal that asks for a merge is the ORCHESTRATOR's to carry out, once,
@@ -6369,7 +6570,7 @@ export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolea
     ...LEAN_BRIEF_HEAD,
     helpers,
     ...LEAN_BRIEF_MIDDLE,
-    ...(opts.visual !== false ? [LEAN_VISUAL_BRIEF] : []),
+    ...(opts.visual !== false ? [opts.seesImages ? LEAN_VISUAL_BRIEF_SIGHTED : LEAN_VISUAL_BRIEF] : []),
     ...LEAN_BRIEF_TAIL,
     ...(merge ? [merge] : []),
     LEAN_FINAL_MESSAGE,
@@ -6483,12 +6684,33 @@ const LEAN_BRIEF_MIDDLE = [
 ];
 
 /** The lean brief's browser and visual-verification block — a visual run's only. */
+const VISUAL_BRIEF_SERVE =
+  "To check a web app, start it as a background child in this folder and browser_open http://127.0.0.1:PORT (an unprivileged port; only your own listener is reachable) — or run `node \"$CLAWBOX_PREVIEW\" --ttl 900`, which builds, serves and prints PREVIEW_PID and PREVIEW_URL. Verify the real API-backed UI, not a static shim; stop test servers when done.";
+const VISUAL_BRIEF_DRIVE =
+  "Set fields with browser_fill and use browser_click; never drive a page key by key — prove logic with a small node script, and spend the browser on ONE pass, one screenshot per state that matters.";
+
 export const LEAN_VISUAL_BRIEF = [
-  "To check a web app, start it as a background child in this folder and browser_open http://127.0.0.1:PORT (an unprivileged port; only your own listener is reachable) — or run `node \"$CLAWBOX_PREVIEW\" --ttl 900`, which builds, serves and prints PREVIEW_PID and PREVIEW_URL. Verify the real API-backed UI, not a static shim; stop test servers when done.",
+  VISUAL_BRIEF_SERVE,
   "You cannot see images: browser_view_local (a standalone HTML file), browser_open and browser_screenshot save a screenshot to the evidence folder and answer with its description — read it before you report done.",
-  // Measured: one run spent 103 steps on single keypresses and was cut off;
-  // each reply is a step, however many tool calls it carries.
-  "Set fields with browser_fill and use browser_click; never drive a page key by key — prove logic with a small node script, and spend the browser on ONE pass, one screenshot per state that matters.",
+  VISUAL_BRIEF_DRIVE,
+].join(" ");
+
+/**
+ * The same block for a run on a model that SEES (an `anthropic` run: every
+ * Claude model reads a PNG through its own Read tool — checked on the box,
+ * 2026-11-09). "You cannot see images" was written for the plan's image-blind
+ * model, and a Claude run that believed it judged its own interface by a
+ * small vision model's paragraph, which names what is on a screen and misses
+ * what is wrong with it: a clipped label, two overlapping controls, a colour
+ * that is off. The description still comes back with every screenshot — the
+ * pull request's evidence table is written from it — and for such a run the
+ * picture comes back with it, in the same reply (mcp/tools/browser.ts
+ * `pageResult`): a separate Read of the PNG was a second call per screen.
+ */
+export const LEAN_VISUAL_BRIEF_SIGHTED = [
+  VISUAL_BRIEF_SERVE,
+  "browser_view_local (a standalone HTML file), browser_open and browser_screenshot save a screenshot to the evidence folder and answer with the picture itself and a short description of it written by a small vision model. You can see images: judge layout, spacing, colour and exact text by the picture, never by the description alone — it names what is on the screen and misses what is wrong with it — and look at every changed screen before you report an interface done.",
+  VISUAL_BRIEF_DRIVE,
 ].join(" ");
 
 const LEAN_BRIEF_TAIL = [
@@ -6789,6 +7011,18 @@ export function fileDenyRules(allowRules: readonly string[] = []): string[] {
     // deny, and the allow rule is what would open it once it appears.
     for (const { dir } of open) denyEntries(dir, [], (entry) => unlocked.includes(path.join(dir, entry)));
   }
+  // A harness state folder its override moved (harnessStateDir) is not where
+  // the list above looks: denied whole wherever it is, unless it is one of the
+  // listed folders after all. Never a filesystem root or the home itself — an
+  // override that broad is a mistake, and its rule would shut the run out of
+  // its own folder.
+  for (const moved of [process.env.CLAUDE_DS_CONFIG_DIR, process.env.CLAUDE_DS_LOCAL_CONFIG_DIR]) {
+    if (typeof moved !== "string" || !path.isAbsolute(moved)) continue;
+    const dir = path.resolve(moved);
+    if (dir === path.parse(dir).root || dir === home) continue;
+    if (HARNESS_STATE_SUBTREES.some((sub) => path.join(home, sub) === dir)) continue;
+    denyTree(dir);
+  }
   denyEntries(DATA_DIR, DATA_SECRET_FILES, (entry) => DATA_DIR_PUBLIC_SUBTREES.has(entry));
   denyEntries(CONFIG_ROOT, [".env"], (entry) => path.join(CONFIG_ROOT, entry) === DATA_DIR);
   return rules;
@@ -6893,7 +7127,7 @@ export function runMediaEnv(media: RunMedia | undefined): string {
  * data/.mcp-token itself through its normal file fallback. Exported for the
  * contract test.
  */
-export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean }, opts: { visual?: boolean } = {}): string {
+export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean; seesImages?: boolean }, opts: { visual?: boolean } = {}): string {
   return JSON.stringify({ mcpServers: { clawbox: runClawboxServer(run, { visual: opts.visual !== false, readOnlyTools: false }) } });
 }
 
@@ -6904,7 +7138,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
  * to register — beside the harness servers exactly as the plan carries them.
  * Exported for the contract test.
  */
-export function buildRunMcpFileConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean }, plan: Pick<RunMcpPlan, "servers" | "readOnlyTools">, opts: { visual: boolean; solo?: boolean }): string {
+export function buildRunMcpFileConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean; seesImages?: boolean }, plan: Pick<RunMcpPlan, "servers" | "readOnlyTools">, opts: { visual: boolean; solo?: boolean }): string {
   const clawbox = opts.visual || run.team || plan.readOnlyTools || opts.solo
     ? { clawbox: runClawboxServer(run, { visual: opts.visual, readOnlyTools: plan.readOnlyTools }) }
     : {};
@@ -6912,7 +7146,7 @@ export function buildRunMcpFileConfig(run: { id: string; directory: string; medi
 }
 
 /** The run's own clawbox server entry. */
-function runClawboxServer(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean }, opts: { visual: boolean; readOnlyTools: boolean }) {
+function runClawboxServer(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null; readOnly?: boolean; seesImages?: boolean }, opts: { visual: boolean; readOnlyTools: boolean }) {
   // A run judged NOT visual (`looksVisual`) holds neither the browser family
   // nor the media tools: its server is told so, and registers only what is
   // left (a team run's `team_message`). Omitted, today's server.
@@ -6938,6 +7172,10 @@ function runClawboxServer(run: { id: string; directory: string; media?: RunMedia
       // Absent means the browser family registers, as it always has; "0"
       // is a run that holds none of it (mcp/lib/run-context.ts).
       ...(visual ? {} : { CLAWBOX_RUN_BROWSER: "0" }),
+      // A run on a model that reads pictures itself (an `anthropic` run):
+      // the server's own words then say where the PNG is instead of "your
+      // model cannot see images" (LEAN_VISUAL_BRIEF_SIGHTED).
+      ...(visual && run.seesImages ? { CLAWBOX_RUN_SEES_IMAGES: "1" } : {}),
       // Only for a run of a coding team, and all four or none: the server
       // registers `team_message` from them (mcp/lib/run-context.ts), and
       // the tool speaks as THIS run — the route then checks the claim
@@ -7005,8 +7243,35 @@ export interface RunArgsOptions { resumeSessionId?: string | null; maxTurns?: nu
  * Codex as `developer_instructions` — one text, so the two runners are told the
  * same things. Exported for the contract test.
  */
+/**
+ * What a run in its own copy of a project is told about that copy — only a
+ * writing run that is not a team's, and only in `<project>/.clawbox/worktrees/…`
+ * (`worktreeAppId`).
+ *
+ * Without it the two things the box does for such a copy are invisible:
+ * `CLAWBOX_APP_ID` (buildRunEnv) and the hard-linked `node_modules`
+ * (hardlinkSharedNodeModules). A project's own run notes, written by runs
+ * from before either existed, still say "run the gates from a copy in a
+ * folder named like the app" and "install again first", and a run believes
+ * its project's notes: with the variable already set, a run made a throwaway
+ * copy named `calculator` to run its gates and left the screenshots it
+ * refreshed there (run-w263ek7z, 2026-11-10).
+ *
+ * It does NOT say every check passes here. The variable only helps code that
+ * reads it: Calculator's `next.config.ts` did and its `mcp/server.mjs` took
+ * the path from its own folder's name, so in a copy the app mounted at
+ * `/apps/calculator` while the MCP server called `/apps/run-…` — 85 of 396
+ * smoke checks answered 404 (run-smi688vg). So the sentence names the rule
+ * and says what such a failure IS: the project's defect, to be fixed where
+ * it is, not walked round by copying the project.
+ */
+export function worktreeCopyBrief(appId: string): string {
+  return `This folder is a temporary copy of the project "${appId}" (a git worktree). CLAWBOX_APP_ID=${appId} is set for everything you run here, and node_modules holds the project's own packages as real files, so the project's checks run in THIS folder without installing again. Code that takes the app's /apps/${appId}/ path from a folder's name must read CLAWBOX_APP_ID first: where a check fails here only because of this folder's name, that line is the defect — fix it rather than copying the project into another folder, whatever an earlier run's note says.`;
+}
+
 export function buildRunSystemPrompt(opts: RunArgsOptions): string {
   const visual = runHoldsVisualTools(opts.visual);
+  const copyOf = !opts.readOnly && !opts.run?.team && opts.run?.directory ? worktreeAppId(opts.run.directory) : null;
   // A run whose diff a separate review will read is told not to review it
   // twice — see leanHelpersBrief. A team's run is told it never merges.
   const headless = headlessBrief({
@@ -7015,6 +7280,9 @@ export function buildRunSystemPrompt(opts: RunArgsOptions): string {
     visual,
     pullRequest: opts.draftPullRequests === true || opts.pullRequestMentioned === true,
     noHelpers: opts.noHelpers === true,
+    // Every Claude model reads a picture; the plan's own model and a Codex
+    // run keep the description alone (LEAN_VISUAL_BRIEF_SIGHTED).
+    seesImages: opts.provider === "anthropic",
   });
   // The media the run actually holds: none for a run without the tools.
   const media = visual ? opts.run?.media : undefined;
@@ -7040,6 +7308,8 @@ export function buildRunSystemPrompt(opts: RunArgsOptions): string {
     // The run's share of the CPU (src/lib/coding-run-cpu.ts). Not for a
     // read-only run: it runs nothing but read-only git, so no build to cap.
     ...(typeof opts.cpuBudget === "number" && opts.cpuBudget >= 1 && !opts.readOnly ? [cpuBudgetBrief(opts.cpuBudget)] : []),
+    // A run in its own copy of a project: what the box did for that copy.
+    ...(copyOf ? [worktreeCopyBrief(copyOf)] : []),
     // How a writing run adds a lesson to its project's run notes
     // (src/lib/coding-run-notes.ts); a read-only run cannot write one.
     ...(opts.lessonChannel && !opts.readOnly ? [LESSON_CHANNEL_BRIEF] : []),
@@ -7100,7 +7370,12 @@ export function runAllowRules(rules: readonly string[], directory: string | null
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: RunArgsOptions): string[] {
+export function buildRunArgs(given: RunArgsOptions): string[] {
+  // A run on the box's own engine never runs on ultracode (effortOnProvider),
+  // whatever effort reaches here: every start clamps it before recording it,
+  // and this holds for a record from before the clamp too — the read-only
+  // rule's belt and braces, the same way round.
+  const opts: RunArgsOptions = given.provider && given.effort ? { ...given, effort: effortOnProvider(given.provider, given.effort) } : given;
   // Does this run hold the browser and media tools? See runHoldsVisualTools.
   const visual = runHoldsVisualTools(opts.visual);
   // The project's extra servers: a writing run's only (prepareRunMcp hands a
@@ -7150,7 +7425,7 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // registers only what is left (a team's `team_message`), so no browser
     // profile starts and no media allowance is handed to a run that reads.
     // A single writing run always gets it: its server registers `assistant_message`.
-    else if (visual || opts.run.team || !opts.readOnly) args.push("--mcp-config", buildRunMcpConfig(opts.run, { visual: visual && !opts.readOnly }));
+    else if (visual || opts.run.team || !opts.readOnly) args.push("--mcp-config", buildRunMcpConfig({ ...opts.run, ...(opts.provider === "anthropic" ? { seesImages: true } : {}) }, { visual: visual && !opts.readOnly }));
     // acceptEdits only covers the working folder; without this, the run's own
     // Write into its evidence folder is denied — the brief's promise broken
     // (measured on run-yuyqta4t: pomodoro-verification.md refused).
@@ -7225,7 +7500,8 @@ export function buildRunArgs(opts: RunArgsOptions): string[] {
     // outranks the whole-server approval above.
     // A read-only run, which has Bash for read-only git, is refused all of it
     // and every mutating git command too, in a team or not (READ_ONLY_BASH_DENYLIST).
-    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? READ_ONLY_BASH_DENYLIST : [...BASH_KILL_DENYLIST, ...(opts.run?.team ? TEAM_MERGE_DENYLIST : [])]), ...(mcp?.disallowedTools ?? []));
+    // A `local` run is refused the web tools by rule as well (LOCAL_DENIED_TOOLS).
+    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? READ_ONLY_BASH_DENYLIST : [...BASH_KILL_DENYLIST, ...(opts.run?.team ? TEAM_MERGE_DENYLIST : [])]), ...(mcp?.disallowedTools ?? []), ...(opts.provider && runsOnLocalEngine(opts.provider) ? LOCAL_DENIED_TOOLS : []));
   }
   return args;
 }
@@ -7628,7 +7904,29 @@ export function previewScriptPath(): string {
   return path.join(CONFIG_ROOT, "scripts", "clawbox-preview.mjs");
 }
 
-export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string>; gitIdentity?: CodingGitIdentity; maxReplyTokens?: number | null } = {}): Record<string, string> {
+/**
+ * Where a `local` run's wrapper finds the box's Messages-API route (TASK-2501
+ * PR-E): the Local AI proxy's loopback authority, which knows the port the
+ * web server listens on. The wrapper asks the route itself for the engine's
+ * model and window, and derives the token that opens it from the box's own
+ * Local AI token (scripts/claude-ds) — so nothing here is async, and the
+ * engine's own key is never anywhere near a run.
+ */
+export function localRunBaseUrl(): string {
+  return `${getLocalAiProxyRootUrl()}/setup-api/local-ai/anthropic`;
+}
+
+/**
+ * The Claude Code tools a `local` run is DENIED by rule, beside not being
+ * listed in `--tools` (CLAUDE_TOOLS): WebSearch is a tool Anthropic's own
+ * servers run, which the box's engine cannot, and WebFetch would carry what a
+ * run reads off the web through a model's summary the lock exists to keep
+ * local. The wrapper writes the same pair into the local harness's settings
+ * (scripts/claude-ds), so a terminal session on `local` is refused them too.
+ */
+export const LOCAL_DENIED_TOOLS: readonly string[] = Object.freeze(["WebSearch", "WebFetch"]);
+
+export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string>; gitIdentity?: CodingGitIdentity; maxReplyTokens?: number | null; appId?: string | null } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -7651,7 +7949,10 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   }
   // The owner's setting wins over anything inherited: this is the knob the
   // Coding Agent app writes, and a stale shell variable must not override it.
-  if (opts.effort) env.CLAUDE_DS_EFFORT = opts.effort;
+  // As the provider runs it (effortOnProvider): the wrapper turns an
+  // ultracode here into `--effort ultracode`, so a `local` run's — a draft's,
+  // an older record's — is clamped on this side as well as in the argv.
+  if (opts.effort) env.CLAUDE_DS_EFFORT = opts.provider ? effortOnProvider(opts.provider, opts.effort) : opts.effort;
   // Which account pays. Always written, never left to whatever the web
   // server's own environment happens to carry: an inherited CLAUDE_DS_PROVIDER
   // would decide who is billed for a run nobody asked to move.
@@ -7672,6 +7973,16 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
     for (const key of Object.keys(env)) if (key.startsWith("CLAUDE_") || key === "CLAWBOX_AI_PROXY_URL") delete env[key];
     env.CODEX_HOME = codexHome();
   }
+  // A `local` run is Claude Code on the box's own engine: no ClawBox AI proxy,
+  // no model override (the engine serves one model, which the wrapper puts in
+  // every slot), no ClawBox AI state folder. What the wrapper needs to reach
+  // the engine's route comes from the box, here, not from anything inherited.
+  if (runsOnLocalEngine(provider)) {
+    for (const key of ["CLAWBOX_AI_PROXY_URL", "CLAUDE_DS_MODEL", "CLAUDE_DS_SMALL_MODEL", "CLAUDE_DS_CONFIG_DIR"]) delete env[key];
+    const localDir = process.env.CLAUDE_DS_LOCAL_CONFIG_DIR;
+    if (typeof localDir === "string" && localDir) env.CLAUDE_DS_LOCAL_CONFIG_DIR = localDir;
+    env.CLAUDE_DS_LOCAL_BASE_URL = localRunBaseUrl();
+  }
   // The run's evidence folder — the brief tells the run to save proof of its
   // work here, and the browser MCP layer saves screenshots into it.
   if (opts.artifactsDir) env.CLAWBOX_RUN_ARTIFACTS_DIR = opts.artifactsDir;
@@ -7685,6 +7996,11 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // it is a CLAWBOX_ name, which setSecret refuses, so the owner's secret store
   // cannot point a run's preview at something else. See previewScriptPath.
   env.CLAWBOX_PREVIEW = previewScriptPath();
+  // Which app a run in a worktree is a copy of (`worktreeAppId`): the project
+  // folder's name, so an app that mounts itself by its folder's name still
+  // mounts at `/apps/<the app>` and not at `/apps/<the run's id>`. A CLAWBOX_
+  // name, so no stored secret can rename the app under a run.
+  if (opts.appId) env.CLAWBOX_APP_ID = opts.appId;
   // How many parallel jobs the run's builds and tests may start
   // (src/lib/coding-run-cpu.ts) — the number its brief tells it to pass to
   // `--maxWorkers` and `-j`. A CLAWBOX_ name, so no stored secret can raise it.
@@ -8212,6 +8528,12 @@ function trimProgress(run: { progress: string[]; progressAt: number[] }): void {
 /** Staging a 200-step run through the harness is not a unit test; the trim is. */
 export const trimProgressForTests = trimProgress;
 
+/** Push one feed line onto a run, for the tests that need a feed at its cap. */
+export function pushRunProgressForTests(runId: string, line: string): void {
+  const run = loadRuns().find((r) => r.id === runId);
+  if (run) pushProgress(run, line);
+}
+
 function relativeToRun(run: CodingRun, file: unknown): string | null {
   if (typeof file !== "string" || !file) return null;
   const abs = path.isAbsolute(file) ? file : path.join(run.directory, file);
@@ -8715,6 +9037,19 @@ export function folderListing(directory: string): string {
   if (names.length === 0) return "this folder is empty.";
   if (names.length > FOLDER_LISTING_MAX) return `this folder has ${names.length} top-level entries.`;
   return `this folder contains: ${names.join(", ")}`;
+}
+
+/**
+ * What a MULTI-FOLDER run is told beside the folder line (TASK-2757): which
+ * subfolders are its repositories, on which branch each one is, and that the
+ * folder itself is none — so it commits in each repository it changes and
+ * never runs `git init` where the box will not look. Empty for every other run.
+ */
+function multiFolderNote(run: CodingRun): string {
+  const folders = run.multiFolder?.folders;
+  if (!folders?.length) return "";
+  const each = folders.map((f) => `${f.name}/ (branch ${f.branch}, forked from ${f.base})`).join(", ");
+  return `This project has ${folders.length} git repositories, each a subfolder here with its own copy and branch: ${each}. This folder itself is not a repository: run git inside the subfolder you changed, and never git init here. The box commits what you leave in each repository when you finish. `;
 }
 
 /**
@@ -9407,6 +9742,146 @@ async function recordRunWork(run: CodingRun): Promise<void> {
   // A read-only run changed nothing and commits nothing: the only commit the
   // folder's log could answer with is somebody else's.
   if (run.readOnly) return;
+  if (run.multiFolder) {
+    await commitRunFolders(run, run.multiFolder);
+    return;
+  }
+  await commitRunChanges(run);
+  await healRunPaths(run);
+  await noteCommittedFiles(run);
+}
+
+/**
+ * A multi-folder run's commits: one per repository, each in its own copy.
+ * Everything in a copy is the run's — nobody else works there — so each is
+ * committed whatever the tools reported, and its branch's newest commit is
+ * recorded on the folder when the branch holds anything (the run's own
+ * commits through its shell included). The run's folder itself is never a
+ * repository and is never committed: `commitRunWork` there would make one.
+ */
+async function commitRunFolders(run: CodingRun, multi: RunMultiFolder): Promise<void> {
+  const failed: string[] = [];
+  for (const f of multi.folders) {
+    if (f.removed || !fs.existsSync(f.path)) continue;
+    try {
+      // Committed on a branch of its own in this copy: brought onto the
+      // folder's branch first, as `adoptRunBranchWork` does for a single run.
+      // When it cannot be, it is said, and the settle keeps the copy.
+      const adopted = await adoptOwnBranchWork(f.path, f.branch);
+      if (!adopted.ok) {
+        // Its branch is not its work now: nothing of this repository goes out
+        // — no commit on whatever is checked out, no pull request, no merge.
+        f.held = `the run committed on a branch of its own, which could not be brought onto ${f.branch}: ${adopted.detail}`;
+        // Not the run's `commitError`: that keeps EVERY copy at settle, and
+        // only this repository's work is in doubt.
+        pushProgress(run, RUNNER_STEP.notCommitted(`${f.name}: ${f.held}`));
+        mirrorOntoOrigin(run, f);
+        continue;
+      }
+      delete f.held;
+      const outcome = await commitRunWork({ directory: f.path, runId: run.id, task: run.task, summary: run.summary });
+      if (outcome.committed) pushProgress(run, RUNNER_STEP.folderCommitted(f.name, outcome.sha));
+      else if (outcome.reason !== "no_changes") {
+        failed.push(`${f.name}: ${outcome.detail ?? outcome.reason}`);
+        pushProgress(run, RUNNER_STEP.notCommitted(`${f.name}: ${outcome.detail ?? outcome.reason}`));
+      }
+      const ahead = await commitsAhead(f.project, f.branch, f.base);
+      f.commit = ahead && ahead > 0 ? await headCommitShort(f.path) : null;
+      // What the branch changed, as the run's own files (`<folder>/<path>`):
+      // a run that wrote only through its shell has no tool-reported file,
+      // and an empty list reads as "changed nothing" to the review pass.
+      if (ahead && ahead > 0) {
+        const diff = await gitIn(f.path, ["diff", "--name-only", "-z", `${f.base}...HEAD`]);
+        if (diff.code === 0) for (const file of diff.stdout.split("\0").filter(Boolean).slice(0, MAX_COMMITTED_FILES)) noteFile(run, path.join(f.name, file));
+      }
+      mirrorOntoOrigin(run, f);
+    } catch (err) {
+      failed.push(`${f.name}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  // The run's own fields, so everything that reads them (the review pass, the
+  // project row, a team) sees that work was committed, or why it was not.
+  run.commit = multi.folders.find((f) => f.commit)?.commit ?? null;
+  run.commitError = failed.length ? failed.join("; ").slice(0, MAX_ERROR_CHARS) : null;
+  persist(true);
+}
+
+/**
+ * A review pass or review round works on copies of its ORIGIN's folder
+ * records; the pull request step and the deliverable gate read the origin's.
+ * What a follow-up's commit learned about a repository is written there too.
+ */
+function mirrorOntoOrigin(run: CodingRun, f: RunFolder): void {
+  const originId = run.reviewOf ?? run.reviewLoopOf;
+  if (!originId) return;
+  const twin = loadRuns().find((r) => r.id === originId)?.multiFolder?.folders.find((o) => o.name === f.name);
+  if (!twin) return;
+  twin.commit = f.commit ?? twin.commit;
+  if (f.held) twin.held = f.held;
+  else delete twin.held;
+}
+
+/** No run's commits are read past this many paths: the list is for the owner's page and the review's brief, not an index. */
+const MAX_COMMITTED_FILES = 500;
+
+/**
+ * The files the run's OWN COMMITS changed, added to what its tools confirmed.
+ *
+ * `filesTouched` is read off the Edit, Write and NotebookEdit calls. A run that
+ * writes through its shell — `python3 - <<EOF … open(p, "w")`, `cat > file`,
+ * `sed -i` — leaves the list short or EMPTY, and an empty list says "this run
+ * changed nothing" to everything that reads it: the automatic review pass was
+ * skipped for a run that committed twelve files (run-8lmn0l4c, Opus 5.5 at low
+ * effort, 2026-11-10), and a review judged whether a change had a face from a
+ * list without the screen's own file in it. Once the work is committed git
+ * knows better: the paths that differ between where the folder stood when the
+ * run began (`headAtStart`) and its HEAD, relative to the run's folder.
+ *
+ * Bounded, and never throws: a folder that had no commit to start from, or a
+ * run with no commit of its own, adds nothing.
+ */
+async function noteCommittedFiles(run: CodingRun): Promise<void> {
+  if (!run.commit || !run.headAtStart) return;
+  try {
+    const diff = await gitIn(run.directory, ["diff", "--name-only", "--relative", "-z", `${run.headAtStart}..HEAD`]);
+    if (diff.code !== 0) return;
+    const before = run.filesTouched.length;
+    for (const file of diff.stdout.split("\0").filter(Boolean).slice(0, MAX_COMMITTED_FILES)) noteFile(run, file);
+    if (run.filesTouched.length !== before) persist(true);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id} committed files not read:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * A run in a worktree wrote THAT folder's path into its files — the command a
+ * README documents, a config's path — and the folder is removed once the work
+ * is merged (coding-worktree-heal.ts): each mention is said in the project's
+ * own folder instead, as one more commit on the run's branch. After the run's
+ * own commit, before a team merges the branch or a pull request is pushed.
+ * Never throws; a rewrite that could not be made leaves the branch as it is.
+ */
+async function healRunPaths(run: CodingRun): Promise<void> {
+  if (run.commitError) return;
+  try {
+    const healed = await healWorktreePaths(run.directory);
+    if (!healed) return;
+    if (!healed.ok) {
+      console.error(`[coding-agent] ${run.id} paths not rewritten: ${healed.detail}`);
+      return;
+    }
+    if (!healed.files.length) return;
+    if (healed.commit) run.commit = healed.commit;
+    pushProgress(run, RUNNER_STEP.pathsRewritten(healed.files));
+    persist(true);
+    console.error(`[coding-agent] ${run.id} rewrote its worktree's path in ${healed.files.length} file(s)`);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id} paths not rewritten:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/** The commit itself — `recordRunWork`'s first half. */
+async function commitRunChanges(run: CodingRun): Promise<void> {
   // No file the tools confirmed — but a run that wrote through its shell and
   // committed there has a commit of its own to record all the same. In a run's
   // OWN worktree the shell's files are the run's too (a background job's
@@ -9516,6 +9991,9 @@ async function noteOwnCommit(run: CodingRun): Promise<void> {
  * picture is cosmetic where a run that waited on one is not.
  */
 async function drawProjectIcon(run: CodingRun): Promise<{ icon: string; favicon: boolean }> {
+  // The icon is drawn by ClawBox AI's cloud: never under the local-only AI
+  // lock (TASK-2501), not even for a run started before the owner turned it on.
+  if (await cloudAiLockOn()) return { icon: "", favicon: false };
   // The PROJECT's folder name, never the worktree's — a worktree is named
   // after the run, and the icon is one per project. The picture itself is
   // still drawn into `run.directory`, so the run can link to a favicon that
@@ -9532,7 +10010,8 @@ async function drawProjectIcon(run: CodingRun): Promise<{ icon: string; favicon:
 
 /** The start-of-run hook: only when the owner left pictures on, never for a review, and never for a team's worker or reviewer — their folder is a worktree named after a task, not a project. */
 function startProjectIcon(run: CodingRun): void {
-  if (!run.media.images || run.reviewOf || (run.team && run.team.role !== "planner")) return;
+  // Nor for a multi-folder run: its folder holds its repositories, not pages to link a favicon from.
+  if (!run.media.images || run.reviewOf || (run.team && run.team.role !== "planner") || run.multiFolder) return;
   void drawProjectIcon(run).catch(() => {
     // ensureProjectIcon already logged; a missing icon never reaches the run.
   });
@@ -9556,7 +10035,48 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
   // review loop all work in this very tree, and `settleRunWorktree` steps
   // aside while any of them is live. Whichever record settles last is the one
   // that finds the tree idle and decides what becomes of it.
-  await settleRunWorktree(run);
+  await settleRunCopies(run);
+}
+
+/** The run's copies settled, whichever kind it has. */
+function settleRunCopies(run: CodingRun): Promise<void> {
+  return run.multiFolder ? settleRunFolders(run, run.multiFolder) : settleRunWorktree(run);
+}
+
+/**
+ * A multi-folder run's copies, settled one repository at a time by the same
+ * rule a single run's copy is (`settleRunWorktree`): nothing on a branch, the
+ * copy and the branch go; a pull request owns it, the copy goes and the
+ * branch stays; otherwise it is merged home into that repository's base.
+ * Then the run's folder goes too, once nothing is left in it. Never throws.
+ */
+async function settleRunFolders(run: CodingRun, multi: RunMultiFolder): Promise<void> {
+  try {
+    if (liveRunsIn(run.directory).length > 0) return;
+    // Settled lost at boot while nobody could say whether its scope was still
+    // up: none of the copies is this settle's to touch (`settleRunWorktree`).
+    if (store.keepTrees.delete(run.id)) {
+      pushProgress(run, RUNNER_STEP.worktreeKept("the box could not tell whether the run was still working in it"));
+      persist(true);
+      return;
+    }
+    // The pull requests are the ORIGIN's when this is its review pass.
+    const origin = run.reviewOf ?? run.reviewLoopOf;
+    const owner = origin ? loadRuns().find((r) => r.id === origin)?.multiFolder : undefined;
+    for (const f of multi.folders) {
+      if (f.held && !f.removed) {
+        pushProgress(run, `${f.name}: ${RUNNER_STEP.worktreeKept(f.held)}`);
+        continue;
+      }
+      const prOwned = !!(f.pr ?? owner?.folders.find((o) => o.name === f.name)?.pr);
+      await settleRunWorktree(run, f, { name: f.name, prOwned });
+    }
+    if (multi.folders.every((f) => f.removed)) {
+      try { fs.rmdirSync(run.directory); } catch { /* something else is in it: left for the owner */ }
+    }
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id} folders settle:`, err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -9622,7 +10142,8 @@ async function registerProjectApp(run: CodingRun): Promise<void> {
 }
 
 async function commitProjectAssets(run: CodingRun): Promise<void> {
-  if (!run.media.images || run.reviewOf || run.reviewLoopOf) return;
+  // Not a multi-folder run's: its folder is no repository to commit an icon in.
+  if (!run.media.images || run.reviewOf || run.reviewLoopOf || run.multiFolder) return;
   try {
     const drawn = await Promise.race([
       drawProjectIcon(run),
@@ -9678,6 +10199,12 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
 
     const origin = finished.reviewOf === null ? finished : loadRuns().find((r) => r.id === finished.reviewOf);
     if (!origin) return;
+
+    // A multi-folder run: one pull request per repository that changed.
+    if (origin.multiFolder) {
+      await openFolderPullRequests(origin, finished, ended);
+      return;
+    }
 
     // A run with NO pull request record of its own may still have opened one
     // itself, because its task said to. That is the defect this branch fixes:
@@ -9788,6 +10315,123 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     await beginPullRequestWatch(origin, { number, url, branch: prBranch, base, foundBy, reviewOk });
   } catch (err) {
     console.error(`[coding-agent] pull request for ${finished.id} not opened:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * A multi-folder run's pull requests as the deliverable gate reads one: its
+ * `pr` bar is met when EVERY repository it committed to has its pull request
+ * open. Null when one of them has none, when none was opened, or for every
+ * other run.
+ */
+async function folderPrForGate(run: CodingRun): Promise<PrState | null> {
+  const folders = run.multiFolder?.folders ?? [];
+  // Every repository whose branch holds the chain's work — asked of the branch
+  // itself, so a review pass's commits count — needs its request, holding all
+  // of it; one that changed nothing needs none; a held one fails the bar.
+  for (const x of folders) {
+    if (x.held) return null;
+    const ahead = await commitsAhead(x.project, x.branch, x.base);
+    if (ahead !== 0 && (!x.pr || x.pr.behind)) return null;
+  }
+  const f = folders.find((x) => x.pr);
+  if (!f?.pr) return null;
+  return {
+    phase: "waiting", number: f.pr.number, url: f.pr.url, branch: f.branch, base: f.base,
+    checks: emptyChecks(), detail: null, startedAt: run.startedAt, endedAt: null, reviewOk: true, foundBy: "opened",
+  };
+}
+
+/** The marked block a multi-folder run's pull requests name each other in: replaced, never duplicated, on a rewrite. */
+const RELATED_PRS_START = "<!-- clawbox:related-pull-requests -->";
+const RELATED_PRS_END = "<!-- /clawbox:related-pull-requests -->";
+
+export function withRelatedPullRequests(body: string, related: readonly { name: string; url: string }[]): string {
+  const block = [
+    RELATED_PRS_START,
+    "### Related pull requests",
+    "The same task, in the project's other repositories:",
+    ...related.map((r) => `- ${r.name}: ${r.url}`),
+    RELATED_PRS_END,
+  ].join("\n");
+  const at = body.indexOf(RELATED_PRS_START);
+  const end = body.indexOf(RELATED_PRS_END);
+  if (at >= 0 && end > at) return `${body.slice(0, at)}${block}${body.slice(end + RELATED_PRS_END.length)}`;
+  return `${body.trimEnd()}\n\n${block}\n`;
+}
+
+/**
+ * A multi-folder run's pull requests (TASK-2757): one per repository whose
+ * branch holds the run's work, each with the same title and task text, and —
+ * once more than one is open — each naming the others.
+ *
+ * Under the same rules as a single run's: only a chain that COMPLETED, never
+ * after the owner's Stop or Pause, never for a task that refuses one, and only
+ * while the auto-PR switch is on. Opened ready rather than as drafts: nothing
+ * watches these to ready them (the single run's watcher follows one request).
+ * A repository whose request could not be opened says why on the run and
+ * keeps its branch; the settle that follows parks the copies of the ones that
+ * did open and merges the rest home, exactly as for a single run.
+ */
+async function openFolderPullRequests(origin: CodingRun, finished: CodingRun, ended: "stop" | "pause" | null): Promise<void> {
+  const multi = origin.multiFolder;
+  if (!multi || ended !== null || origin.status !== "completed" || finished.status === "paused") return;
+  if (origin.readOnly || origin.team || goalRefusesPullRequest(origin.task) || !(await getAutoPr())) return;
+  const taskMode = await getPrBodyIncludesTask();
+  const title = pullRequestTitle(origin.task, { hostNames: boxHostNames() });
+  const where = (f: RunFolder) => (fs.existsSync(f.path) ? f.path : f.project);
+  const open: RunFolder[] = [];
+  for (const f of multi.folders) {
+    if (f.held) {
+      pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, f.held));
+      continue;
+    }
+    if (f.pr) {
+      // Already open (a resume, a review pass or a Fix CI went on in it):
+      // its branch goes up again, or the request never sees the new commits.
+      // A push that failed is kept on the request (`behind`), which the
+      // deliverable gate reads as a bar not met.
+      const pushed = await pushBranch(where(f), f.branch).catch((err: unknown) => ({ ok: false as const, detail: err instanceof Error ? err.message : String(err) }));
+      if (pushed.ok) delete f.pr.behind;
+      else {
+        f.pr.behind = true;
+        pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, `${f.branch} was not pushed to ${f.pr.url}: ${pushed.detail}`));
+      }
+      persist(true);
+      open.push(f);
+      continue;
+    }
+    const ahead = await commitsAhead(f.project, f.branch, f.base);
+    if (ahead === null) {
+      pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, "git could not say what is on its branch"));
+      continue;
+    }
+    if (ahead === 0) continue;
+    const mine = await findOpenPullRequestForBranch(where(f), f.branch);
+    if (mine?.url) {
+      f.pr = { number: mine.number, url: mine.url };
+    } else {
+      // The body names THIS repository's commit, not the first one the run made anywhere.
+      const commit = fs.existsSync(f.path) ? (await headCommitShort(f.path)) ?? f.commit : f.commit;
+      const body = prBody({ ...origin, commit }, finished, taskMode);
+      const created = await openPullRequest({ directory: where(f), branch: f.branch, base: f.base, title, body, draft: false });
+      if (!created.ok) {
+        pushProgress(origin, RUNNER_STEP.folderNoPullRequest(f.name, created.detail));
+        persist(true);
+        continue;
+      }
+      f.pr = { number: created.number, url: created.url };
+    }
+    pushProgress(origin, RUNNER_STEP.folderPullRequest(f.name, f.pr.url));
+    open.push(f);
+    persist(true);
+  }
+  if (open.length < 2) return;
+  for (const f of open) {
+    const related = open.filter((o) => o !== f).map((o) => ({ name: o.name, url: o.pr!.url }));
+    const edited = await updatePullRequestBody({ directory: where(f), number: f.pr!.number, rewrite: (body) => withRelatedPullRequests(body, related) })
+      .catch((err: unknown) => ({ ok: false as const, detail: err instanceof Error ? err.message : String(err) }));
+    if (!edited.ok) console.error(`[coding-agent] ${origin.id} ${f.name}: related pull requests not linked: ${edited.detail}`);
   }
 }
 
@@ -10040,6 +10684,49 @@ function settlePr(run: CodingRun, phase: "merged" | "blocked" | "failed", detail
   run.pr = { ...run.pr, phase, detail, endedAt: Date.now() };
   pushProgress(run, phase === "merged" ? RUNNER_STEP.merged : RUNNER_STEP.notMerged(detail ?? phase));
   persist(true);
+  // Merged — on GITHUB. The project folder follows (bringMergeHome), on the
+  // settle path so a reset or a shutdown waits for it like any other step.
+  if (phase === "merged") trackSettleWork(bringMergeHome(run.id), run.id);
+}
+
+/**
+ * A pull request the box watched ended MERGED: bring the project folder up to
+ * the base it was merged into (`bringBaseHome`, fast-forward only), and say on
+ * the run's feed what became of it.
+ *
+ * Without this the merge existed on GitHub alone. The run's own tree had been
+ * parked when the pull request opened ("its work is kept on clawbox/run-… — it
+ * is open as a pull request"), so after "Merged into the base branch" the
+ * project folder still held the base from BEFORE the run: the next run in that
+ * project forked from it and never saw the merged work, and the app the box
+ * serves from that folder was the old one (run-deyse3g9, 2026-11-10).
+ *
+ * Nothing is said when the folder already has the merge (a `gh pr merge` that
+ * pulled, an owner who did). An app's SERVER is not restarted here: five of
+ * the owner's eight apps build only when no build is there, so a restart alone
+ * would serve the old build under a line saying otherwise — docs/agents/coding-agent.md.
+ * TODO(next release): rebuild and restart an installed app once its merged
+ * release is in the folder. That needs a build step `clawbox.json` does not
+ * name yet (it names how to start, not how to build); until then the owner
+ * rebuilds and restarts the app by hand.
+ * Never throws.
+ */
+async function bringMergeHome(runId: string): Promise<void> {
+  try {
+    const run = loadRuns().find((r) => r.id === runId);
+    const base = run?.pr?.phase === "merged" ? run.pr.base : null;
+    if (!run || !base) return;
+    const home = await bringBaseHome({ projectDir: projectDirectoryOf(run), base });
+    if (home.ok && !home.moved) return;
+    const current = loadRuns().find((r) => r.id === runId);
+    if (!current) return;
+    pushProgress(current, !home.ok
+      ? RUNNER_STEP.baseNotHome(base, home.detail)
+      : home.checkedOut ? RUNNER_STEP.baseHome(base, (home.commit ?? "").slice(0, 7)) : RUNNER_STEP.baseRefHome(base));
+    persist(true);
+  } catch (err) {
+    console.error(`[coding-agent] ${runId}: bringing the merged pull request home failed:`, err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -10766,8 +11453,9 @@ async function refreshPrEvidence(origin: CodingRun, last: CodingRun): Promise<vo
   const found = visualEvidenceSection(last, origin);
   if (!found) return;
   // Only the box's own block is redacted: the rest of the body is whatever is
-  // on GitHub now, a person's edits included, and is put back as it was.
-  const section = redactForGitHub(found);
+  // on GitHub now, a person's edits included, and is put back as it was. The
+  // block is sent as it is, so it gets the quoted-value pass too.
+  const section = redactForGitHub(found, { quotedValues: true });
   try {
     const updated = await updatePullRequestBody({
       directory: origin.directory,
@@ -10974,7 +11662,7 @@ async function deliverableSandbox(run: CodingRun): Promise<DeliverableSandbox | 
     args: CAPABILITY_DROP_ARGS,
     // The run's own provider, like its harness's: never the default's wiring
     // under a run that is paid from the other account.
-    env: buildRunEnv({ effort: run.effort, artifactsDir: artifactsDir(run.id), inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel }),
+    env: buildRunEnv({ effort: run.effort, artifactsDir: artifactsDir(run.id), inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, appId: worktreeAppId(run.directory) }),
   };
 }
 
@@ -11136,7 +11824,7 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     }
 
     const verdict = await checkDeliverable(
-      { directory: origin.directory, pr: origin.pr },
+      { directory: origin.directory, pr: origin.pr ?? (await folderPrForGate(origin)) },
       deliverable,
       deliverable.kind === "command" ? await deliverableSandbox(origin) : null,
     );
@@ -11495,7 +12183,8 @@ function limitModelOf(run: CodingRun, found: FoundAccountLimit | null): string |
 async function settleLimitScope(run: CodingRun, found: FoundAccountLimit): Promise<void> {
   if (!run.anthropicAccount || found.limit.kind === "credit") return;
   const model = limitModelOf(run, found);
-  const reading = await readAccountUsage(run.anthropicAccount).catch(() => null);
+  // `record: false`: recordAccountLimit records it, with this run — the move is announced as this run's.
+  const reading = await readAccountUsage(run.anthropicAccount, 0, { record: false }).catch(() => null);
   if (!reading) return;
   const now = Date.now();
   const spent = usageForModel(reading, model);
@@ -11742,6 +12431,15 @@ async function continueOnAnotherAccount(
   }
   if (run.status !== "running" || live.has(run.id)) return;
 
+  // The local-only AI lock (TASK-2501) went on while this run waited for an
+  // account: no new process is started on a cloud model. The run ends failed,
+  // in the lock's words, through finishRun's ordinary tail.
+  if (await isCloudAiLocked()) {
+    state.forcedAccountFailure = CODING_AGENT_CLOUD_LOCKED;
+    finishRun(run, state, exitCode);
+    return;
+  }
+
   if (!prepared) {
     // Nobody else can answer after all (the next account's credential turned
     // out dead, or could not be renewed just now). Wait for the first reset,
@@ -11776,6 +12474,11 @@ async function continueOnAnotherAccount(
       finishRun(run, state, exitCode);
       return;
     }
+    // TODO(next release): no fallback MODEL. When only one model's own week is
+    // spent (`why.kind === "limit"` with `why.found.limit.model` set) and no
+    // account is left for that model, the run is paused until the reset — here,
+    // and more often in finishRun's `another === false` branch — although
+    // those accounts stay usable for every other model.
     pushProgress(run, RUNNER_STEP.accountsWaiting(formatResetClock(resetsAt)));
     const message = why.kind === "limit" ? why.found.text : why.kind === "auth" ? why.text : "Every Anthropic account on this ClawBox is at its usage limit.";
     state.forcedAccountPause = { resetsAt: new Date(resetsAt).toISOString(), message: message.slice(0, MAX_PAUSE_MESSAGE_CHARS) };
@@ -11816,6 +12519,13 @@ async function continueOnAnotherAccount(
       ? `, restarted with its credential read again from the store (credential retry ${trail.count}/${MAX_AUTH_RETRIES})`
       : `, failed over in the owner's order (credential retry ${trail.count}/${MAX_AUTH_RETRIES})`;
   console.error(`[coding-agent] ${run.id}: continuing on Anthropic account ${prepared.account.id} after ${fromId ?? "its account"} ${why.kind === "limit" ? `hit its ${why.found.limit.kind} limit` : why.kind === "auth" ? "was refused" : "was swapped out"}${how}`);
+  // Asked once more with no await between the answer and the spawn
+  // (TASK-2501): the lock may have gone on while the secrets above were read.
+  if (isCloudAiLockedSync()) {
+    state.forcedAccountFailure = CODING_AGENT_CLOUD_LOCKED;
+    finishRun(run, state, exitCode);
+    return;
+  }
   try {
     // The SAME record and session: `continuingRecord`, so the counters add up,
     // and the session's own transcript is where the work is — the task is not
@@ -12280,7 +12990,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // reply cut to what fits beside the context (runContextReply). Claude Code
   // compacts before its first request — the wrapper's auto-compact window is
   // far below what the session holds — and goes on from the summary.
-  if (contextCarryOn && run.status === "failed" && run.sessionId) {
+  // Not under the local-only AI lock (TASK-2501), which may have gone on while
+  // this run worked: the carry-on would be a new process on a cloud model.
+  if (contextCarryOn && run.status === "failed" && run.sessionId && (runsOnLocalEngine(run.provider) || !isCloudAiLockedSync())) {
     const { overflow, maxReplyTokens, attempt } = contextCarryOn;
     run.contextRecoveries = attempt;
     run.status = "running";
@@ -12360,6 +13072,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     && run.filesTouched.length === 0
     && !state.sawWriteAttempt
     && !state.commandMayHaveSideEffects
+    // Nor under the local-only AI lock (TASK-2501) for a cloud run: its retry
+    // is a new process on a cloud model. Asked last, so an ordinary exit reads
+    // no file for it. A run on the box's own engine (PR-E) retries as before.
+    && (runsOnLocalEngine(run.provider) || !isCloudAiLockedSync())
   ) {
     {
       run.retries = 1;
@@ -12874,7 +13590,8 @@ function spawnRun(
   const cpuBudget = run.cpuBudget ?? runCpuBudget({ cpus: hostCpuCount() });
   // The project's run notes, read at EVERY spawn (src/lib/coding-run-notes.ts):
   // a resume sees a lesson the owner added meanwhile.
-  const runNotes = runNotesBlock(readRunNotes(run.directory));
+  const projectNotes = readRunNotes(run.directory);
+  const runNotes = runNotesBlock(projectNotes);
   // The visual decision, made ONCE — at this record's first spawn — and kept
   // for every respawn, so the run's tools and its prompt prefix never move
   // under it (CodingRun.visual).
@@ -12886,13 +13603,13 @@ function spawnRun(
   const mcpPlan = run.readOnly ? undefined : runMcpPlan.get(run.id);
   const runMcp: RunMcpArgs | null = mcpPlan && !codex
     ? {
-        configFile: writeRunMcpConfig(run.id, buildRunMcpFileConfig({ id: run.id, directory: run.directory, media: run.media, team: run.team, readOnly: run.readOnly }, mcpPlan, { visual: runHoldsVisualTools(run.visual), solo: !run.team && !run.readOnly })),
+        configFile: writeRunMcpConfig(run.id, buildRunMcpFileConfig({ id: run.id, directory: run.directory, media: run.media, team: run.team, readOnly: run.readOnly, ...(run.provider === "anthropic" ? { seesImages: true } : {}) }, mcpPlan, { visual: runHoldsVisualTools(run.visual), solo: !run.team && !run.readOnly })),
         allowedTools: mcpPlan.allowedTools,
         disallowedTools: mcpPlan.disallowedTools,
         readOnlyTools: mcpPlan.readOnlyTools,
       }
     : null;
-  const runArgs: RunArgsOptions = { resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly, run: { id: run.id, directory: run.directory, media: run.media, team: run.team }, visual: run.visual, pullRequestMentioned: mentionsPullRequest(run.task), mcp: runMcp };
+  const runArgs: RunArgsOptions = { resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly && runNotesHaveRoom(projectNotes), run: { id: run.id, directory: run.directory, media: run.media, team: run.team }, visual: run.visual, pullRequestMentioned: mentionsPullRequest(run.task), mcp: runMcp };
   if (codex) writeCodexRules(run.id);
   const dropped = codex
     ? buildCodexSpawnArgv(tools.setprivPath, buildCodexRunArgs({ ...runArgs, model: run.requestedModel ?? defaultModelForProvider(run.provider) ?? DEFAULT_OPENAI_MODEL, readOnlyTools: mcpPlan?.readOnlyTools === true }))
@@ -12929,7 +13646,7 @@ function spawnRun(
   // window asks for less than Claude Code's own reply.
   const maxReplyTokens = runContextReply.get(run.id) ?? null;
   runContextReply.delete(run.id);
-  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, cpuBudget, secrets: runSecretEnv.get(run.id), gitIdentity: gitIdentityFor(run.id), maxReplyTokens });
+  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, cpuBudget, secrets: runSecretEnv.get(run.id), gitIdentity: gitIdentityFor(run.id), maxReplyTokens, appId: worktreeAppId(run.directory) });
   // The Anthropic account this spawn is on (prepareRunSecrets chose it). Its
   // credential goes into a one-shot 0600 file the wrapper reads and deletes
   // before exec; only the file's PATH is in the environment — the credential
@@ -13048,6 +13765,9 @@ function spawnRun(
     // A rolling check, not a deadline: a run that keeps producing events is
     // allowed to work for as long as it needs.
     timeout: setInterval(() => {
+      // The local-only AI lock (TASK-2501), asked every minute: a cloud run
+      // already going when it went on is paused (pauseCloudRunUnderLock).
+      if (!runsOnLocalEngine(run.provider)) void pauseCloudRunUnderLock(run, state).catch(() => {});
       const idleFor = Date.now() - run.lastActivityAt;
       if (idleFor < RUN_IDLE_TIMEOUT_MS) return;
       state.timedOut = true;
@@ -13126,7 +13846,7 @@ function spawnRun(
   const inputsNote = runInputsNote(run);
   const firstTurn = stdinText ?? (resumeSessionId
     ? `${run.task}\n\n[ClawBox harness: this continuation is a NEW run. Its evidence folder is ${artifactsDir(run.id)} — save screenshots and report.md there, not in any previous run's folder. ${inputsNote}]`
-    : `${run.task}\n\n[ClawBox harness: ${folderListing(run.directory)} ${inputsNote}]`);
+    : `${run.task}\n\n[ClawBox harness: ${folderListing(run.directory)} ${multiFolderNote(run)}${inputsNote}]`);
   try {
     child.stdin?.on("error", () => {
       // EPIPE when the wrapper dies before reading the task; `exit` reports it.
@@ -13448,6 +14168,84 @@ async function attachRunWorktree(run: CodingRun, projectDir: string, baseBranch:
 }
 
 /**
+ * The folders a run in `directory` works on when that folder is a MULTI-FOLDER
+ * project's home (src/lib/project-folders.ts) — a folder directly inside the
+ * owner's project folder whose name the store lists. Null for every other
+ * folder, which then gets the single copy it always got.
+ */
+async function multiFolderListFor(directory: string): Promise<{ root: string; folders: ProjectFolder[] } | null> {
+  const root = await getDefaultDirectory();
+  const realRoot = await fs.promises.realpath(root).catch(() => path.resolve(root));
+  const dir = await fs.promises.realpath(directory).catch(() => path.resolve(directory));
+  if (path.dirname(dir) !== realRoot) return null;
+  const folders = await readMultiFolderList(path.basename(dir));
+  return folders && folders.length ? { root: realRoot, folders } : null;
+}
+
+/**
+ * The run's own copies, whichever kind it gets: one git worktree of EACH
+ * repository of a multi-folder project, side by side in one folder of its own
+ * (`<project>/.clawbox/worktrees/<runId>/<folder>`, each on `clawbox/<runId>`
+ * in its own repository, forked from the folder's base when the project names
+ * one, else from what its checkout is on — `addRunWorktree`'s own rule); or,
+ * for every other folder, the single worktree `attachRunWorktree` makes.
+ *
+ * All or nothing: a run that quietly lost one of its repositories would edit
+ * the others as if it had them all, so a copy that cannot be made refuses the
+ * start and takes back the ones already made.
+ */
+async function attachRunCopies(run: CodingRun, directory: string, baseBranch: string | null = null): Promise<void> {
+  const list = await multiFolderListFor(directory);
+  if (!list) return attachRunWorktree(run, directory, baseBranch);
+  const home = path.resolve(directory);
+  const dir = runWorktreePath(home, run.id);
+  const made: RunFolder[] = [];
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    for (const f of list.folders) {
+      const projectDir = path.join(list.root, f.folder);
+      const got = await addRunWorktree({ projectDir, runId: run.id, protectedRoot: protectedCheckout(), baseBranch: f.base ?? baseBranch, target: path.join(dir, f.folder) });
+      if (!got.ok) throw new CodingAgentError("invalid", `${f.folder}: ${got.detail}`);
+      made.push({ path: got.path, branch: got.branch, base: got.base, project: projectDir, removed: false, branchRemoved: false, result: null, name: f.folder, commit: null, pr: null });
+    }
+  } catch (err) {
+    for (const f of made) {
+      await removeRunWorktree(f.project, f.path).catch(() => false);
+      await deleteRunBranch(f.project, f.branch).catch(() => false);
+    }
+    try { fs.rmdirSync(dir); } catch { /* not empty, or never made: left as it is */ }
+    if (err instanceof CodingAgentError) throw err;
+    throw new CodingAgentError("invalid", `The project's folders could not be copied for this run: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  run.multiFolder = { project: home, folders: made };
+  run.directory = dir;
+  for (const f of made) pushProgress(run, RUNNER_STEP.folderWorktree(f.name, f.branch, f.base));
+}
+
+/** A multi-folder run's copies put back for a resume, each the way `reopenWorktree` puts back one. */
+async function reopenRunFolders(previous: CodingRun): Promise<RunMultiFolder | undefined> {
+  const multi = previous.multiFolder;
+  if (!multi) return undefined;
+  const folders: RunFolder[] = [];
+  const madeNow: RunFolder[] = [];
+  for (const f of multi.folders) {
+    const there = fs.existsSync(f.path);
+    const back = await restoreRunWorktree(f.project, f.path, f.branch, f.base).catch(() => false);
+    if (!back) {
+      // All or nothing, as at the start: a run carrying on without one of its
+      // repositories would work as if it had them all. The copies put back
+      // just now hold nothing their branches do not, so they go again.
+      for (const m of madeNow) await removeRunWorktree(m.project, m.path).catch(() => false);
+      throw new CodingAgentError("not_found", `${f.name}: the run's copy could not be put back from ${f.branch}, so it cannot carry on. Start a new run instead.`);
+    }
+    const entry = { ...f, removed: false, branchRemoved: false, result: null, pr: f.pr ? { ...f.pr } : null };
+    if (!there) madeNow.push(entry);
+    folders.push(entry);
+  }
+  return { project: multi.project, folders };
+}
+
+/**
  * The worktree a resumed run carries forward, put back on disk if a settle
  * took it away.
  *
@@ -13474,6 +14272,24 @@ async function reopenWorktree(previous: CodingRun): Promise<RunWorktree | null> 
 const STOPPED_UNMERGED = "the run was stopped before it finished, so its work stays on its branch, unmerged; the owner decides whether to merge it";
 
 /** Every live run working in this exact folder — the question "is anybody still in there?". */
+/**
+ * Is a coding team that has not settled the owner of this branch
+ * (`mergeRunBranch`'s `teamLive`)? Read off the boards, which say so whether
+ * or not one of the team's runs is going this second — between a worker and
+ * its reviewer, or waiting for a seat, a team has no live run and is still
+ * working. Loaded on the call: the board module imports this one. A read that
+ * fails answers YES — the checkout is then left alone, which is the safe way
+ * to be wrong.
+ */
+async function teamStillWorkingOn(branch: string): Promise<boolean> {
+  try {
+    const { listBoards } = await import("@/lib/coding-team-board");
+    return listBoards().some((board) => board.branch === branch && !isSettledTeamStatus(board.status));
+  } catch {
+    return true;
+  }
+}
+
 function liveRunsIn(directory: string): CodingRun[] {
   return loadRuns().filter((r) => isLive(r.status) && r.directory === directory);
 }
@@ -13522,9 +14338,10 @@ function liveRunsIn(directory: string): CodingRun[] {
  * Never throws: this is the settle path, and a run whose tree could not be
  * tidied is still a run that finished.
  */
-async function settleRunWorktree(run: CodingRun): Promise<void> {
-  const wt = run.worktree;
+async function settleRunWorktree(run: CodingRun, wt: RunWorktree | null = run.worktree, folder?: { name: string; prOwned: boolean }): Promise<void> {
   if (!wt || wt.removed) return;
+  // One repository of a multi-folder run says which, on every line it adds.
+  const say = (line: string) => pushProgress(run, folder ? `${folder.name}: ${line}` : line);
   try {
     if (liveRunsIn(wt.path).length > 0) return;
     if (!fs.existsSync(wt.path)) {
@@ -13533,14 +14350,14 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       return;
     }
     if (run.status === "paused") {
-      pushProgress(run, RUNNER_STEP.worktreeKept("the run is paused, and Resume carries on in it"));
+      say(RUNNER_STEP.worktreeKept("the run is paused, and Resume carries on in it"));
       persist(true);
       return;
     }
     // Settled lost at boot while nobody could say whether its scope was still
     // up (reconcileAfterRestart): the tree is not this settle's to touch.
     if (store.keepTrees.delete(run.id)) {
-      pushProgress(run, RUNNER_STEP.worktreeKept("the box could not tell whether the run was still working in it"));
+      say(RUNNER_STEP.worktreeKept("the box could not tell whether the run was still working in it"));
       persist(true);
       return;
     }
@@ -13552,7 +14369,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
     const ahead = await commitsAhead(wt.project, wt.branch, wt.base);
     if (ahead === null) {
       // No answer is not permission to delete: keep it and say so.
-      pushProgress(run, RUNNER_STEP.worktreeKept("git could not say what is on its branch"));
+      say(RUNNER_STEP.worktreeKept("git could not say what is on its branch"));
       persist(true);
       return;
     }
@@ -13575,7 +14392,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
     if (ahead === 0) {
       const unsaved = (await unsavedWork()) ?? inUse;
       if (unsaved) {
-        pushProgress(run, RUNNER_STEP.worktreeKept(unsaved));
+        say(RUNNER_STEP.worktreeKept(unsaved));
         persist(true);
         return;
       }
@@ -13584,7 +14401,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       // copy had gone would leave the disk unreclaimed with nothing to retry
       // from — the owner's Remove returns early on exactly that flag.
       if (!(await removeRunWorktree(wt.project, wt.path))) {
-        pushProgress(run, RUNNER_STEP.worktreeKept("it could not be removed"));
+        say(RUNNER_STEP.worktreeKept("it could not be removed"));
         persist(true);
         return;
       }
@@ -13593,7 +14410,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       await deleteRunBranch(wt.project, wt.branch);
       wt.removed = true;
       wt.branchRemoved = true;
-      pushProgress(run, RUNNER_STEP.worktreeRemoved);
+      say(RUNNER_STEP.worktreeRemoved);
       persist(true);
       return;
     }
@@ -13603,17 +14420,17 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
     const park = async (reason: string): Promise<void> => {
       const unsaved = (await unsavedWork()) ?? inUse;
       if (unsaved) {
-        pushProgress(run, RUNNER_STEP.worktreeKept(`${unsaved}; ${reason}`));
+        say(RUNNER_STEP.worktreeKept(`${unsaved}; ${reason}`));
         persist(true);
         return;
       }
       if (!(await removeRunWorktree(wt.project, wt.path))) {
-        pushProgress(run, RUNNER_STEP.worktreeKept(`${reason}, and the copy could not be removed`));
+        say(RUNNER_STEP.worktreeKept(`${reason}, and the copy could not be removed`));
         persist(true);
         return;
       }
       wt.removed = true;
-      pushProgress(run, RUNNER_STEP.worktreeParked(wt.branch, reason));
+      say(RUNNER_STEP.worktreeParked(wt.branch, reason));
       persist(true);
     };
     if (run.status === "stopped") {
@@ -13626,7 +14443,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
     // from there took the branch away from the request it is open for.
     const origin = run.reviewOf ?? run.reviewLoopOf;
     const pr = run.pr ?? (origin ? loadRuns().find((r) => r.id === origin)?.pr ?? null : null);
-    if (pr && pr.phase !== "failed") {
+    if (folder ? folder.prOwned : pr && pr.phase !== "failed") {
       await park("it is open as a pull request");
       return;
     }
@@ -13635,6 +14452,7 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       branch: wt.branch,
       base: wt.base,
       message: `Coding agent ${run.id}: ${taskTitle(run.task, 72)}`,
+      teamLive: teamStillWorkingOn,
     });
     if (!merged.ok) {
       // Recorded, not just logged: this is the state the run's page reads to
@@ -13644,22 +14462,23 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       return;
     }
     wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: merged.commit };
+    if (merged.returnedFrom) say(RUNNER_STEP.checkoutReturned(merged.returnedFrom, wt.base));
     // The merge took the branch home, not what the tree holds beside it.
     const unsaved = (await unsavedWork()) ?? inUse;
     if (unsaved) {
-      pushProgress(run, RUNNER_STEP.worktreeKept(`it was merged into ${wt.base}, but ${unsaved}`));
+      say(RUNNER_STEP.worktreeKept(`it was merged into ${wt.base}, but ${unsaved}`));
       persist(true);
       return;
     }
     if (!(await removeRunWorktree(wt.project, wt.path))) {
       // The work IS home — the merge landed — so this is only the copy left
       // behind, and the card's Remove is what answers it.
-      pushProgress(run, RUNNER_STEP.worktreeKept(`it was merged into ${wt.base} but could not be removed`));
+      say(RUNNER_STEP.worktreeKept(`it was merged into ${wt.base} but could not be removed`));
       persist(true);
       return;
     }
     wt.removed = true;
-    pushProgress(run, RUNNER_STEP.worktreeMerged(wt.base));
+    say(RUNNER_STEP.worktreeMerged(wt.base));
     persist(true);
   } catch (err) {
     console.error(`[coding-agent] ${run.id} worktree settle:`, err instanceof Error ? err.message : err);
@@ -13719,6 +14538,12 @@ export function markRunWorktreesRemoved(paths: readonly string[]): number {
       run.worktree.removed = true;
       changed += 1;
     }
+    for (const f of run.multiFolder?.folders ?? []) {
+      if (!f.removed && gone.has(path.resolve(f.path))) {
+        f.removed = true;
+        changed += 1;
+      }
+    }
   }
   if (changed > 0) persist(true);
   return changed;
@@ -13740,6 +14565,17 @@ export function requireBaseBranch(raw: unknown): string | null {
   return name;
 }
 
+/**
+ * The effort a run on this provider runs at. A run on the box's own engine
+ * (TASK-2501 PR-E) never runs on ultracode: the engine answers one request at
+ * a time and is asked with thinking off, so the Workflow fan-out would only
+ * queue on it — the same xhigh, without the Workflow tool. Asked by every
+ * start that records an effort: `startRun` (a resume too) and a draft's start.
+ */
+function effortOnProvider(provider: CodingProvider, effort: CodingEffort): CodingEffort {
+  return runsOnLocalEngine(provider) && effort === ULTRACODE_EFFORT ? "xhigh" : effort;
+}
+
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
   let task = normalizeTask(input.task, isBoxWrittenTask(input));
   /** A Fix CI continuation's place in its chain — see StartRunInput.fixCi. */
@@ -13749,6 +14585,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   const givenExperience = requireExperience(input.experience);
   const givenEffort = requireEffort(input.effort);
   const givenBase = requireBaseBranch(input.baseBranch);
+  // The local-only AI lock (TASK-2501) is asked by `assertCanSpawn` below, on
+  // the provider this run will use and before anything of a run is touched (a
+  // resume would otherwise put its worktree back on disk first); the check in
+  // `assertProviderReady` stays as the backstop for other callers.
 
   let resumeSessionId: string | null = null;
   let directory: string;
@@ -13767,6 +14607,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
    * settles last is the one that has to decide what becomes of it.
    */
   let inheritedWorktree: RunWorktree | null = null;
+  let inheritedMulti: RunMultiFolder | undefined;
 
   const resumeRunId = typeof input.resumeRunId === "string" ? input.resumeRunId.trim() : "";
   // A continuation of a run whose settle is still going — the commit after a
@@ -13830,6 +14671,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       // of a run that left nothing on its branch, so it is put back from that
       // branch first; the tree is the only thing that was removed.
       inheritedWorktree = await reopenWorktree(previous);
+      inheritedMulti = await reopenRunFolders(previous);
       directory = await realDirectory(previous.directory);
       releaseDirectory = assertDirectoryFree(directory, undefined, input.team ?? null, input.readOnly === true);
       projectId = previous.projectId;
@@ -13872,7 +14714,11 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // the fix than about the code being fixed is a difference nobody asked for,
     // and on the fresh path — where the run has no memory to lean on — the
     // owner's current setting could be the weaker of the two.
-    if (previous && typeof input.reviewLoopOf === "string") settings.effort = previous.effort;
+    // The automatic REVIEW PASS is the same kind of continuation (it resumes
+    // the run's own session): a run asked for at `xhigh` was reviewed at the
+    // owner's `ultracode`, sub-agents and all (run-kuor6wxx, 2026-11-10), and
+    // a run asked for at `low` would be too.
+    if (previous && (typeof input.reviewLoopOf === "string" || typeof input.reviewOf === "string")) settings.effort = previous.effort;
     // A TEAM's run gets its role's model and effort (src/lib/coding-role-models.ts):
     // unless the owner chose otherwise, a planner and a lead the provider's
     // best model, a worker and a reviewer its middle one, and a planner, a lead
@@ -13885,7 +14731,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // session was opened on (applyProviderChoice already carried them) and
     // takes only the effort.
     if (modelRole) {
-      const role = resolveRoleRun(modelRole, settings.provider, settings.model, settings.effort, await getRoleModels());
+      const role = resolveRoleRun(modelRole, settings.provider, settings.model, settings.effort, await getRunRoleModels());
       settings.effort = role.effort;
       // A reading role's step cap (ROLE_DEFAULTS.turnsCap): the safety net
       // (DEFAULT_MAX_TURNS) is sized for the worker that writes.
@@ -13900,6 +14746,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // (buildRunArgs hands it no Workflow tool). The thinking half stays. The
     // shell reviewer is not read-only and keeps whatever its role resolved.
     if (input.readOnly === true && settings.effort === ULTRACODE_EFFORT) settings.effort = "xhigh";
+    // Nor does a run on the box's own engine (effortOnProvider).
+    settings.effort = effortOnProvider(settings.provider, settings.effort);
     await assertProviderReady(settings.provider);
     // A resume carries the lessons of the run it continues, the way it carries
     // that run's account and folder — the automatic review pass and every
@@ -13962,11 +14810,12 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // the folder it was asked to look at.
     if (resumeRunId) {
       run.worktree = inheritedWorktree;
+      if (inheritedMulti) run.multiFolder = inheritedMulti;
     } else if (!run.team && !run.readOnly) {
       stepCodingStart(run.id, "worktree");
-      await attachRunWorktree(run, directory, givenBase);
+      await attachRunCopies(run, directory, givenBase);
     }
-    if (givenBase && run.worktree?.base !== givenBase) {
+    if (givenBase && run.worktree?.base !== givenBase && !(run.multiFolder && !resumeRunId)) {
       throw new CodingAgentError("invalid", resumeRunId
         ? "base_branch is for a new run: a resumed run keeps the branch it already has."
         : "base_branch needs a run of its own copy of the project, and this folder does not get one (it is not a git repository's root, or it is ClawBox's own checkout).");
@@ -13989,7 +14838,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // A task that refuses a pull request ("do not open a PR") gets none, whatever
     // the owner's auto-PR switch says: the switch is the default for a task that
     // says nothing (goalRefusesPullRequest, shared with the team's goal).
-    if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && !goalRefusesPullRequest(run.task) && (await getAutoPr())) {
+    // A multi-folder run has no ONE branch: its pull requests, one per
+    // repository that changed, are opened at settle (`openFolderPullRequests`).
+    if (!run.reviewOf && !run.reviewLoopOf && !run.readOnly && !run.team && !run.multiFolder && !goalRefusesPullRequest(run.task) && (await getAutoPr())) {
       if (run.worktree) {
         // The worktree IS the branch: `git worktree add -b clawbox/<runId>` has
         // already forked it, off the project's own branch, and the run is
@@ -14088,7 +14939,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     stepCodingStart(run.id, "launching");
     await prepareRunSecrets(run);
     // Where the folder stood as the run began — see CodingRun.headAtStart.
-    run.headAtStart = await headCommitShort(run.directory);
+    // A multi-folder run's folder is no repository (its copies are, one each).
+    run.headAtStart = run.multiFolder ? null : await headCommitShort(run.directory);
     // A start refused between here and the insert never reaches a settle, so it
     // gives back what it was just handed: the values out of memory, and the
     // one-run copies it claimed back out of the store.
@@ -14256,24 +15108,27 @@ interface RunSettings {
 async function ownerOrRoleProvider(role: ModelRole | null): Promise<CodingProvider> {
   const owner = await getCodingProvider();
   if (!role) return owner;
-  return resolveRoleRun(role, owner, defaultModelForProvider(owner), DEFAULT_EFFORT, await getRoleModels()).provider;
+  return resolveRoleRun(role, owner, defaultModelForProvider(owner), DEFAULT_EFFORT, await getRunRoleModels()).provider;
 }
 
 async function readRunSettings(): Promise<RunSettings> {
-  const [provider, effort, maxTurns, generateImages, generateAudio, reviewPass, allowRules] = await Promise.all([
+  const [provider, effort, maxTurns, generateImages, generateAudio, reviewPass, allowRules, locked] = await Promise.all([
     getCodingProvider(), getEffort(), getMaxTurns(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
     // With the device's own context: these rules are about to be frozen on the
     // record and handed to the CLI, which is exactly where a rule that has gone
     // inert must not travel.
     getAllowRules(allowRuleContext()),
+    cloudAiLockOn(),
   ]);
   return {
     provider,
     model: defaultModelForProvider(provider),
     effort,
     maxTurns,
-    generateImages,
-    generateAudio,
+    // Pictures and clips are drawn by ClawBox AI's cloud: none under the
+    // local-only AI lock (TASK-2501), whatever the owner's switch says.
+    generateImages: generateImages && !locked,
+    generateAudio: generateAudio && !locked,
     reviewPass,
     allowRules,
   };
@@ -14298,6 +15153,12 @@ async function applyProviderChoice(
   const fallback = !named && inherited ? inherited.provider : settings.provider;
   const resolved = resolveRunProvider(input.provider, input.model, fallback);
   if (!resolved.ok) throw new ProviderChoiceError(resolved.error);
+  // Under the local-only AI lock only the box's engine runs: a cloud provider
+  // the caller named — or the one a resumed run was opened on — is refused in
+  // words, never moved to the engine behind the caller's back.
+  if (!providersUnderLock(await cloudAiLockOn()).includes(resolved.provider)) {
+    throw new ProviderChoiceError(lockedProviderRefusal(resolved.provider));
+  }
   // The SAME "the caller named nothing" test the provider half uses, and for
   // the same reason: a client that always serialises the field sends
   // `"model": null`, which resolveRunProvider reads as unnamed. Tested only
@@ -14564,6 +15425,44 @@ function requestEnd(run: CodingRun, state: LiveRun, kind: "stop" | "pause"): voi
   persist();
 }
 
+/** What a cloud run's feed says when the local-only AI lock paused it. */
+export const PAUSED_BY_CLOUD_AI_LOCK = "Paused: the local-only AI lock went on, and this run's model is in the cloud. Resume it once the lock is off, or start a new run on the box's own engine.";
+
+/**
+ * A run on a cloud model (ClawBox AI, Anthropic, OpenAI) that was already
+ * going when the local-only AI lock went on (TASK-2501) is PAUSED: its CLI
+ * talks to the provider directly, with no hop on the box a request could be
+ * refused at, so the lock can only end the process. A pause, not a stop: the
+ * session and the work are kept, and the run resumes on its own provider once
+ * the lock is off. Work that must go on under the lock is a NEW run on the
+ * box's own engine (`provider: "local"`): the session lives in the cloud
+ * provider's state folder, which a `local` run's Claude Code does not read
+ * (`harnessStateDir`), so a resume there would not find it. A run
+ * on the box's engine is left alone. Every new process a run starts asks the
+ * lock already (`assertProviderReady`, the resume's provider check), so this
+ * covers the one that was running when the lock went on — within a minute,
+ * from each live run's own check. Answers whether it paused the run.
+ */
+async function pauseCloudRunUnderLock(run: CodingRun, state: LiveRun): Promise<boolean> {
+  if (runsOnLocalEngine(run.provider) || state.endRequested !== null) return false;
+  if (!(await cloudAiLockOn())) return false;
+  // Asked again after the read: the run may have ended meanwhile.
+  if (run.status !== "running" || live.get(run.id) !== state || state.endRequested !== null) return false;
+  pushProgress(run, PAUSED_BY_CLOUD_AI_LOCK);
+  requestEnd(run, state, "pause");
+  return true;
+}
+
+/** {@link pauseCloudRunUnderLock} over every live run now; how many it paused. */
+export async function pauseCloudRunsUnderLock(): Promise<number> {
+  let paused = 0;
+  for (const run of loadRuns()) {
+    const state = run.status === "running" ? live.get(run.id) : undefined;
+    if (state && (await pauseCloudRunUnderLock(run, state))) paused++;
+  }
+  return paused;
+}
+
 /** Idempotent: stopping a finished run just returns it. */
 export function stopRun(id: string): CodingRun {
   const run = loadRuns().find((r) => r.id === id);
@@ -14601,7 +15500,7 @@ export function stopRun(id: string): CodingRun {
     wakeWaiters(id);
     // The pause kept the worktree for its Resume; the stop is where its work
     // is parked on the branch, unmerged, like any stopped run's.
-    trackSettleWork(settleRunWorktree(run), run.id);
+    trackSettleWork(settleRunCopies(run), run.id);
     // A paused REVIEW PASS is what its origin's finish notice was held back
     // for (deliverableGateApplies), and the gate that releases it skipped the
     // pause. A running pass's Stop reaches it through finishRun; this one is
@@ -14827,6 +15726,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // so the tree is made again from it and the resume carries on in the folder
     // the session was opened in — which is what `--resume` needs.
     if (run.worktree) run.worktree = await reopenWorktree(run);
+    if (run.multiFolder) run.multiFolder = await reopenRunFolders(run);
     try {
       run.directory = await realDirectory(run.directory);
     } catch {
@@ -14845,6 +15745,74 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // lie. Narrowing works the same way: a rule removed before the resume is gone
     // from the resumed run too.
     if (!automatic) run.allowRules = await getAllowRules(allowRuleContext());
+    // RE-RESOLVED, like the permission rules just above and for the same reason:
+    // a resume is the owner's own deliberate act, so an entry they have un-ticked
+    // since the pause is not handed back, and one they have ticked is.
+    //
+    // Ahead of the flip below (TASK-2501 PR-E): this is the longest await on the
+    // path — accounts, MCP servers, the project's secrets, git identity — and a
+    // lock the owner turns on during it must still be able to stop the launch,
+    // which it can only do while the record is untouched.
+    // Long enough that the feed itself has to be given back in full: the
+    // preparation's own lines are pushed onto the record, and a feed already at
+    // its cap loses its middle to the cap — which a restored LENGTH cannot put
+    // back (TASK-2501 PR-E, CodeRabbit's finding on #1511).
+    const progressBefore = [...run.progress];
+    const progressAtBefore = [...run.progressAt];
+    const secretNamesBefore = run.secretNames;
+    // The account the record was opened on, kept for the same reason as the
+    // feed: `prepareRunAccount` moves `run.anthropicAccount` onto the account it
+    // picked for this attempt, and a refused resume never used it — the record
+    // would name an account that did not resume it (TASK-2501 PR-E,
+    // CodeRabbit's finding on #1511).
+    const accountBefore = run.anthropicAccount;
+    const prepared = await prepareRunSecrets(run);
+    // The record can END inside that preparation: the owner may press Stop on the
+    // paused run, and `stopRun` closes the book on it — status stopped, its pull
+    // request settled, its one-run copies given back. This attempt is then a
+    // resume of something that no longer asks to continue, so it cancels itself:
+    // only what IT prepared is given back and the record keeps the state the Stop
+    // left, instead of being revived as running with a process behind it
+    // (TASK-2501 PR-E, CodeRabbit's finding on #1511). Checked synchronously here,
+    // with nothing awaited before the flip below, so no Stop can land in between.
+    const live = loadRuns().find((r) => r.id === id);
+    if (!live || live !== run || (run.status !== "paused" && run.status !== "gave_up")) {
+      dropRunSecrets(run.id);
+      runSecretScopes.delete(run.id);
+      runSecretExpiry.delete(run.id);
+      // Only what THIS resolve claimed: the copies a stopped run's own settle
+      // released are already gone, and the paused run's are not this attempt's.
+      trackSettleWork(releaseRunSecretNames(run.id, prepared.claimed));
+      if (!live) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+      return cloneRun(live);
+    }
+    // Asked ONCE MORE here (TASK-2501 PR-E): the gate above was read before the
+    // tools, the worktree, the folder, the allow rules and the preparation, and
+    // every one of those awaits is long enough for the owner to turn the lock on
+    // mid-resume. Asked synchronously, with nothing awaited between this answer
+    // and the spawn below, so there is no gap left to start a cloud process in.
+    try {
+      assertCodingAgentUnlockedSync(run.provider);
+    } catch (err) {
+      // Nothing has been flipped, so the only thing to give back is what the
+      // preparation just handed this run: the tables in memory, the one-run
+      // copies it CLAIMED in the resolve above, and the feed lines it wrote. A
+      // refused resume comes out as paused — or as given up — as it went in:
+      // the copies the paused run already held stay its own, for its next try.
+      run.progress.length = 0;
+      run.progress.push(...progressBefore);
+      run.progressAt.length = 0;
+      run.progressAt.push(...progressAtBefore);
+      run.secretNames = secretNamesBefore;
+      run.anthropicAccount = accountBefore;
+      dropRunSecrets(run.id);
+      runSecretScopes.delete(run.id);
+      runSecretExpiry.delete(run.id);
+      // Only what THIS resolve claimed: `endRunSecrets` would take the paused
+      // run's own one-run copies with it, and they are still its to hold.
+      trackSettleWork(releaseRunSecretNames(run.id, prepared.claimed));
+      throw err;
+    }
     // Read BEFORE the flip below, which is what makes this a resume: the
     // continuation text and the pull-request step both depend on which of the two
     // resumable endings this run is coming back from.
@@ -14867,10 +15835,6 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     if (gaveUp) reopenPullRequestStep(run);
     if (!automatic) openAttempt(run);
     pushProgress(run, automatic ? RUNNER_STEP.resumedAfterLimit : RUNNER_STEP.resumedByOwner);
-    // RE-RESOLVED, like the permission rules just above and for the same reason:
-    // a resume is the owner's own deliberate act, so an entry they have un-ticked
-    // since the pause is not handed back, and one they have ticked is.
-    await prepareRunSecrets(run);
     persist(true);
     console.error(`[coding-agent] ${run.id} resumed from ${gaveUp ? "giving up" : automatic ? "waiting for an Anthropic limit to reset" : "pause"}`);
     startProjectIcon(run);
@@ -14951,8 +15915,10 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   // itself, and the queue starts it here (startQueuedRun).
   const fromQueue = run.status === "queued" && run.queued?.start?.kind === "draft";
   if (run.status !== "draft" && !fromQueue) throw new CodingAgentError("invalid", "Only a drafted run can be started this way.");
-  // In order: a draft started while runs wait for a slot goes behind them.
-  if (!fromQueue && hasQueuedRuns()) return queueDraft(run);
+  // In order: a draft started while runs wait for a slot goes behind them —
+  // the ones that can start, anyway; a draft on the box's own engine is not
+  // held behind a cloud entry the lock refuses (TASK-2501 PR-E).
+  if (!fromQueue && (await hasQueuedRunsThatCanStart())) return queueDraft(run);
   // The account this draft named, not whatever the default is now. Checked
   // before the record is flipped to "running": a draft for an account whose
   // key the owner has since removed should be refused with a sentence, not
@@ -14977,7 +15943,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     // The copy of the project is made at START and not when the draft was
     // written: a draft may sit for days, and a worktree made for one that is
     // never started would be a branch and a folder nobody asked for.
-    if (!run.team && !run.readOnly && !run.worktree) await attachRunWorktree(run, run.directory);
+    if (!run.team && !run.readOnly && !run.worktree && !run.multiFolder) await attachRunCopies(run, run.directory);
     // Settings are read at START: a run keeps what it starts with.
     //
     // The provider and its model are deliberately NOT among them. They are the
@@ -14987,10 +15953,14 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     const settings = await readRunSettings();
     const writersLive = loadRuns().filter((r) => isLive(r.status) && !r.readOnly && r.id !== run.id).length;
     run.cpuBudget = runCpuBudget({ cpus: hostCpuCount(), concurrent: writersLive + 1, onBattery: await onBatteryPower() });
+    // The owner's effort, as the draft's provider runs it — before it is
+    // recorded and before spawnOrSettle builds the arguments from it.
+    settings.effort = effortOnProvider(run.provider, settings.effort);
     run.effort = settings.effort;
     run.maxTurns = settings.maxTurns;
     run.media = { images: settings.generateImages, audio: settings.generateAudio };
-    run.headAtStart = await headCommitShort(run.directory);
+    // A multi-folder run's folder is no repository (its copies are, one each).
+    run.headAtStart = run.multiFolder ? null : await headCommitShort(run.directory);
     run.status = "running";
     run.queued = null;
     run.startedAt = Date.now();
@@ -15024,8 +15994,17 @@ export const QUEUE_RETRY_MS = 60_000;
 /** Refusals that are the BOX's state, not the run's: the queue waits them out rather than failing the run. */
 const QUEUE_WAITS: ReadonlySet<CodingAgentErrorKind> = new Set(["disabled", "not_ready", "limited", "busy"]);
 
-function hasQueuedRuns(): boolean {
-  return loadRuns().some((r) => r.status === "queued");
+/**
+ * Is anything in the queue able to start as the box stands? A cloud entry the
+ * lock refuses is not (TASK-2501 PR-E): with the lock on, the owner asks for
+ * the box's own engine, and answering "you are behind a run that never starts"
+ * is a queue that refuses work the box can do.
+ */
+async function hasQueuedRunsThatCanStart(): Promise<boolean> {
+  const queued = queuedRuns();
+  if (queued.length === 0) return false;
+  if (!(await isCloudAiLocked())) return true;
+  return queued.some((r) => r.provider === undefined || providersUnderLock(true).includes(r.provider));
 }
 
 /** The queued runs in the order they start in: the order they were asked for. */
@@ -15065,7 +16044,7 @@ export async function startOrQueueRun(input: StartRunInput): Promise<{ run: Codi
   const asked: StartRunInput = announced ? { ...input, runId: announced } : input;
   let failed = false;
   try {
-    if (!hasQueuedRuns()) {
+    if (!(await hasQueuedRunsThatCanStart())) {
       try {
         return { run: await startRun(asked), queued: false };
       } catch (err) {
@@ -15238,8 +16217,14 @@ export function pumpRunQueue(): Promise<string[]> {
     const started: string[] = [];
     do {
       store.queuePumpAgain = false;
+      // The entries the LOCK refuses, passed over for the rest of this pass
+      // (TASK-2501 PR-E): a cloud run waiting on the lock cannot start however
+      // often it is asked, and while the lock is on it must not hold the box's
+      // own engine behind it. They keep their place in the queue, and the retry
+      // below gives them their turn again.
+      const lockBlocked = new Set<string>();
       for (;;) {
-        const next = queuedRuns()[0];
+        const next = queuedRuns().find((r) => !lockBlocked.has(r.id));
         if (!next) break;
         try {
           await startQueuedRun(next.id);
@@ -15253,6 +16238,12 @@ export function pumpRunQueue(): Promise<string[]> {
           if (settled?.status === "failed") announceEndingToChat(settled);
           // Every slot is taken: its turn comes when a run settles.
           if (err instanceof SlotsFullError) break;
+          // The lock's refusal is about WHERE this run's model lives, not about
+          // the box being busy: the entries behind it may be able to start.
+          if (isCloudAiLockedError(err)) {
+            lockBlocked.add(next.id);
+            continue;
+          }
           if (err instanceof CodingAgentError && QUEUE_WAITS.has(err.kind)) {
             armQueueRetry();
             break;
@@ -15260,6 +16251,7 @@ export function pumpRunQueue(): Promise<string[]> {
           failQueuedRun(next.id, err);
         }
       }
+      if (lockBlocked.size > 0) armQueueRetry();
     } while (store.queuePumpAgain);
     return started;
   })().finally(() => {
@@ -15384,6 +16376,10 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
   if (!(await isCodingAgentEnabled())) {
     throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
   }
+  // Before the readiness verdict, which also names the lock but as a plain
+  // sentence: a resume or a draft's start on a cloud provider keeps the lock's
+  // code (TASK-2501); a run on the box's own engine goes on (PR-E).
+  await assertCodingAgentUnlocked(provider);
   const readiness = await checkReadiness();
   // The provider THIS run will use, when the caller knows it — not the owner's
   // default. `readiness.ready` is the default provider's verdict, and
@@ -15630,7 +16626,7 @@ function spawnOrSettle(
     // …and neither does the aftermath run, which is where a run's copy of the
     // project is normally decided. A run that never started left nothing on
     // its branch, so this removes both.
-    trackSettleWork(settleRunWorktree(run), run.id);
+    trackSettleWork(settleRunCopies(run), run.id);
     // The branch made for its pull request is already on the record. Nothing
     // settles the run through finishRun on this path, so the pull request is
     // ended here too, or it stays "opening" — pending — for good.

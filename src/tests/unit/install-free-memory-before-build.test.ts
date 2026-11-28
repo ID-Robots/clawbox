@@ -3,6 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import fs, { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { accountOnlyHome, CAN_LOCK_HOME, unlockTree } from "../helpers/account-only-home";
 
 /**
  * `do_rebuild` is where this appliance rebuilds itself — from the in-app
@@ -121,6 +122,8 @@ function sourceInstallShellFns(tmp: string): string[] {
     // …and the guard that turns a junk threshold back into the default, which
     // is a `case` line rather than an assignment.
     `grep -E '^case "[$]BUILD_GATEWAY_ROOM_MB"' "$1" >> "${tmp}/fns.sh" || true`,
+    // as_clawbox is one line, so it is cut by grep rather than by range.
+    `grep -E '^as_clawbox\\(\\) \\{' "$1" >> "${tmp}/fns.sh"`,
     ...fns.map((f) => `sed -n '/^${f}() {/,/^}/p' "$1" >> "${tmp}/fns.sh"`),
     `. "${tmp}/fns.sh"`,
   ];
@@ -312,23 +315,27 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
   const pidFile = () => path.join(tmp, "data", "llamacpp", "server.pid");
 
   /**
-   * Start a process whose argv[0] IS `name`, so /proc/<pid>/cmdline says what
-   * the harness needs it to say. `llama-server` is the engine; anything else
-   * stands in for the process that inherited a recycled pid.
+   * Start a process whose /proc/<pid>/cmdline carries `name`, which is all the
+   * identity check under test reads (`grep -qa llama-server` over it).
+   * `llama-server` is the engine; anything else stands in for the process that
+   * inherited a recycled pid.
    *
-   * A copy of `sleep` spawned directly, not a shell script: a script that
-   * `exec`s sleep replaces its own argv, so cmdline would read "sleep" and the
-   * identity check under test would never see the name it is looking for.
+   * `/bin/sh <tmp>/bin/<name>`, the shape the SIGKILL case below already has —
+   * not a copy of `sleep` renamed to `name`. Where coreutils is one multi-call
+   * binary (uutils, the default from Ubuntu 25.10, so on GitHub's
+   * ubuntu-26.04 runners) that copy picks its applet by argv[0], answers
+   * "unknown program 'llama-server'" and exits at once: the engine was gone
+   * before the code under test looked, and the innocent bystander was not
+   * alive to be spared. Nor `exec -a <name> sleep`, for the same reason.
+   *
+   * The script exits on SIGTERM, as the engine does, and waits on a
+   * background `sleep` so the trap runs at once rather than after it.
    * Detached and unref'd so it outlives the call rather than dying with it.
    */
-  const SLEEP_BIN = ["/bin/sleep", "/usr/bin/sleep"].find((p) => fs.existsSync(p));
-
   function startFakeProcess(name: string): number {
-    if (!SLEEP_BIN) throw new Error("no sleep binary to copy");
-    const bin = path.join(tmp, "bin", name);
-    fs.copyFileSync(SLEEP_BIN, bin);
-    fs.chmodSync(bin, 0o755);
-    const child = spawn(bin, ["120"], { detached: true, stdio: "ignore" });
+    const script = path.join(tmp, "bin", name);
+    fs.writeFileSync(script, `trap 'exit 0' TERM${NL}while :; do sleep 1 & wait $!; done${NL}`);
+    const child = spawn("/bin/sh", [script], { detached: true, stdio: "ignore" });
     child.unref();
     strays.push(child.pid!);
     return child.pid!;
@@ -359,7 +366,8 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
     existingUnits = "ollama.service kokoro-server.service",
     ramKb,
     args = "",
-  }: { existingUnits?: string; ramKb?: number; args?: string } = {}) {
+    before = [],
+  }: { existingUnits?: string; ramKb?: number; args?: string; before?: string[] } = {}) {
     const log = path.join(tmp, "systemctl.log");
     fs.writeFileSync(log, "");
     const script = [
@@ -376,6 +384,7 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
       ...(ramKb === undefined
         ? []
         : [`awk() { case "$1" in *MemTotal*) echo ${ramKb} ;; *) command awk "$@" ;; esac; }`]),
+      ...before,
       `free_memory_for_build ${args} 2>&1`,
     ].join(NL);
     let code = 0;
@@ -474,6 +483,69 @@ describe("free_memory_for_build — behaviour, driven against stubs", () => {
     // The pidfile goes with it: leaving it behind would make the next reader
     // believe a server is up.
     expect(fs.existsSync(pidFile())).toBe(false);
+  });
+
+  // data/llamacpp is the service account's, whose llama-server wrote the
+  // pidfile: the account unlinks it. Against a data/llamacpp only
+  // `as_clawbox` can write to (src/tests/helpers/account-only-home.ts), root's
+  // own `rm` fails with EACCES, and its file commands there are logged.
+  (CAN_LOCK_HOME ? it : it.skip)("removes the pidfile as the service account", () => {
+    // A script whose NAME carries the identity, as in the SIGKILL case below:
+    // it stands in on any coreutils, multi-call builds included.
+    const script = path.join(tmp, "bin", "llama-server-fake");
+    fs.writeFileSync(script, `trap 'exit 0' TERM${NL}while :; do sleep 1 & wait $!; done${NL}`);
+    const child = spawn("/bin/sh", [script], { detached: true, stdio: "ignore" });
+    child.unref();
+    strays.push(child.pid!);
+    const pid = child.pid!;
+    fs.writeFileSync(pidFile(), `${pid}${NL}`);
+    const aux = fs.mkdtempSync(path.join(os.tmpdir(), "free-mem-aux-"));
+    try {
+      const account = accountOnlyHome(path.dirname(pidFile()), aux);
+
+      const r = run({ before: [account.shell, "__ao_lock"] });
+      unlockTree(path.dirname(pidFile()));
+
+      expect(r.code, r.out).toBe(0);
+      expect(alive(pid)).toBe(false);
+      expect(fs.existsSync(pidFile())).toBe(false);
+      expect(account.asClawbox()).toEqual([`rm -f -- ${pidFile()}`]);
+      expect(account.rootInHome().filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
+    } finally {
+      fs.rmSync(aux, { recursive: true, force: true });
+    }
+  });
+
+  // Between the engine pauses and the resume, under errexit: a pidfile the
+  // account cannot remove must not end do_rebuild with every engine stopped.
+  (CAN_LOCK_HOME ? it : it.skip)("goes on to the build when the account cannot remove the pidfile", () => {
+    const script = path.join(tmp, "bin", "llama-server-fake");
+    fs.writeFileSync(script, `trap 'exit 0' TERM${NL}while :; do sleep 1 & wait $!; done${NL}`);
+    const child = spawn("/bin/sh", [script], { detached: true, stdio: "ignore" });
+    child.unref();
+    strays.push(child.pid!);
+    const pid = child.pid!;
+    fs.writeFileSync(pidFile(), `${pid}${NL}`);
+    const dir = path.dirname(pidFile());
+    const aux = fs.mkdtempSync(path.join(os.tmpdir(), "free-mem-aux-"));
+    try {
+      // Not even the account may write data/llamacpp: its removal fails for real.
+      fs.chmodSync(dir, 0o555);
+      const account = accountOnlyHome(dir, aux);
+
+      const r = run({ before: [account.shell, "__ao_lock"] });
+      unlockTree(dir);
+
+      expect(r.code, r.out).toBe(0);
+      expect(alive(pid)).toBe(false);
+      expect(r.out).toMatch(/Memory available for the build: \d+ MB \(was \d+ MB\)/);
+      expect(fs.existsSync(pidFile())).toBe(true);
+      expect(account.asClawbox()).toEqual([`rm -f -- ${pidFile()}`]);
+      expect(account.rootInHome().filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
+    } finally {
+      fs.chmodSync(dir, 0o755);
+      fs.rmSync(aux, { recursive: true, force: true });
+    }
   });
 
   it("never signals a process that merely inherited the pid", () => {
@@ -999,7 +1071,10 @@ describe("both stops an update performs have a start", () => {
     // already waiting through. Only that arm has a reboot reason, and test mode
     // never asks for one, so every other arm takes the resuming call.
     const STEP = shellCode(extractShellFunction("step_rebuild_reboot"));
-    expect(STEP).toMatch(/if \[ -n "\$reboot_reasons" \]; then\s*\n\s*do_rebuild --reboot-follows\s*\n\s*else\s*\n\s*do_rebuild\s*\n/);
+    // The restart arm outside test mode hands a gateway paused for the build to
+    // the update's second half (TASK-2517); every other engine is still
+    // resumed there. Test mode keeps the plain resuming call.
+    expect(STEP).toMatch(/if \[ -n "\$reboot_reasons" \]; then\s*\n\s*do_rebuild --reboot-follows\s*\n\s*elif ! is_test_mode; then\s*\n\s*do_rebuild --gateway-to-update\s*\n\s*else\s*\n\s*do_rebuild\s*\n/);
     const decision = STEP.slice(0, STEP.indexOf("do_rebuild --reboot-follows"));
     expect(decision, "test mode does not reboot, so it never asks for a reason")
       .toMatch(/if ! is_test_mode; then\s*\n\s*reboot_reasons="\$\(update_reboot_reasons\)"/);

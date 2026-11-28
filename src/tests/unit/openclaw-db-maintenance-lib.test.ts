@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
 import path from "node:path";
 
@@ -19,6 +19,9 @@ const h = vi.hoisted(() => {
     probe: { available: true, path: "/usr/bin/systemd-run", detail: null as string | null },
     execFile: vi.fn(),
     spawn: vi.fn(),
+    bin: "/home/clawbox/.npm-global/bin/openclaw",
+    /** The desktop integration's host file, as this suite stands it in: never the host's own /etc. */
+    envFile: `${root}/etc/x64-integration.env`,
   };
 });
 
@@ -32,9 +35,13 @@ vi.mock("@/lib/config-store", () => ({
 vi.mock("@/lib/openclaw-config", () => ({
   CONFIG_PATH: "/home/clawbox/.openclaw/openclaw.json",
   OPENCLAW_HOME: "/home/clawbox/.openclaw",
-  findOpenclawBin: () => "/home/clawbox/.npm-global/bin/openclaw",
+  findOpenclawBin: () => h.bin,
   gatewayIsAbsent: () => h.edition === "hermes",
 }));
+vi.mock("@/lib/x64-integration", async (original) => {
+  const actual = await original<typeof import("@/lib/x64-integration")>();
+  return { ...actual, x64IntegrationNpmPrefix: () => actual.x64IntegrationNpmPrefix(h.envFile) };
+});
 vi.mock("@/lib/openclaw-state-store", () => ({ openclawStateDir: (home: string) => home }));
 vi.mock("@/lib/updater", () => ({ updateInFlight: async () => h.updating }));
 vi.mock("@/lib/coding-run-unit", () => ({
@@ -49,6 +56,8 @@ import {
   normaliseDbMaintenanceSchedule,
   readDbMaintenanceSchedule,
   readDbMaintenanceStatus,
+  markOpenclawDoctorDue,
+  recordOpenclawDoctorComplete,
   startDbMaintenance,
   writeDbMaintenanceSchedule,
 } from "@/lib/openclaw-db-maintenance";
@@ -88,6 +97,8 @@ beforeEach(() => {
   h.probe = { available: true, path: "/usr/bin/systemd-run", detail: null };
   h.execFile.mockReset();
   h.spawn.mockReset();
+  h.bin = "/home/clawbox/.npm-global/bin/openclaw";
+  h.envFile = path.join(h.root, "etc", "x64-integration.env");
 });
 
 afterEach(() => {
@@ -274,5 +285,284 @@ describe("readDbMaintenanceStatus", () => {
     h.edition = "hermes";
     expect(await readDbMaintenanceStatus()).toMatchObject({ available: false, databases: [], schedule: { enabled: false }, nextRunAt: null });
     expect(h.execFile).not.toHaveBeenCalled();
+  });
+});
+
+// The real one: this suite mocks child_process for the module under test.
+const { spawnSync } = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+
+/**
+ * The update's gateway check records a `doctor --fix` it saw complete the way
+ * install.sh records its own: the helper's `record-doctor --verdict complete`,
+ * which stamps the core's version and the time and recomputes the status from
+ * the databases.
+ */
+describe("recordOpenclawDoctorComplete", () => {
+  const HELPER = path.resolve(process.cwd(), "scripts/openclaw-db-maintenance.py");
+  const ok = () => h.execFile.mockImplementation((_b: string, _a: string[], _o: unknown, cb: (e: Error | null, o: string, e2: string) => void) =>
+    cb(null, "", ""));
+
+  it("runs the helper's record-doctor with the places install.sh passes, and answers true when it exits 0", async () => {
+    ok();
+    expect(await recordOpenclawDoctorComplete()).toBe(true);
+    expect(h.execFile).toHaveBeenCalledTimes(1);
+    const [bin, args] = h.execFile.mock.calls[0] as [string, string[]];
+    expect(bin).toBe("python3");
+    expect(args).toEqual([
+      "-I", path.join(h.root, "scripts", "openclaw-db-maintenance.py"), "record-doctor", "--verdict", "complete",
+      "--source", "update",
+      "--state-dir", "/home/clawbox/.openclaw",
+      "--config", "/home/clawbox/.openclaw/openclaw.json",
+      "--data-dir", path.join(h.root, "data"),
+      "--core-pkg", "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json",
+    ]);
+  });
+
+  it("answers false, without throwing, when the helper fails", async () => {
+    h.execFile.mockImplementation((_b: string, _a: string[], _o: unknown, cb: (e: Error | null, o: string, e2: string) => void) =>
+      cb(new Error("exit 1"), "", "Traceback"));
+    expect(await recordOpenclawDoctorComplete()).toBe(false);
+  });
+
+  it("records nothing when the core cannot be named, or on the Hermes edition", async () => {
+    ok();
+    // No absolute binary: no core package to name, and a verdict for no core
+    // would close the fast path the record opens.
+    h.bin = "openclaw";
+    expect(await recordOpenclawDoctorComplete()).toBe(false);
+    h.bin = "/home/clawbox/.npm-global/bin/openclaw";
+    h.edition = "hermes";
+    expect(await recordOpenclawDoctorComplete()).toBe(false);
+    expect(h.execFile).not.toHaveBeenCalled();
+  });
+
+  it.runIf(spawnSync("python3", ["--version"]).status === 0)(
+    "is a command line the real helper takes: it records doctor complete, for the installed core, with its time",
+    async () => {
+      ok();
+      await recordOpenclawDoctorComplete();
+      const args = [...(h.execFile.mock.calls[0][1] as string[])];
+      const state = path.join(h.root, "state");
+      const prefix = path.join(h.root, "prefix", "lib", "node_modules", "openclaw");
+      mkdirSync(state, { recursive: true });
+      mkdirSync(prefix, { recursive: true });
+      writeFileSync(path.join(prefix, "package.json"), JSON.stringify({
+        name: "openclaw", version: "2026.10.9", openclaw: { schemaVersions: { state: 20, agent: 25 } },
+      }));
+      args[args.indexOf("record-doctor") - 1] = HELPER;
+      args[args.indexOf("--state-dir") + 1] = state;
+      args[args.indexOf("--config") + 1] = path.join(state, "openclaw.json");
+      args[args.indexOf("--core-pkg") + 1] = path.join(prefix, "package.json");
+      const before = Date.now();
+      const run = spawnSync("python3", args, { encoding: "utf8" });
+      expect(run.status, run.stderr).toBe(0);
+      const written = JSON.parse(readFileSync(path.join(h.root, "data", "openclaw-migration-status.json"), "utf8"));
+      expect(written.doctor).toMatchObject({ core: "2026.10.9", verdict: "complete" });
+      expect(written.source).toBe("update");
+      // Whole seconds: the helper writes `%Y-%m-%dT%H:%M:%SZ`.
+      expect(Date.parse(written.doctor.at)).toBeGreaterThanOrEqual(Math.floor(before / 1000) * 1000);
+      expect(written.state).toBe("ok");
+    },
+  );
+
+  it("marks the recorded run due again with the helper's doctor-due, at the same places", async () => {
+    ok();
+    expect(await markOpenclawDoctorDue()).toBe(true);
+    const [bin, args] = h.execFile.mock.calls[0] as [string, string[]];
+    expect(bin).toBe("python3");
+    expect(args.slice(2, 3)).toEqual(["doctor-due"]);
+    expect(args).not.toContain("--verdict");
+    expect(args.slice(3)).toEqual([
+      "--state-dir", "/home/clawbox/.openclaw",
+      "--config", "/home/clawbox/.openclaw/openclaw.json",
+      "--data-dir", path.join(h.root, "data"),
+      "--core-pkg", "/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json",
+    ]);
+    h.edition = "hermes";
+    h.execFile.mockReset();
+    expect(await markOpenclawDoctorDue()).toBe(false);
+    expect(h.execFile).not.toHaveBeenCalled();
+  });
+
+  it.runIf(spawnSync("python3", ["--version"]).status === 0)(
+    "is a command line the real helper takes: the verdict and core stay, the time goes",
+    async () => {
+      ok();
+      await markOpenclawDoctorDue();
+      const args = [...(h.execFile.mock.calls[0][1] as string[])];
+      const state = path.join(h.root, "state");
+      mkdirSync(state, { recursive: true });
+      args[args.indexOf("doctor-due") - 1] = HELPER;
+      args[args.indexOf("--state-dir") + 1] = state;
+      args[args.indexOf("--config") + 1] = path.join(state, "openclaw.json");
+      const record = { state: "ok", core: "2026.10.9", doctor: { core: "2026.10.9", verdict: "complete", at: "2026-11-03T21:04:27Z" } };
+      writeFileSync(path.join(h.root, "data", "openclaw-migration-status.json"), JSON.stringify(record));
+      const run = spawnSync("python3", args, { encoding: "utf8" });
+      expect(run.status, run.stderr).toBe(0);
+      const written = JSON.parse(readFileSync(path.join(h.root, "data", "openclaw-migration-status.json"), "utf8"));
+      expect(written).toMatchObject({ state: "ok", core: "2026.10.9", doctor: { core: "2026.10.9", verdict: "complete", at: null } });
+    },
+  );
+});
+
+describe("the core package.json the helper reads (--core-pkg)", () => {
+  const HELPER = path.resolve(process.cwd(), "scripts/openclaw-db-maintenance.py");
+  const hasPython3 = (() => {
+    try {
+      return spawnSync("python3", ["--version"]).status === 0;
+    } catch {
+      return false;
+    }
+  })();
+  const okStatus = () => h.execFile.mockImplementation((_b: string, _a: string[], _o: unknown, cb: (e: Error | null, o: string, e2: string) => void) =>
+    cb(null, JSON.stringify({ core: null, supported: false, databases: [] }), ""));
+  const statusArgs = async (): Promise<string[]> => {
+    okStatus();
+    await readDbMaintenanceStatus();
+    return h.execFile.mock.calls[0][1] as string[];
+  };
+  const opt = (args: string[], name: string) => args[args.indexOf(name) + 1];
+  const writePkg = (prefix: string, version: string) => {
+    const dir = path.join(prefix, "lib", "node_modules", "openclaw");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "openclaw", version, openclaw: { schemaVersions: { state: 3, agent: 5 } } }));
+    return path.join(dir, "package.json");
+  };
+  /** The desktop integration: ~/.npm-global/bin/openclaw is a link to its wrapper, and the core is under NPM_PREFIX. */
+  const desktopIntegration = (prefix: string, prefixLine = `NPM_PREFIX=${prefix}`) => {
+    const npmBin = path.join(h.root, "home", ".npm-global", "bin");
+    const libexec = path.join(h.root, "libexec");
+    mkdirSync(npmBin, { recursive: true });
+    mkdirSync(libexec, { recursive: true });
+    writeFileSync(path.join(libexec, "openclaw-cli"), "#!/usr/bin/env bash\nexit 1\n", { mode: 0o755 });
+    symlinkSync(path.join(libexec, "openclaw-cli"), path.join(npmBin, "openclaw"));
+    h.bin = path.join(npmBin, "openclaw");
+    mkdirSync(path.dirname(h.envFile), { recursive: true });
+    writeFileSync(h.envFile, [
+      "INSTALL_USER=fixture", `INSTALL_HOME=${path.join(h.root, "home")}`, "PROJECT_DIR=/fixture/clawbox",
+      "NODE_DIR=/fixture/node/bin", prefixLine, "",
+    ].join("\n"));
+    return path.join(h.root, "home", ".npm-global", "lib", "node_modules", "openclaw", "package.json");
+  };
+  /** The helper's own read-only `status --json` over an empty state, with the args the web server built. */
+  const realStatus = (args: string[]) => {
+    const state = path.join(h.root, "state");
+    mkdirSync(state, { recursive: true });
+    const real = [...args];
+    real[real.indexOf("status") - 1] = HELPER;
+    real[real.indexOf("--state-dir") + 1] = state;
+    real[real.indexOf("--config") + 1] = path.join(state, "openclaw.json");
+    const run = spawnSync("python3", real, { encoding: "utf8" });
+    expect(run.status, run.stderr).toBe(0);
+    return JSON.parse(run.stdout) as { core: string | null; supported: boolean };
+  };
+
+  it("is the one beside the binary's npm prefix on the appliance layout, exactly as before, whatever a host file says", async () => {
+    const npmGlobal = path.join(h.root, "home", ".npm-global");
+    const pkg = writePkg(npmGlobal, "2026.10.6");
+    mkdirSync(path.join(npmGlobal, "bin"), { recursive: true });
+    h.bin = path.join(npmGlobal, "bin", "openclaw");
+    const args = await statusArgs();
+    expect(args.slice(args.indexOf("--openclaw-bin"))).toEqual([
+      "--openclaw-bin", h.bin, "--core-pkg", path.join(npmGlobal, "bin", "..", "lib", "node_modules", "openclaw", "package.json"),
+    ]);
+    expect(opt(args, "--core-pkg")).toBe(pkg);
+    // A desktop integration's host file does not move a core that is where the binary says.
+    const other = writePkg(path.join(h.root, "other-prefix"), "2026.10.9");
+    mkdirSync(path.dirname(h.envFile), { recursive: true });
+    writeFileSync(h.envFile, `NPM_PREFIX=${path.join(h.root, "other-prefix")}\n`);
+    h.execFile.mockReset();
+    expect(opt(await statusArgs(), "--core-pkg")).toBe(pkg);
+    expect(opt(await statusArgs(), "--core-pkg")).not.toBe(other);
+  });
+
+  it("keeps the appliance's path for a binary with no package beside it, as before (startDbMaintenance)", async () => {
+    h.execFile.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: (e: Error | null, o: string, e2: string) => void) => cb(null, "", ""));
+    await startDbMaintenance("manual");
+    const args = h.execFile.mock.calls[0][1] as string[];
+    expect(opt(args, "--core-pkg")).toBe("/home/clawbox/.npm-global/lib/node_modules/openclaw/package.json");
+  });
+
+  it("is the desktop integration's NPM_PREFIX core when the binary is its wrapper, for status and for a run", async () => {
+    const prefix = path.join(h.root, "desktop-prefix");
+    const pkg = writePkg(prefix, "2026.10.9");
+    desktopIntegration(prefix);
+    expect(opt(await statusArgs(), "--core-pkg")).toBe(pkg);
+    expect(opt(await statusArgs(), "--openclaw-bin")).toBe(h.bin);
+    h.execFile.mockReset();
+    h.execFile.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: (e: Error | null, o: string, e2: string) => void) => cb(null, "", ""));
+    await startDbMaintenance("manual");
+    const command = h.execFile.mock.calls[0][1] as string[];
+    expect(opt(command, "--core-pkg")).toBe(pkg);
+  });
+
+  it("reads a prefix the package's shlex.quote single-quoted", async () => {
+    const prefix = path.join(h.root, "desktop prefix");
+    const pkg = writePkg(prefix, "2026.10.9");
+    desktopIntegration(prefix, `NPM_PREFIX='${prefix}'`);
+    expect(opt(await statusArgs(), "--core-pkg")).toBe(pkg);
+  });
+
+  it("parses the host file as text: the last NPM_PREFIX, CRLF lines, shlex's two forms, and nothing else", async () => {
+    const { x64IntegrationNpmPrefix } = await vi.importActual<typeof import("@/lib/x64-integration")>("@/lib/x64-integration");
+    const file = path.join(h.root, "parse.env");
+    const read = (text: string) => {
+      writeFileSync(file, text);
+      return x64IntegrationNpmPrefix(file);
+    };
+    expect(read("NPM_PREFIX=/opt/a\nNPM_PREFIX=/opt/b\n")).toBe("/opt/b");
+    expect(read("INSTALL_USER=fixture\r\nNPM_PREFIX=/opt/crlf\r\n")).toBe("/opt/crlf");
+    expect(read("NPM_PREFIX='/opt/with space'\n")).toBe("/opt/with space");
+    expect(read("NPM_PREFIX=/opt/with space\n")).toBeNull();
+    expect(read("NPM_PREFIX='/opt/it'\"'\"'s'\n")).toBeNull();
+    expect(read("NPM_PREFIX=\"/opt/double\"\n")).toBeNull();
+    expect(read("NPM_PREFIX=\n")).toBeNull();
+    expect(read(" NPM_PREFIX=/opt/indented\n")).toBeNull();
+    expect(read(`NPM_PREFIX=/opt/${"x".repeat(5000)}\n`)).toBeNull();
+    symlinkSync(file, path.join(h.root, "link.env"));
+    writeFileSync(file, "NPM_PREFIX=/opt/through-a-link\n");
+    expect(x64IntegrationNpmPrefix(path.join(h.root, "link.env"))).toBeNull();
+    expect(x64IntegrationNpmPrefix(path.join(h.root, "absent.env"))).toBeNull();
+  });
+
+  it.skipIf(!hasPython3)("reads back what the integration package's writer emits (build-package.py: k=shlex.quote(v))", async () => {
+    const { x64IntegrationNpmPrefix } = await vi.importActual<typeof import("@/lib/x64-integration")>("@/lib/x64-integration");
+    const writer = "import shlex, sys\nhost = dict(INSTALL_USER='fixture', NPM_PREFIX=sys.argv[1], NODE_DIR='/opt/node/bin')\n"
+      + "open(sys.argv[2], 'w').write(''.join(f'{k}={shlex.quote(v)}\\n' for k, v in host.items()))\n";
+    const file = path.join(h.root, "written.env");
+    for (const prefix of ["/opt/fixture/.npm-global", "/opt/fixture user/.npm-global", "/srv/a+b@c/.npm-global"]) {
+      const run = spawnSync("python3", ["-I", "-c", writer, prefix, file], { encoding: "utf8" });
+      expect(run.status, run.stderr).toBe(0);
+      expect(x64IntegrationNpmPrefix(file), prefix).toBe(prefix);
+    }
+  });
+
+  it.skipIf(!hasPython3)("lets the helper see a 2026.10 core on the desktop integration: supported", async () => {
+    const prefix = path.join(h.root, "desktop-prefix");
+    writePkg(prefix, "2026.10.9");
+    desktopIntegration(prefix);
+    expect(realStatus(await statusArgs())).toMatchObject({ core: "2026.10.9", supported: true });
+  });
+
+  it("keeps today's path when the host file is missing, unreadable, names no usable prefix, or a prefix with no core", async () => {
+    const prefix = path.join(h.root, "desktop-prefix");
+    writePkg(prefix, "2026.10.9");
+    const today = desktopIntegration(prefix);
+    const cases: Array<[string, () => void]> = [
+      ["missing", () => {}],
+      ["unreadable (a directory)", () => mkdirSync(h.envFile)],
+      ["no NPM_PREFIX", () => writeFileSync(h.envFile, "INSTALL_USER=fixture\nPROJECT_DIR=/fixture/clawbox\n")],
+      ["a relative prefix", () => writeFileSync(h.envFile, "NPM_PREFIX=desktop-prefix\n")],
+      ["shell code, never run", () => writeFileSync(h.envFile, `NPM_PREFIX=$(touch ${path.join(h.root, "ran")})${prefix}\n`)],
+      ["a prefix with no core", () => writeFileSync(h.envFile, `NPM_PREFIX=${path.join(h.root, "empty-prefix")}\n`)],
+    ];
+    for (const [name, arrange] of cases) {
+      rmSync(h.envFile, { recursive: true, force: true });
+      arrange();
+      h.execFile.mockReset();
+      expect(opt(await statusArgs(), "--core-pkg"), name).toBe(today);
+    }
+    expect(existsSync(path.join(h.root, "ran"))).toBe(false);
+    if (hasPython3) expect(realStatus(await statusArgs())).toMatchObject({ core: null, supported: false });
   });
 });

@@ -262,6 +262,13 @@ case "$1" in
       printf 'created-by-%s' "$version" > '{root}/.openclaw/agents/ops/agent/openclaw-agent.sqlite'
       printf 'shm' > '{root}/.openclaw/agents/ops/agent/openclaw-agent.sqlite-shm'
     fi
+    if [ -f '{root}/doctor-conflicts' ] && [ "$(cat '{root}/doctor-conflicts')" -gt 0 ]; then
+      echo $(( $(cat '{root}/doctor-conflicts') - 1 )) > '{root}/doctor-conflicts'
+      printf 'doctor-end\n' >> '{root}/events'
+      printf 'Doctor could not complete maintenance. Check the reported service state and resolve the failure.\n'
+      printf 'Plugin migration obligations changed during migration input publication. expected=[codex], current=[codex], changed=[codex:command, codex:reason].\n'
+      exit 1
+    fi
     [ ! -f '{root}/doctor-hangs' ] || sleep 30
     printf 'doctor-end\n' >> '{root}/events'
     exit "$(cat '{root}/core-exit')" ;;
@@ -572,6 +579,35 @@ exit {code}
                 self.assertNotIn('configuration accepted',result.stdout)
                 self.assertFalse((root/'guard').exists())
                 self.assertEqual(len(self.recovery_points(root)),1)
+                self.assertFalse((root/'.openclaw-migration-pending').exists())
+
+    def test_doctor_asking_for_another_pass_gets_exactly_one(self):
+        """A changed plugin migration obligation earns one more doctor; a second refusal, a blocker or any other failure rolls back."""
+        # (conflicts, core-exit, blocker, doctor runs): config validate logs one more doctor-start on success.
+        for conflicts,core_exit,blocker,doctors in [(1,0,'',2),(2,0,'',2),(0,1,'',1),(1,0,'agent database maintenance lease was lost\n',1)]:
+            with self.subTest(conflicts=conflicts,core_exit=core_exit,blocker=bool(blocker)):
+                root,worker,_=self.core_fixture(core_exit)
+                (root/'mirror/config/openclaw-target.txt').write_text('2026.9.1\n')
+                (root/'doctor-mutates').write_text('')
+                (root/'doctor-says').write_text('doctor-pass-output\n'+blocker)
+                (root/'doctor-conflicts').write_text(str(conflicts))
+                result=self.run_worker(worker,'openclaw_install')
+                events=(root/'events').read_text().splitlines()
+                log=(self.recovery_points(root)[0]/'doctor.log').read_text()
+                self.assertEqual(log.count('doctor-pass-output'),doctors)
+                self.assertEqual(log.count('Plugin migration obligations changed'),conflicts)
+                if doctors==2 and conflicts==1:
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    self.assertEqual(events.count('doctor-start'),doctors+1,events)
+                    self.assertEqual(self.core_version(root/'lib/node_modules/openclaw'),'2026.9.1')
+                    self.assertIn('configuration accepted',result.stdout)
+                else:
+                    self.assertNotEqual(result.returncode,0)
+                    self.assertEqual(events.count('doctor-start'),doctors,events)
+                    self.assertIn('restoring OpenClaw 2026.8.1',result.stderr)
+                    self.assertEqual(self.core_version(root/'lib/node_modules/openclaw'),'2026.8.1')
+                    self.assertEqual((root/'.openclaw/agents/main/agent/openclaw-agent.sqlite').read_text(),'agent-2026.8.1')
+                    self.assertNotIn('validate-2026.9.1',events)
                 self.assertFalse((root/'.openclaw-migration-pending').exists())
 
     def test_staged_core_that_is_not_the_pin_never_reaches_the_live_prefix(self):

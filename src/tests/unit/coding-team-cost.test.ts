@@ -88,6 +88,18 @@ describe("the planner's repo map", () => {
     expect(planner.PLANNER_BRIEF).toMatch(/test_commands/);
     expect(planner.PLANNER_BRIEF).toMatch(/ONE task runs as a single ordinary run/);
     expect(planner.PLANNER_BRIEF).toMatch(/edit mostly the same files/);
+    // Steps that build on each other are one task too (2026-11-10): Todo 1.3.0
+    // planned as a chain of five (backend → MCP ∥ UI → undo → release) cost
+    // $17.33 and 74 minutes where one run of the same goal cost $1.68 and 13,
+    // both to 48 of 48 hidden checks — and the brief used to ASK for the chain
+    // ("any chain where each step builds on the last, runs serially").
+    expect(planner.PLANNER_BRIEF).toMatch(/steps that each build on the last .* are ONE task/);
+    expect(planner.PLANNER_BRIEF).toMatch(/Only a chain too long for one session/);
+    // And a yardstick, because "what one session can hold" was the planner's
+    // guess: told only the rule above, it planned the same release as four
+    // tasks — backend, then MCP beside UI, then release (team-iogwx6jt).
+    expect(planner.PLANNER_BRIEF).toMatch(/one session does a whole feature release of a small app in one go/);
+    expect(planner.PLANNER_BRIEF).not.toMatch(/any chain where each step builds on the last, runs serially/);
     // The other lever of before — a task marked bulk for a cheaper model — went on 2026-10-30.
     expect(planner.PLANNER_BRIEF).not.toMatch(/bulk/);
   });
@@ -168,7 +180,7 @@ describe("tokens per provider", () => {
       { id: "run-00000007", role: "worker", taskId: "t3", tokens: 1_000 },
     );
     const m = board.teamMetrics(b);
-    expect(m.tokensByProvider).toEqual({ "clawbox-ai": 140_000, anthropic: 23_000, openai: 0 });
+    expect(m.tokensByProvider).toEqual({ "clawbox-ai": 140_000, anthropic: 23_000, openai: 0, local: 0 });
     expect(m.tokensUsed).toBe(164_000);
     board.saveBoard(b);
     const back = board.loadBoard(b.id)!;
@@ -180,7 +192,7 @@ describe("tokens per provider", () => {
   });
 
   it("is every provider at zero on a new board", () => {
-    expect(fresh().metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 0, openai: 0 });
+    expect(fresh().metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 0, openai: 0, local: 0 });
   });
 
   it("loads a board from before the field — and one hand-edited — without inventing an account", () => {
@@ -202,7 +214,7 @@ describe("tokens per provider", () => {
       { id: "run-00000002", role: "worker", taskId: "t1", tokens: 6_000 },
       { id: "run-00000003", role: "worker", taskId: "t2", tokens: 7_000, provider: "anthropic", modelRole: "worker" },
     ]);
-    expect(back.metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 7_000, openai: 0 });
+    expect(back.metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 7_000, openai: 0, local: 0 });
     expect(back.metrics.tokensUsed).toBe(17_000);
   });
 });

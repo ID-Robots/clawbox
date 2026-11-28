@@ -4,7 +4,7 @@
  * Seen on a real box. A run died in seconds and the card carried, whole and
  * alone, the line the CLI had printed:
  *
- *     [claude-code:unrecognized_model] {"model":"deepseek-v4-pro[1m]","query_source":"sdk"}
+ *     [claude-code:unrecognized_model] {"model":"deepseek-v4-flash[1m]","query_source":"sdk"}
  *
  * Nothing in that is actionable by the person it was shown to, and nothing on
  * the box acted on it either: the next run asked for the same model and died
@@ -56,9 +56,9 @@ let binDir: string;
 let restore: () => void;
 
 /** The line the box actually died on. */
-const UNRECOGNIZED = '[claude-code:unrecognized_model] {"model":"deepseek-v4-pro[1m]","query_source":"sdk"}';
+const UNRECOGNIZED = '[claude-code:unrecognized_model] {"model":"deepseek-v4-flash[1m]","query_source":"sdk"}';
 
-const INIT = '{"type":"system","subtype":"init","session_id":"sess-abc-123","model":"deepseek-v4-pro","permissionMode":"acceptEdits"}';
+const INIT = '{"type":"system","subtype":"init","session_id":"sess-abc-123","model":"deepseek-v4-flash","permissionMode":"acceptEdits"}';
 
 function resultError(message: string): string {
   return JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: message, num_turns: 0 });
@@ -105,7 +105,7 @@ function installEmittingWrapper(lines: string[], code = 1): void {
 function answer(content: unknown[], usage: Record<string, number> | null, id = "msg_1"): string {
   return JSON.stringify({
     type: "assistant",
-    message: { id, model: "deepseek-v4-pro", role: "assistant", content, ...(usage ? { usage } : {}) },
+    message: { id, model: "deepseek-v4-flash", role: "assistant", content, ...(usage ? { usage } : {}) },
     parent_tool_use_id: null,
     session_id: "sess-abc-123",
   });
@@ -185,8 +185,8 @@ describe("what counts as the harness not being ready", () => {
   it("recognises the other ways a model refuses to answer at all", () => {
     for (const err of [
       "API Error: 400 Model not allowed",
-      "model_not_found: deepseek-v4-pro",
-      "Unknown model: deepseek-v4-pro[1m]",
+      "model_not_found: deepseek-v4-flash",
+      "Unknown model: deepseek-v4-flash[1m]",
       "invalid_api_key: the provided key is not valid",
       "authentication_error",
       "API Error: 401 Unauthorized",
@@ -235,7 +235,7 @@ describe("the message the owner is left with", () => {
     expect(message).toContain("Settings → AI Models");
     // The model that was refused is the first thing anyone looking into this
     // needs, so it survives — just not as the opening line.
-    expect(message).toContain("deepseek-v4-pro[1m]");
+    expect(message).toContain("deepseek-v4-flash[1m]");
   });
 
   it("bounds the line it quotes and flattens it to one", () => {
@@ -295,7 +295,7 @@ describe("a run that dies because the harness is not ready", () => {
     expect(run.failureKind).toBe("harness_not_ready");
     expect(run.error).toContain(HARNESS_NOT_READY_SENTENCE);
     // The evidence is kept, but it is no longer the whole message.
-    expect(run.error).toContain("deepseek-v4-pro[1m]");
+    expect(run.error).toContain("deepseek-v4-flash[1m]");
     expect(run.error?.startsWith("[claude-code:")).toBe(false);
     // Resuming replays a failure Claude Code persists in the session, and
     // there is no work in it to come back to anyway.
@@ -524,7 +524,7 @@ describe("the stderr tail of a harness that died with no result", () => {
     expect(run.status).toBe("failed");
     expect(run.retries).toBe(1);
     expect(run.failureKind).toBe("harness_not_ready");
-    expect(run.error).toContain("deepseek-v4-pro[1m]");
+    expect(run.error).toContain("deepseek-v4-flash[1m]");
     expect(run.error).not.toContain("was killed");
   });
 });

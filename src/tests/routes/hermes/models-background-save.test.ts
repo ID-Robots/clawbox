@@ -14,6 +14,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const runHermesCliMock = vi.hoisted(() => vi.fn());
 const getModelOptionsMock = vi.hoisted(() => vi.fn());
 const saveKeyMock = vi.hoisted(() => vi.fn());
+/** The local-only AI lock (TASK-2501), as the device store holds it. */
+const lockState = vi.hoisted(() => ({ on: false }));
 
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: runHermesCliMock }));
 vi.mock("@/lib/hermes-model-options", async (importOriginal) => {
@@ -27,8 +29,8 @@ vi.mock("@/lib/route-auth", () => ({ requireSession: vi.fn(async () => null) }))
 vi.mock("@/lib/provider-verified", () => ({ readProviderVerified: vi.fn(async () => null) }));
 vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(async () => undefined),
-  getKnown: vi.fn(async () => ({ value: undefined, known: true })),
-  get: vi.fn(async () => undefined),
+  getKnown: vi.fn(async (key: string) => ({ value: key === "ai_cloud_lock" && lockState.on ? true : undefined, known: true })),
+  get: vi.fn(async (key: string) => (key === "ai_cloud_lock" && lockState.on ? true : undefined)),
   set: vi.fn(),
   resolveConfigRoot: () => process.env.CLAWBOX_ROOT || "/tmp",
 }));
@@ -89,6 +91,7 @@ beforeEach(async () => {
   runHermesCliMock.mockReset().mockResolvedValue({ code: 0, stdout: "", stderr: "" });
   getModelOptionsMock.mockReset().mockImplementation(async () => structuredClone(PAYLOAD));
   saveKeyMock.mockReset().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+  lockState.on = false;
 });
 
 afterEach(async () => {
@@ -138,5 +141,56 @@ describe("POST /setup-api/hermes/models {background: true}", () => {
     const res = await post({ provider: "anthropic", model: "anthropic/claude-opus-5" });
     expect(res.status).toBe(200);
     expect(saveKeyMock).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("POST /setup-api/hermes/models — the local-only AI lock (TASK-2501)", () => {
+  /** The box's on-device model, offered beside the cloud provider. */
+  const WITH_LOCAL = {
+    ...PAYLOAD,
+    providers: [
+      ...PAYLOAD.providers,
+      { id: "clawlocal", name: "Gemma 4 (on-device)", authenticated: true, verified: null, isUserDefined: true, source: "dashboard", total: 1, models: [{ id: "gemma-4-e2b", description: "" }] },
+    ],
+  };
+
+  it("refuses a cloud provider's sign-in before any task starts or key is saved", async () => {
+    lockState.on = true;
+    const res = await post({ provider: "anthropic", apiKey: "sk-ant-0123456789", model: "anthropic/claude-opus-5", background: true });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+    expect(saveKeyMock).not.toHaveBeenCalled();
+    expect(runHermesCliMock).not.toHaveBeenCalled();
+    const { listBackgroundTasks } = await import("@/lib/background-tasks");
+    expect(listBackgroundTasks()).toEqual([]);
+  });
+
+  it("refuses a plain save onto a cloud provider, and writes nothing", async () => {
+    lockState.on = true;
+    const res = await post({ provider: "anthropic", model: "anthropic/claude-opus-5" });
+    expect(res.status).toBe(409);
+    expect(runHermesCliMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a model pick on the cloud provider Hermes is already on", async () => {
+    lockState.on = true;
+    // PAYLOAD.current is OpenRouter: a model-only pick stays on it.
+    const res = await post({ model: "openrouter/auto" });
+    expect(res.status).toBe(409);
+    expect(runHermesCliMock).not.toHaveBeenCalled();
+  });
+
+  it("still moves Hermes onto the on-device model", async () => {
+    lockState.on = true;
+    getModelOptionsMock.mockImplementation(async () => structuredClone(WITH_LOCAL));
+    const res = await post({ provider: "clawlocal", model: "gemma-4-e2b" });
+    expect(res.status).toBe(200);
+    expect(runHermesCliMock).toHaveBeenCalled();
+  });
+
+  it("saves the same cloud provider once the lock is off", async () => {
+    const res = await post({ provider: "anthropic", model: "anthropic/claude-opus-5" });
+    expect(res.status).toBe(200);
   });
 });

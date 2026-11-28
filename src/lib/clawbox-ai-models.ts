@@ -12,84 +12,82 @@
  * so a staging proxy with a different alias map can point them elsewhere
  * without code changes.
  *
- * The proxy serves BOTH ids with DeepSeek V4 Flash: `deepseek-v4-pro` is the
- * Max plan's id, a plan gate the portal and proxy check, not a bigger model.
- * Copy on the box names the model that answers ("DeepSeek V4 Flash"), never
- * "V4 Pro". The ids stay as they are: saved openclaw.json and Hermes configs,
- * the boot script's allowlists and the portal's entitlement lists all carry
- * them.
+ * ONE MODEL (TASK-2261). The proxy answers every ClawBox AI id with the same
+ * upstream model, DeepSeek V4.1 Flash, on every plan — measured 2026-11-07: a
+ * turn sent as the Flash id, the former Max-plan id and the former vision id
+ * all report `model: "deepseek-flash"`. So the box offers exactly one:
+ * `deepseek-v4-flash`, for chat, and for looking at pictures while the vision
+ * check says it can (src/lib/clawbox-ai-vision.ts; a describe-only fallback
+ * steps in when upstream takes vision away). The ids the box used to write
+ * live only in src/lib/clawbox-ai-retired-models.ts, which is what every
+ * migration recognises them by.
  */
 export const CLAWBOX_AI_PROVIDER = "deepseek" as const;
 
 export const CLAWBOX_AI_FLASH_MODEL_ID =
   process.env.CLAWBOX_AI_FLASH_MODEL_ID?.trim() || "deepseek-v4-flash";
 
-// The proxy serves DeepSeek V4 Flash through both the Flash and Pro ids.
-// Chat uses the Flash id; keep the wire IDs and subscription tiers stable.
+// The name of the one model ClawBox AI serves, for copy that names it.
 export const CLAWBOX_AI_CHAT_MODEL_LABEL = "DeepSeek V4 Flash";
 
-export const CLAWBOX_AI_PRO_MODEL_ID =
-  process.env.CLAWBOX_AI_PRO_MODEL_ID?.trim() || "deepseek-v4-pro";
-
+/**
+ * The PLAN vocabulary the device-tier badge is stored in (`clawai_tier`):
+ * `flash` is the Pro plan, `pro` the Max plan (see {@link CLAWBOX_AI_TIER_LABEL}).
+ * A plan no longer chooses a model — every plan runs
+ * {@link CLAWBOX_AI_FLASH_MODEL_ID} — but the words stay: the portal hands
+ * them to the box and the plan pickers, the voice gate and the harness swap
+ * still read them.
+ */
 export type ClawboxAiTier = "flash" | "pro";
 
 export const CLAWBOX_AI_DEFAULT_TIER: ClawboxAiTier = "flash";
 
-export const CLAWBOX_AI_MODEL_BY_TIER: Record<ClawboxAiTier, string> = {
-  flash: `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_FLASH_MODEL_ID}`,
-  pro: `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_PRO_MODEL_ID}`,
-};
+/**
+ * The qualified ref of the one ClawBox AI chat model, as openclaw.json's
+ * `agents.defaults.model.primary` and its fallbacks take it.
+ *
+ * Both spellings are load-bearing on their own side: openclaw.json takes this
+ * qualified ref, while Hermes' `model.default` and the ClawBox AI proxy take
+ * the bare {@link CLAWBOX_AI_FLASH_MODEL_ID} (a prefixed slug comes back
+ * "HTTP 400: Model not allowed").
+ */
+export const CLAWBOX_AI_CHAT_MODEL = `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_FLASH_MODEL_ID}`;
 
 /**
- * The same table, BARE — no `deepseek/` prefix.
+ * The BARE ids the ClawBox AI proxy serves as CHAT models: the one model.
  *
- * Both spellings are load-bearing on their own side: openclaw.json's
- * `agents.defaults.model.primary` takes the qualified ref, while Hermes'
- * `model.default` and the ClawBox AI proxy take the bare id (a prefixed slug
- * comes back "HTTP 400: Model not allowed"). One table so the two editions
- * cannot answer the tier question differently.
+ * A list rather than a constant because Hermes takes one: `applyClawaiToHermes`
+ * declares it in Hermes' own `providers.clawai.models` (the block Hermes'
+ * `/model` picker and its dashboard both read), and hermes-model-options.ts
+ * uses it as the cold-start floor for the same provider.
+ *
+ * Deliberately excludes the image-generation id: that exists so a picture can
+ * be drawn, and offering it as something to talk to is a turn the proxy
+ * answers with "Model not allowed".
  */
-export const CLAWBOX_AI_MODEL_ID_BY_TIER: Record<ClawboxAiTier, string> = {
-  flash: CLAWBOX_AI_FLASH_MODEL_ID,
-  pro: CLAWBOX_AI_PRO_MODEL_ID,
-};
+export const CLAWBOX_AI_CHAT_MODEL_IDS: readonly string[] = [CLAWBOX_AI_FLASH_MODEL_ID];
 
 /**
- * The BARE ids the ClawBox AI proxy serves as CHAT models, in the order a
- * picker should show them.
+ * What the one model takes in while it can see: text AND pictures.
  *
- * BOTH, ON EVERY BOX, AND THE PROXY STILL GATES BY PLAN. `deepseek-v4-pro` is
- * Max-only (see `clawbox-ai-tiers.ts`, and the "Max plan only" note the wizard
- * picker carries), so a Free or Pro box that picks it gets a model-gate
- * rejection. Offering both anyway is the existing product behaviour, not a
- * choice invented here: `normalizeRow` seeds both regardless of tier and the
- * OpenClaw provider definition declares both for every tier. It is also the
- * only behaviour that stays TRUE — the portal can move a device's tier without
- * re-running any of these writers, so a list derived from the tier at link time
- * would lock an upgraded box out of the model it now pays for.
+ * Measured 2026-11-07 against the live proxy on a lab box with the
+ * `deepseek-v4-flash` id: a picture with text, a photo, a UI screenshot, two
+ * pictures in one turn and 2048-pixel images were all described correctly,
+ * streamed and not, with and without tools in the request. On OpenClaw the row
+ * carrying `image` is what lets an attached picture reach the chat model
+ * directly (verified on the box's own chat, full page and mascot); it is also
+ * what `agents.defaults.imageModel` needs, because OpenClaw's
+ * `resolveImageRuntime` refuses an image model whose catalog entry does not
+ * advertise `image` ("Model does not support images").
  *
- * What is genuinely worse on the Hermes side is that its own picker shows a
- * bare id with no plan label, where the ClawBox pickers say "Max plan only".
- * That is a gap to close in Hermes' row metadata, not a reason to hide a model
- * the account may already be entitled to.
- *
- * Deliberately excludes the image and vision ids: those exist so a picture can
- * be drawn or looked at, and offering them as something to talk to is a turn
- * the proxy answers with "Model not allowed".
- *
- * Lives beside the ids rather than being re-typed by each writer:
- * `applyClawaiToHermes` declares it in Hermes' own `providers.clawai.models`
- * (the block Hermes' `/model` picker and its dashboard both read), and
- * hermes-model-options.ts uses it as the cold-start floor for the same
- * provider. `CLAWAI_MODELS` and `CLAWAI_STATIC_MODELS` still spell the ids out
- * as literals beside their labels, so a staging box that sets
- * `CLAWBOX_AI_FLASH_MODEL_ID` will see them disagree — pre-existing, and worth
- * folding through here the next time that pair is touched.
+ * NOT ASSUMED. Upstream can take vision away from Flash, so the box asks before
+ * it declares it (src/lib/clawbox-ai-vision.ts); a Flash that cannot see gets
+ * {@link CLAWBOX_AI_TEXT_ONLY_MODALITIES} and pictures go to the fallback.
  */
-export const CLAWBOX_AI_CHAT_MODEL_IDS: readonly string[] = [
-  CLAWBOX_AI_FLASH_MODEL_ID,
-  CLAWBOX_AI_PRO_MODEL_ID,
-];
+export const CLAWBOX_AI_INPUT_MODALITIES = ["text", "image"] as const;
+
+/** The Flash row while the vision check says it cannot see. */
+export const CLAWBOX_AI_TEXT_ONLY_MODALITIES = ["text"] as const;
 
 // Device-tier badge label rendered in the chat header / Settings. Mirrors
 // the subscription plan names ("Pro plan" / "Max plan") so users don't see
@@ -155,31 +153,12 @@ export function normalizeClawboxAiPlanTier(value: unknown): ClawboxAiPlanTier | 
  * keep showing it under the other.
  *
  * Says WHICH proxy, not which model and not who may run it: see
- * {@link isClawboxAiProModel} and {@link portalDeniesClawboxAiModel}.
+ * {@link portalDeniesClawboxAiModel}.
  */
 export function isClawboxAiProvider(provider: string | null | undefined): boolean {
   if (typeof provider !== "string") return false;
   const normalized = provider.trim().toLowerCase();
   return normalized === CLAWBOX_AI_PROVIDER || normalized === "clawai";
-}
-
-/**
- * True if `model` is a fully-qualified ClawBox AI Pro slug
- * (`clawai/deepseek-v4-pro` or `deepseek/deepseek-v4-pro`).
- *
- * Says WHICH model this is, and nothing about who may run it — that
- * question is answered by {@link portalDeniesClawboxAiModel} from the
- * portal's own entitlement list. The two used to be one check keyed on
- * the device-tier badge, which is a device DEFAULT, not an entitlement.
- */
-export function isClawboxAiProModel(model: string | null | undefined): boolean {
-  if (typeof model !== "string") return false;
-  const idx = model.indexOf("/");
-  if (idx <= 0) return false;
-  const provider = model.slice(0, idx);
-  const modelId = model.slice(idx + 1);
-  if (modelId !== CLAWBOX_AI_PRO_MODEL_ID) return false;
-  return isClawboxAiProvider(provider);
 }
 
 /**
@@ -200,7 +179,7 @@ export function normalizeAllowedModelIds(value: unknown): string[] | null {
   return ids.length > 0 ? ids : null;
 }
 
-/** Bare id of a model ref: `deepseek/deepseek-v4-pro` → `deepseek-v4-pro`. */
+/** Bare id of a model ref: `deepseek/deepseek-v4-flash` → `deepseek-v4-flash`. */
 function bareModelId(ref: string): string {
   const slash = ref.lastIndexOf("/");
   return (slash >= 0 ? ref.slice(slash + 1) : ref).trim().toLowerCase();
@@ -221,67 +200,22 @@ function isClawboxAiModelRef(ref: string): boolean {
   return isClawboxAiProvider(ref.slice(0, idx));
 }
 
-/** The translation keys a picker draws one ClawBox AI chat tier with. */
-export interface ClawboxAiTierTextKeys {
-  labelKey: string;
-  hintKey: string;
-}
-
-/**
- * What a picker CALLS each chat tier, as translation KEYS.
- *
- * Keys rather than words, because this module is import-safe from the server
- * and from every client bundle, and the words belong to the locale: the chat
- * composer's model chip said "Max Tier" beside a Settings page that called the
- * same plan "Max-Tarif" (the UI sweep of 2026-09-07). The Max label is the
- * plan name Settings already uses (`ai.planNameMax`), so the two surfaces
- * cannot drift apart again; the Flash tier has no single plan behind it and
- * carries its own key.
- */
-export const CLAWBOX_AI_TIER_TEXT_KEYS: Readonly<Record<ClawboxAiTier, ClawboxAiTierTextKeys>> = {
-  flash: { labelKey: "ai.clawboxTierFlash", hintKey: "ai.clawboxTierFlashHint" },
-  pro: { labelKey: "ai.planNameMax", hintKey: "ai.clawboxTierMaxHint" },
-};
-
-/**
- * The tier text keys for `model` — a bare id (`deepseek-v4-pro`, the shape a
- * catalogue row carries) or a ClawBox AI ref (`clawai/…`, `deepseek/…`) — and
- * null for anything else, including another provider's model that happens to
- * share the id. The caller keeps whatever label it already had for a null.
- */
-export function clawboxAiTierTextKeys(model: string | null | undefined): ClawboxAiTierTextKeys | null {
-  if (typeof model !== "string") return null;
-  if (model.includes("/") && !isClawboxAiModelRef(model)) return null;
-  const id = bareModelId(model);
-  if (id === CLAWBOX_AI_FLASH_MODEL_ID.toLowerCase()) return CLAWBOX_AI_TIER_TEXT_KEYS.flash;
-  if (id === CLAWBOX_AI_PRO_MODEL_ID.toLowerCase()) return CLAWBOX_AI_TIER_TEXT_KEYS.pro;
-  return null;
-}
-
 /**
  * Does the portal POSITIVELY refuse `model` for this device's account?
  *
  * `allowedModels` is the list `GET /api/clawbox-ai/device-info` publishes for
  * the paired `claw_*` token — the portal's own answer to "what may this device
- * run", carried in the same response the tier badge is read from. Measured on
- * a Max box (2026-09-04):
+ * run", carried in the same response the tier badge is read from, e.g.
  *
  *   {"tier":"max","deviceTier":"pro",
- *    "allowedModels":["deepseek-v4-flash","deepseek-v4-pro",…],
- *    "defaultModel":"deepseek-v4-pro", …}
+ *    "allowedModels":["deepseek-v4-flash",…],
+ *    "defaultModel":"deepseek-v4-flash", …}
  *
  * WHY NOT THE TIER BADGE. The badge (`clawai_tier`) comes from
  * `mapPortalTier`, which prefers the portal's `deviceTier` stamp — and that
- * stamp is deliberately a DEVICE DEFAULT: "a Max subscriber who runs Flash on
- * this device" is a state the configure route documents and keeps (TASK-481).
- * A default is the right thing to write as the primary model. It is the wrong
- * thing to VETO with: the old gate refused the Pro model, and rewrote the
- * box's primary back to Flash, whenever the badge was not exactly `"pro"` —
- * including when the status poll had simply not answered and the badge was
- * `null`. That undid an explicit pick (from this picker or from the Telegram
- * `/model` keyboard) on a Max box and told its owner to buy the plan he
- * already had. A default may be overridden by a pick; an entitlement may not,
- * and only the portal knows which is which.
+ * stamp is deliberately a DEVICE DEFAULT, not an entitlement. A default may be
+ * overridden by a pick; an entitlement may not, and only the portal knows
+ * which is which.
  *
  * ONLY ClawBox AI refs are judged (`clawai/…`, `deepseek/…`). The list says
  * nothing about a provider the owner brought their own key for.
@@ -590,81 +524,52 @@ export function clawboxAiNonChatModelReason(ref: string): string {
 }
 
 /* ---------------------------------------------------------------------------
- * ClawBox AI vision (image understanding)
+ * ClawBox AI looking at a picture
  * ------------------------------------------------------------------------ */
 
-/**
- * Model the device uses to *look at* an image the user attached in chat.
+/*
+ * One model looks at pictures too (TASK-2261): while the vision check says
+ * Flash can see (src/lib/clawbox-ai-vision.ts), every surface that has to look
+ * at an image names {@link CLAWBOX_AI_FLASH_MODEL_ID} — OpenClaw's
+ * `agents.defaults.imageModel` (for a turn whose chat model is another
+ * provider's), Hermes' `auxiliary.vision`, and the box's own describe route
+ * (src/lib/vision-describe.ts).
  *
- * Registered under `CLAWBOX_AI_PROVIDER` (`deepseek`) rather than `openai`,
- * even though the id is an OpenAI one, because that provider entry is really
- * "the ClawBox AI proxy": it already carries `api: "openai-completions"`, the
- * proxy `baseUrl` and the `claw_` subscription token, which is exactly the
- * transport a vision request needs. OpenClaw's `openai` provider defaults to
- * `openai-responses` (`dist/model-C3gzf-T3.js` on 2026.7.1), an API the proxy
- * does not speak, so an entry there would have to re-declare the api, the
- * baseUrl and the auth to end up in the same place.
- *
- * It cannot leak into the chat model picker: the device catalogue for
- * `clawai` is the hardcoded two-entry `CLAWAI_STATIC_MODELS` in
- * src/app/setup-api/ai-models/catalog/route.ts, not a read of
- * `models.providers.deepseek.models`.
- *
- * Env-overridable for the same reason the chat and image slugs are — the proxy
- * matches the BARE id against its allowlist, so this value must always name
- * something production already allows.
- *
- * Since 2026-08-27 the PREFERRED id is DeepSeek's own multimodal model,
- * `deepseek-v4-flash-vision-exp` — vision from the same family the chat
- * tiers run on. The proxy's allowlist may trail its release, so nothing
- * writes this id unverified: every writer resolves through
- * `resolveVisionModelId()` (src/lib/clawbox-ai-vision.ts), which asks the
- * proxy and falls back to the previous vision model until the new one is
- * served. An env override skips the probe — the operator's word is final.
+ * THE FALLBACK. Upstream can take vision away from Flash. When the check says
+ * Flash does not see, pictures go to {@link CLAWBOX_AI_VISION_FALLBACK_MODEL_ID}
+ * instead — a model that only ever LOOKS at a picture, never one offered to chat
+ * with — and when that is not served either, the box says plainly that it
+ * cannot look at pictures right now rather than accepting one it cannot read.
  */
-export const CLAWBOX_AI_VISION_MODEL_ID =
-  process.env.CLAWBOX_AI_VISION_MODEL_ID?.trim() || "deepseek-v4-flash-vision-exp";
 
 /**
- * The vision model boxes ran before the DeepSeek one, and the fallback while
- * the proxy does not yet allow the new id. Boxes in the field name this in
- * `agents.defaults.imageModel` / `auxiliary.vision.model`; the writers treat
- * a slot naming either OUR id as ours to move, and any other value as the
- * owner's choice.
+ * The model pictures go to while Flash cannot see. OpenAI's `gpt-5.6-luna`,
+ * served by the ClawBox AI proxy (measured 2026-11-07: a picture is described,
+ * without tools; with function tools it answers 400, which is why it is a
+ * describe-only slot and never a chat model). Env-overridable like the chat id.
  */
-export const CLAWBOX_AI_LEGACY_VISION_MODEL_ID = "gpt-5.6-luna";
+export const CLAWBOX_AI_VISION_FALLBACK_MODEL_ID =
+  process.env.CLAWBOX_AI_VISION_FALLBACK_MODEL_ID?.trim() || "gpt-5.6-luna";
 
-/** `name` on the model entry. Required by OpenClaw's schema — see the image label. */
-export const CLAWBOX_AI_VISION_MODEL_LABEL = "ClawBox AI Vision";
+/** `name` on the fallback's model row. Required by OpenClaw's schema. */
+export const CLAWBOX_AI_VISION_FALLBACK_LABEL = "ClawBox AI Vision";
 
-/** Fully-qualified ref for a vision id, as `agents.defaults.imageModel.primary` wants it. */
-export function clawboxAiVisionModelRef(id: string): string {
-  return `${CLAWBOX_AI_PROVIDER}/${id}`;
+/**
+ * Completion-token ceiling the upstream enforces for the fallback, measured
+ * against the live proxy on 2026-08-21: `max_tokens: 128000` is accepted,
+ * `200000` comes back 400 — and 200,000 is the generic default an entry falls
+ * through to when it omits the field.
+ */
+export const CLAWBOX_AI_VISION_FALLBACK_MAX_TOKENS = 128_000;
+
+const DEFAULT_CLAWBOX_AI_PROXY_URL = "https://clawbox.com/api/ai";
+
+/**
+ * The ClawBox AI proxy base, env-overridable, trailing slash stripped (a
+ * doubled slash 404s on the proxy). One function, so every caller that speaks
+ * to the proxy directly — the describe route, Prime Radiant's Flash client —
+ * resolves it one way.
+ */
+export function clawboxAiProxyUrl(): string {
+  return (process.env.CLAWBOX_AI_PROXY_URL?.trim() || DEFAULT_CLAWBOX_AI_PROXY_URL).replace(/\/+$/, "");
 }
-
-/** Fully-qualified ref of the PREFERRED id — resolve before writing it anywhere. */
-export const CLAWBOX_AI_VISION_MODEL = clawboxAiVisionModelRef(CLAWBOX_AI_VISION_MODEL_ID);
-
-/**
- * Input modalities. `image` is the whole point of the entry: OpenClaw's
- * `resolveImageRuntime` (`dist/image-Bg-2ezSd.js:99` on 2026.7.1) refuses a
- * media-understanding model whose catalog entry does not advertise it, with
- * "Model does not support images".
- */
-export const CLAWBOX_AI_VISION_INPUT_MODALITIES = ["text", "image"] as const;
-
-/**
- * Completion-token ceiling the upstream actually enforces, measured against the
- * live proxy from a device on 2026-08-21: `max_tokens: 128000` is accepted,
- * `200000` and `400000` both come back 400 "max_tokens is too large … This
- * model supports at most 128000 completion tokens".
- *
- * 200,000 is not an arbitrary counter-example: it is the generic default a
- * configured provider entry falls through to when it omits the field, because
- * an entry in `models.providers` overrides OpenClaw's bundled catalog outright.
- * The media-understanding path in 2026.7.1 happens not to send `max_tokens` at
- * all — verified on a real box, the describe call succeeds with this field
- * removed — so this is a guard against any caller that does start sending it,
- * not the thing that makes vision work today.
- */
-export const CLAWBOX_AI_VISION_MAX_TOKENS = 128_000;

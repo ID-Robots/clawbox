@@ -14,17 +14,17 @@ import { outsidePath } from "../../../bench/lib/outside.mjs";
 import { parseTranscript } from "../../../bench/lib/transcript.mjs";
 import { deltaByTask, figureKey, formatMs, formatTokens, hints, parallelism, summarizeCycle, taskFigures } from "../../../bench/lib/metrics.mjs";
 
-const PRICING = { currency: "USD", models: { "deepseek-v4-pro[1m]": { input: 1, output: 2, cacheRead: 0.1 }, "deepseek-v4-flash": { input: 0.1, output: 0.2 } } };
+const PRICING = { currency: "USD", models: { "deepseek-v4-flash[1m]": { input: 1, output: 2, cacheRead: 0.1 }, "deepseek-v4-flash": { input: 0.1, output: 0.2 } } };
 
 describe("cost", () => {
   it("prices each model's tokens per million, cache rates falling back to input, and answers no TOTAL while a model is unpriced", () => {
     const cost = costOfUsage({
-      "deepseek-v4-pro[1m]": { input: 1_000_000, output: 500_000, cacheRead: 2_000_000, cacheWrite: 100_000, messages: 10 },
+      "deepseek-v4-flash[1m]": { input: 1_000_000, output: 500_000, cacheRead: 2_000_000, cacheWrite: 100_000, messages: 10 },
       "deepseek-v4-flash": { input: 3_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0, messages: 4 },
       "gpt-mystery": { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, messages: 1 },
     }, PRICING);
     // pro: 1 + 1 + 0.2 + 0.1 (cacheWrite at input's rate) = 2.3; flash: 0.3 + 0.2 = 0.5
-    expect(cost.byModel["deepseek-v4-pro[1m]"]).toEqual({ usd: 2.3, priced: true, tokens: 3_600_000 });
+    expect(cost.byModel["deepseek-v4-flash[1m]"]).toEqual({ usd: 2.3, priced: true, tokens: 3_600_000 });
     expect(cost.byModel["deepseek-v4-flash"]).toEqual({ usd: 0.5, priced: true, tokens: 4_000_000 });
     expect(cost.byModel["gpt-mystery"]).toEqual({ usd: null, priced: false, tokens: 20 });
     // The priced subtotal is there; the total is not a number, because the
@@ -75,7 +75,7 @@ describe("parallelism", () => {
 describe("a cycle's figures", () => {
   const line = (over: Record<string, unknown>) => ({
     task: "m-01", tier: "M", runId: "run-1", outcome: "completed", score: 90, wallMs: 300_000, commitLagMs: 2_000, numTurns: 20, tokensUsed: 1_000_000, thinkingTokens: 100_000,
-    filesTouched: 8, permissionDenials: 0, subagentsTotal: 2, subagentsByType: { explorer: 1, reviewer: 1 }, modelsUsed: ["deepseek-v4-pro[1m]"], usageByModel: null, ...over,
+    filesTouched: 8, permissionDenials: 0, subagentsTotal: 2, subagentsByType: { explorer: 1, reviewer: 1 }, modelsUsed: ["deepseek-v4-flash[1m]"], usageByModel: null, ...over,
   });
   const fig = (over: Record<string, unknown>, parallel = parallelism([], 0), rep = 1) =>
     taskFigures({ line: line(over), cost: costOfUsage({ "deepseek-v4-flash": { input: 1_000_000, output: 0 } }, PRICING), parallel, cycle: "c1", rep });
@@ -182,16 +182,16 @@ describe("parseTranscript — the per-model bill", () => {
       JSON.stringify({ message: { id: "m1", model: "deepseek-v4-flash", usage: { input_tokens: 10, output_tokens: 0, cache_read_input_tokens: 500 } } }),
       JSON.stringify({ message: { id: "m1", model: "deepseek-v4-flash", usage: { input_tokens: 10, output_tokens: 640, cache_read_input_tokens: 500 } } }),
       JSON.stringify({ message: { id: "m1", model: "deepseek-v4-flash", usage: { input_tokens: 10, output_tokens: 640, cache_read_input_tokens: 500 } } }),
-      JSON.stringify({ message: { id: "m2", model: "deepseek-v4-pro", usage: { input_tokens: 3, output_tokens: 7, cache_creation_input_tokens: 2 } } }),
+      JSON.stringify({ message: { id: "m2", model: "deepseek-v4-flash[1m]", usage: { input_tokens: 3, output_tokens: 7, cache_creation_input_tokens: 2 } } }),
       // A line with no message id is billed on its own.
-      JSON.stringify({ message: { model: "deepseek-v4-pro", usage: { input_tokens: 1, output_tokens: 1 } } }),
+      JSON.stringify({ message: { model: "deepseek-v4-flash[1m]", usage: { input_tokens: 1, output_tokens: 1 } } }),
       "not json at all",
     ].join("\n"));
     // The parser is plain JS; its shape is what the figures reader relies on.
     const parsed = parseTranscript(file) as { lines: number; byModel: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number; messages: number }> } | null;
     expect(parsed).not.toBeNull();
     expect(parsed!.byModel["deepseek-v4-flash"]).toEqual({ input: 10, output: 640, cacheRead: 500, cacheWrite: 0, messages: 1 });
-    expect(parsed!.byModel["deepseek-v4-pro"]).toEqual({ input: 4, output: 8, cacheRead: 0, cacheWrite: 2, messages: 2 });
+    expect(parsed!.byModel["deepseek-v4-flash[1m]"]).toEqual({ input: 4, output: 8, cacheRead: 0, cacheWrite: 2, messages: 2 });
     expect(parsed!.lines).toBe(5);
     expect(parseTranscript(path.join(path.dirname(file), "missing.jsonl"))).toBeNull();
   });

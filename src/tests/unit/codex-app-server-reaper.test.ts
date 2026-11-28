@@ -1,0 +1,616 @@
+/**
+ * @vitest-environment node
+ *
+ * The idle `codex app-server` processes the gateway keeps are stopped, and
+ * nothing else is (src/lib/codex-app-server-reaper.ts). /proc, the gateway's
+ * answer, signals and the clock are all faked: the reaper is judged on which
+ * pids it signals, with what, and when.
+ */
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const gatewayWsCall = vi.fn();
+vi.mock("@/lib/openclaw-gateway-ws", () => ({ gatewayWsCall: (...args: unknown[]) => gatewayWsCall(...args) }));
+
+import {
+  CODEX_APP_SERVER_IDLE_MS,
+  GATEWAY_ANSWER_TIMEOUT_MS,
+  QUIET_CPU_SHARE,
+  STOP_GRACE_MS,
+  agentOfEnviron,
+  agentOfSessionKey,
+  createCodexAppServerReaper,
+  gatewayAppServers,
+  isCodexAppServerArgv,
+  isCodexLauncherArgv,
+  parseProcStat,
+  type UnitProcess,
+} from "@/lib/codex-app-server-reaper";
+
+beforeEach(() => {
+  gatewayWsCall.mockReset();
+});
+
+const LAUNCHER = "/home/clawbox/.openclaw/npm/projects/openclaw-codex-8902d781d4/node_modules/@openai/codex/bin/codex.js";
+const NATIVE = "/home/clawbox/.openclaw/npm/projects/openclaw-codex-8902d781d4/node_modules/@openai/codex-linux-arm64/vendor/aarch64-unknown-linux-musl/bin/codex";
+const APP_SERVER_ARGS = ["-c", 'cli_auth_credentials_store="ephemeral"', "app-server", "--listen", "stdio://"];
+const GATEWAY = 1000;
+const MIN = 60_000;
+
+const proc = (pid: number, ppid: number, argv: string[], extra: Partial<UnitProcess> = {}): UnitProcess => ({
+  pid,
+  ppid,
+  startTicks: pid * 10,
+  cpuTicks: 5,
+  argv,
+  parentComm: ppid === 1 ? "systemd" : "node",
+  ...extra,
+});
+
+const gateway = () => proc(GATEWAY, 1, ["openclaw-gateway", "", ""]);
+/** The plugin's app-server: the node launcher under the gateway, the native binary under it. */
+const appServer = (wrapper: number, extra: Partial<UnitProcess> = {}) => [
+  proc(wrapper, GATEWAY, ["/usr/bin/node", LAUNCHER, ...APP_SERVER_ARGS], extra),
+  proc(wrapper + 1, wrapper, [NATIVE, ...APP_SERVER_ARGS], extra),
+];
+
+/** Sessions with agent work, as the gateway lists them: a count is that many sessions of an agent with no app-server here. */
+type Active = number | string[];
+const sessionKeys = (active: Active) => (typeof active === "number" ? Array.from({ length: active }, (_, i) => `agent:other-${i}:main`) : active);
+
+/** A fake box: what /proc lists on each look, what the gateway answers, and every signal sent. */
+function fakeBox(
+  initial: UnitProcess[],
+  options: { active?: Active | Error | ((asked: number) => Active); survivesTerm?: boolean; unkillable?: boolean; homeless?: number[] } = {},
+) {
+  let procs = initial;
+  let clock = 0;
+  const signals: [number, string][] = [];
+  const signalledAt: number[] = [];
+  const logs: string[] = [];
+  let gatewayAsked = 0;
+  const reaper = createCodexAppServerReaper({
+    listUnitProcesses: async () => procs,
+    activeSessionKeys: async () => {
+      gatewayAsked += 1;
+      if (options.active instanceof Error) throw options.active;
+      if (typeof options.active === "function") return sessionKeys(options.active(gatewayAsked));
+      return sessionKeys(options.active ?? 0);
+    },
+    isAlive: async (pid, start) => procs.some((p) => p.pid === pid && p.startTicks === start),
+    signal: (pid, signal) => {
+      signals.push([pid, signal]);
+      signalledAt.push(clock);
+      if (!options.unkillable && (signal === "SIGKILL" || !options.survivesTerm)) {
+        // The launcher forwards SIGTERM to the binary and exits with it.
+        const gone = new Set([pid, ...procs.filter((p) => p.ppid === pid).map((p) => p.pid)]);
+        procs = procs.filter((p) => !gone.has(p.pid));
+      }
+    },
+    rssKb: async () => 85_000,
+    agentOf: async (pid) => (options.homeless?.includes(pid) ? null : `agent-${pid}`),
+    now: () => clock,
+    sleep: async (ms) => {
+      clock += ms;
+    },
+    log: (line) => logs.push(line),
+  });
+  return {
+    reaper,
+    signals,
+    signalledAt,
+    logs,
+    gatewayAsked: () => gatewayAsked,
+    advance: (ms: number) => {
+      clock += ms;
+    },
+    setProcs: (next: UnitProcess[]) => {
+      procs = next;
+    },
+    procs: () => procs,
+  };
+}
+
+describe("isCodexAppServerArgv", () => {
+  it("knows the npm launcher and the native binary running app-server", () => {
+    expect(isCodexAppServerArgv(["/usr/bin/node", LAUNCHER, ...APP_SERVER_ARGS])).toBe(true);
+    expect(isCodexAppServerArgv([NATIVE, ...APP_SERVER_ARGS])).toBe(true);
+    expect(isCodexAppServerArgv(["codex", "app-server"])).toBe(true);
+    expect(isCodexAppServerArgv([`${NATIVE} (deleted)`, "app-server", "--listen", "stdio://"])).toBe(true);
+  });
+
+  it("refuses other codex commands and anything that only mentions one", () => {
+    expect(isCodexAppServerArgv([NATIVE, "exec", "app-server"])).toBe(false);
+    expect(isCodexAppServerArgv(["/usr/bin/node", LAUNCHER, "exec", "say app-server"])).toBe(false);
+    expect(isCodexAppServerArgv(["/usr/bin/node", "/tmp/codex.js", "app-server"])).toBe(false);
+    expect(isCodexAppServerArgv(["/bin/bash", "-c", `${NATIVE} app-server`])).toBe(false);
+    expect(isCodexAppServerArgv(["/usr/bin/python3", NATIVE, "app-server"])).toBe(false);
+    expect(isCodexAppServerArgv(["-c", "app-server"])).toBe(false);
+    expect(isCodexAppServerArgv([])).toBe(false);
+  });
+
+  it("takes only the launcher as a root: a bare binary a shell exec'd in place is not the plugin's", () => {
+    expect(isCodexLauncherArgv(["/usr/bin/node", LAUNCHER, ...APP_SERVER_ARGS])).toBe(true);
+    expect(isCodexLauncherArgv([NATIVE, ...APP_SERVER_ARGS])).toBe(false);
+    expect(isCodexLauncherArgv(["codex", "app-server"])).toBe(false);
+  });
+});
+
+describe("parseProcStat", () => {
+  it("counts fields from the last parenthesis, so a spaced, parenthesised command name cannot shift them", () => {
+    // pid (comm) state ppid pgrp session tty tpgid flags minflt cminflt majflt cmajflt utime stime cutime cstime prio nice threads itreal starttime …
+    const line = "181320 (codex (x) y) S 181307 181307 180962 0 -1 4194560 9157 0 12 0 20 14 0 0 20 0 9 0 8386019 1234 5678\n";
+    expect(parseProcStat(line)).toEqual({ state: "S", ppid: 181307, cpuTicks: 34, startTicks: 8386019 });
+    expect(parseProcStat("181320 (codex) Z 1 0 0 0 0 0 0 0 0 0 7 3 0 0 0 0 0 0 99")).toEqual({ state: "Z", ppid: 1, cpuTicks: 10, startTicks: 99 });
+  });
+
+  it("answers null for a line it cannot read", () => {
+    expect(parseProcStat("")).toBeNull();
+    expect(parseProcStat("181320 (codex) S 1 2")).toBeNull();
+  });
+});
+
+describe("gatewayAppServers", () => {
+  it("takes only the gateway's own children, with everything under them", () => {
+    const shell = proc(3000, GATEWAY, ["/bin/bash", "-c", "codex app-server"]);
+    const agentsOwn = proc(3001, 3000, [NATIVE, "app-server"]);
+    // `bash -c 'codex app-server'` exec'd in place: a bare binary, directly under the gateway.
+    const execd = proc(3100, GATEWAY, [NATIVE, ...APP_SERVER_ARGS]);
+    const trees = gatewayAppServers([gateway(), ...appServer(2000), shell, agentsOwn, execd]);
+    expect(trees.map((t) => t.root.pid)).toEqual([2000]);
+    expect(trees[0].descendants.map((p) => p.pid)).toEqual([2001]);
+  });
+
+  it("finds nothing when the gateway is not running", () => {
+    expect(gatewayAppServers(appServer(2000))).toEqual([]);
+  });
+});
+
+describe("createCodexAppServerReaper", () => {
+  it("stops an app-server whose CPU time stood still for the idle window while the gateway is idle", async () => {
+    const box = fakeBox([gateway(), ...appServer(2000), ...appServer(2100)]);
+    expect(await box.reaper.sweep()).toEqual([]); // first look: the clock starts
+    box.advance(CODEX_APP_SERVER_IDLE_MS - MIN);
+    expect(await box.reaper.sweep()).toEqual([]);
+    expect(box.gatewayAsked()).toBe(2); // once at each look while an app-server runs
+    box.advance(MIN);
+    const stopped = await box.reaper.sweep();
+    expect(stopped.map((s) => s.pid)).toEqual([2000, 2100]);
+    expect(stopped[0]).toMatchObject({ agent: "agent-2000", idleMs: CODEX_APP_SERVER_IDLE_MS, rssKb: 170_000, killed: false });
+    expect(box.signals).toEqual([[2000, "SIGTERM"], [2100, "SIGTERM"]]);
+    expect(box.gatewayAsked()).toBe(4); // the look's answer serves the first stop; asked again before the second
+    expect(box.procs().map((p) => p.pid)).toEqual([GATEWAY]);
+    expect(box.logs[0]).toMatch(/stopped the idle codex app-server of agent agent-2000 \(pid 2000, idle 30 min, 166 MB\)/);
+  });
+
+  it("counts the little CPU an idle app-server still uses as quiet", async () => {
+    // Measured on a Jetson: 3-4 ticks a minute per idle app-server, ~18 per look.
+    const box = fakeBox([gateway(), ...appServer(2000)]);
+    for (let look = 0; look <= 6; look += 1) {
+      box.setProcs([gateway(), proc(2000, GATEWAY, ["/usr/bin/node", LAUNCHER, ...APP_SERVER_ARGS]), proc(2001, 2000, [NATIVE, ...APP_SERVER_ARGS], { cpuTicks: 5 + 18 * look })]);
+      const stopped = await box.reaper.sweep();
+      if (look < 6) expect(stopped).toEqual([]);
+      else expect(stopped.map((s) => s.pid)).toEqual([2000]);
+      box.advance(5 * MIN);
+    }
+  });
+
+  it("keeps an app-server that used CPU, and restarts its clock", async () => {
+    const box = fakeBox([gateway(), ...appServer(2000)]);
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS - MIN);
+    box.setProcs([gateway(), ...appServer(2000, { cpuTicks: 2_000 })]); // a turn: 40 s of CPU
+    await box.reaper.sweep();
+    box.advance(2 * MIN);
+    expect(await box.reaper.sweep()).toEqual([]);
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    expect((await box.reaper.sweep()).map((s) => s.pid)).toEqual([2000]);
+  });
+
+  it("allows a quiet tree QUIET_CPU_SHARE of a core between looks, and not a tick more", async () => {
+    const budget = 5 * 60 * 100 * QUIET_CPU_SHARE; // ticks in five minutes
+    for (const [gained, quiet] of [[budget, true], [budget + 1, false]] as const) {
+      const box = fakeBox([gateway(), ...appServer(2000)]);
+      let cpu = 5;
+      for (let look = 0; look <= 6; look += 1) {
+        box.setProcs([gateway(), proc(2000, GATEWAY, ["/usr/bin/node", LAUNCHER, ...APP_SERVER_ARGS]), proc(2001, 2000, [NATIVE, ...APP_SERVER_ARGS], { cpuTicks: cpu })]);
+        const stopped = await box.reaper.sweep();
+        if (look === 6) expect(stopped.length).toBe(quiet ? 1 : 0);
+        cpu += gained;
+        box.advance(5 * MIN);
+      }
+    }
+  });
+
+  it("keeps an app-server with work under it: a command, a background terminal or an MCP server", async () => {
+    const mcp = proc(2002, 2001, ["/usr/bin/node", "/home/clawbox/clawbox/mcp/dist/server.js"]);
+    const box = fakeBox([gateway(), ...appServer(2000), mcp]);
+    await box.reaper.sweep();
+    box.advance(2 * CODEX_APP_SERVER_IDLE_MS);
+    expect(await box.reaper.sweep()).toEqual([]);
+    expect(box.signals).toEqual([]);
+  });
+
+  it("stops nothing while any session has agent work running or queued, and says so once", async () => {
+    const box = fakeBox([gateway(), ...appServer(2000)], { active: 1 });
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    expect(await box.reaper.sweep()).toEqual([]);
+    // Once per look while an app-server runs.
+    expect(box.gatewayAsked()).toBe(2);
+    box.advance(5 * MIN);
+    expect(await box.reaper.sweep()).toEqual([]);
+    expect(box.signals).toEqual([]);
+    expect(box.logs).toEqual(["[codex-reaper] left 1 idle codex app-server(s) running: 1 session(s) have agent work running or queued"]);
+  });
+
+  it("stops nothing when the gateway does not answer, and says so once", async () => {
+    const box = fakeBox([gateway(), ...appServer(2000)], { active: new Error("gateway handshake timed out") });
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    expect(await box.reaper.sweep()).toEqual([]);
+    box.advance(5 * MIN);
+    expect(await box.reaper.sweep()).toEqual([]);
+    expect(box.signals).toEqual([]);
+    expect(box.logs).toHaveLength(1);
+    expect(box.logs[0]).toMatch(/did not say whether it is busy \(gateway handshake timed out\)/);
+  });
+
+  it.each([
+    ["used CPU", () => [gateway(), ...appServer(2000, { cpuTicks: 7 })]],
+    ["got a new process under it", () => [gateway(), proc(2000, GATEWAY, ["/usr/bin/node", LAUNCHER, ...APP_SERVER_ARGS]), proc(2005, 2000, [NATIVE, ...APP_SERVER_ARGS])]],
+    ["was replaced by another process on the same pid", () => [gateway(), proc(2000, GATEWAY, ["/usr/bin/node", LAUNCHER, ...APP_SERVER_ARGS], { startTicks: 77 }), proc(2001, 2000, [NATIVE, ...APP_SERVER_ARGS])]],
+    ["is gone", () => [gateway()]],
+  ])("does not stop a tree that %s while the gateway answered", async (_what, meanwhile) => {
+    let procs = [gateway(), ...appServer(2000)];
+    let clock = 0;
+    let asked = 0;
+    const signals: string[] = [];
+    const reaper = createCodexAppServerReaper({
+      listUnitProcesses: async () => procs,
+      activeSessionKeys: async () => {
+        asked += 1;
+        if (asked === 2) procs = meanwhile(); // the answer before the stop: a turn started meanwhile, or the process changed
+        return [];
+      },
+      signal: (_pid, signal) => signals.push(signal),
+      agentOf: async () => "main",
+      now: () => clock,
+      log: () => {},
+    });
+    await reaper.sweep();
+    clock = CODEX_APP_SERVER_IDLE_MS;
+    expect(await reaper.sweep()).toEqual([]);
+    expect(signals).toEqual([]);
+  });
+
+  it("treats a recycled pid as a new process", async () => {
+    const box = fakeBox([gateway(), ...appServer(2000)]);
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS - MIN);
+    // Only the root's start time differs: the same pids, another process.
+    box.setProcs([gateway(), proc(2000, GATEWAY, ["/usr/bin/node", LAUNCHER, ...APP_SERVER_ARGS], { startTicks: 99_999 }), proc(2001, 2000, [NATIVE, ...APP_SERVER_ARGS])]);
+    box.advance(MIN);
+    expect(await box.reaper.sweep()).toEqual([]);
+    expect(box.signals).toEqual([]);
+  });
+
+  it("follows a SIGTERM that is ignored with SIGKILL, only after the grace", async () => {
+    const box = fakeBox([gateway(), ...appServer(2000)], { survivesTerm: true });
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    const [stopped] = await box.reaper.sweep();
+    expect(stopped.killed).toBe(true);
+    expect(box.signals).toEqual([[2000, "SIGTERM"], [2000, "SIGKILL"], [2001, "SIGKILL"]]);
+    expect(box.signalledAt[1] - box.signalledAt[0]).toBeGreaterThanOrEqual(STOP_GRACE_MS);
+    expect(box.logs[0]).toMatch(/SIGKILL after SIGTERM/);
+  });
+
+  it("does not count a tree that outlives SIGKILL as stopped, and tries it again later", async () => {
+    // Stuck in the kernel: still listed after every signal.
+    const box = fakeBox([gateway(), ...appServer(2000)], { unkillable: true });
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    expect(await box.reaper.sweep()).toEqual([]);
+    expect(box.signals).toEqual([[2000, "SIGTERM"], [2000, "SIGKILL"], [2001, "SIGKILL"]]);
+    expect(box.signalledAt[1] - box.signalledAt[0]).toBeGreaterThanOrEqual(STOP_GRACE_MS);
+    expect(box.logs).toEqual(["[codex-reaper] could not stop the idle codex app-server of agent agent-2000: pid 2000, 2001 still running after SIGKILL"]);
+    // Its clock starts over: not tried again before another idle window.
+    box.advance(5 * MIN);
+    expect(await box.reaper.sweep()).toEqual([]);
+    expect(box.signals).toHaveLength(3);
+  });
+
+  it("still sees to the binary when the launcher is gone by the time of the SIGTERM", async () => {
+    let procs = [gateway(), ...appServer(2000)];
+    let clock = 0;
+    const signals: [number, string][] = [];
+    const reaper = createCodexAppServerReaper({
+      listUnitProcesses: async () => procs,
+      activeSessionKeys: async () => [],
+      isAlive: async (pid, start) => procs.some((p) => p.pid === pid && p.startTicks === start),
+      signal: (pid, signal) => {
+        signals.push([pid, signal]);
+        if (signal === "SIGTERM") {
+          procs = procs.filter((p) => p.pid !== pid); // the launcher had just exited
+          throw Object.assign(new Error("kill ESRCH"), { code: "ESRCH" });
+        }
+        procs = procs.filter((p) => p.pid !== pid);
+      },
+      rssKb: async () => 0,
+      agentOf: async () => "main",
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      log: () => {},
+    });
+    await reaper.sweep();
+    clock = CODEX_APP_SERVER_IDLE_MS;
+    expect((await reaper.sweep()).map((s) => s.killed)).toEqual([true]);
+    expect(signals).toEqual([[2000, "SIGTERM"], [2001, "SIGKILL"]]);
+  });
+
+  it("leaves an app-server without the plugin's per-agent Codex home alone", async () => {
+    const box = fakeBox([gateway(), ...appServer(2000), ...appServer(2100)], { homeless: [2000] });
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    expect((await box.reaper.sweep()).map((s) => s.pid)).toEqual([2100]);
+    expect(box.signals).toEqual([[2100, "SIGTERM"]]);
+  });
+
+  it("asks the gateway again before each stop, and stops no more once a turn has started", async () => {
+    // Asked once at each look, then again before every stop after the first.
+    const box = fakeBox([gateway(), ...appServer(2000), ...appServer(2100)], { active: (asked) => (asked <= 2 ? 0 : 1) });
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    expect((await box.reaper.sweep()).map((s) => s.pid)).toEqual([2000]);
+    expect(box.gatewayAsked()).toBe(3);
+    expect(box.signals).toEqual([[2000, "SIGTERM"]]);
+  });
+
+  it("starts an agent's clock over while the gateway reports work for that agent, whatever its CPU says", async () => {
+    // A turn waiting on the model: no CPU, but the gateway lists the agent's session.
+    const box = fakeBox([gateway(), ...appServer(2000), ...appServer(2100)], { active: (asked) => (asked <= 2 ? ["agent:agent-2000:main"] : []) });
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    // Another agent's work holds every stop back; it does not restart agent-2100's clock.
+    expect(await box.reaper.sweep()).toEqual([]);
+    expect(box.logs).toEqual(["[codex-reaper] left 1 idle codex app-server(s) running: 1 session(s) have agent work running or queued"]);
+    box.advance(MIN);
+    // The turn is over: agent-2100's app-server goes, agent-2000's counts from the last look that saw its work.
+    expect((await box.reaper.sweep()).map((s) => s.pid)).toEqual([2100]);
+    box.advance(CODEX_APP_SERVER_IDLE_MS - 2 * MIN);
+    expect(await box.reaper.sweep()).toEqual([]);
+    box.advance(MIN);
+    expect((await box.reaper.sweep()).map((s) => [s.pid, s.idleMs])).toEqual([[2000, CODEX_APP_SERVER_IDLE_MS]]);
+  });
+
+  it("reads the agent of a session key", () => {
+    expect(agentOfSessionKey("agent:main:main")).toBe("main");
+    expect(agentOfSessionKey("agent:R1:telegram:direct:42")).toBe("r1");
+    expect(agentOfSessionKey("global")).toBeNull();
+    expect(agentOfSessionKey("")).toBeNull();
+  });
+
+  it("reads the agent from the plugin's Codex home in a process environment, and nothing else", () => {
+    const env = (...entries: string[]) => [...entries, ""].join("\0");
+    expect(agentOfEnviron(env("PATH=/usr/bin", "CODEX_HOME=/home/clawbox/.openclaw/agents/main/agent/codex-home"))).toBe("main");
+    expect(agentOfEnviron(env("CODEX_HOME=/home/clawbox/.openclaw/agents/r1/agent/codex-home/"))).toBe("r1");
+    expect(agentOfEnviron(env("CODEX_HOME=/home/clawbox/.codex"))).toBeNull();
+    expect(agentOfEnviron(env("CODEX_HOME=/home/clawbox/.openclaw/agents/main/agent/codex-home-old"))).toBeNull();
+    expect(agentOfEnviron(env("CODEX_HOME=/tmp/openclaw/codex-bounded-turn-1/codex-home"))).toBeNull();
+    expect(agentOfEnviron(env("HOME=/home/clawbox", "XCODEX_HOME=/x/agents/main/agent/codex-home"))).toBeNull();
+    expect(agentOfEnviron("")).toBeNull();
+  });
+
+  it("matches an agent's work to its app-server whatever the case of its id", async () => {
+    let procs = [gateway(), ...appServer(2000)];
+    let clock = 0;
+    const signals: number[] = [];
+    const reaper = createCodexAppServerReaper({
+      listUnitProcesses: async () => procs,
+      activeSessionKeys: async () => (clock < CODEX_APP_SERVER_IDLE_MS ? ["agent:research:main"] : []),
+      isAlive: async (pid, start) => procs.some((p) => p.pid === pid && p.startTicks === start),
+      signal: (pid) => {
+        signals.push(pid);
+        procs = [gateway()];
+      },
+      rssKb: async () => 0,
+      agentOf: async () => "Research",
+      now: () => clock,
+      log: () => {},
+    });
+    await reaper.sweep();
+    clock = CODEX_APP_SERVER_IDLE_MS - MIN;
+    await reaper.sweep(); // its work is still listed: the clock starts over here
+    clock = CODEX_APP_SERVER_IDLE_MS + MIN;
+    expect(await reaper.sweep()).toEqual([]);
+    clock = 2 * CODEX_APP_SERVER_IDLE_MS - MIN;
+    expect((await reaper.sweep()).map((s) => s.pid)).toEqual([2000]);
+    expect(signals).toEqual([2000]);
+  });
+
+  it("starts the clock over for a tree that moved between the look and the stop", async () => {
+    let procs = [gateway(), ...appServer(2000)];
+    let clock = 0;
+    let asked = 0;
+    const signals: number[] = [];
+    const reaper = createCodexAppServerReaper({
+      listUnitProcesses: async () => procs,
+      activeSessionKeys: async () => {
+        asked += 1;
+        // Three ticks while the gateway answered: too much for the instant re-look,
+        // little enough to vanish in the next look's five-minute budget.
+        if (asked === 2) procs = [gateway(), ...appServer(2000, { cpuTicks: 5 }).map((p, i) => (i === 1 ? { ...p, cpuTicks: 8 } : p))];
+        return [];
+      },
+      isAlive: async (pid, start) => procs.some((p) => p.pid === pid && p.startTicks === start),
+      signal: (pid) => {
+        signals.push(pid);
+        procs = [gateway()];
+      },
+      rssKb: async () => 0,
+      agentOf: async () => "main",
+      now: () => clock,
+      log: () => {},
+    });
+    await reaper.sweep();
+    clock = CODEX_APP_SERVER_IDLE_MS;
+    expect(await reaper.sweep()).toEqual([]);
+    clock += 5 * MIN;
+    expect(await reaper.sweep()).toEqual([]);
+    expect(signals).toEqual([]);
+    clock = 2 * CODEX_APP_SERVER_IDLE_MS;
+    expect((await reaper.sweep()).map((s) => [s.pid, s.idleMs])).toEqual([[2000, CODEX_APP_SERVER_IDLE_MS]]);
+  });
+
+  it("says so again when agent work holds stops back a second time", async () => {
+    let active = 1;
+    const box = fakeBox([gateway(), ...appServer(2000)], { active: () => active });
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    await box.reaper.sweep();
+    // The app-server goes (a gateway restart, say), and a new one runs into busy work later.
+    box.setProcs([gateway()]);
+    box.advance(5 * MIN);
+    await box.reaper.sweep();
+    box.setProcs([gateway(), ...appServer(2100)]);
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    await box.reaper.sweep();
+    active = 0;
+    expect(box.logs).toEqual([
+      "[codex-reaper] left 1 idle codex app-server(s) running: 1 session(s) have agent work running or queued",
+      "[codex-reaper] left 1 idle codex app-server(s) running: 1 session(s) have agent work running or queued",
+    ]);
+  });
+
+  it("logs a stop the kernel refused, and does not count it", async () => {
+    const procs = [gateway(), ...appServer(2000)];
+    const logs: string[] = [];
+    let clock = 0;
+    const reaper = createCodexAppServerReaper({
+      listUnitProcesses: async () => procs,
+      activeSessionKeys: async () => [],
+      signal: () => {
+        throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
+      },
+      rssKb: async () => 0,
+      agentOf: async () => "main",
+      now: () => clock,
+      log: (line) => logs.push(line),
+    });
+    await reaper.sweep();
+    clock = CODEX_APP_SERVER_IDLE_MS;
+    expect(await reaper.sweep()).toEqual([]);
+    expect(logs).toEqual(["[codex-reaper] could not stop codex app-server pid 2000: kill EPERM"]);
+  });
+
+  it("is ready for the next sweep after one that threw", async () => {
+    let fail = true;
+    let asked = 0;
+    const reaper = createCodexAppServerReaper({
+      listUnitProcesses: async () => {
+        if (fail) throw new Error("cgroup.procs vanished");
+        return [gateway(), ...appServer(2000)];
+      },
+      activeSessionKeys: async () => {
+        asked += 1;
+        return [];
+      },
+      agentOf: async () => "main",
+      log: () => {},
+    });
+    await expect(reaper.sweep()).rejects.toThrow("cgroup.procs vanished");
+    fail = false;
+    await reaper.sweep();
+    expect(asked).toBe(1);
+  });
+
+  it("does not wait for ever on a gateway that never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      let asked = 0;
+      const logs: string[] = [];
+      let clock = 0;
+      const reaper = createCodexAppServerReaper({
+        listUnitProcesses: async () => [gateway(), ...appServer(2000)],
+        activeSessionKeys: () => {
+          asked += 1;
+          return new Promise<string[]>(() => {}); // a call that never settles
+        },
+        agentOf: async () => "main",
+        now: () => clock,
+        log: (line) => logs.push(line),
+      });
+      const first = reaper.sweep();
+      await vi.advanceTimersByTimeAsync(GATEWAY_ANSWER_TIMEOUT_MS);
+      expect(await first).toEqual([]);
+      clock = CODEX_APP_SERVER_IDLE_MS;
+      const second = reaper.sweep(); // not shut out by a sweep still in flight
+      await vi.advanceTimersByTimeAsync(GATEWAY_ANSWER_TIMEOUT_MS);
+      expect(await second).toEqual([]);
+      expect(asked).toBe(2);
+      expect(logs).toEqual(["[codex-reaper] left 1 idle codex app-server(s) running: the gateway did not say whether it is busy (no answer within 30 s)"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["no session list", {}, false, /without a sessions list/],
+    ["a running session", { sessions: [{ key: "agent:main:main" }] }, false, null],
+    ["only rows that say they have no run", { sessions: [{ key: "agent:main:main", hasActiveRun: false }] }, true, null],
+  ])("takes the gateway's own answer, and stops nothing on one with %s", async (_what, payload, stops, logged) => {
+    gatewayWsCall.mockResolvedValue(payload);
+    let clock = 0;
+    const logs: string[] = [];
+    const signals: number[] = [];
+    let procs = [gateway(), ...appServer(2000)];
+    const reaper = createCodexAppServerReaper({
+      listUnitProcesses: async () => procs,
+      isAlive: async (pid, start) => procs.some((p) => p.pid === pid && p.startTicks === start),
+      signal: (pid) => {
+        signals.push(pid);
+        procs = [gateway()];
+      },
+      rssKb: async () => 0,
+      agentOf: async () => "main",
+      now: () => clock,
+      log: (line) => logs.push(line),
+    });
+    await reaper.sweep();
+    clock = CODEX_APP_SERVER_IDLE_MS;
+    await reaper.sweep();
+    expect(gatewayWsCall).toHaveBeenCalledWith("sessions.list", { activeOnly: true, rowMode: "compact", limit: 50 }, { timeoutMs: 5_000 });
+    expect(signals).toEqual(stops ? [2000] : []);
+    if (logged) expect(logs.join("\n")).toMatch(logged);
+  });
+
+  it("forgets an app-server that is gone, and starts over for its successor", async () => {
+    const box = fakeBox([gateway(), ...appServer(2000)]);
+    await box.reaper.sweep();
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    box.setProcs([gateway()]);
+    await box.reaper.sweep();
+    box.setProcs([gateway(), ...appServer(2000)]);
+    expect(await box.reaper.sweep()).toEqual([]);
+    box.advance(CODEX_APP_SERVER_IDLE_MS);
+    expect((await box.reaper.sweep()).map((s) => s.pid)).toEqual([2000]);
+  });
+
+  it("runs one sweep at a time", async () => {
+    let release: () => void = () => {};
+    const box = fakeBox([gateway(), ...appServer(2000)]);
+    const slow = createCodexAppServerReaper({
+      listUnitProcesses: () => new Promise((resolve) => {
+        release = () => resolve(box.procs());
+      }),
+      log: () => {},
+    });
+    const first = slow.sweep();
+    expect(await slow.sweep()).toEqual([]);
+    release();
+    expect(await first).toEqual([]);
+  });
+});

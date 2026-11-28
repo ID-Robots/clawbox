@@ -13,7 +13,7 @@ const auth = vi.hoisted(() => ({ requireSession: vi.fn(async () => null) }));
 vi.mock("@/lib/route-auth", () => auth);
 const owner = vi.hoisted(() => ({ hasPersonSession: vi.fn(async () => true) }));
 vi.mock("@/lib/owner-session", () => owner);
-vi.mock("@/lib/prime-radiant/flash-client", () => ({ flashAvailable: async () => true }));
+vi.mock("@/lib/prime-radiant/flash-client", () => ({ flashAvailable: async () => true, flashUnavailableReason: async () => null, NO_ENGINE_MESSAGE: "no engine" }));
 const start = vi.hoisted(() => ({ startIngest: vi.fn() }));
 vi.mock("@/lib/prime-radiant/ingest", async (importActual) => {
   const actual = await importActual<typeof import("@/lib/prime-radiant/ingest")>();

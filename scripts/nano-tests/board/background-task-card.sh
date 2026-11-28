@@ -205,6 +205,41 @@ elif [ "$MEMORY_SOURCE" = cloud ]; then
     "$([ "$MEMORY_OWNER_PICK" = True ] && echo "the owner's pick" || echo "the plan's default")"
 fi
 
+# The owner's saved desktop (TASK-1306, GET/PUT /setup-api/desktop/state): the
+# test's browser brings back the windows it holds on load and saves the desktop
+# again once it has closed Settings, so it is read here and put back after —
+# the desktop as it was when the test began; a lab board has nobody at it to
+# change it meanwhile. Two cases cannot be put back, and are said: a desktop
+# the box could not read, and a box with none saved at all, which is left with
+# an empty one (it brings back the same nothing; there is no route to delete).
+DESKTOP_BEFORE=$(call GET /setup-api/desktop/state)
+DESKTOP_SAVED=""
+if [ "$(status_of "$DESKTOP_BEFORE")" = 200 ]; then
+  DESKTOP_SAVED=$(body_of "$DESKTOP_BEFORE" | python3 -c 'import json,sys; s=json.load(sys.stdin).get("state"); print(json.dumps({"state": s}) if isinstance(s, dict) else "")' 2>/dev/null)
+  [ -n "$DESKTOP_SAVED" ] || printf 'NOTE the owner has no saved desktop; the browser leaves an empty one\n'
+else
+  printf 'NOTE the owner'"'"'s saved desktop could not be read (%s), so the windows the browser saves are not put back\n' "$(status_of "$DESKTOP_BEFORE")"
+fi
+# put_desktop_back [WHEN]: from the end of the run, and from the EXIT trap. Up
+# to three tries, five seconds apart; it disarms only once the box has taken
+# the desktop, so a put-back that failed at the end is tried again at exit.
+put_desktop_back() {
+  [ -n "$DESKTOP_SAVED" ] || return 0
+  local r try
+  for try in 1 2 3; do
+    r=$(call PUT /setup-api/desktop/state "$DESKTOP_SAVED")
+    if [ "$(status_of "$r")" = 200 ]; then
+      DESKTOP_SAVED=""
+      say "ok - the owner's saved desktop is put back as it was found${1:+ ($1)}"
+      return 0
+    fi
+    [ "$try" = 3 ] || sleep 5
+  done
+  say "not ok - putting the owner's saved desktop back${1:+ ($1)} answered $(status_of "$r") three times: $(body_of "$r" | head -c 200)"
+}
+# Each of the three does nothing unless armed, so one trap serves every path.
+trap 'put_desktop_back "at exit"; hand_memory_back; switch_back' EXIT
+
 PROFILE=$(mktemp -d /tmp/nano-bg-task-XXXXXX)
 OWNER_COOKIE=$OWNER CHROME=$CHROME PROFILE_DIR=$PROFILE FORCE=$PRESENT DEADLINE_S=${DEADLINE_S:-480} \
   timeout "${DRIVER_TIMEOUT_S:-620}" node "$DRIVER" 2>&1 | grep -E '^(RESULT|NOTE) ' | while IFS= read -r line; do
@@ -214,6 +249,7 @@ OWNER_COOKIE=$OWNER CHROME=$CHROME PROFILE_DIR=$PROFILE FORCE=$PRESENT DEADLINE_
     esac
   done
 rm -rf "$PROFILE"
+put_desktop_back
 
 if [ "$PRESENT" = 0 ]; then
   # A model that was not here goes again — once the download has ended (the

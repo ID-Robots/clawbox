@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
 import type { Mock } from "vitest";
 import * as childProcess from "child_process";
 import fsp from "fs/promises";
@@ -156,6 +157,29 @@ vi.mock("@/lib/provider-status", async (importOriginal) => ({
     degraded: false,
   })),
 }));
+// OpenClaw 2026.11.3's credential writes go through src/lib/openclaw-auth-ops.ts
+// (the gateway's RPCs while it runs; its own unit tests cover that). Here they
+// take its offline arm, the CLI argv this file has always asserted.
+vi.mock("@/lib/openclaw-auth-ops", async () => {
+  const { spawnOpenclawCli } = await import("@/lib/openclaw-config");
+  const cli = (args: string[], opts: Record<string, unknown> = {}) => spawnOpenclawCli(args, { timeoutMs: 60_000, ...opts });
+  return {
+    providerOfProfileId: (id: string) => id.split(":")[0]?.trim().toLowerCase() ?? "",
+    saveOpenclawApiKey: async (provider: string, profileId: string, key: string) => {
+      await cli(["models", "auth", "paste-api-key", "--provider", provider, "--profile-id", profileId], { stdinData: key + "\n" });
+      return { via: "cli", profileId };
+    },
+    logoutOpenclawAuthProfiles: async (_provider: string, ids: string[]) => {
+      for (const id of ids) await cli(["models", "auth", "logout", id, "--yes"]);
+      return ids;
+    },
+    setOpenclawAuthOrder: async (provider: string, order: string[] | null) => {
+      await cli(order && order.length ? ["models", "auth", "order", "set", "--provider", provider, ...order] : ["models", "auth", "order", "clear", "--provider", provider]);
+    },
+    withOpenclawGatewayStopped: async <T,>(work: () => Promise<T>) => work(),
+  };
+});
+
 vi.mock("@/lib/openclaw-config", async () => ({
   ...(await import("./config-write-passthrough")).configWritePassthrough,
   // Spies over the passthrough, for "one openclaw.json write per save" below:
@@ -266,6 +290,9 @@ vi.mock("@/lib/openclaw-core-generation", () => ({
 // must never reach it, and one that does by accident fails on the first read.
 vi.mock("@/lib/openclaw-auth-store", () => ({
   readGatewayAuthProfile: vi.fn(),
+  // The xAI sign-in check reads the store directly (OpenClaw 2026.11.3's
+  // `models auth list` needs the gateway stopped).
+  readGatewayProviderAuth: vi.fn(() => ({ kind: "no-store" })),
   putGatewayOAuthProfile: vi.fn(),
 }));
 
@@ -279,7 +306,7 @@ vi.mock("@/lib/local-ai-token", () => ({
   markLocalAiTokenMigrated: vi.fn(),
 }));
 
-import { getAll, getKnown, set as setConfigKey, setMany } from "@/lib/config-store";
+import { get as getConfigKey, getAll, getKnown, set as setConfigKey, setMany } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
 import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel,
   setPrimaryModelWithoutCatalogValidation,
@@ -301,6 +328,7 @@ import { forgetProviderEnumerations } from "@/lib/provider-runnable";
 import {
   putGatewayOAuthProfile,
   readGatewayAuthProfile,
+  readGatewayProviderAuth,
   type GatewayAuthProfileRead,
   type GatewayOAuthBundle,
 } from "@/lib/openclaw-auth-store";
@@ -377,6 +405,21 @@ describe("POST /setup-api/ai-models/configure", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * The legacy auth-profiles.json this request wrote is STILL on disk: doctor
+   * did not import it. `access` answers ENOENT for everything by default (the
+   * file is a mock, nobody wrote it), which now reads as "doctor imported the
+   * file and failed afterwards" (SUP-1023) — the one fact the cases below that
+   * mean "doctor failed before migrating anything" must say otherwise.
+   */
+  function legacyFileStaysOnDisk() {
+    mockFs.access.mockImplementation(async (target) => {
+      if (!String(target).endsWith("auth-profiles.json")) {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }
     });
   }
 
@@ -789,14 +832,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.deepseek");
     const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
-    const chatTiers = providerDef.models.filter(
-      (m: { id: string }) => m.id === "deepseek-v4-flash" || m.id === "deepseek-v4-pro",
-    );
-    expect(chatTiers).toHaveLength(2);
-    for (const model of chatTiers) {
-      expect(model.contextWindow).toBe(1_000_000);
-      expect(model.contextTokens).toBeUndefined();
-    }
+    expect(providerDef.models).toHaveLength(1);
+    expect(providerDef.models[0].contextWindow).toBe(1_000_000);
+    expect(providerDef.models[0].contextTokens).toBeUndefined();
   });
 
   it("uses a user-supplied ClawBox AI token when provided", async () => {
@@ -817,33 +855,23 @@ describe("POST /setup-api/ai-models/configure", () => {
     const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
     expect(providerDef.apiKey).toBe("portal-token-123");
     expect(providerDef.baseUrl).toBe("https://clawbox.com/api/ai");
-    expect(providerDef.models[0].compat.supportedReasoningEfforts).toEqual(["off", "high", "xhigh"]);
-    expect(providerDef.models[1].compat.supportedReasoningEfforts).toEqual(["off", "high", "xhigh"]);
+    // ONE model (TASK-2261): chat and pictures alike.
+    expect(providerDef.models).toHaveLength(1);
+    const [model] = providerDef.models;
+    expect(model.id).toBe("deepseek-v4-flash");
+    expect(model.compat.supportedReasoningEfforts).toEqual(["off", "high", "xhigh"]);
 
     // A configured provider overrides OpenClaw's bundled catalog, so these
-    // three fields have to be stated on every CHAT model. Omit contextWindow
-    // and the gateway falls back to a generic 200,000 rather than V4's real 1M
-    // — reproduced on a device running 2026.7.1 on 2026-08-17.
-    //
-    // Scoped to the two V4 tiers on purpose: the same provider also carries the
-    // vision entry (TASK-417), which is deliberately text+image with its own
-    // measured ceiling and is never a session model. Asserting over every row
-    // would make this test fail on a correct config.
-    const chatTiers = providerDef.models.filter(
-      (m: { id: string }) => m.id === "deepseek-v4-flash" || m.id === "deepseek-v4-pro",
-    );
-    expect(chatTiers).toHaveLength(2);
-    for (const model of chatTiers) {
-      expect(model.contextWindow).toBe(1_000_000);
-      expect(model.maxTokens).toBe(393_216);
-      expect(model.input).toEqual(["text"]);
-      // The active-input cap: compaction follows it, so a long session is
-      // trimmed near 128K instead of growing toward the full 1M window.
-      expect(model.contextTokens).toBe(131_072);
-    }
-    // The vision entry is a one-shot describe, never a session: no cap.
-    const vision = providerDef.models.find((m: { id: string }) => m.id === "deepseek-v4-flash-vision-exp");
-    expect(vision?.contextTokens).toBeUndefined();
+    // fields have to be stated on the row. Omit contextWindow and the gateway
+    // falls back to a generic 200,000 rather than V4's real 1M — reproduced on
+    // a device running 2026.7.1 on 2026-08-17.
+    expect(model.contextWindow).toBe(1_000_000);
+    expect(model.maxTokens).toBe(393_216);
+    // It looks at pictures itself: an attached image reaches it directly.
+    expect(model.input).toEqual(["text", "image"]);
+    // The active-input cap: compaction follows it, so a long session is
+    // trimmed near 128K instead of growing toward the full 1M window.
+    expect(model.contextTokens).toBe(131_072);
 
     expect(mockSetMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -896,16 +924,12 @@ describe("POST /setup-api/ai-models/configure", () => {
    * TASK-713 — the tier badge fills in a DEFAULT, and a default never
    * overwrites a choice.
    *
-   * A re-pair (and the wizard finalise, which reaches this route through
-   * `clawai/poll`) arrives carrying `clawaiTier`, so the badge cannot be told
-   * apart from an owner pressing a plan card. What settles it is the other
-   * side: whether the owner has ever picked a ClawBox AI model themselves. On
-   * a Max account whose box is stamped `deviceTier: "flash"` — a state the
-   * portal keeps on purpose — an entitled Max primary was replaced by Flash on
-   * every re-pair, and the chat's own guard could not undo it because it only
-   * ever moves down.
+   * Since TASK-2261 there is one ClawBox AI model, so the default and any
+   * choice are the same model; what these still pin is the bookkeeping — a
+   * pick is honoured only while it names a model the box offers, it belongs to
+   * the account that made it, and the running model is never read as one.
    */
-  describe("a re-pair never overwrites an explicit model pick", () => {
+  describe("a re-pair and the owner's remembered ClawBox AI pick", () => {
     async function pairClawai(tier: string) {
       return configurePost(jsonRequest({
         provider: "clawai",
@@ -920,44 +944,39 @@ describe("POST /setup-api/ai-models/configure", () => {
         .filter((command) => command.startsWith("config set agents.defaults.model.primary "));
     }
 
-    it("keeps the owner's Max model when the device badge says Flash", async () => {
+    const FLASH_PRIMARY = "config set agents.defaults.model.primary deepseek/deepseek-v4-flash";
+
+    it("runs a pick of the retired Max-plan id on Flash, on any plan (TASK-2261)", async () => {
       mockGetAll.mockResolvedValue({
-        clawai_tier: "flash",
-        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+        clawai_tier: "pro",
+        ai_model_explicit_picks: { clawai: `deepseek/${RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0]}` },
       });
 
-      const body = await (await pairClawai("flash")).json();
+      const body = await (await pairClawai("pro")).json();
 
-      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-pro"]);
-      // ...and the answer SAYS so, so the plan card is not a 200 over a screen
-      // where nothing appears to have happened.
-      expect(body).toMatchObject({ explicitPickKept: true, model: "deepseek/deepseek-v4-pro" });
+      expect(primaryWrites()).toEqual([FLASH_PRIMARY]);
+      expect(body.explicitPickKept).toBeUndefined();
     });
 
-    it("writes the tier default when the owner has never picked a model", async () => {
-      // The control for the case above: identical on beta, and it is what says
-      // the guard is about the marker rather than about ClawBox AI saves.
+    it("keeps the owner's pick, and says so, whatever the badge says", async () => {
+      mockGetAll.mockResolvedValue({
+        clawai_tier: "flash",
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-flash" },
+      });
+
+      const body = await (await pairClawai("pro")).json();
+
+      expect(primaryWrites()).toEqual([FLASH_PRIMARY]);
+      expect(body).toMatchObject({ explicitPickKept: true, model: "deepseek/deepseek-v4-flash" });
+    });
+
+    it("writes the one model when the owner has never picked a model", async () => {
       mockGetAll.mockResolvedValue({ clawai_tier: "flash" });
 
       const body = await (await pairClawai("flash")).json();
 
-      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-flash"]);
+      expect(primaryWrites()).toEqual([FLASH_PRIMARY]);
       expect(body.explicitPickKept).toBeUndefined();
-    });
-
-    it("keeps the pick on a DOWNGRADE, and lets the plan error be the one that speaks", async () => {
-      // The owner's Max pick with a box now on the Flash plan. Writing Flash
-      // here would be this route deciding an entitlement question it cannot
-      // see; the turn fails with the proxy's own "Model not allowed" instead,
-      // and the picker shows what the plan does allow.
-      mockGetAll.mockResolvedValue({
-        clawai_tier: "pro",
-        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
-      });
-
-      expect((await pairClawai("flash")).status).toBe(200);
-
-      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-pro"]);
     });
 
     it("is not moved by a pick the owner made for a DIFFERENT provider", async () => {
@@ -968,27 +987,26 @@ describe("POST /setup-api/ai-models/configure", () => {
         clawai_tier: "flash",
         ai_model_explicit_picks: {
           anthropic: "anthropic/claude-opus-5",
-          clawai: "deepseek/deepseek-v4-pro",
+          clawai: "deepseek/deepseek-v4-flash",
         },
       });
 
-      expect((await pairClawai("flash")).status).toBe(200);
+      const body = await (await pairClawai("flash")).json();
 
-      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-pro"]);
+      expect(primaryWrites()).toEqual([FLASH_PRIMARY]);
+      expect(body.explicitPickKept).toBe(true);
     });
 
     it("drops the pick when the box is linked to a DIFFERENT ClawBox AI account", async () => {
-      // The choice belonged to the account that has just been replaced —
-      // the same signal this route already unpairs ClawKeep on. Imposing account
-      // A's Max model on account B's Pro plan fails every turn on a box B has
-      // only just paired.
+      // The choice belonged to the account that has just been replaced — the
+      // same signal this route already unpairs ClawKeep on.
       mockGetAll.mockResolvedValue({
         clawai_tier: "flash",
         clawai_token: "claw_ACCOUNT_A",
-        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-pro" },
+        ai_model_explicit_picks: { clawai: "deepseek/deepseek-v4-flash" },
       });
       vi.mocked(getKnown).mockResolvedValue({
-        value: { clawai: "deepseek/deepseek-v4-pro" },
+        value: { clawai: "deepseek/deepseek-v4-flash" },
         known: true,
       });
 
@@ -1000,7 +1018,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       }));
 
       expect(res.status).toBe(200);
-      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-flash"]);
+      expect(primaryWrites()).toEqual([FLASH_PRIMARY]);
       // Cleared in the SAME write that stores the replacement token, so a failed
       // clear cannot leave account A's pick beside account B's token.
       expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({
@@ -1010,12 +1028,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     });
 
     it("does NOT read the model the box is running as a choice", async () => {
-      // The badge and the model move at different times: the status poll
-      // persists a new portal tier within 30 s while nothing rewrites the model
-      // until the next configure, so the first configure after ANY plan change
-      // sees a primary that differs from the tier default. Reading that as a
-      // pick minted one on every upgrade — the customer pays for Max and the box
-      // could never default to it again.
+      // The badge and the model move at different times, so the running model
+      // is never evidence of a pick; minting one from it is how a box once came
+      // to keep a model its owner never chose.
       mockGetAll.mockResolvedValue({ clawai_tier: "pro" });
       mockReadOpenClawConfig.mockResolvedValue({
         agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
@@ -1023,7 +1038,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
       expect((await pairClawai("pro")).status).toBe(200);
 
-      expect(primaryWrites()).toEqual(["config set agents.defaults.model.primary deepseek/deepseek-v4-pro"]);
+      expect(primaryWrites()).toEqual([FLASH_PRIMARY]);
       expect(mockSetMany).not.toHaveBeenCalledWith(
         expect.objectContaining({ ai_model_explicit_picks: expect.anything() }),
       );
@@ -1135,6 +1150,79 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).not.toContain("config set gateway.auth.token clawbox");
   });
 
+  describe("the local-only AI lock (TASK-2501)", () => {
+    // The lock is read through the store's tri-state reader; every other key answers as the file's beforeEach set it.
+    const lock = () => {
+      vi.mocked(getConfigKey).mockImplementation(async (key: string) => (key === "ai_cloud_lock" ? true : undefined));
+      vi.mocked(getKnown).mockImplementation(async (key: string) => ({ value: key === "ai_cloud_lock" ? true : undefined, known: true }));
+    };
+    const writes = () => configSetCalls(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+    // `clearAllMocks` keeps implementations: the lock must not outlive these cases.
+    afterEach(() => {
+      vi.mocked(getConfigKey).mockImplementation(async () => undefined);
+      vi.mocked(getKnown).mockImplementation(async () => ({ value: undefined, known: true }));
+    });
+
+    it("connects no cloud provider, ClawBox AI included, and writes nothing", async () => {
+      lock();
+      for (const body of [{ provider: "anthropic", apiKey: "sk-ant-api03-test" }, { provider: "clawai", apiKey: "claw_token_abc" }]) {
+        const res = await configurePost(jsonRequest(body));
+        expect(res.status).toBe(409);
+        expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+      }
+      expect(writes()).toEqual([]);
+      expect(mockSetMany).not.toHaveBeenCalled();
+      expect(mockRestartGateway).not.toHaveBeenCalled();
+    });
+
+    it("refuses Settings' background sign-in before any task starts", async () => {
+      lock();
+      const { listBackgroundTasks } = await import("@/lib/background-tasks");
+      const before = listBackgroundTasks({ kind: "provider-sign-in" }).length;
+      const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-0123456789", background: true }));
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+      expect(listBackgroundTasks({ kind: "provider-sign-in" })).toHaveLength(before);
+    });
+
+    it("judges an OAuth handoff on the provider its tokens were minted for, not the body's", async () => {
+      lock();
+      mockFs.readFile.mockImplementation(async (file) =>
+        String(file).endsWith("oauth-device-tokens.json")
+          ? JSON.stringify({ provider: "openai", access_token: "access.token.jwt", refresh_token: "refresh-token", expires_in: 3600, createdAt: Date.now() })
+          : JSON.stringify({ version: 1, profiles: {} }),
+      );
+      const res = await configurePost(jsonRequest({ provider: "llamacpp", authMode: "subscription", oauthHandoff: true }));
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "cloud_ai_locked" });
+      expect(writes()).toEqual([]);
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+      // Left in place: a refusal is not a reason to throw away a sign-in.
+      expect(mockFs.unlink).not.toHaveBeenCalledWith(expect.stringContaining("oauth-device-tokens.json"));
+    });
+
+    it("still turns the on-device model on, with no ClawBox AI model behind it", async () => {
+      lock();
+      // A linked box: without the lock, the on-device primary gets ClawBox AI as its fallback.
+      mockGetAll.mockResolvedValue({ clawai_token: "claw_token_abc" });
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+      expect(res.status).toBe(200);
+      const calls = writes();
+      expect(calls.find((c) => c.path === "agents.defaults.model.primary")?.value).toBe("llamacpp/gemma4-e2b-it-q4_0");
+      expect(calls.some((c) => c.path === "models.providers.deepseek")).toBe(false);
+      const fallbacks = calls.filter((c) => c.path === "agents.defaults.model.fallbacks").map((c) => String(c.value));
+      expect(fallbacks.every((value) => !value.includes("deepseek"))).toBe(true);
+    });
+
+    it("puts ClawBox AI behind the same on-device model once the lock is off", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "claw_token_abc" });
+      const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
+      expect(res.status).toBe(200);
+      const fallbacks = writes().filter((c) => c.path === "agents.defaults.model.fallbacks").map((c) => String(c.value));
+      expect(fallbacks.some((value) => value.includes("deepseek"))).toBe(true);
+    });
+  });
+
   it("preserves an externally managed gateway token when settings are saved", async () => {
     const secretRef = {
       source: "exec",
@@ -1155,6 +1243,22 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands.some((command) =>
       command.startsWith("config set gateway.auth.token "),
     )).toBe(false);
+  });
+
+  it("turns the on-device model on only after an external engine transition in flight (TASK-2376)", async () => {
+    // Its "no engine selected" check and its writes must not interleave with
+    // an engine's save or remove, which hold this lock.
+    const { withLocalAiTransitionLock } = await import("@/lib/local-ai-transition-lock");
+    let release!: () => void;
+    const held = withLocalAiTransitionLock(() => new Promise<void>((resolve) => { release = resolve; }));
+    let settled = false;
+    const pending = configurePost(jsonRequest({ provider: "llamacpp" })).then((res) => { settled = true; return res; });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(settled).toBe(false);
+    expect(configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch))).toEqual([]);
+    release();
+    await held;
+    expect((await pending).status).toBe(200);
   });
 
   it("promotes local AI to the active default when no primary AI provider was configured", async () => {
@@ -2751,12 +2855,22 @@ describe("POST /setup-api/ai-models/configure", () => {
   // which /setup-api/ai-models/xai-login drives. This save is everything after
   // the credential write — and it proves the sign-in is in the store first.
   describe("the xAI sign-in", () => {
-    const storeAnswer = (profiles: unknown[]) => JSON.stringify({ profiles });
+    const storeAnswer = (profiles: { id: string; type: string }[]) => {
+      vi.mocked(readGatewayProviderAuth).mockImplementation((provider: string) => (provider === "xai"
+        ? {
+          kind: "present",
+          profiles: profiles.map((row) => ({ profileId: row.id, type: row.type, fingerprint: null, refreshFingerprint: null, expires: null, fenced: false, fence: null })),
+          order: null,
+          failures: {},
+        }
+        : { kind: "no-store" }));
+    };
+    afterEach(() => {
+      vi.mocked(readGatewayProviderAuth).mockImplementation(() => ({ kind: "no-store" }));
+    });
 
     it("finishes a sign-in the store holds: oauth profile metadata, primary, applied live — and no paste", async () => {
-      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce(
-        storeAnswer([{ id: "xai:default", provider: "xai", type: "oauth" }]),
-      );
+      storeAnswer([{ id: "xai:default", type: "oauth" }]);
 
       const res = await configurePost(jsonRequest({ provider: "xai", authMode: "subscription" }));
       const body = await res.json();
@@ -2764,10 +2878,8 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(res.status).toBe(200);
       expect(body.success).toBe(true);
 
-      // The store was asked, with the store's own reader.
-      expect(vi.mocked(spawnOpenclawCli).mock.calls.some(
-        ([args]) => Array.isArray(args) && args.join(" ") === "models auth list --json",
-      )).toBe(true);
+      // The store was asked, read directly.
+      expect(vi.mocked(readGatewayProviderAuth)).toHaveBeenCalledWith("xai");
       // Nothing was pasted and no legacy OAuth file was written: there is no
       // credential in this request to store.
       expect(pasteCallFor("xai:default")).toBeUndefined();
@@ -2786,9 +2898,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     });
 
     it("writes the model the owner picked", async () => {
-      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce(
-        storeAnswer([{ id: "xai:default", provider: "xai", type: "oauth" }]),
-      );
+      storeAnswer([{ id: "xai:default", type: "oauth" }]);
 
       const res = await configurePost(jsonRequest({ provider: "xai", authMode: "subscription", model: "grok-4.5" }));
 
@@ -2799,9 +2909,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     it("refuses, before any write, when the store answers and holds no xAI sign-in", async () => {
       // An API key at the id is not a sign-in: the login did not land.
-      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce(
-        storeAnswer([{ id: "xai:default", provider: "xai", type: "api_key" }]),
-      );
+      storeAnswer([{ id: "xai:default", type: "api_key" }]);
 
       const res = await configurePost(jsonRequest({ provider: "xai", authMode: "subscription" }));
       const body = await res.json();
@@ -2814,7 +2922,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     });
 
     it("saves anyway when the store cannot be read — unknown is not a refusal", async () => {
-      vi.mocked(spawnOpenclawCli).mockRejectedValueOnce(new Error("store busy"));
+      vi.mocked(readGatewayProviderAuth).mockImplementation((provider: string) => (provider === "xai" ? { kind: "unreadable" } : { kind: "no-store" }));
 
       const res = await configurePost(jsonRequest({ provider: "xai", authMode: "subscription" }));
 
@@ -2825,23 +2933,16 @@ describe("POST /setup-api/ai-models/configure", () => {
       // Both modes live at `xai:default`, and picking the API Key tab is the
       // owner switching. The guard that protects a Claude sign-in would make
       // that switch impossible from the UI, so xAI does not ask it.
-      vi.mocked(spawnOpenclawCli).mockImplementation(async (args) =>
-        Array.isArray(args) && args.includes("list")
-          ? storeAnswer([{ id: "xai:default", provider: "xai", type: "oauth" }])
-          : "");
-      try {
-        const res = await configurePost(jsonRequest({ provider: "xai", apiKey: "xai-test-key-not-real" }));
+      storeAnswer([{ id: "xai:default", type: "oauth" }]);
+      vi.mocked(readGatewayAuthProfile).mockClear();
+      const res = await configurePost(jsonRequest({ provider: "xai", apiKey: "xai-test-key-not-real" }));
 
-        expect(res.status).toBe(200);
-        expect(vi.mocked(spawnOpenclawCli).mock.calls.some(
-          ([args]) => Array.isArray(args) && args.includes("list"),
-        )).toBe(false);
-        expect(pasteStdin("xai:default")).toContain("xai-test-key-not-real");
-        const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-        expect(commands).toContain('config set auth.profiles.xai:default {"provider":"xai","mode":"api_key"} --json');
-      } finally {
-        vi.mocked(spawnOpenclawCli).mockReset().mockResolvedValue("");
-      }
+      expect(res.status).toBe(200);
+      // No sign-in guard read for xAI (the store reader), and the paste goes ahead.
+      expect(vi.mocked(readGatewayAuthProfile)).not.toHaveBeenCalledWith("xai:default");
+      expect(pasteStdin("xai:default")).toContain("xai-test-key-not-real");
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(commands).toContain('config set auth.profiles.xai:default {"provider":"xai","mode":"api_key"} --json');
     });
 
     it("still requires a key for an xai API-key save", async () => {
@@ -3353,7 +3454,7 @@ describe("POST /setup-api/ai-models/configure", () => {
         "agents.defaults.model.primary",
       )?.value;
 
-    it("configures the Max model when the portal says Max, even though the picker said Pro", async () => {
+    it("records the Max plan the portal says, even though the picker said Pro, and runs the one model", async () => {
       vi.stubGlobal("fetch", deviceInfo({ tier: "max" }));
 
       const res = await configurePost(jsonRequest({
@@ -3363,15 +3464,15 @@ describe("POST /setup-api/ai-models/configure", () => {
       }));
 
       expect(res.status).toBe(200);
-      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-flash");
       expect(mockSetMany).toHaveBeenCalledWith(
         expect.objectContaining({ clawai_tier: "pro" }),
       );
     });
 
-    it("configures the Pro model when the portal says Pro, even though the picker said Max", async () => {
+    it("records the Pro plan the portal says, even though the picker said Max", async () => {
       // The mirror image, and the reason this is a reconcile rather than a
-      // promote: clicking the Max card does not entitle you to the Max model.
+      // promote: clicking the Max card does not make an account Max.
       vi.stubGlobal("fetch", deviceInfo({ tier: "pro" }));
 
       const res = await configurePost(jsonRequest({
@@ -3387,9 +3488,9 @@ describe("POST /setup-api/ai-models/configure", () => {
       );
     });
 
-    it("honours the portal's deviceTier stamp so a Max subscriber can run Flash on this box", async () => {
-      // Deliberate downgrade, expressed on the portal side at pair time. The
-      // fix must not force such a device up to the plan's headline model.
+    it("honours the portal's deviceTier stamp", async () => {
+      // A device default expressed on the portal side at pair time. Every plan
+      // runs the one model (TASK-2261), so the model it writes is the same.
       vi.stubGlobal("fetch", deviceInfo({ tier: "max", deviceTier: "flash" }));
 
       const res = await configurePost(jsonRequest({
@@ -3555,7 +3656,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       }));
 
       expect(res.status).toBe(200);
-      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-flash");
     });
 
     it("keeps the picker's choice when the portal answers 401", async () => {
@@ -3571,7 +3672,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       }));
 
       expect(res.status).toBe(200);
-      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-flash");
     });
 
     describe("a token the portal itself refuses (TASK-1601)", () => {
@@ -3618,7 +3719,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       }));
 
       expect(res.status).toBe(200);
-      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-flash");
     });
 
     it("runs Flash for a Free pick, not the badge a previous account left behind", async () => {
@@ -3655,7 +3756,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       }));
 
       expect(res.status).toBe(200);
-      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-flash");
       expect(mockSetMany).toHaveBeenCalledWith(
         expect.objectContaining({ clawai_tier: "pro" }),
       );
@@ -3879,7 +3980,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       // no enumeration either. UNKNOWN is not "this id does not exist" — the
       // ClawBox AI first-boot save is the single most common producer of the
       // refusal, and it is always over one of our own constants.
-      refuseThePrimary("deepseek/deepseek-v4-pro");
+      refuseThePrimary("deepseek/deepseek-v4-flash");
       const res = await configurePost(jsonRequest({
         provider: "clawai",
         apiKey: "claw_token_abc",
@@ -3929,7 +4030,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       // the primary itself, keeping the save-without-validating contract.
       vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
         new Error(
-          'Cannot set model reference "deepseek/deepseek-v4-pro" at agents.defaults.model.primary: Unable to refresh provider catalog',
+          'Cannot set model reference "deepseek/deepseek-v4-flash" at agents.defaults.model.primary: Unable to refresh provider catalog',
         ),
       );
       const res = await configurePost(jsonRequest({
@@ -4020,7 +4121,11 @@ describe("POST /setup-api/ai-models/configure", () => {
       // The early failure is the dangerous case: there is no .migrated-* file
       // yet, but the legacy auth-profiles.json we just wrote still prevents an
       // OpenClaw 2 gateway from starting.
-      vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor stopped before migration"));
+      // Persistent, not Once: a doctor that failed is run a second time before
+      // the save gives up (SUP-1023), and a second run that completed would be
+      // a different test.
+      vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("doctor stopped before migration"));
+      legacyFileStaysOnDisk();
       vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.8.1 (test)\n");
       mockFs.readdir.mockResolvedValueOnce([]);
 
@@ -4206,7 +4311,8 @@ describe("POST /setup-api/ai-models/configure", () => {
       // The half that must not move: a doctor that failed for any other reason
       // is a state the owner can act on with the command, and this arm is what
       // keeps the new sentence from swallowing it.
-      vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor exploded"));
+      vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("doctor exploded"));
+      legacyFileStaysOnDisk();
       vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.8.1 (test)\n");
       mockFs.readdir.mockResolvedValueOnce([]);
 
@@ -4297,7 +4403,8 @@ describe("POST /setup-api/ai-models/configure", () => {
     });
 
     it("keeps the legacy best-effort doctor behavior on an explicit OpenClaw 1 binary", async () => {
-      vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("v1 doctor unavailable"));
+      vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("v1 doctor unavailable"));
+      legacyFileStaysOnDisk();
       vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");
       mockFs.readdir.mockResolvedValueOnce([]);
 
@@ -4317,7 +4424,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       // The narrow helper owns the strict read and cross-process lock. Any
       // refusal there must stop the route rather than claim a configured model.
       vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
-        new Error('Cannot set model reference "deepseek/deepseek-v4-pro" at agents.defaults.model.primary: Unable to refresh provider catalog'),
+        new Error('Cannot set model reference "deepseek/deepseek-v4-flash" at agents.defaults.model.primary: Unable to refresh provider catalog'),
       );
       vi.mocked(setPrimaryModelWithoutCatalogValidation).mockRejectedValueOnce(
         new Error("openclaw.json does not contain a configuration object"),
@@ -5077,6 +5184,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       }],
       ["throws on a pre-SQLite core, whose legacy file is the store", () => {
         vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("v1 doctor unavailable"));
+        legacyFileStaysOnDisk();
         vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");
       }],
       ["is blocked on a pre-SQLite core", () => {
@@ -5093,18 +5201,12 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(mockPut).not.toHaveBeenCalled();
     });
 
-    // Claude's sign-in only. (The ClawBox AI device login, which `clawai/poll`
-    // posts as `authMode: "subscription"`, no longer reaches this doctor at all:
-    // its portal token is pasted — see "the device login's portal token" above.)
+    // Not Claude's, not ChatGPT's (the next block): Google's sign-in is the
+    // lane nobody has measured this gate on. (The ClawBox AI device login,
+    // which `clawai/poll` posts as `authMode: "subscription"`, no longer
+    // reaches this doctor at all: its portal token is pasted — see "the device
+    // login's portal token" above.)
     it.each<[string, Record<string, unknown>]>([
-      ["the ChatGPT sign-in", {
-        provider: "openai",
-        apiKey: "access.token.jwt",
-        idToken: "id.token.jwt",
-        authMode: "subscription",
-        refreshToken: "refresh-token",
-        expiresIn: 3600,
-      }],
       ["the Google sign-in", {
         provider: "google",
         apiKey: "access-token",
@@ -5120,6 +5222,422 @@ describe("POST /setup-api/ai-models/configure", () => {
       // …and the store was left alone.
       expect(mockRead).not.toHaveBeenCalled();
       expect(mockPut).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * SUP-1023 — "Credential migration failed" shown over a ChatGPT sign-in that
+   * had in fact gone through.
+   *
+   * `openclaw doctor --fix` imports the legacy auth-profiles.json FIRST and
+   * exits 1 for what it does after (measured on 2026.11.3: a config write that
+   * collided with another writer — "Doctor finished, but config fixes were not
+   * applied." — with the profile in the store and the file archived). The route
+   * read the exit code as the migration's verdict, answered 502 and rolled
+   * back a file that no longer existed. And the ChatGPT lane, unlike Claude's,
+   * never asked the store at all, so a stale or fenced `openai:chatgpt` that
+   * the migration kept in place of the new sign-in was a silent 200.
+   *
+   * Now: the same store check as Claude's lane; a doctor that failed is run
+   * once more when a second run can change the answer; and when the file it
+   * imported is gone, the store decides.
+   */
+  describe("a ChatGPT sign-in, a doctor that fails, and what the gateway's auth store holds (SUP-1023)", () => {
+    // Placeholders in the real ones' shape — this repository is public.
+    const ACCESS = "fake.chatgpt-access.jwt";
+    const ID_TOKEN = "fake.chatgpt-id.jwt";
+    const REFRESH = "fake-chatgpt-refresh-token";
+    const PROFILE = "openai:chatgpt";
+
+    type Held = Extract<GatewayAuthProfileRead, { kind: "present" }>;
+    const FENCE: Partial<Held> = { fingerprint: null, refreshFingerprint: null, expires: 1, fenced: true, fence: "failed" };
+    const ANOTHER: Partial<Held> = { fingerprint: "0123456789abcdef", refreshFingerprint: "fedcba9876543210", expires: 1_790_000_000_000 };
+
+    const mockRead = vi.mocked(readGatewayAuthProfile);
+    const mockPut = vi.mocked(putGatewayOAuthProfile);
+    const mockDoctor = vi.mocked(runOpenclawDoctorFix);
+
+    beforeEach(() => {
+      mockDoctor.mockResolvedValue("completed");
+    });
+
+    function signIn(body: Record<string, unknown> = {}) {
+      return jsonRequest({
+        provider: "openai",
+        apiKey: ACCESS,
+        idToken: ID_TOKEN,
+        authMode: "subscription",
+        refreshToken: REFRESH,
+        expiresIn: 3600,
+        ...body,
+      });
+    }
+
+    /** The bundle this request wrote to auth-profiles.json: what the migration was handed. */
+    function fileBundle(): GatewayOAuthBundle {
+      const write = mockFs.writeFile.mock.calls.find(([file]) => String(file).includes("auth-profiles.json"));
+      return JSON.parse(write?.[1] as string).profiles[PROFILE];
+    }
+
+    /** The store holding exactly this request's sign-in, or `instead` of it. */
+    function holding(instead: Partial<Held> = {}): GatewayAuthProfileRead {
+      const bundle = fileBundle();
+      return {
+        kind: "present",
+        store: "shared",
+        type: "oauth",
+        fingerprint: tokenFingerprint(bundle.access),
+        refreshFingerprint: tokenFingerprint(bundle.refresh),
+        expires: bundle.expires,
+        fenced: false,
+        fence: null,
+        storeUpdatedAtMs: Date.now(),
+        ...instead,
+      };
+    }
+
+    const lines = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.map((args) => args.map(String).join(" "));
+
+    function primaryWasWritten(): boolean {
+      return configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch))
+        .some((command) => command.startsWith("config set agents.defaults.model.primary openai/"));
+    }
+
+    function rolledBack(): boolean {
+      return mockFs.rename.mock.calls.some(
+        ([from, to]) => /auth-profiles\.json$/.test(String(from)) && /auth-profiles\.json\.failed-/.test(String(to)),
+      );
+    }
+
+    const NOT_MIGRATED = "Credential migration failed. The subscription sign-in was rolled back";
+
+    describe("when doctor completes", () => {
+      it("asks the store for the ChatGPT profile and writes nothing when the migration imported the sign-in", async () => {
+        mockRead.mockImplementation(() => holding());
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockRead).toHaveBeenCalledTimes(1);
+        expect(mockRead).toHaveBeenCalledWith(PROFILE);
+        expect(mockPut).not.toHaveBeenCalled();
+        expect(primaryWasWritten()).toBe(true);
+      });
+
+      it.each([
+        ["a failed refresh fence", FENCE, /an OAuth refresh fence \(failed\)/],
+        ["another sign-in", ANOTHER, /left as it was: present\)/],
+      ])("replaces %s the migration kept, in the shape the migration itself stores", async (_what, kept, said) => {
+        mockRead.mockImplementationOnce(() => holding(kept)).mockImplementation(() => holding());
+        mockPut.mockReturnValue({ ok: true, store: "shared" });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockPut).toHaveBeenCalledTimes(1);
+        // The bundle without its id_token — which is what core's own import
+        // leaves in the store (measured) — and with the SAME `expires` as the
+        // legacy file, or the read-back could never match.
+        const stored: Record<string, unknown> = { ...fileBundle() };
+        delete stored.id;
+        expect(fileBundle()).toMatchObject({ type: "oauth", provider: "openai", access: ACCESS, id: ID_TOKEN, refresh: REFRESH });
+        expect(mockPut).toHaveBeenCalledWith(PROFILE, stored);
+        expect(mockPut.mock.calls[0][1]).not.toHaveProperty("id");
+        expect(mockRead.mock.invocationCallOrder[1]).toBeGreaterThan(mockPut.mock.invocationCallOrder[0]);
+        expect(primaryWasWritten()).toBe(true);
+
+        const replaced = lines(warn).filter((line) => line.includes("ClawBox replaced it in place"));
+        expect(replaced).toHaveLength(1);
+        expect(replaced[0]).toContain("doctor --fix completed without storing");
+        expect(replaced[0]).toMatch(said);
+        for (const secret of [ACCESS, ID_TOKEN, REFRESH, tokenFingerprint(ACCESS), tokenFingerprint(REFRESH)]) {
+          expect(lines(warn).join("\n")).not.toContain(secret);
+        }
+        warn.mockRestore();
+      });
+
+      it("refuses, with the sentence the Claude lane gives, when the replace does not read back", async () => {
+        mockRead.mockImplementation(() => holding(FENCE));
+        mockPut.mockReturnValue({ ok: true, store: "shared" });
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+        const body = await res.json();
+        error.mockRestore();
+
+        expect(res.status).toBe(502);
+        expect(body.code).toBe("credential_not_stored");
+        expect(primaryWasWritten()).toBe(false);
+      });
+
+      it("passes, saying so, on a box with no store to ask (an OpenClaw 1 core)", async () => {
+        mockRead.mockReturnValue({ kind: "no-store" });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockPut).not.toHaveBeenCalled();
+        expect(lines(warn).some((line) => line.includes("carrying on with what doctor --fix reported"))).toBe(true);
+        warn.mockRestore();
+      });
+    });
+
+    describe("when doctor exits non-zero", () => {
+      it("runs it once more, and goes on when the second run completes", async () => {
+        mockDoctor.mockRejectedValueOnce(new Error("Config unavailable. Doctor could not complete maintenance."));
+        legacyFileStaysOnDisk();
+        mockRead.mockImplementation(() => holding());
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockDoctor).toHaveBeenCalledTimes(2);
+        expect(rolledBack()).toBe(false);
+        // The store is still asked, as after any completed doctor.
+        expect(mockRead).toHaveBeenCalledWith(PROFILE);
+        expect(primaryWasWritten()).toBe(true);
+        expect(lines(warn).some((line) => line.includes("completed on its second run"))).toBe(true);
+        warn.mockRestore();
+        error.mockRestore();
+      });
+
+      it("journals the END of what doctor said, not the start", async () => {
+        const banner = "(node:1) DeprecationWarning: Plugin SDK: createOpenClawCodingTools is deprecated.";
+        const verdict = "Doctor finished, but config fixes were not applied.";
+        mockDoctor.mockRejectedValue(new Error(`${banner}\n${"x".repeat(5000)}\n│\n└  ${verdict}`));
+        legacyFileStaysOnDisk();
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(502);
+        const journal = lines(error).filter((line) => line.includes("doctor --fix failed after the OAuth store write"));
+        expect(journal.length).toBeGreaterThan(0);
+        for (const line of journal) {
+          expect(line).toContain(verdict);
+          expect(line).not.toContain("DeprecationWarning");
+          expect(line.length).toBeLessThan(600);
+        }
+        error.mockRestore();
+      });
+
+      it("rolls back, as before, when both runs fail and the legacy file is still there", async () => {
+        mockDoctor.mockRejectedValue(new Error("doctor exploded"));
+        legacyFileStaysOnDisk();
+        mockFs.readdir.mockResolvedValue(["auth-profiles.json.migrated-2026-09-01T00-00-00-000Z"] as never);
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+        const body = await res.json();
+        error.mockRestore();
+
+        expect(res.status).toBe(502);
+        expect(body.error).toContain(NOT_MIGRATED);
+        expect(mockDoctor).toHaveBeenCalledTimes(2);
+        expect(rolledBack()).toBe(true);
+        expect(mockRead).not.toHaveBeenCalled();
+        expect(primaryWasWritten()).toBe(false);
+      });
+
+      it.each([
+        ["a run killed at its budget", () => Object.assign(new Error("openclaw doctor timed out after 180000ms"), { name: "OpenclawSpawnTimeoutError" })],
+        ["a config doctor cannot parse", () => new Error("Config at /x/openclaw.json is not parseable and cannot be repaired automatically. The file remains unchanged.")],
+        ["a CLI that cannot be run", () => Object.assign(new Error("spawn openclaw ENOENT"), { code: "ENOENT" })],
+      ])("does not run it again after %s", async (_what, failure) => {
+        mockDoctor.mockRejectedValue(failure());
+        legacyFileStaysOnDisk();
+        mockFs.readdir.mockResolvedValue(["auth-profiles.json.migrated-2026-09-01T00-00-00-000Z"] as never);
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+        error.mockRestore();
+
+        expect(res.status).toBe(502);
+        expect(mockDoctor).toHaveBeenCalledTimes(1);
+        expect(rolledBack()).toBe(true);
+      });
+
+      it.each(["blocked-by-legacy-exec-approvals", "blocked-by-service-ownership", "gateway-not-stopped"] as const)(
+        "does not run it again after a refusal doctor named (%s)",
+        async (named) => {
+          mockDoctor.mockResolvedValue(named);
+          legacyFileStaysOnDisk();
+          mockFs.readdir.mockResolvedValue(["auth-profiles.json.migrated-2026-09-01T00-00-00-000Z"] as never);
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          error.mockRestore();
+
+          expect(res.status).toBe(502);
+          expect(mockDoctor).toHaveBeenCalledTimes(1);
+        },
+      );
+
+      describe("after it had imported the file (the file is gone)", () => {
+        beforeEach(() => {
+          // Both runs fail: the second one changes nothing here.
+          mockDoctor.mockRejectedValue(new Error("Doctor finished, but config fixes were not applied."));
+        });
+
+        it("goes on when the store holds the sign-in — the credential landed, the exit code was about something else", async () => {
+          mockRead.mockImplementation(() => holding());
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          const body = await res.json();
+          const said = lines(warn);
+          const failed = lines(error).filter((line) => line.includes("doctor --fix failed"));
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(200);
+          expect(body.success).toBe(true);
+          expect(rolledBack()).toBe(false);
+          expect(mockPut).not.toHaveBeenCalled();
+          expect(primaryWasWritten()).toBe(true);
+          expect(said.some((line) => line.includes("came after the migration and does not undo it"))).toBe(true);
+          // Both attempts, and nothing else, are in the journal as failures.
+          expect(failed).toHaveLength(2);
+        });
+
+        it("replaces what the migration kept in the store and goes on, saying which doctor it was", async () => {
+          mockRead.mockImplementationOnce(() => holding(FENCE)).mockImplementation(() => holding());
+          mockPut.mockReturnValue({ ok: true, store: "shared" });
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          const said = lines(warn);
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(200);
+          expect(mockPut).toHaveBeenCalledTimes(1);
+          expect(said.some((line) => line.includes("failed after importing the file, without storing"))).toBe(true);
+          expect(rolledBack()).toBe(false);
+        });
+
+        it.each([
+          ["no store to read", { kind: "no-store" } as GatewayAuthProfileRead],
+          ["a store it cannot read", { kind: "unreadable", cause: "database is locked" } as GatewayAuthProfileRead],
+        ])("rolls back over %s — nothing shows the credential is anywhere", async (_what, read) => {
+          mockRead.mockReturnValue(read);
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          const body = await res.json();
+          const said = lines(error);
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(502);
+          expect(body.error).toContain(NOT_MIGRATED);
+          expect(rolledBack()).toBe(true);
+          expect(primaryWasWritten()).toBe(false);
+          expect(said.some((line) => line.includes("and doctor --fix had failed: rolling the sign-in back"))).toBe(true);
+        });
+
+        it("refuses, as after a completed doctor, when the replace does not read back", async () => {
+          mockRead.mockImplementation(() => holding(FENCE));
+          mockPut.mockReturnValue({ ok: true, store: "shared" });
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          const body = await res.json();
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(502);
+          expect(body.code).toBe("credential_not_stored");
+        });
+
+        it("goes on when the second run answers with a refusal it names — the first run's import still stands", async () => {
+          mockDoctor.mockReset();
+          mockDoctor
+            .mockRejectedValueOnce(new Error("Doctor finished, but config fixes were not applied."))
+            .mockResolvedValueOnce("blocked-by-service-ownership");
+          mockRead.mockImplementation(() => holding());
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(200);
+          expect(mockDoctor).toHaveBeenCalledTimes(2);
+          expect(rolledBack()).toBe(false);
+          expect(primaryWasWritten()).toBe(true);
+        });
+
+        it("reads the store and writes nothing when the second run found the gateway running", async () => {
+          // The reviewer's case: a second run that finds the gateway up (another
+          // surface restarted it) is the collision this fix is about. A store
+          // that already holds the sign-in passes…
+          mockDoctor.mockReset();
+          mockDoctor
+            .mockRejectedValueOnce(new Error("Doctor finished, but config fixes were not applied."))
+            .mockResolvedValueOnce("gateway-not-stopped");
+          mockRead.mockImplementation(() => holding());
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(200);
+          expect(mockPut).not.toHaveBeenCalled();
+          expect(rolledBack()).toBe(false);
+        });
+
+        it("…and rolls back WITHOUT writing when it does not, because nothing may be written beside a running gateway", async () => {
+          mockDoctor.mockReset();
+          mockDoctor
+            .mockRejectedValueOnce(new Error("Doctor finished, but config fixes were not applied."))
+            .mockResolvedValueOnce("gateway-not-stopped");
+          mockRead.mockImplementation(() => holding(FENCE));
+          mockPut.mockReturnValue({ ok: true, store: "shared" });
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(signIn());
+          const body = await res.json();
+          const said = lines(error);
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(502);
+          expect(body.error).toMatch(/busy restarting/i);
+          expect(mockPut).not.toHaveBeenCalled();
+          expect(rolledBack()).toBe(true);
+          expect(said.some((line) => line.includes("the gateway is not stopped: rolling the sign-in back"))).toBe(true);
+        });
+
+        it("still rolls back for a lane whose store this gate has not been measured on (Google's)", async () => {
+          const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+          const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+          const res = await configurePost(jsonRequest({
+            provider: "google",
+            apiKey: "access-token",
+            authMode: "subscription",
+            projectId: "my-project-id",
+          }));
+          warn.mockRestore();
+          error.mockRestore();
+
+          expect(res.status).toBe(502);
+          expect(mockRead).not.toHaveBeenCalled();
+        });
+      });
     });
   });
 
@@ -5194,10 +5712,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     it("still asks the sign-in guard before a paste that would change something", async () => {
       const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-api03-test" }));
       expect(res.status).toBe(200);
-      const listed = vi.mocked(spawnOpenclawCli).mock.calls.some(
-        (call) => Array.isArray(call[0]) && call[0].join(" ").includes("models auth list"),
-      );
-      expect(listed).toBe(true);
+      // The guard reads the gateway's store itself (OpenClaw 2026.11.3 refuses
+      // `models auth list` while the gateway runs).
+      expect(vi.mocked(readGatewayAuthProfile)).toHaveBeenCalledWith("anthropic:default");
       expect(pasteCallFor("anthropic:default")).toBeDefined();
     });
 

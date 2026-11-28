@@ -84,6 +84,13 @@ afterEach(() => {
 });
 
 describe("describing a local image", () => {
+  it("answers the local-only AI lock's refusal as a 409 with its code (TASK-2501)", async () => {
+    mocks.describeImage.mockResolvedValue({ text: null, error: "Local-only AI is on.", code: "cloud_ai_locked" } as never);
+    const res = await POST(req({ path: png("shot.png") }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "Local-only AI is on.", code: "cloud_ai_locked" });
+  });
+
   it("describes a real image and passes its actual mime through", async () => {
     const img = path.join(base, "shot.jpg");
     fs.writeFileSync(img, Buffer.from([0xff, 0xd8, 0xff]));

@@ -237,6 +237,53 @@ d("gateway-pre-start.sh — a fresh box", () => {
   });
 });
 
+/** The shipped derivation of the heartbeat-retired flag, out of the real script. */
+function retiredFlagDerivation(): string {
+  const src = readFileSync(SCRIPT, "utf-8");
+  const from = "if [ -z \"${CLAWBOX_OPENCLAW_2026_11_5:-}\" ]; then";
+  const to = "export CLAWBOX_OPENCLAW_2026_11_5\n";
+  const start = src.indexOf(from);
+  const end = src.indexOf(to, start);
+  if (start < 0 || end < 0) throw new Error("the 2026.11.5 flag derivation is not in gateway-pre-start.sh");
+  return src.slice(start, end + to.length);
+}
+
+d("gateway-pre-start.sh — which cores have retired the heartbeat key", () => {
+  // The flag is DERIVED from the installed core's version with `sort -V`, and
+  // the cases below run that derivation itself: a broken comparison would make
+  // a 2026.11.3 box skip a row it needs, or a 2026.11.5 box try the refused write.
+  function flagFor(effective: string, explicit?: string): string {
+    const r = spawnSync("bash", ["-c", `${retiredFlagDerivation()}\nprintf %s "$CLAWBOX_OPENCLAW_2026_11_5"`], {
+      encoding: "utf-8",
+      env: testEnv({ PATH: "/usr/bin:/bin", CLAWBOX_OPENCLAW_EFFECTIVE: effective, ...(explicit === undefined ? {} : { CLAWBOX_OPENCLAW_2026_11_5: explicit }) }),
+      timeout: 30_000,
+    });
+    expect(r.status).toBe(0);
+    return r.stdout;
+  }
+
+  it.each([
+    ["2026.11.5", "1"],
+    ["2026.11.6", "1"],
+    ["2026.11.10", "1"],
+    ["2026.12.0", "1"],
+    ["2027.1.0", "1"],
+    ["2026.11.5-beta.1", "1"],
+    ["2026.11.4", "0"],
+    ["2026.11.3", "0"],
+    ["2026.10.9", "0"],
+    ["2026.9.30", "0"],
+    ["", "0"],
+  ])("takes the core %s as %s", (effective, expected) => {
+    expect(flagFor(effective)).toBe(expected);
+  });
+
+  it("lets an explicit value win, as the other core flags do", () => {
+    expect(flagFor("2026.11.3", "1")).toBe("1");
+    expect(flagFor("2026.11.5", "0")).toBe("0");
+  });
+});
+
 d("gateway-pre-start.sh — a box the previous build seeded off", () => {
   it("flips every key still at its opt-out, and writes generation 2", () => {
     writeGen1();
@@ -256,6 +303,32 @@ d("gateway-pre-start.sh — a box the previous build seeded off", () => {
     expect(calls()[0]).toContain("config set --batch-json");
     expect(calls()[1]).toBe(`config unset ${HEARTBEAT}`);
     expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+
+  it("never asks a core that retired the heartbeat key to unset it, and still flips the other two", () => {
+    // OpenClaw 2026.11.5 turned the heartbeat monitor into an automation job and
+    // took `agents.defaults.heartbeat` out of its schema: `config unset` of it is
+    // refused there. The boot flag says which core this is; the cadence row is
+    // skipped, the other two rows are flipped as before, and the record is
+    // written all the same so the box is not judged again every boot.
+    writeGen1();
+    writeConfig(OPTED_OUT);
+    const r = run({ CLAWBOX_OPENCLAW_2026_11_5: "1" });
+    expect(r.status).toBe(0);
+    expect(at(DREAMING)).toBe(true);
+    expect(at(MODE)).toBe("auto");
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0]).toContain("config set --batch-json");
+    expect(calls().join("\n")).not.toContain("heartbeat");
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+
+  it("still unsets the heartbeat key on a core that has it (the flag absent or 0)", () => {
+    writeGen1();
+    writeConfig(OPTED_OUT);
+    const r = run({ CLAWBOX_OPENCLAW_2026_11_5: "0" });
+    expect(r.status).toBe(0);
+    expect(calls()).toContain(`config unset ${HEARTBEAT}`);
   });
 
   it("leaves the one key the owner changed afterwards, and flips the rest", () => {
@@ -410,6 +483,228 @@ d("gateway-pre-start.sh — the shared record on a dual box", () => {
     writeFileSync(statePath, JSON.stringify({ seeded: HERMES_KEYS, generation: 2 }, null, 2));
     run();
     expect(record().seeded).toEqual([...HERMES_KEYS, ...OPENCLAW_KEYS].sort());
+  });
+});
+
+// TASK-2387: a box whose chats all share ONE local or cluster engine
+// (`CLAWBOX_SINGLE_ENGINE=1`, seeded by install-x64.sh on a workstation) keeps
+// self-learning's background review and memory dreaming OFF by default, and
+// ClawBox never switches them back on. Once per box, an ABSENT key gets the off
+// value and the row `single-engine:<key>` is recorded; a value already there —
+// an owner's `auto`, a restored `off` — is the owner's.
+const SE_MODE = `single-engine:${MODE}`;
+const SE_DREAMING = `single-engine:${DREAMING}`;
+const SE_RECORD = { seeded: [...OPENCLAW_KEYS, SE_DREAMING, SE_MODE].sort(), generation: 2 };
+const SINGLE = { CLAWBOX_SINGLE_ENGINE: "1" };
+
+function writeDotenv(body: string) {
+  writeFileSync(path.join(dir, "root", ".env"), body);
+}
+
+d("gateway-pre-start.sh — a single-engine box (CLAWBOX_SINGLE_ENGINE=1)", () => {
+  it("seeds self-learning and dreaming off on a fresh box and records the rows", () => {
+    const r = run(SINGLE);
+    expect(r.status).toBe(0);
+    expect(at(MODE)).toBe("off");
+    expect(at(DREAMING)).toBe(false);
+    // Check-ins are not this flag's business: absent is the core's default.
+    expect(at(HEARTBEAT)).toBeUndefined();
+    // One CLI start: both values in the one validated batch, nothing removed.
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0]).toContain("config set --batch-json");
+    expect(r.stdout).toContain("Single-engine box");
+    expect(r.stdout).not.toContain("Brought");
+    expect(record()).toEqual(SE_RECORD);
+  });
+
+  it("leaves an `off` it finds with no record off — no flip to auto, no write", () => {
+    // The bug: a fresh install, a factory reset or a restored config with no
+    // record (or one below generation 2) had `off` flipped to `auto` at boot.
+    writeConfig(OPTED_OUT);
+    const r = run(SINGLE);
+    expect(r.status).toBe(0);
+    expect(at(MODE)).toBe("off");
+    expect(at(DREAMING)).toBe(false);
+    // The check-ins flip is unchanged: `0m` was ClawBox's, so it is removed.
+    expect(at(HEARTBEAT)).toBeUndefined();
+    expect(calls()).toEqual([`config unset ${HEARTBEAT}`]);
+    expect(r.stdout).not.toContain("Single-engine box");
+    expect(record()).toEqual(SE_RECORD);
+  });
+
+  it("does not flip the previous build's opt-outs on either", () => {
+    writeGen1();
+    writeConfig(OPTED_OUT);
+    run(SINGLE);
+    expect(at(MODE)).toBe("off");
+    expect(at(DREAMING)).toBe(false);
+    expect(record()).toEqual(SE_RECORD);
+  });
+
+  it("keeps the owner's `auto` and `true` once the box has been seeded", () => {
+    run(SINGLE);
+    expect(at(MODE)).toBe("off");
+    // Settings → Harness switches both back on: the panel writes the values.
+    writeConfig({ ...config(), skills: { workshop: { autonomous: { mode: "auto" } } },
+      plugins: { entries: { "memory-core": { config: { dreaming: { enabled: true } } } } } });
+    rmSync(path.join(dir, "calls.log"), { force: true });
+    const before = readFileSync(statePath, "utf-8");
+    for (let boot = 0; boot < 2; boot += 1) {
+      const r = run(SINGLE);
+      expect(r.status).toBe(0);
+      expect(r.stdout).toBe("");
+    }
+    expect(at(MODE)).toBe("auto");
+    expect(at(DREAMING)).toBe(true);
+    expect(calls()).toEqual([]);
+    expect(readFileSync(statePath, "utf-8")).toBe(before);
+  });
+
+  it("keeps an `auto` the owner had set before the flag, and records the row", () => {
+    writeConfig({ skills: { workshop: { autonomous: { mode: "auto" } } } });
+    run(SINGLE);
+    expect(at(MODE)).toBe("auto");
+    // Dreaming was absent, so it alone is seeded.
+    expect(at(DREAMING)).toBe(false);
+    expect(record()).toEqual(SE_RECORD);
+  });
+
+  it("seeds once per box: a key removed after the seed stays removed", () => {
+    run(SINGLE);
+    writeConfig({});
+    rmSync(path.join(dir, "calls.log"), { force: true });
+    run(SINGLE);
+    expect(at(MODE)).toBeUndefined();
+    expect(at(DREAMING)).toBeUndefined();
+    expect(calls()).toEqual([]);
+  });
+
+  it("gives a generation-2 box one more pass, and undoes nothing the owner switched since", () => {
+    // Migrated before the flag existed; the owner then switched check-ins OFF
+    // and set self-learning to `auto` themselves. Only the absent dreaming key
+    // is seeded — re-running the migration would have removed their `0m`.
+    writeFileSync(statePath, JSON.stringify({ seeded: OPENCLAW_KEYS, generation: 2 }, null, 2));
+    writeConfig({
+      agents: { defaults: { heartbeat: { every: "0m" } } },
+      skills: { workshop: { autonomous: { mode: "auto" } } },
+    });
+    const r = run(SINGLE);
+    expect(r.status).toBe(0);
+    expect(at(HEARTBEAT)).toBe("0m");
+    expect(at(MODE)).toBe("auto");
+    expect(at(DREAMING)).toBe(false);
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0]).toContain(DREAMING);
+    expect(calls()[0]).not.toContain(MODE);
+    expect(record()).toEqual(SE_RECORD);
+
+    // ...and from then on it is done: no CLI start, no write.
+    rmSync(path.join(dir, "calls.log"), { force: true });
+    expect(run(SINGLE).stdout).toBe("");
+    expect(calls()).toEqual([]);
+  });
+
+  it("keeps the other half's rows on a dual box", () => {
+    writeFileSync(statePath, JSON.stringify({ seeded: HERMES_KEYS, generation: 2 }, null, 2));
+    run(SINGLE);
+    expect(record()).toEqual({ seeded: [...HERMES_KEYS, ...SE_RECORD.seeded].sort(), generation: 2 });
+  });
+
+  it("records nothing when the seed does not land, and seeds it next boot", () => {
+    const failed = run({ ...SINGLE, OC_EXIT: "1" });
+    expect(failed.status).toBe(0);
+    expect(failed.stderr).toContain("could not bring");
+    expect(at(MODE)).toBeUndefined();
+    expect(existsSync(statePath)).toBe(false);
+
+    run(SINGLE);
+    expect(at(MODE)).toBe("off");
+    expect(at(DREAMING)).toBe(false);
+    expect(record()).toEqual(SE_RECORD);
+  });
+
+  it("writes into no shape it did not make, and still records the box as judged", () => {
+    writeConfig({ skills: { workshop: "custom" } });
+    run(SINGLE);
+    expect(at("skills.workshop")).toBe("custom");
+    expect(at(DREAMING)).toBe(false);
+    expect(record()).toEqual(SE_RECORD);
+  });
+
+  it("reads the flag from .env, the way the box sets it", () => {
+    writeDotenv("LLAMACPP_MODEL=x\nexport CLAWBOX_SINGLE_ENGINE=\"1\"\n");
+    run();
+    expect(at(MODE)).toBe("off");
+    expect(at(DREAMING)).toBe(false);
+    expect(record()).toEqual(SE_RECORD);
+  });
+
+  it("lets the process environment override .env", () => {
+    writeDotenv("CLAWBOX_SINGLE_ENGINE=1\n");
+    writeConfig(OPTED_OUT);
+    run({ CLAWBOX_SINGLE_ENGINE: "0" });
+    expect(at(MODE)).toBe("auto");
+    expect(at(DREAMING)).toBe(true);
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+
+  // The process decides whenever it has the variable — empty included — the
+  // way the panel's `isSingleEngineBox` does, and quotes are stripped from
+  // either source, so the boot script and Settings never disagree.
+  it("takes an EMPTY process value as off, without falling back to .env", () => {
+    writeDotenv("CLAWBOX_SINGLE_ENGINE=1\n");
+    writeConfig(OPTED_OUT);
+    run({ CLAWBOX_SINGLE_ENGINE: "" });
+    expect(at(MODE)).toBe("auto");
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+
+  it.each(['"1"', "'1'", ' "true" '])("reads a quoted process value %j as on, as the panel does", (value) => {
+    writeConfig(OPTED_OUT);
+    run({ CLAWBOX_SINGLE_ENGINE: value });
+    expect(at(MODE)).toBe("off");
+    expect(at(DREAMING)).toBe(false);
+    expect(record()).toEqual(SE_RECORD);
+  });
+
+  it.each(["0", "", "no", "2"])("is not a single-engine box at CLAWBOX_SINGLE_ENGINE=%j", (value) => {
+    writeDotenv(`CLAWBOX_SINGLE_ENGINE=${value}\n`);
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(config()).toEqual({});
+    expect(calls()).toEqual([]);
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+
+  it("keeps the gateway starting on a .env that is not even UTF-8", () => {
+    writeFileSync(path.join(dir, "root", ".env"), Buffer.from([0xff, 0xfe, 0x43, 0x3d, 0x31, 0x0a]));
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stderr).not.toContain("Traceback");
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+});
+
+d("gateway-pre-start.sh — no single-engine flag: exactly as before", () => {
+  it("flips an opted-out config on a fresh box and records no single-engine row", () => {
+    writeConfig(OPTED_OUT);
+    const r = run();
+    expect(at(MODE)).toBe("auto");
+    expect(at(DREAMING)).toBe(true);
+    expect(at(HEARTBEAT)).toBeUndefined();
+    expect(r.stdout).toContain("Brought the OpenClaw 2 background jobs");
+    expect(r.stdout).not.toContain("Single-engine box");
+    expect(record()).toEqual({ seeded: OPENCLAW_KEYS, generation: 2 });
+  });
+
+  it("leaves a box the flag once seeded alone after the flag is gone", () => {
+    run(SINGLE);
+    rmSync(path.join(dir, "calls.log"), { force: true });
+    const r = run();
+    expect(r.stdout).toBe("");
+    expect(calls()).toEqual([]);
+    expect(at(MODE)).toBe("off");
+    expect(at(DREAMING)).toBe(false);
   });
 });
 

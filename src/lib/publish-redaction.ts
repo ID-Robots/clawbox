@@ -49,7 +49,7 @@
  * exhaustively; the box's own names come from the caller (`redactForGitHub` in
  * ./coding-pr reads them).
  */
-import { redactCredentialShapes } from "./incident-sanitize";
+import { quotedCredentialValueRule, redactCredentialShapes, SECRET_KEYWORD_NAMES } from "./incident-sanitize";
 
 export const SECRET_PLACEHOLDER = "<redacted>";
 export const PRIVATE_IP_PLACEHOLDER = "<private-ip>";
@@ -66,6 +66,13 @@ export interface PublishRedactionOptions {
    * the factory name.
    */
   hostNames?: readonly string[];
+  /**
+   * Also replace a quoted value under a credential name through its closing
+   * quote (rule 6). Only for the text as it goes out, after every cut: a piece
+   * that is cut, joined or put through these rules again afterwards leaves it
+   * off, and the call that sends the text turns it on.
+   */
+  quotedValues?: boolean;
 }
 
 /** A PEM private key, armour and all. One with no END line runs to the end of
@@ -93,6 +100,31 @@ const KEY_VALUE_RE = /\b([A-Za-z0-9_-]*(?:key|token|secret))(\s*[=:]\s*)(["']?)(
  * separator: a bare `pwd:` is the shell's working directory.
  */
 const PASSWORD_VALUE_RE = /\b([A-Za-z0-9_-]*(?:password|passwd|[_-]pwd))(\s*[=:]\s*)(["']?)([^\s"'`&,;)\]}<>]{6,})\3/gi;
+
+/**
+ * A quoted value under one of the names above, read through its closing quote:
+ * `{"DB_PASSWORD": "correct horse battery staple"}`, `{"DEPLOY_TOKEN": "…"}`
+ * and the escaped `{\"DB_PASSWORD\":\"…\"}`. The two rules above need the
+ * separator right after the name, and stop a value at its first space or
+ * quote. Their value tests apply here too (quotedValueStays). The name is
+ * read as one whole word first and only its end checked, so a long word is
+ * scanned once.
+ */
+const QUOTED_SECRET_RE = quotedCredentialValueRule(String.raw`(?<![\w-])[\w-]+(?![\w-])(?<=(?:key|token|secret|password|passwd|[_-]pwd))`);
+
+/** A bare name ending in a word the shared keyword rule knows. That rule
+ *  writes `password: "<redacted>"` as `password="<redacted>"`, so this one does
+ *  too, and a second pass changes nothing. */
+const SHARED_KEYWORD_LABEL_RE = new RegExp(String.raw`\b(?:${SECRET_KEYWORD_NAMES})[^\S\r\n]*[:=][^\S\r\n]*$`, "i");
+
+/** Whether a quoted value under a credential name stays as it is: a
+ *  placeholder (after `Bearer` or `Basic` too), or a value the matching rule
+ *  above would leave. */
+function quotedValueStays(key: string, value: string): boolean {
+  if (/^(?:(?:bearer|basic)\s+)?(?:<redacted>|\[redacted\])$/i.test(value)) return true;
+  if (/(?:password|passwd|pwd)\W*$/i.test(key)) return value.length < 6 || !/[^A-Za-z]/.test(value) || /^[${%]/.test(value);
+  return !(/^[A-Za-z0-9+/_-]{16,}={0,2}$/.test(value) && /\d/.test(value) && /[A-Za-z]/.test(value));
+}
 
 /** The password half of `scheme://user:password@host`. The user name stays:
  *  `x-access-token` or `git` says what kind of URL it was. */
@@ -262,6 +294,16 @@ export function redactForPublishing(text: string, options: PublishRedactionOptio
   out = out.replace(LAN_NAME_RE, HOST_PLACEHOLDER);
   const own = hostNamePattern(options.hostNames);
   if (own) out = out.replace(own, HOST_PLACEHOLDER);
+
+  // 6. Quoted values under a credential name, when asked for: after every other
+  //    rule, and it only puts the placeholder in place of a value.
+  if (options.quotedValues) {
+    out = out.replace(QUOTED_SECRET_RE, (match, key: string, esc: string, quote: string, value: string, close: string) => {
+      if (quotedValueStays(key, value)) return match;
+      const label = SHARED_KEYWORD_LABEL_RE.test(key) ? key.replace(/[^\S\r\n]*[:=][^\S\r\n]*$/, "=") : key;
+      return `${label}${esc}${quote}${SECRET_PLACEHOLDER}${close}`;
+    });
+  }
 
   return out;
 }

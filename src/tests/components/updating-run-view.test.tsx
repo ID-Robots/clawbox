@@ -22,6 +22,13 @@ import type { StepState, UpdateState } from "@/lib/updater";
 
 let locale: "en" | "de" = "en";
 
+// The panel streams from the box and draws with xterm; its own suite
+// (update-raw-log.test.tsx) covers that. Here: where it opens, and when.
+vi.mock("@/components/UpdateRawLog", () => ({
+  default: ({ id, label, live }: { id: string; label: string; live: boolean }) => (
+    <section id={id} aria-label={label} data-live={String(live)} data-testid="update-raw-log" />
+  ),
+}));
 vi.mock("@/lib/i18n", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/i18n")>()),
   I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
@@ -42,6 +49,7 @@ import SystemUpdateApp from "@/components/SystemUpdateApp";
 import { HANDOVER_MAX_MS, HANDOVER_MIN_MS } from "@/components/UpdateHandover";
 import { UPDATE_COMPACT_MEDIA, UPDATE_SCREEN_MEDIA } from "@/components/UpdateRunView";
 import { SHOWCASE_NARROW_PX } from "@/components/UpdateWhatsNewShowcase";
+import { rememberMonitorStatus } from "@/lib/use-monitor-layout";
 
 const LABELS: [string, string][] = [
   ["bootstrap_updater", "Refreshing updater scripts"],
@@ -385,12 +393,48 @@ describe("/updating draws the System Update run view", () => {
 
     expect(view.getByTestId("update-error-panel")).toHaveTextContent("Installing Chromium");
     expect(view.getByTestId("update-error-reason")).toHaveTextContent("apt could not reach the mirror");
-    expect(view.queryByRole("button", { name: /Resume|again/ })).toBeNull();
+    expect(view.queryByRole("button", { name: /Resume|Start the update again/ })).toBeNull();
 
     fireEvent.click(view.getByRole("button", { name: "Dismiss" }));
     await advance();
     expect(posts).toEqual(["/setup-api/update/dismiss"]);
     expect(replace).toHaveBeenCalledWith("/");
+  });
+
+  it("offers Try again for a failure with a cause of its own, and follows the fresh run it starts", async () => {
+    let again = false;
+    const { fetchMock, posts } = stubBox(() => ({ body: again ? { phase: "running", currentStepIndex: 0, steps: steps(0) } : FAILED, locked: again }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    again = true;
+    const button = view.getByRole("button", { name: "Try again" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await advance();
+    // The page's Resume request: /updating is the update's own screen, so it
+    // asks nothing about agent work and draws no busy dialog.
+    expect(posts).toEqual(["/setup-api/update/run"]);
+    const run = fetchMock.mock.calls.find(([u]) => String(u) === "/setup-api/update/run");
+    expect(JSON.parse(String(run?.[1]?.body))).toEqual({ force: true, ignoreBusy: true });
+    expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
+    await advance(2_000);
+    expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "updating");
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("offers no Try again beside a Dismiss the box did not take", async () => {
+    const { fetchMock, posts } = stubBox(() => ({ body: FAILED, locked: false }));
+    const view = render(<UpdatingPage />);
+    await advance();
+    fetchMock.mockImplementationOnce(async () => respond({ error: "disk full" }, {}, 500));
+    fireEvent.click(view.getByRole("button", { name: "Dismiss" }));
+    await advance();
+    expect(view.getByTestId("update-dismiss-error")).toHaveTextContent("The device could not clear that result.");
+    expect(view.getByTestId("update-error-panel")).toHaveTextContent("Installing Chromium");
+    expect(view.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    expect(posts).not.toContain("/setup-api/update/run");
   });
 
   it("keeps a verdict the box could not clear — its Resume included — and says why beside it", async () => {
@@ -851,5 +895,158 @@ describe("/updating and the drift a run was started over", () => {
     await advance();
     expect(view.getByTestId("update-run")).toHaveAttribute("data-status", "failed");
     expect(view.getByTestId("update-warning-checkout-behind-pin")).toHaveTextContent(DRIFT.message);
+  });
+});
+
+/**
+ * The owner's x64 laptop test (2026-11-10): the terminal button in the steps
+ * panel's header opens the update's log and closes it again, on /updating as
+ * in the window — for a live run and a finished one. Since TASK-2428 that log
+ * is the RAW one, every byte the steps printed, streamed from the box
+ * (UpdateRawLog, its own suite); the step list beside it is unchanged.
+ */
+describe("/updating's raw update log", () => {
+  /** RUNNING, with the restart step on line `detail`. */
+  const on = (detail: string): Answer => ({ body: { ...RUNNING, steps: steps(7, { status: "running", detail }) } });
+
+  it("opens on the terminal button for a live run, follows it, and closes on the next click", async () => {
+    stubBox(inOrder(on("Fetching the new build"), on("Building the web app")));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    const toggle = within(view.getByTestId("update-steps-panel")).getByRole("button", { name: "Full update log" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(view.queryByTestId("update-raw-log")).toBeNull();
+
+    await advance(2_000);
+    expect(view.getByTestId("update-step-detail")).toHaveTextContent("Building the web app");
+
+    fireEvent.click(toggle);
+    const log = view.getByTestId("update-raw-log");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(log).toHaveAttribute("data-live", "true");
+    expect(log).toHaveAccessibleName("Full update log");
+    // The step list is the same with the log open.
+    expect(view.getByTestId("update-step-detail")).toHaveTextContent("Building the web app");
+
+    fireEvent.click(toggle);
+    expect(view.queryByTestId("update-raw-log")).toBeNull();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("is there for a finished run too, read to its end", async () => {
+    stubBox(() => ({ body: COMPLETED }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    const toggle = view.getByRole("button", { name: "Full update log" });
+    expect(view.queryByTestId("update-raw-log")).toBeNull();
+    fireEvent.click(toggle);
+    expect(view.getByTestId("update-raw-log")).toHaveAttribute("data-live", "false");
+    fireEvent.click(toggle);
+    expect(view.queryByTestId("update-raw-log")).toBeNull();
+  });
+
+  it("is named in the owner's language", async () => {
+    locale = "de";
+    stubBox(() => ({ body: INTERRUPTED }));
+    const view = render(<UpdatingPage />);
+    await advance();
+    fireEvent.click(view.getByRole("button", { name: translations.de["update.fullLog"] }));
+    expect(view.getByTestId("update-raw-log")).toHaveAccessibleName(translations.de["update.fullLog"]);
+    expect(document.body.textContent).not.toMatch(/\bupdate\.[a-zA-Z]/);
+  });
+});
+
+/**
+ * Two monitors (the owner's x64 laptop test, 2026-11-10): the desktop is ONE
+ * app window laid over the row, and /updating was laid out, scaled and
+ * centred across the whole of it — half the run on each monitor. Now it is
+ * drawn inside the MAIN monitor's rect only, laid out and scaled for that
+ * monitor, and the others show plain ground. The layout comes from the answer
+ * the desktop kept for this window: the box is down for minutes mid-rebuild.
+ */
+describe("/updating on a row of monitors", () => {
+  /** A row of two monitors, `main` the primary, in a window exactly the row's size. */
+  function layOver(monitors: { id: string; rect: { x: number; y: number; width: number; height: number } }[], main: string) {
+    const width = Math.max(...monitors.map((m) => m.rect.x + m.rect.width));
+    const height = Math.max(...monitors.map((m) => m.rect.y + m.rect.height));
+    Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: height, configurable: true });
+    rememberMonitorStatus({
+      available: true,
+      main,
+      box: { width, height },
+      monitors: monitors.map((m) => ({ ...m, label: m.id, enabled: true })),
+    });
+  }
+
+  let savedSize: [PropertyDescriptor | undefined, PropertyDescriptor | undefined];
+  beforeEach(() => {
+    savedSize = [Object.getOwnPropertyDescriptor(window, "innerWidth"), Object.getOwnPropertyDescriptor(window, "innerHeight")];
+  });
+  afterEach(() => {
+    sessionStorage.clear();
+    if (savedSize[0]) Object.defineProperty(window, "innerWidth", savedSize[0]);
+    if (savedSize[1]) Object.defineProperty(window, "innerHeight", savedSize[1]);
+  });
+
+  const box = (element: HTMLElement) => {
+    const { left, top, width, height } = element.style;
+    return { left, top, width, height };
+  };
+
+  it("draws a live run inside the main monitor on the right, scaled for that monitor, and nothing on the other", async () => {
+    layOver([
+      { id: "laptop", rect: { x: 0, y: 0, width: 1280, height: 800 } },
+      { id: "desk", rect: { x: 1280, y: 0, width: 1920, height: 1080 } },
+    ], "desk");
+    stubBox(() => ({ body: RUNNING }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    const ground = view.getByTestId("updating-screen");
+    expect(ground).toHaveAttribute("data-update-main", "desk");
+    const main = view.getByTestId("updating-main-screen");
+    expect(box(main)).toEqual({ left: "1280px", top: "0px", width: "1920px", height: "1080px" });
+    // The whole run is inside that box; the ground around it carries nothing else.
+    expect(main.contains(view.getByTestId("update-run"))).toBe(true);
+    expect(main.contains(view.getByTestId("update-run-notice"))).toBe(true);
+    expect([...ground.children]).toEqual([main]);
+    // Laid out and scaled for 1920×1080, not for the 3200 px row: no viewport units, no media query.
+    const css = document.querySelector("style[data-update-full]")?.textContent ?? "";
+    expect(css).toContain("[data-update-screen]{--update-px:clamp(1px,min(1.5px,1.5px),3px)}");
+    expect(css).not.toMatch(/vw|dvh|@media/);
+    expect(document.querySelector("style[data-update-compact]")).toBeNull();
+  });
+
+  it("follows the main monitor's size on the left, where the row would choose the other layout", async () => {
+    // The row is 3584×1440 — the full-screen layout's size — but the main
+    // monitor is 1024×768: the steps alone, as on any window that size.
+    layOver([
+      { id: "small", rect: { x: 0, y: 0, width: 1024, height: 768 } },
+      { id: "big", rect: { x: 1024, y: 0, width: 2560, height: 1440 } },
+    ], "small");
+    stubBox(() => ({ body: RUNNING }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    expect(box(view.getByTestId("updating-main-screen"))).toEqual({ left: "0px", top: "0px", width: "1024px", height: "768px" });
+    expect(document.querySelector("style[data-update-full]")).toBeNull();
+    const compact = document.querySelector("style[data-update-compact]")?.textContent ?? "";
+    expect(compact).toContain("[data-update-screen] .us-show{display:none}");
+    expect(compact).not.toContain("@media");
+  });
+
+  it("fills the viewport as before with one monitor", async () => {
+    stubBox(() => ({ body: RUNNING }));
+    const view = render(<UpdatingPage />);
+    await advance();
+
+    expect(view.getByTestId("updating-screen")).not.toHaveAttribute("data-update-main");
+    const main = view.getByTestId("updating-main-screen");
+    expect(main).toHaveClass("contents");
+    expect(main.getAttribute("style")).toBeNull();
+    expect(document.querySelector("style[data-update-full]")?.textContent?.trim().startsWith(`@media ${UPDATE_SCREEN_MEDIA}{`)).toBe(true);
   });
 });

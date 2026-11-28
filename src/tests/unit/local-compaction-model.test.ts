@@ -141,3 +141,25 @@ describe("disarming, after a write that moves the primary off the box", () => {
     }
   });
 });
+
+describe("under the local-only AI lock (TASK-2501)", () => {
+  it("arms nothing: the conversation is not summarized by a cloud model either", async () => {
+    store.set("ai_cloud_lock", true);
+    expect(await localCompactionModelArmOps(cfg({ model: { fallbacks: [CLOUD] } }), LOCAL, CLOUD)).toEqual([]);
+    store.delete("ai_cloud_lock");
+    expect(await localCompactionModelArmOps(cfg({ model: { fallbacks: [CLOUD] } }), LOCAL, CLOUD)).toEqual([[COMPACTION_MODEL_PATH, CLOUD]]);
+  });
+
+  it("takes ClawBox's cloud value out even while the primary stays on the box", async () => {
+    store.set(LOCAL_COMPACTION_MODEL_KEY, CLOUD);
+    const armed = cfg({ compaction: { model: CLOUD } });
+    expect(await localCompactionModelDisarmNeeded(armed, LOCAL)).toBe(false);
+    store.set("ai_cloud_lock", "pinned");
+    expect(await localCompactionModelDisarmNeeded(armed, LOCAL)).toBe(true);
+  });
+
+  it("still never touches the owner's own compaction model", async () => {
+    store.set("ai_cloud_lock", true);
+    expect(await localCompactionModelDisarmNeeded(cfg({ compaction: { model: CLOUD } }), LOCAL)).toBe(false);
+  });
+});

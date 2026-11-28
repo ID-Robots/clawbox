@@ -64,6 +64,18 @@ describe("provider-models", () => {
       expect(catalog?.defaultModelId).toBe("claude-opus-5-5");
     });
 
+    // Fable 5.2 (2026-11-09) leads the Fable rows the same way: offered, never
+    // the default, and ahead of the 5.1 it replaced.
+    it("offers Claude Fable 5.2 as a non-default row, ahead of Fable 5.1", () => {
+      const catalog = getProviderCatalog("anthropic");
+      const ids = (catalog?.models ?? []).map((m) => m.id);
+      const fable = catalog?.models.find((m) => m.id === "claude-fable-5-2");
+      expect(fable).toMatchObject({ id: "claude-fable-5-2", label: "Claude Fable 5.2" });
+      expect(fable?.hint?.startsWith("Default")).toBe(false);
+      expect(ids.indexOf("claude-fable-5-2")).toBeLessThan(ids.indexOf("claude-fable-5-1"));
+      expect(catalog?.defaultModelId).toBe("claude-opus-5-5");
+    });
+
     // xAI (Grok): the cold-start list is the three ids the core's bundled xai
     // plugin leads its manifest with, and the default is its curated default,
     // Grok 4.7 (core 2026.10.7). 4.6 and 4.5 stay: xAI still serves both.

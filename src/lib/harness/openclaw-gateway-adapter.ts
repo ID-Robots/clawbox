@@ -30,6 +30,7 @@ import {
   type TurnRequest,
   type TurnResult,
 } from "./transport";
+import { isOfficeDocumentName, isSpreadsheetName, officeTextPath } from "@/lib/office-documents";
 
 /**
  * The OpenClaw side of the transport, wrapping today's gateway RPCs 1:1.
@@ -164,6 +165,33 @@ function storedRunFailure(m: Record<string, unknown>, words: ChatFailureWords | 
 }
 
 /**
+ * An assistant row that is a provider's refusal rather than a reply
+ * (`stopReason: "error"`), as the chat's own failure note — tagged with its
+ * run, so the line the live error frame painted and this one are never shown
+ * side by side. Never the row's own text: that is the gateway's rendering of
+ * the provider's error, written for an operator.
+ */
+function recordedAssistantFailure(
+  m: Record<string, unknown>,
+  role: string,
+  words: ChatFailureWords | undefined,
+): HistoryMessage | null {
+  if (role !== "assistant" || m.stopReason !== "error") return null;
+  const raw = typeof m.errorMessage === "string" && m.errorMessage.trim() ? m.errorMessage : extractText(m);
+  const note = chatFailureNote(raw, undefined, words);
+  const meta = m.__openclaw && typeof m.__openclaw === "object" ? m.__openclaw as Record<string, unknown> : null;
+  const runId = typeof meta?.runId === "string" && meta.runId ? meta.runId : undefined;
+  return {
+    role: "system",
+    text: note.text,
+    timestamp: (m.timestamp as number) || 0,
+    ...(runId ? { failedRun: runId } : {}),
+    ...(note.variant ? { variant: note.variant } : {}),
+    ...(note.actions ? { actions: note.actions } : {}),
+  };
+}
+
+/**
  * Turn a raw `chat.history` page into the transcript the chat renders.
  *
  * THE SHARPEST EDGE IN THIS PROGRAM. What looks like one function is about six
@@ -220,6 +248,16 @@ export function projectGatewayHistory(
       continue;
     }
     if (role !== "user" && role !== "assistant") continue;
+    // A reply that never came: the provider refused the turn. OpenClaw's
+    // history renders that row as its own copy of the provider's error
+    // ("LLM request rejected: … unknown variant `image_url` …", measured on a
+    // lab box, TASK-2261), which painted the raw error beside the chat's own
+    // failure line. It is the same failure, so it is the same line.
+    const recordedFailure = recordedAssistantFailure(m, role, options?.failureWords);
+    if (recordedFailure) {
+      chatMsgs.push(recordedFailure);
+      continue;
+    }
     const raw = extractText(m);
     if (isSentinel(raw)) continue;
     // OpenClaw routes background-job results back into the conversation as
@@ -299,7 +337,12 @@ export function projectGatewayHistory(
       previous.audio = audio;
       continue;
     }
-    chatMsgs.push({ role: "assistant", text, timestamp, images, audio, ...(files.length ? { files } : {}) });
+    // The run that wrote it, off the gateway's own record: what the live final
+    // for the same run is recognised by when this read painted it first
+    // (TASK-2494, `withAssistantReply`).
+    const meta = m.__openclaw && typeof m.__openclaw === "object" ? m.__openclaw as Record<string, unknown> : null;
+    const runId = typeof meta?.runId === "string" && meta.runId ? meta.runId : undefined;
+    chatMsgs.push({ role: "assistant", text, timestamp, images, audio, ...(files.length ? { files } : {}), ...(runId ? { idempotencyKey: runId } : {}) });
   }
   // Current OpenClaw merges TTS supplement records into chat.history, but
   // older supported gateways do not. The session-gated device route reads
@@ -400,6 +443,30 @@ export function agentIdFromSessionKey(key: string): string | undefined {
   return parts[1].toLowerCase();
 }
 
+/**
+ * How a staged file is named in the turn. A picture on a box whose chat model
+ * cannot see (TASK-2261: the vision check found Flash blind) also says how to
+ * look at it: OpenClaw hands a text-only model the PATH, and a model that saw
+ * pictures directly earlier in the conversation was measured answering from
+ * that history instead of calling `view_image` — a description of a picture
+ * nobody looked at.
+ */
+export function attachmentLine(attachment: { path: string; type: string }, picturesViaTool: boolean): string {
+  if (picturesViaTool && typeof attachment.type === "string" && attachment.type.startsWith("image/")) {
+    return `[Attached image: ${attachment.path} — you cannot see this picture directly; look at it with the view_image tool before you say anything about it]`;
+  }
+  // An office document is a ZIP no model reads: the staging route took its
+  // text out beside it (src/lib/office-documents.ts), and the agent is pointed
+  // there. The hint rides the line after ` — `, the shape the transcript's
+  // reader (chat-media.ts `splitUserAttachments`) strips, so the bubble still
+  // shows the file's name and nothing else.
+  if (isOfficeDocumentName(attachment.path)) {
+    const what = isSpreadsheetName(attachment.path) ? "its sheets as CSV" : "its text";
+    return `[Attached file: ${attachment.path} — ClawBox saved ${what} in ${officeTextPath(attachment.path)}; read that file to answer from the document]`;
+  }
+  return `[Attached file: ${attachment.path}]`;
+}
+
 export class OpenClawGatewayAdapter implements HarnessAdapter {
   readonly id = "openclaw" as const;
 
@@ -469,7 +536,7 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     void _onEvent;
     let messageText = req.text;
     if (req.attachments.length > 0) {
-      const filePaths = req.attachments.map((a) => `[Attached file: ${a.path}]`).join("\n");
+      const filePaths = req.attachments.map((a) => attachmentLine(a, this.capabilities.picturesViaTool === true)).join("\n");
       messageText = [filePaths, req.text].filter(Boolean).join("\n");
     }
     // The transport contract says a turn rejects `HarnessError('aborted')` when
@@ -480,7 +547,7 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     if (req.signal?.aborted) throw new HarnessError("aborted", "Stopped.");
     try {
       await this.link.request("chat.send", {
-        sessionKey: this.link.sessionKey(),
+        sessionKey: req.sessionKey ?? this.link.sessionKey(),
         message: messageText || "(file attached)",
         deliver: false,
         idempotencyKey: req.idempotencyKey,

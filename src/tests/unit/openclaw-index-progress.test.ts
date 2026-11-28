@@ -5,6 +5,8 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   countIndexChunks,
+  indexWriteMark,
+  scratchIndexNames,
   createIndexProgressReader,
   openclawAgentDbPath,
   parseIndexProgressSegment,
@@ -168,15 +170,61 @@ describe("counting the chunks the pass has written", () => {
     await fs.writeFile(db, "not a database");
     expect(countIndexChunks(db, Date.now())).toBeNull();
   });
+
+  it("knows this pass's scratch copy by its new name when the clock went back (TASK-2431)", async () => {
+    const live = makeIndex(db, 38);
+    const stale = `${db}.memory-reindex-00000000-0000-4000-8000-000000000000`;
+    makeIndex(stale, 900).close();
+    const old = new Date(Date.now() - 60 * 60 * 1000);
+    await fs.utimes(stale, old, old);
+    const preexisting = scratchIndexNames(db);
+    expect([...preexisting]).toEqual([path.basename(stale)]);
+    // Written after the pass began, but stamped an hour BEFORE its start, the
+    // way a clock that jumps back at boot stamps it.
+    const fresh = `${db}.memory-reindex-6f1c2c1e-9d5b-4b58-a1ef-3f1d3a9b2c10`;
+    makeIndex(fresh, 5).close();
+    await fs.utimes(fresh, old, old);
+    try {
+      expect(countIndexChunks(db, Date.now(), { rebuild: true })).toBeNull();
+      expect(countIndexChunks(db, Date.now(), { rebuild: true, preexisting })).toBe(5);
+      expect(indexWriteMark(db, Date.now(), { rebuild: true, preexisting })).toContain(path.basename(fresh));
+    } finally {
+      live.close();
+    }
+  });
+
+  it("has a write mark that moves on a commit, not on a read (TASK-2431)", () => {
+    const handle = makeIndex(db, 3);
+    try {
+      const before = indexWriteMark(db, Date.now());
+      expect(before).not.toBeNull();
+      expect(countIndexChunks(db, Date.now())).toBe(3);
+      expect(indexWriteMark(db, Date.now())).toBe(before);
+      // The same count after the commit: one chunk replaced by another.
+      handle.exec("DELETE FROM memory_index_chunks WHERE id = 'c0'");
+      handle.prepare("INSERT INTO memory_index_chunks VALUES (?, ?, ?)").run("c9", "memory/a.md", "text");
+      expect(countIndexChunks(db, Date.now())).toBe(3);
+      expect(indexWriteMark(db, Date.now())).not.toBe(before);
+    } finally {
+      handle.close();
+    }
+    expect(indexWriteMark(path.join(dir, "absent.sqlite"), Date.now())).toBeNull();
+  });
 });
 
 describe("where the agent's index lives", () => {
   it("follows OpenClaw's own state directory, and a test's override first", () => {
-    expect(openclawAgentDbPath({ OPENCLAW_STATE_DIR: "/srv/oc" }))
+    expect(openclawAgentDbPath("main", { OPENCLAW_STATE_DIR: "/srv/oc" }))
       .toBe("/srv/oc/agents/main/agent/openclaw-agent.sqlite");
-    expect(openclawAgentDbPath({ CLAWKEEP_MEMORY_AGENT_DB: "/x/y.sqlite", OPENCLAW_STATE_DIR: "/srv/oc" }))
+    expect(openclawAgentDbPath("main", { CLAWKEEP_MEMORY_AGENT_DB: "/x/y.sqlite", OPENCLAW_STATE_DIR: "/srv/oc" }))
       .toBe("/x/y.sqlite");
-    expect(openclawAgentDbPath({}))
+    expect(openclawAgentDbPath("main", {}))
       .toBe(path.join(os.homedir(), ".openclaw", "agents", "main", "agent", "openclaw-agent.sqlite"));
+  });
+
+  it("is the database of the agent the pass was started for, not main by assumption", () => {
+    // TASK-2248: a renamed agent leaves agents/main/ behind; the pass writes the real one.
+    expect(openclawAgentDbPath("default", { OPENCLAW_STATE_DIR: "/srv/oc" }))
+      .toBe("/srv/oc/agents/default/agent/openclaw-agent.sqlite");
   });
 });

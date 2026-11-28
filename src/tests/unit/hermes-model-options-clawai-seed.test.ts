@@ -34,10 +34,11 @@ vi.mock("fs/promises", () => ({
   readFile: readFileMock,
 }));
 
-// The ids are IMPORTED, never retyped: `CLAWBOX_AI_FLASH_MODEL_ID` and
-// `CLAWBOX_AI_PRO_MODEL_ID` are env-overridable (clawbox-ai-models.ts), so a
-// runner that sets either would fail a suite that spelled them out.
-import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID } from "@/lib/clawbox-ai-models";
+// The id is IMPORTED, never retyped: `CLAWBOX_AI_FLASH_MODEL_ID` is
+// env-overridable (clawbox-ai-models.ts), so a runner that sets it would fail
+// a suite that spelled it out.
+import { CLAWBOX_AI_FLASH_MODEL_ID } from "@/lib/clawbox-ai-models";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
 
 /** One clawai row, exactly as `/api/model/options` serves it. */
 function dashboardRow(models: string[]) {
@@ -75,11 +76,18 @@ describe("the ClawBox AI row our own picker builds", () => {
     mod = await import("@/lib/hermes-model-options");
   });
 
-  it("seeds both tier models when Hermes reports the row empty", async () => {
+  it("seeds the one model when Hermes reports the row empty", async () => {
     dashboardRow([]);
     const payload = await mod.getModelOptions();
     const row = payload.providers.find((p) => p.id === "clawai");
-    expect(row?.models.map((m) => m.id)).toEqual([CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID]);
+    expect(row?.models.map((m) => m.id)).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
+  });
+
+  it("never offers a retired id a box not yet migrated still lists (TASK-2261)", async () => {
+    dashboardRow([CLAWBOX_AI_FLASH_MODEL_ID, RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0]]);
+    const payload = await mod.getModelOptions();
+    const row = payload.providers.find((p) => p.id === "clawai");
+    expect(row?.models.map((m) => m.id)).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("leaves a non-empty row exactly as Hermes reported it", async () => {

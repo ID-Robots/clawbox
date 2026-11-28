@@ -16,6 +16,30 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const { failures } = vi.hoisted(() => ({ failures: { settled: 0 } }));
 
+// OpenClaw 2026.11.3: the status probe asks the gateway's memory.status first
+// (no gateway in these tests: the CLI answers, as before), and an OpenClaw
+// index pass runs with the gateway stopped and started again (recorded here).
+vi.mock("@/lib/openclaw-gateway-ws", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/openclaw-gateway-ws")>();
+  return { ...real, gatewayWsCall: vi.fn(async () => { throw new real.GatewayWsUnavailableError("no gateway in this test"); }) };
+});
+vi.mock("@/lib/openclaw-auth-ops", () => ({
+  // The gateway request through the (mocked) socket: no gateway = not answered.
+  askOpenclawGateway: async (method: string, params: Record<string, unknown>, timeoutMs: number) => {
+    const ws = await import("@/lib/openclaw-gateway-ws");
+    try {
+      return { answered: true, result: await ws.gatewayWsCall(method, params, { timeoutMs }) };
+    } catch (err) {
+      if (err instanceof ws.GatewayWsUnavailableError) return { answered: false };
+      throw err;
+    }
+  },
+  // No gateway unit is up in these suites: an owner's incremental pass runs.
+  openclawGatewayRuns: vi.fn(async () => false),
+  stopOpenclawGatewayForOffline: vi.fn(async () => undefined),
+  startOpenclawGatewayAfterOffline: vi.fn(async () => undefined),
+}));
+
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   const writeFile = (async (...args: Parameters<typeof actual.promises.writeFile>) => {
@@ -67,5 +91,25 @@ describe("recording how a pass ended", () => {
     expect(run.status).toBe("succeeded");
     expect(failures.settled).toBe(0);
     expect((await readMemoryRunState()).status).toBe("succeeded");
+  });
+
+  it("does not hold later passes back when the settled record never reached the disk", async () => {
+    // Every attempt fails: `finish` frees the lock all the same and the
+    // record still says "running", naming this very process as its
+    // supervisor. This process knows it supervises no pass, so the next read
+    // settles the record instead of refusing every pass until a restart.
+    failures.settled = 4;
+    const { startMemoryIndex, readMemoryRunState, memoryPassSettled } = await import("@/lib/clawkeep-memory");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    await memoryPassSettled();
+    expect(failures.settled).toBe(0);
+    // The first read after it — the status refresh `finish` itself starts —
+    // settles it once the disk takes writes again.
+    expect(await readMemoryRunState()).toMatchObject({ status: "failed", errorCode: "interrupted" });
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    expect((await settledMemoryRun(tmpDir)).status).toBe("succeeded");
+    await memoryPassSettled();
+    vi.mocked(console.warn).mockRestore();
   });
 });

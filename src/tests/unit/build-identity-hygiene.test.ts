@@ -3,6 +3,9 @@ import { execFileSync, spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import {
+  accountOnlyHome, CAN_LOCK_HOME, handOverOrder, shellFunctionIfPresent, unlockTree,
+} from "../helpers/account-only-home";
 
 /**
  * TASK-447 round 2, defects 3, 4 and 5 — the three ways this feature reported
@@ -53,7 +56,7 @@ function seedRepo(): void {
   git("update-ref", "refs/remotes/origin/beta", git("rev-parse", "HEAD"));
 }
 
-function stamp(): { dirty: boolean | null; untracked: number | null; branch: string | null } {
+function stamp(): { dirty: boolean | null; contentDirty: boolean | null; untracked: number | null; branch: string | null } {
   const run = spawnSync("node", [STAMPER], {
     cwd: repo,
     env: { ...process.env, CLAWBOX_ROOT: repo },
@@ -74,7 +77,7 @@ afterEach(() => {
 
 d("build-info.json `dirty` describes the tracked files the build came from", () => {
   it("is false on a clean tree", () => {
-    expect(stamp()).toMatchObject({ dirty: false, untracked: 0, branch: "beta" });
+    expect(stamp()).toMatchObject({ dirty: false, contentDirty: false, untracked: 0, branch: "beta" });
   });
 
   it("is false when the only difference is an untracked file, and counts it separately", () => {
@@ -89,6 +92,26 @@ d("build-info.json `dirty` describes the tracked files the build came from", () 
     fs.writeFileSync(path.join(repo, "README.md"), "edited over ssh\n");
 
     expect(stamp()).toMatchObject({ dirty: true });
+  });
+
+  it("says so in `contentDirty` too when a tracked file's contents changed (TASK-2517)", () => {
+    fs.writeFileSync(path.join(repo, "README.md"), "edited over ssh\n");
+
+    expect(stamp()).toMatchObject({ dirty: true, contentDirty: true });
+  });
+
+  it("leaves an executable bit out of `contentDirty` and keeps it in `dirty` (TASK-2517)", () => {
+    // The update's rebuild step makes every scripts/*.sh executable before it
+    // builds; on a checkout with core.fileMode=true that alone made `dirty`
+    // true on every update build, so the build could never be kept.
+    git("config", "core.fileMode", "true");
+    fs.mkdirSync(path.join(repo, "scripts"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "scripts", "x.sh"), "echo\n", { mode: 0o644 });
+    git("add", "-A");
+    git("commit", "-qm", "script");
+    fs.chmodSync(path.join(repo, "scripts", "x.sh"), 0o755);
+
+    expect(stamp()).toMatchObject({ dirty: true, contentDirty: false });
   });
 
   it("ignores gitignored paths, so a device's own data/ never reads as dirty", () => {
@@ -153,8 +176,77 @@ d(".deployed-sha — the orphan that faked drift", () => {
   it("is deleted by install.sh's step 1 as well, before the sync", () => {
     const start = INSTALL_SH.indexOf("step_bootstrap_updater() {");
     const fn = INSTALL_SH.slice(start, INSTALL_SH.indexOf("\n}", start));
-    expect(fn).toContain('rm -f "$PROJECT_DIR/.deployed-sha"');
+    expect(fn).toContain('rm -f -- "$PROJECT_DIR/.deployed-sha"');
     expect(fn.indexOf(".deployed-sha")).toBeLessThan(fn.lastIndexOf("sync_repo_to_update_target"));
+  });
+});
+
+/**
+ * The orphan sits in the checkout, the service account's: the account removes
+ * it, in step 1 and in git_pull alike, and a removal that fails ends neither
+ * step. Run under `set -euo pipefail` against a checkout only `as_clawbox` can
+ * write to (src/tests/helpers/account-only-home.ts): a root `rm` there fails
+ * with EACCES, and a root command on a checkout path is logged. The account is
+ * not the suite's user, so the hand-over in step 1 fires; root's `chown` only
+ * records.
+ */
+(CAN_LOCK_HOME ? describe : describe.skip)(".deployed-sha is removed as the service account", () => {
+  function runStep(step: "step_bootstrap_updater" | "step_git_pull", prelude = "") {
+    const aux = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-hygiene-aux-"));
+    try {
+      fs.writeFileSync(path.join(repo, ".deployed-sha"), "1b21187\n");
+      const account = accountOnlyHome(repo, aux);
+      const script = [
+        "set -euo pipefail",
+        `PROJECT_DIR=${JSON.stringify(repo)}`,
+        'IFACE_ENV="$PROJECT_DIR/data/network.env"',
+        "CLAWBOX_USER=clawbox",
+        account.shell,
+        `chown() { [ -n "\${AS_SERVICE_USER:-}" ] || printf 'chown %s\\n' "$*" >> ${JSON.stringify(path.join(aux, "stubs"))}; }`,
+        'resolve_update_branch() { UPDATE_TARGET_LOCAL=beta; UPDATE_TARGET_UPSTREAM=origin/beta; UPDATE_TARGET_UNRESOLVED=0; }',
+        "refuse_unresolved_update_target() { exit 1; }",
+        `sync_repo_to_update_target() { echo "synced $*"; }`,
+        "handover_legacy_updater() { :; }",
+        "persist_update_branch_pin() { :; }",
+        prelude,
+        shellFunctionIfPresent(INSTALL_SH, "hand_over_checkout"),
+        account.recordHandOvers,
+        shellFunctionIfPresent(INSTALL_SH, "step_fix_git_perms"),
+        shellFunctionIfPresent(INSTALL_SH, step),
+        "__ao_lock",
+        step,
+      ].join("\n");
+      const r = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+      unlockTree(repo);
+      return { status: r.status, out: `${r.stdout}${r.stderr}`, rootInHome: account.rootInHome(), sequence: account.sequence() };
+    } finally {
+      unlockTree(repo);
+      fs.rmSync(aux, { recursive: true, force: true });
+    }
+  }
+  const failRm = 'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"\n'
+    + 'as_clawbox() { [ "$1" = rm ] && return 1; __real_as_clawbox "$@"; }';
+
+  it.each(["step_bootstrap_updater", "step_git_pull"] as const)("%s removes it as the account, then syncs", (step) => {
+    const r = runStep(step);
+    expect(r.status, r.out).toBe(0);
+    expect(fs.existsSync(path.join(repo, ".deployed-sha"))).toBe(false);
+    expect(r.out).toContain("synced beta origin/beta");
+    expect(r.rootInHome).toEqual([]);
+    expect(r.sequence.filter((l) => !l.startsWith("hand-over "))).toEqual([`rm -f -- ${path.join(repo, ".deployed-sha")}`]);
+  });
+
+  it("step_bootstrap_updater hands the checkout over first, through step_fix_git_perms", () => {
+    const r = runStep("step_bootstrap_updater");
+    const { handOver, firstWrite } = handOverOrder(r.sequence, "hand_over_checkout .git");
+    expect(handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
+  });
+
+  it.each(["step_bootstrap_updater", "step_git_pull"] as const)("%s still syncs when the removal fails", (step) => {
+    const r = runStep(step, failRm);
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("synced beta origin/beta");
   });
 });
 

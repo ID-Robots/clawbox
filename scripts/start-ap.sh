@@ -137,6 +137,16 @@ wait_for_nm() {
 }
 wait_for_nm || true
 
+# WiFi switched off stays off across a reboot (NetworkManager's state file; an
+# rfkill soft block reads the same), and then neither a saved network nor the
+# hotspot can come up, while the box shows nothing to say why. Turn it on before
+# anything below needs the radio. A hardware switch stays off: the steps below
+# then fail as they always did.
+if [ "$(nmcli -t -f WIFI radio 2>/dev/null)" = disabled ]; then
+  echo "[AP] WiFi radio is off — turning it on"
+  nmcli radio wifi on || echo "[AP] Warning: could not turn the WiFi radio on" >&2
+fi
+
 # Single WiFi radio: it can host the AP or join a WiFi network, but not both. If
 # a wired (Ethernet) uplink is present the device already has connectivity, so we
 # keep the radio for the hotspot instead of joining saved WiFi. This is what lets

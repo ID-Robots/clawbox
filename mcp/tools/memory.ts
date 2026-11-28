@@ -34,6 +34,7 @@
 
 import { z } from "zod";
 import { api, apiGet, type ApiOptions } from "../lib/api";
+import { installEdition } from "../lib/edition";
 import { ApiError, redact, ToolError, type ToolErrorCode } from "../lib/errors";
 import { json, text, type Ed, type Registrar, type ToolOpts } from "../lib/register";
 import { zBool, zEnumOf, zInt, zText } from "../lib/schema";
@@ -176,12 +177,14 @@ const NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
   owner_only: { code: "CONFLICT", next: `This box keeps that to the owner. Do not retry; tell the user they can do it in the Memory Shard app (${OPEN_APP} opens it).` },
   disabled: { code: "CONFLICT", next: "Memory Shard is switched off. Turn it on with memory_shard_enable if the user asks for that, or tell them it is off." },
   running: { code: "CONFLICT", next: "A pass is already running. Do not start another; memory_shard_status shows how far it has got." },
+  gateway_indexes: { code: "CONFLICT", next: "Nothing was started and nothing needs to be: the running assistant keeps this index up to date by itself. Do not retry. Only a full pass (mode full) rebuilds it, and that one stops the assistant while it runs, so it is the owner's to ask for." },
   not_running: { code: "CONFLICT", next: "No pass is running, so there is nothing to stop." },
   not_found: { code: "NOT_FOUND", next: "That folder is not inside the owner's Files, or is not a folder. Ask the user for its exact place in their Files." },
   hidden: { code: "BAD_ARGUMENT", next: "Hidden folders hold the box's and the apps' own files. Ask the user for the folder their documents are in." },
   paid_plan_required: { code: "CONFLICT", next: "Memory Shard needs a paid ClawBox AI plan (Pro or Max). The owner changes the plan in Settings → Providers; there is no tool for it." },
   cloud_unavailable: { code: "CONFLICT", next: "Keep the index on this box, or tell the user the cloud embedder needs a ClawBox AI plan and a reachable service." },
   local_not_installed: { code: "CONFLICT", next: `Tell the user to choose "On this box" in Memory Shard's settings (${OPEN_APP}), which downloads the model and moves the index.` },
+  local_model_unavailable: { code: "NOT_SUPPORTED_HERE", next: "This box cannot run that model. Do not retry; tell the user why in plain words and keep the model it has." },
   read_failed: { code: "ENDPOINT_DOWN", next: "Try once more; if it fails again, tell the user the folder list could not be read." },
   write_failed: { code: "ENDPOINT_DOWN", next: "Try once more; if it fails again, tell the user it could not be saved." },
   unreadable: { code: "ENDPOINT_DOWN", next: "Call clawbox_health, then retry once. If it fails again, tell the user." },
@@ -361,7 +364,10 @@ function describeMemoryStatus(s: MemoryStatusBody, searchHint: boolean): Record<
           last_pass: run.status,
           ...(run.mode ? { mode: run.mode } : {}),
           ...(isoMinute(run.finishedAtMs) ? { finished: isoMinute(run.finishedAtMs) } : {}),
-          ...(run.errorCode ? { problem: run.errorCode } : {}),
+          // The sentence beside the code, as the index's own `problem_text`:
+          // a pass the stall watchdog ended (TASK-2431) must read as that in
+          // plain words, not as a bare `stalled` the assistant has to guess at.
+          ...(run.errorCode ? { problem: run.errorCode, ...(run.error ? { problem_text: redact(run.error.slice(0, 200)) } : {}) } : {}),
         }
         : "no pass has run since the box started",
     schedule: scheduleWords(s.schedule),
@@ -371,11 +377,13 @@ function describeMemoryStatus(s: MemoryStatusBody, searchHint: boolean): Record<
 }
 
 function registerMemoryStatus(reg: Registrar, edition: Ed): void {
-  const hermes = edition === "hermes";
+  // The search route answers only where there is no OpenClaw: on a dual box
+  // running Hermes the index is OpenClaw's and the route answers 409 `edition`.
+  const searchHint = edition === "hermes" && installEdition() !== "dual";
   reg.tool(
     "memory_shard_status",
     "Read the state of Memory Shard, the index of the folders the owner added: whether it is on and healthy, what it holds, why it wants a reindex and how far a pass has got. "
-      + (hermes ? "Search it with memory_shard_search. " : "")
+      + (searchHint ? "Search it with memory_shard_search. " : "")
       + "Use it when the user asks whether their documents are indexed, or how a reindex is going.",
     {},
     { editions: [edition], readOnly: true },
@@ -386,7 +394,7 @@ function registerMemoryStatus(reg: Registrar, edition: Ed): void {
         // it has one.
         timeoutMs: READ_MS,
       });
-      return json(describeMemoryStatus(status, hermes));
+      return json(describeMemoryStatus(status, searchHint));
     },
   );
 }
@@ -513,13 +521,46 @@ function registerSourceTools(reg: Registrar): void {
 
 // ── schedule, provider, switch, reset ──────────────────────────────────────
 
+interface LocalModelRow {
+  id?: string;
+  label?: string;
+  dimensions?: number;
+  active?: boolean;
+  installed?: boolean;
+  bytes?: number | null;
+  quant?: string | null;
+  available?: boolean;
+  reason?: string | null;
+  detail?: string | null;
+}
+
 interface ProviderBody {
   source?: string;
   recorded?: boolean;
   cloudAvailable?: boolean;
   cloudReason?: string | null;
   localInstalled?: boolean;
+  /** The model on this box the embedder runs (TASK-2411); absent from an older server. */
+  localModel?: string;
+  localModels?: LocalModelRow[];
   model?: string;
+}
+
+/** The models the owner can pick between on this box (TASK-2411). */
+const LOCAL_MODEL_IDS = ["qwen3-embedding-0.6b", "qwen3-embedding-4b"] as const;
+
+/** One picker row as a model relays it. */
+function localModelOut(m: LocalModelRow): Record<string, unknown> {
+  return {
+    model: m.id ?? "unknown",
+    ...(m.label ? { name: m.label } : {}),
+    ...(typeof m.dimensions === "number" ? { dimensions: m.dimensions } : {}),
+    in_use: m.active === true,
+    downloaded: m.installed === true,
+    ...(typeof m.bytes === "number" ? { size_gb: Math.round(m.bytes / 1e8) / 10 } : {}),
+    runs_on_this_box: m.available === true,
+    ...(m.available === false && m.detail ? { why_not: m.detail } : {}),
+  };
 }
 
 const WHERE = { cloud: "the ClawBox AI cloud", local: "the model on this box" } as const;
@@ -593,27 +634,55 @@ function registerSettingTools(reg: Registrar): void {
         cloud_on_offer: r.cloudAvailable ?? "unknown",
         ...(r.cloudReason ? { cloud_not_on_offer_because: r.cloudReason } : {}),
         on_box_model_downloaded: r.localInstalled ?? "unknown",
+        // Which model on this box, and which others this box could run. An
+        // older server sends neither, and could only run the 0.6B.
+        local_model: r.localModel ?? "qwen3-embedding-0.6b",
+        ...(Array.isArray(r.localModels) && r.localModels.length ? { local_models: r.localModels.map(localModelOut) } : {}),
       });
     },
   );
 
   reg.tool(
     "memory_shard_provider_set",
-    "Move Memory Shard's index to the ClawBox AI cloud embedder or the model on this box, when the user asked. Moving re-embeds every file: without confirm it answers the estimate; with confirm: true (owner said yes) it switches and starts the full pass.",
+    "Move Memory Shard's index to the ClawBox AI cloud embedder or the model on this box, or switch which model on this box, when the user asked. Any change re-embeds every file: without confirm it answers the estimate; with confirm: true (owner said yes) it switches and starts the full pass.",
     {
       source: zEnumOf(["cloud", "local"], "cloud (ClawBox AI) or local (the model on this box)."),
+      local_model: zEnumOf(LOCAL_MODEL_IDS, "With source local only: which model on this box. Omit to keep it; memory_shard_provider_get lists what runs here.").optional(),
       confirm: zBool(false, "true only after the owner said yes to the estimate in this chat."),
     },
     DESTRUCTIVE,
-    async (a: { source: "cloud" | "local"; confirm?: boolean }) => {
+    async (a: { source: "cloud" | "local"; local_model?: (typeof LOCAL_MODEL_IDS)[number]; confirm?: boolean }) => {
+      if (a.local_model && a.source !== "local") {
+        throw new ToolError("BAD_ARGUMENT", "local_model goes with source local only.", "Call again with source local, or without local_model.");
+      }
       const current = await call<ProviderBody>("GET", "/provider");
-      if (current.source === a.source) return text(`Memory Shard's index is already embedded by ${WHERE[a.source]}; nothing changed.`);
-      const r = await ms<ProviderBody>("POST", "/provider", { body: { source: a.source, ...(a.confirm === true ? { confirm: true } : {}) } });
+      const currentModel = current.localModel ?? "qwen3-embedding-0.6b";
+      const modelChange = a.source === "local" && a.local_model !== undefined && a.local_model !== currentModel;
+      if (current.source === a.source && !modelChange) {
+        return text(`Memory Shard's index is already embedded by ${WHERE[a.source]}; nothing changed.${a.source === "local" ? ` The model on this box is ${currentModel}.` : ""}`);
+      }
+      // Said before the estimate: an estimate for a move this box cannot make
+      // is a question nobody can answer yes to. The route refuses it too.
+      const row = a.local_model ? current.localModels?.find((m) => m.id === a.local_model) : undefined;
+      if (row && row.available === false) {
+        throw new ToolError(
+          "NOT_SUPPORTED_HERE",
+          row.detail ?? `${a.local_model} cannot run on this box.`,
+          NEXT.local_model_unavailable.next,
+        );
+      }
+      const body = {
+        source: a.source,
+        ...(a.local_model ? { localModel: a.local_model } : {}),
+        ...(a.confirm === true ? { confirm: true } : {}),
+      };
+      const r = await ms<ProviderBody>("POST", "/provider", { body });
       if (r.gated) {
         return json({
           switched: false,
           from: current.source ? WHERE[current.source as "cloud" | "local"] ?? current.source : "unknown",
           to: WHERE[a.source],
+          ...(modelChange ? { from_model: currentModel } : {}),
           ...(r.body.model ? { model: r.body.model } : {}),
           why: "Passages from two embedding models cannot be searched together, so every file is embedded again.",
           ...estimateOut(r.body.estimate),

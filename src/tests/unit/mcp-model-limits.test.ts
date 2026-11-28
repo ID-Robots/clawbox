@@ -30,13 +30,13 @@ describe("managed model-limit guidance", () => {
 describe("readConfiguredModelLimits", () => {
   it("reads the active model rather than guessing from its id", () => {
     const file = configFile("valid.json", {
-      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
       models: {
         providers: {
           deepseek: {
             models: [
-              { id: "deepseek-v4-flash", contextWindow: 111, maxTokens: 222 },
-              { id: "deepseek-v4-pro", contextWindow: 1_000_000, maxTokens: 393_216 },
+              { id: "deepseek-v5", contextWindow: 111, maxTokens: 222 },
+              { id: "deepseek-v4-flash", contextWindow: 1_000_000, maxTokens: 393_216 },
             ],
           },
         },
@@ -44,7 +44,7 @@ describe("readConfiguredModelLimits", () => {
     });
 
     expect(readConfiguredModelLimits(file)).toEqual({
-      model: "deepseek/deepseek-v4-pro",
+      model: "deepseek/deepseek-v4-flash",
       context_window_tokens: 1_000_000,
       max_output_tokens: 393_216,
       source: "openclaw_config",
@@ -54,16 +54,16 @@ describe("readConfiguredModelLimits", () => {
   it("reports unknown instead of inventing unavailable limits", () => {
     expect(readConfiguredModelLimits("/does/not/exist")).toBe("unknown");
     const file = configFile("invalid-limits.json", {
-      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
       models: {
         providers: {
-          deepseek: { models: [{ id: "deepseek-v4-pro", contextWindow: -1 }] },
+          deepseek: { models: [{ id: "deepseek-v4-flash", contextWindow: -1 }] },
         },
       },
     });
 
     expect(readConfiguredModelLimits(file)).toEqual({
-      model: "deepseek/deepseek-v4-pro",
+      model: "deepseek/deepseek-v4-flash",
       context_window_tokens: "unknown",
       max_output_tokens: "unknown",
       source: "openclaw_config",

@@ -122,7 +122,7 @@ describe("GET /setup-api/providers/status — a provider the box can run no mode
       readConfig.mockResolvedValue({
         auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
         models: { providers },
-        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
       });
     }
 

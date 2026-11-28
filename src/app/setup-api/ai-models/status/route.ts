@@ -4,7 +4,6 @@ import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store
 import {
   CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_PLAN_UNPAID,
-  CLAWBOX_AI_PRO_MODEL_ID,
   normalizeClawboxAiPlanTier,
   normalizeClawboxAiTier,
   type ClawboxAiPlanTier,
@@ -28,7 +27,11 @@ import {
 // tier stamp beside it is a device DEFAULT and may not be refused on — see
 // `clawai-plan-tier.ts` and TASK-744.
 import { CLAWAI_PLAN_TIER_KEY, clawaiPlanGeneration, persistClawaiPlanTier } from "@/lib/clawai-plan-tier";
+// A subscription linked for its plan alone, with no ClawBox AI chat credential
+// (TASK-2501). Its plan unlocks the same paid features; see `buildStatusResponse`.
+import { refreshSubscriptionLink } from "@/lib/subscription-link";
 
+import { EXTERNAL_ENGINE_PROVIDER } from "@/lib/external-engine-shared";
 export const dynamic = "force-dynamic";
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -44,6 +47,8 @@ const PROVIDER_LABELS: Record<string, string> = {
   // "clawlocal" leaked into the UI as a provider name. Matches the wording in
   // lib/hermes-providers.ts so the same model isn't called two things.
   clawlocal: "Gemma 4 (on-device)",
+  // The owner's external AI engine in the Local AI slot (TASK-2376).
+  [EXTERNAL_ENGINE_PROVIDER]: "External engine",
 };
 
 const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
@@ -58,24 +63,26 @@ const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
  * Only the compatibility path uses this. A portal that publishes the real list
  * always wins, and a portal that could not be reached gets no list at all.
  *
- * It reaches the Max id when EITHER reading of the response does, and that
- * "either" is load-bearing in both directions. The device stamp alone is what
- * the old badge rule used, and deriving the list from it reproduced TASK-691
- * through this very door: a Max subscriber whose box is stamped
- * `deviceTier: "flash"` — a state `mapPortalTier` preserves on purpose — would
- * get `["deepseek-v4-flash"]`, which the boot guard reads as a positive refusal
- * and WRITES his primary model down on. The plan alone would be the mirror
- * mistake: a box the portal stamped `"pro"` used to be allowed to run the Max
- * model under the old rule, and a compatibility path must not start refusing
- * something that used to work. So: the more permissive of the two.
+ * The one model, on every plan (TASK-2261): ClawBox AI serves DeepSeek V4.1
+ * Flash to Free, Pro and Max alike, so neither the device stamp nor the plan
+ * can widen or narrow it.
  */
-function allowedModelsForCompat(
-  deviceTier: ClawboxAiTier | null,
-  planTier: ClawboxAiTier | null,
-): string[] {
-  return deviceTier === "pro" || planTier === "pro"
-    ? [CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID]
-    : [CLAWBOX_AI_FLASH_MODEL_ID];
+function allowedModelsForCompat(): string[] {
+  return [CLAWBOX_AI_FLASH_MODEL_ID];
+}
+
+/** Max, then Pro, then Free, then "not known" — the internal names are off by one. */
+const PLAN_RANK: Record<ClawboxAiPlanTier, number> = { pro: 3, flash: 2, free: 1 };
+
+/**
+ * The better of two plan answers, for a box that has both a ClawBox AI account
+ * and a linked subscription: the owner pays for whichever covers more, and the
+ * paid-plan gate (`@/lib/plan-entitlement`) unlocks on exactly that. A known
+ * plan beats "not known".
+ */
+function strongerPlan(a: ClawboxAiPlanTier | null, b: ClawboxAiPlanTier | null): ClawboxAiPlanTier | null {
+  const rank = (plan: ClawboxAiPlanTier | null) => (plan ? PLAN_RANK[plan] : 0);
+  return rank(b) > rank(a) ? b : a;
 }
 
 function normalizeProvider(provider: string | null): string | null {
@@ -128,7 +135,7 @@ async function resolveOpenclawAiState(): Promise<ResolvedAiState> {
   const profileKeys = Object.keys(profiles);
   // Normalize both sides through normalizeProvider so the deepseek/clawai
   // alias collapses correctly. Without this, a primary model of
-  // `clawai/deepseek-v4-pro` (canonical) would never match a profile
+  // `clawai/deepseek-v4-flash` (canonical) would never match a profile
   // recorded under the wire-format `deepseek` provider, and we'd silently
   // fall back to profileKeys[0].
   const primaryProviderHint = normalizeProvider(model ? model.split("/")[0] : null);
@@ -143,7 +150,14 @@ async function resolveOpenclawAiState(): Promise<ResolvedAiState> {
 
   let provider: string | null = null;
   let mode: string | null = null;
-  if (activeKey) {
+  if (primaryProviderHint === EXTERNAL_ENGINE_PROVIDER && !profileKeys.some((key) =>
+    normalizeProvider(profileProviderId(key, profiles[key])) === EXTERNAL_ENGINE_PROVIDER)) {
+    // The external AI engine (TASK-2376) authenticates with the key in its
+    // provider block and files no auth profile: the primary names it, not
+    // whichever unrelated profile happens to be first.
+    provider = EXTERNAL_ENGINE_PROVIDER;
+    mode = "api_key";
+  } else if (activeKey) {
     const entry = profiles[activeKey];
     provider = entry?.provider ?? activeKey.split(":")[0];
     mode = entry?.mode ?? null;
@@ -270,7 +284,7 @@ async function buildStatusResponse(state: ResolvedAiState, askedAtGeneration: nu
         // portal-ANSWERED branch does this — an unreachable portal stays null,
         // which is the whole point of the change.
         clawaiAllowedModels = lookup.allowedModels
-          ?? allowedModelsForCompat(lookup.tier, lookup.planTier);
+          ?? allowedModelsForCompat();
         accountTierSource = "portal";
         // Persist the portal-confirmed tier so the portal-unreachable
         // fallback reflects the last *confirmed* tier, not a stale
@@ -349,6 +363,22 @@ async function buildStatusResponse(state: ResolvedAiState, askedAtGeneration: nu
     );
   }
 
+  // A subscription linked for its PLAN alone (TASK-2501): the owner's account
+  // is on this box without ClawBox AI being a chat model of it. Asked here,
+  // on the poll every plan surface already reads, so an upgrade or a lapse on
+  // the portal reaches the box the same way the ClawBox AI plan's does — the
+  // lookup is cached for two minutes, so the paid gate's 5 s cadence costs the
+  // portal nothing. Never throws, and never touches the ClawBox AI keys.
+  const link = await refreshSubscriptionLink().catch(() => null);
+  if (link) {
+    // With no ClawBox AI account the link's plan IS the plan — not the
+    // "pays for nothing" above, and "not known" while the portal has not
+    // answered for it. With one, the better of the two: the paid-plan gate
+    // unlocks on either, and the plan surfaces must say what the gate does.
+    clawaiPlan = state.hasClawaiProfile ? strongerPlan(clawaiPlan, link.plan) : link.plan;
+    if (link.changed) clawaiPlanChanged = true;
+  }
+
   // The badge-facing tier mirrors the account tier *only* when
   // ClawBox AI is the active chat provider. Switching to OpenAI in
   // the chat dropdown should hide the chat-header tier badge — the
@@ -388,6 +418,15 @@ async function buildStatusResponse(state: ResolvedAiState, askedAtGeneration: nu
     // flip on an auth error. This is the one field that says the credential
     // does not work, and the surfaces that claim health read it.
     clawaiTokenRejected,
+    // A subscription is linked to this box for its plan alone (TASK-2501).
+    // NOT folded into `clawaiConfigured`, which says ClawBox AI is a chat
+    // model of this box; the login hook reads either as "an account is on
+    // this box". Its plan is already in `clawaiPlan` above.
+    subscriptionLinked: link !== null,
+    // The portal refused the linked token on this poll: a re-link is due, and
+    // its plan is forgotten meanwhile — unlike the ClawBox AI badge, the plan
+    // is all a link is for (`refreshSubscriptionLink` says why).
+    subscriptionLinkRejected: link?.rejected ?? false,
     tierSource,
   }, {
     headers: {
@@ -414,13 +453,20 @@ export async function GET() {
       : await resolveOpenclawAiState();
     return await buildStatusResponse(state, askedAtGeneration);
   } catch {
+    // The agent config could not be read (a half-written openclaw.json, a
+    // Hermes read that timed out). The subscription link does not live there,
+    // so it is still answered: a link-only box must not read as unlinked —
+    // the paid gates dropping to their Connect card — for one bad read.
+    const link = await refreshSubscriptionLink().catch(() => null);
     return NextResponse.json(
       {
         connected: false, provider: null, providerLabel: null, mode: null, model: null,
         // `clawaiPlan: null` is "not known", never Free: a failed read must not
-        // tell a paying owner their plan just ended.
-        clawaiTier: null, clawaiAccountTier: null, clawaiPlan: null, clawaiAllowedModels: null,
-        clawaiConfigured: false, clawaiTokenRejected: false, tierSource: "picker",
+        // tell a paying owner their plan just ended. The linked plan is a fact
+        // this answer does have.
+        clawaiTier: null, clawaiAccountTier: null, clawaiPlan: link?.plan ?? null, clawaiAllowedModels: null,
+        clawaiConfigured: false, clawaiTokenRejected: false,
+        subscriptionLinked: link !== null, subscriptionLinkRejected: link?.rejected ?? false, tierSource: "picker",
       },
       {
         headers: {

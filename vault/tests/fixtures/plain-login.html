@@ -1,0 +1,18 @@
+<!doctype html>
+<html><head><title>Example Bank – Sign in</title></head>
+<body>
+  <header><form role="search" action="/search"><input type="search" name="q" placeholder="Search"></form></header>
+  <main>
+    <form id="login" action="/session" method="post">
+      <label for="email">Email address</label>
+      <input id="email" name="email" type="email" autocomplete="username">
+      <input type="hidden" name="csrf" value="token123">
+      <input type="password" name="decoy" style="display:none">
+      <label for="pw">Password</label>
+      <input id="pw" name="password" type="password" autocomplete="current-password">
+      <label><input type="checkbox" name="remember"> Remember me</label>
+      <button type="button" id="show">Show</button>
+      <button type="submit" id="submit">Sign in</button>
+    </form>
+  </main>
+</body></html>

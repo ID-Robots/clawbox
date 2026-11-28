@@ -9,9 +9,11 @@ import EditionStep from "./EditionStep";
 import UpdateStep from "./UpdateStep";
 import CredentialsStep from "./CredentialsStep";
 import AIModelsStep from "./AIModelsStep";
+import { CloudProvidersWizardGate } from "./CloudProvidersPanel";
 import TelegramStep from "./TelegramStep";
 import StatusMessage from "./StatusMessage";
 import ReconnectingOverlay from "./ReconnectingOverlay";
+import WifiConnectedDialog, { type WifiConnectStatus } from "./WifiConnectedDialog";
 import { useT, I18nProvider, LANGUAGES, type Locale } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { DISCORD_INVITE_URL } from "@/lib/community";
@@ -455,6 +457,34 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The WiFi step's handoff lands here, on the box's address on the network it
+  // just joined, with ?wifi=connected (WifiHandoffOverlay): say where the box is
+  // now. The join may still be finishing, so a "connecting" answer is asked again.
+  const [wifiJoined, setWifiJoined] = useState<{ ssid: string; ip: string | null } | null>(null);
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("wifi") !== "connected") return;
+    url.searchParams.delete("wifi");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    let alive = true;
+    let tries = 0;
+    // A box just back on a new network can answer a request or two badly: ask
+    // again, within the same budget, rather than lose the dialog.
+    const again = () => { if (alive && ++tries < 30) setTimeout(read, 2000); };
+    const read = () => {
+      fetch("/setup-api/wifi/connect-status", { cache: "no-store" })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((s: WifiConnectStatus | null) => {
+          if (!alive) return;
+          if (s?.phase === "connected" && s.ssid) setWifiJoined({ ssid: s.ssid, ip: s.ip ?? null });
+          else if (!s || s.phase === "connecting") again();
+        })
+        .catch(again);
+    };
+    read();
+    return () => { alive = false; };
+  }, []);
+
   const persistSetupProgress = useCallback(async (step: number) => {
     try {
       await fetch("/setup-api/setup/progress", {
@@ -754,7 +784,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
                 className="setup-icon-btn"
               >
                 {/* `help_outline` is not in the subset the device actually
-                    ships (public/fonts/material-symbols-rounded.ttf is a
+                    ships (src/assets/fonts/material-symbols-rounded.ttf is a
                     static font with no FILL axis and no outline aliases), so
                     it rendered as its own name. `help` is the real glyph. */}
                 <span className="material-symbols-rounded" style={{ fontSize: 20 }}>help</span>
@@ -845,6 +875,15 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
             {currentStep === 1 && (
               <WifiStep onNext={() => goToStep(2)} />
             )}
+            {wifiJoined && (
+              <WifiConnectedDialog
+                ssid={wifiJoined.ssid}
+                ip={wifiJoined.ip}
+                // Landed before the join finished (the wizard resumed at the
+                // WiFi step): the network step is done now.
+                onClose={() => { setWifiJoined(null); if (currentStep === 1) goToStep(2); }}
+              />
+            )}
             {choosingAssistant && <EditionStep />}
             {currentStep === 2 && !choosingAssistant && (
               <UpdateStep onNext={() => void leaveUpdateStep()} />
@@ -853,13 +892,16 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
               <CredentialsStep onNext={() => goToStep(4)} hermes={isHermesEdition} />
             )}
             {currentStep === 4 && !choosingAssistant && (
-              <AIModelsStep
-                providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "xai", "llamacpp"]}
-                defaultProviderId="clawai"
-                title={tr("settings.aiConnectTitle", "Connect AI Provider")}
-                description={t("ai.description")}
-                onNext={() => goToStep(5)}
-              />
+              // "Hide cloud AI providers" (TASK-2497): the box's own AI instead.
+              <CloudProvidersWizardGate onNext={() => goToStep(5)}>
+                <AIModelsStep
+                  providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "xai", "llamacpp"]}
+                  defaultProviderId="clawai"
+                  title={tr("settings.aiConnectTitle", "Connect AI Provider")}
+                  description={t("ai.description")}
+                  onNext={() => goToStep(5)}
+                />
+              </CloudProvidersWizardGate>
             )}
             {/* Local AI step removed from initial setup — owners now reach
                 it via Settings → Local AI on demand. The wizard ships a

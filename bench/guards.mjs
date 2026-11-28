@@ -119,12 +119,14 @@ async function upstreamLongAnswer(name, targetSeconds, maxTokens) {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        // The pro reasoner with a planning brief, non-streamed: the same
-        // shape that held a real bench run in one 8-minute extended think
-        // (run-okzr0lzs). Asking flash for 30 000 numbers looked cheaper but
-        // the model declines the drudgery and answers in seconds — thinking
-        // time is the one duration a model will actually spend.
-        model: "deepseek-v4-pro[1m]",
+        // The reasoner with a planning brief, non-streamed: the same shape
+        // that held a real bench run in one 8-minute extended think
+        // (run-okzr0lzs). Asking for 30 000 numbers looked cheaper but the
+        // model declines the drudgery and answers in seconds — thinking time
+        // is the one duration a model will actually spend. ClawBox AI's one
+        // model since TASK-2261; a wall this run does not reach reads as
+        // INCONCLUSIVE, never as a pass.
+        model: "deepseek-v4-flash[1m]",
         max_tokens: maxTokens,
         messages: [{
           role: "user",

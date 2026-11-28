@@ -8,7 +8,7 @@ import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { addWorkerWorktree, adoptOwnBranchWork, changedFiles, committableFiles, ensureTeamBranch, forkBase, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, ownBranchWork, readCheckout, removeWorktree, teamBranchName, workerBranchName } from "@/lib/coding-team-worktree";
+import { addWorkerWorktree, adoptOwnBranchWork, changedFiles, committableFiles, ensureTeamBranch, forkBase, harvestWorktree, isGeneratedArtifact, mergeWorkerBranch, ownBranchWork, readCheckout, removeWorktree, teamBranchName, workerBranchName, worktreeAppId } from "@/lib/coding-team-worktree";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
@@ -226,6 +226,30 @@ describe("a coding team's git plumbing", () => {
     } finally {
       fs.rmSync(plain, { recursive: true, force: true });
     }
+  });
+});
+
+describe("the app a worktree is a copy of", () => {
+  it("names the project folder for a run's worktree, a team task's, and anything under one", () => {
+    // run-3mnuu230 (2026-11-10): the Notes app mounts at /apps/<its folder's
+    // name>, so in its worktree it mounted at /apps/run-3mnuu230 and its own
+    // smoke test and mobile gate, which ask for /apps/notes, answered 404.
+    expect(worktreeAppId("/home/clawbox/Projects/notes/.clawbox/worktrees/run-3mnuu230")).toBe("notes");
+    expect(worktreeAppId("/home/clawbox/Projects/audiobook-player/.clawbox/worktrees/t4-1")).toBe("audiobook-player");
+    expect(worktreeAppId("/home/clawbox/Projects/notes/.clawbox/worktrees/review-t5-1/app/api")).toBe("notes");
+    expect(worktreeAppId("/home/clawbox/Projects/notes/.clawbox/worktrees/run-a/")).toBe("notes");
+  });
+
+  it("names nothing for a folder that is not a worktree, or a project whose name is no app id", () => {
+    expect(worktreeAppId("/home/clawbox/Projects/notes")).toBeNull();
+    expect(worktreeAppId("/home/clawbox/Projects/notes/.clawbox")).toBeNull();
+    expect(worktreeAppId("/home/clawbox/Projects/notes/.clawbox/worktrees")).toBeNull();
+    expect(worktreeAppId("/home/clawbox/Projects/notes/worktrees/run-a")).toBeNull();
+    // Rebuilt from the app-id alphabet, never passed through: it reaches a process environment.
+    expect(worktreeAppId("/home/clawbox/Projects/my app/.clawbox/worktrees/run-a")).toBeNull();
+    expect(worktreeAppId("/home/clawbox/Projects/a$(id)/.clawbox/worktrees/run-a")).toBeNull();
+    expect(worktreeAppId(`/home/clawbox/Projects/${"a".repeat(65)}/.clawbox/worktrees/run-a`)).toBeNull();
+    expect(worktreeAppId("/.clawbox/worktrees/run-a")).toBeNull();
   });
 });
 

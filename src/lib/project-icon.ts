@@ -137,12 +137,27 @@ export async function ensureProjectIcon(target: ProjectIconTarget): Promise<Proj
  * there. Answers whether either file is new.
  */
 async function writeFavicons(directory: string, source: Buffer): Promise<boolean> {
-  const small = await shrinkIcon(source, FAVICON_PX);
+  // RGBA even when the picture is opaque: the ICO says 32 bits per pixel, and
+  // a decoder that holds it to that refuses an RGB PNG inside. Next.js's
+  // Turbopack does — `next build` stops on an `app/favicon.ico` like that with
+  // "The PNG is not in RGBA format!" (TASK-2323: a Store app shipped one and
+  // never started), and `app/` is where a run building a Next app puts the
+  // box's favicon.ico. The PNG beside it is the same bytes, so a favicon a run
+  // derives from it has the alpha channel too.
+  const small = await shrinkIcon(source, FAVICON_PX, { alpha: true });
   // If sharp could not load its native binding it hands back the original;
-  // a 1024 px favicon is still a favicon, and better than none.
+  // a 1024 px favicon is still a favicon, and better than none. Not inside an
+  // ICO, though: one whose PNG is not the 64 px RGBA its header promises is
+  // the file a Next build stops on, and no favicon.ico is better than that.
   const png = await placeNew(path.join(directory, FAVICON_PNG), small);
-  const ico = await placeNew(path.join(directory, FAVICON_ICO), icoFromPng(small, FAVICON_PX));
+  const ico = isRgbaPngOf(small, FAVICON_PX) ? await placeNew(path.join(directory, FAVICON_ICO), icoFromPng(small, FAVICON_PX)) : false;
   return png || ico;
+}
+
+/** Is this a PNG of `size` × `size`, 8-bit RGBA? Read off its IHDR: width, height, bit depth, colour type 6. Exported for its test. */
+export function isRgbaPngOf(png: Buffer, size: number): boolean {
+  if (!isPng(png) || png.length < 26 || png.toString("latin1", 12, 16) !== "IHDR") return false;
+  return png.readUInt32BE(16) === size && png.readUInt32BE(20) === size && png.readUInt8(24) === 8 && png.readUInt8(25) === 6;
 }
 
 /**
@@ -159,6 +174,8 @@ async function writeFavicons(directory: string, source: Buffer): Promise<boolean
  *               why a 256 px favicon is not what this writes), no palette,
  *               one plane, 32 bits per pixel, then the payload's length and
  *               its offset — 6 + 16, the only place it can start.
+ *
+ * 32 bits per pixel means the PNG has to be RGBA: `writeFavicons` hands it one.
  */
 export function icoFromPng(png: Buffer, size: number): Buffer {
   const header = Buffer.alloc(22);

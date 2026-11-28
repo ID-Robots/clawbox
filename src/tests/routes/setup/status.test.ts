@@ -65,6 +65,7 @@ describe("GET /setup-api/setup/status — unauthenticated payload", () => {
     "local_ai_configured",
     "local_ai_provider",
     "local_ai_model",
+    "external_engine",
     "ai_model_configured",
     "ai_model_provider",
     "telegram_configured",
@@ -235,6 +236,48 @@ describe("GET /setup-api/setup/status", () => {
     expect(body.local_ai_configured).toBe(true);
     expect(body.local_ai_provider).toBe("llamacpp");
     expect(body.local_ai_model).toBe("llamacpp/gemma4-e2b-it-q4_0");
+  });
+
+  it("reports an external AI engine in the Local AI slot, never its key, and not as the cloud provider (TASK-2376)", async () => {
+    await fs.writeFile(CONFIG_PATH, JSON.stringify({
+      ai_model_configured: true,
+      ai_model_provider: "clawai",
+      local_ai_configured: true,
+      local_ai_provider: "clawext",
+      local_ai_model: "clawext/Qwen/Qwen3-32B",
+      external_engine: {
+        baseUrl: "http://192.0.2.10:8000/v1",
+        modelId: "Qwen/Qwen3-32B",
+        contextWindow: 131072,
+        maxTokens: 8192,
+        imageInput: false,
+        harness: "openclaw",
+        previous: { store: {} },
+      },
+    }), "utf-8");
+    await fs.writeFile(OPENCLAW_CONFIG_PATH, JSON.stringify({
+      agents: { defaults: { model: { primary: "clawext/Qwen/Qwen3-32B" } } },
+    }), "utf-8");
+
+    const body = await (await statusGet()).json();
+    expect(body.local_ai_provider).toBe("clawext");
+    expect(body.external_engine).toMatchObject({
+      selected: true,
+      providerId: "clawext",
+      model: "Qwen/Qwen3-32B",
+      displayName: "Qwen3-32B",
+      baseUrl: "http://192.0.2.10:8000/v1",
+      contextWindow: 131072,
+    });
+    expect(JSON.stringify(body.external_engine)).not.toMatch(/apiKey|previous/);
+    // The engine is the Local AI, not the cloud provider the box is set up with.
+    expect(body.ai_model_provider).toBe("clawai");
+  });
+
+  it("reports no external engine on a box that has none", async () => {
+    await fs.writeFile(CONFIG_PATH, JSON.stringify({ local_ai_configured: false }), "utf-8");
+    const body = await (await statusGet()).json();
+    expect(body.external_engine).toBeNull();
   });
 
   it("infers local AI configuration from openclaw.json when config-store flags are missing", async () => {

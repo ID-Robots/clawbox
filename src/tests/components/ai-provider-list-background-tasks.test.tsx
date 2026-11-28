@@ -95,7 +95,7 @@ describe("AiProviderList — a provider change the box is running", () => {
     box.task = providerTask("t-out", { provider: "xai", label: "xAI Grok", state: "failed", error: "The xAI Grok sign-in could not be removed." });
     expect(await screen.findByTestId("ai-provider-sign-out-error-xai")).toHaveTextContent("could not be removed");
     await waitFor(() => expect(screen.getByTestId("ai-provider-xai")).not.toHaveAttribute("data-sign-out"));
-    expect(screen.getByTestId("ai-provider-sign-out-xai")).toHaveTextContent("Sign out of xAI Grok");
+    expect(screen.getByTestId("ai-provider-sign-out-xai")).toHaveAccessibleName("Sign out of xAI Grok");
   });
 
   it("opened during a sign-in: the provider being connected is drawn with the same spinner, and becomes its row when the box is done", async () => {

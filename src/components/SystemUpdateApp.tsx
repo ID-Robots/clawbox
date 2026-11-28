@@ -16,7 +16,10 @@ import {
   type VersionInfo,
 } from "@/components/UpdateRunView";
 import UpdateHandover from "@/components/UpdateHandover";
+import WeeklyUpdateCheckCard from "@/components/WeeklyUpdateCheckCard";
 import { cleanVersion, shipsOpenclaw } from "@/lib/version-utils";
+import { LINKED_BOXES_FLAG_EVENT, LINKED_BOXES_FLAG_PREF, VIEWER_SCREENS_FLAG_EVENT, VIEWER_SCREENS_FLAG_PREF } from "@/lib/box-switcher";
+import { useLinkedBoxesFlag, useViewerScreensFlag } from "@/lib/use-box-switcher";
 import {
   HARNESS_DOWNGRADE_CODE,
   HARNESS_DOWNGRADE_OVERRIDE_FLAG,
@@ -34,7 +37,8 @@ export { type ComponentVersion, type VersionInfo } from "@/components/UpdateRunV
 export { shipsOpenclaw };
 
 /** How the effective branch was decided — `EffectiveUpdateBranch` in src/lib/updater.ts. */
-type EffectiveBranchSource = "pin-file" | "checkout-branch" | "detached-recovered" | "default" | "unresolved";
+type EffectiveBranchSource =
+  | "pin-file" | "checkout-branch" | "detached-recovered" | "default" | "unresolved" | "workstation-channel";
 
 interface EffectiveBranch {
   branch: string;
@@ -70,6 +74,13 @@ function effectiveBranchText(
         "update.effectiveBranchRecovered",
         "Updates follow {branch}, worked out from this box's own build. No branch is recorded.",
       );
+    case "workstation-channel":
+      // A ClawBox Workstation's own channel (src/lib/update-channel.ts): the
+      // controls beside this line write `.update-branch`, which it does not read.
+      return tr(
+        "update.effectiveBranchWorkstation",
+        "Updates follow {branch}, the ClawBox Workstation channel: a version reaches it only after it was tested on a Workstation. The beta toggle and a branch recorded here do not apply on this computer.",
+      );
     case "unresolved":
       // The check looks at main; the update itself refuses to guess a channel
       // for a box that is not on a branch, and says so when it is started.
@@ -90,7 +101,7 @@ function readEffectiveBranch(value: unknown): EffectiveBranch | null {
   if (!v || typeof v.branch !== "string" || !v.branch) return null;
   const source: EffectiveBranchSource =
     v.source === "pin-file" || v.source === "checkout-branch" || v.source === "detached-recovered"
-      || v.source === "unresolved"
+      || v.source === "unresolved" || v.source === "workstation-channel"
       ? v.source
       : "default";
   return { branch: v.branch, source };
@@ -163,6 +174,8 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   // toggle would borrow the first one's name.
   const betaLabelId = useId();
   const branchInputId = useId();
+  const linkedBoxesLabelId = useId();
+  const viewerScreensLabelId = useId();
   const [versions, setVersions] = useState<VersionInfo | null>(null);
   const [versionsError, setVersionsError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -177,6 +190,10 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   const [branchDowngrade, setBranchDowngrade] = useState<{ branch: string | null; detail: HarnessDowngradeDetail } | null>(null);
   const [betaConfirm, setBetaConfirm] = useState(false);
   const [forceConfirm, setForceConfirm] = useState(false);
+  const linkedBoxesOn = useLinkedBoxesFlag(true);
+  const [linkedBoxesSaving, setLinkedBoxesSaving] = useState(false);
+  const viewerScreensOn = useViewerScreensFlag(true);
+  const [viewerScreensSaving, setViewerScreensSaving] = useState(false);
 
   // Fetched once on mount, from the same endpoint the About screen uses, so
   // the two surfaces cannot disagree about whether this box is running its own
@@ -274,6 +291,25 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       setBranchError((e as Error).message);
     } finally {
       setBranchSaving(false);
+    }
+  }, []);
+
+  // The experiments' switches (Linked ClawBoxes, and its monitors switch,
+  // TASK-2771) are box preferences; Settings and the desktop hear each from its
+  // event once the box has stored it.
+  const saveFlag = useCallback(async (pref: string, event: string, setSaving: (saving: boolean) => void, on: boolean) => {
+    setSaving(true);
+    try {
+      const res = await fetch("/setup-api/preferences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [pref]: on }),
+      });
+      if (res.ok) window.dispatchEvent(new CustomEvent(event, { detail: on }));
+    } catch {
+      /* The switch stays where it was. */
+    } finally {
+      setSaving(false);
     }
   }, []);
 
@@ -447,9 +483,14 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
               // that starts one. Dismiss forgets the position; the hero's
               // update button is hidden while a run is settled, so without
               // this the resume was reachable by no gesture at all. Any other
-              // failure starts over from step 1 on a fresh run, so it is not
-              // offered as a "resume": Dismiss, then Update everything.
+              // failure is not offered as a "resume": it gets Try again, below.
               onResume={canResume(updateState) ? () => void startUpdate() : undefined}
+              // Update everything's own request, so it runs the update again:
+              // an ordinary failure from step 1, where `bootstrap_updater`
+              // fetches the newest head (a resume at the failed step would run
+              // the tree the failed run rolled back to), and a run the box lost
+              // from where it stopped. Agent work still asks first (409).
+              onTryAgain={() => void startUpdate()}
               onOverrideDowngrade={() => void startUpdate(true)}
             />
           ) : (
@@ -546,6 +587,11 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
           {versions && <AgentVersions versions={versions} />}
           </>
           )}
+
+          {/* The weekly check's switch: on by default, and a notice the owner
+              gets without opening this screen — so it sits in plain view,
+              not behind Advanced. */}
+          {status !== "updating" && <WeeklyUpdateCheckCard />}
 
           {/* ADVANCED */}
           {status !== "updating" && (
@@ -650,6 +696,36 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                         onOverride={() => void saveBranch(branchDowngrade.branch, true)}
                       />
                     )}
+                  </div>
+
+                  {/* Linked ClawBoxes — an experiment, off until switched on here */}
+                  <div className="border-t border-[var(--border-subtle)] pt-4 flex items-start justify-between gap-4">
+                    <div id={linkedBoxesLabelId} className="text-sm text-gray-100 inline-flex items-center gap-2">
+                      <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">workspaces</span>
+                      {tr("update.linkedBoxesExperimental", "Linked ClawBoxes (experimental)")}
+                    </div>
+                    <BetaToggle
+                      enabled={linkedBoxesOn === true}
+                      saving={linkedBoxesSaving}
+                      labelledBy={linkedBoxesLabelId}
+                      onEnable={() => void saveFlag(LINKED_BOXES_FLAG_PREF, LINKED_BOXES_FLAG_EVENT, setLinkedBoxesSaving, true)}
+                      onDisable={() => void saveFlag(LINKED_BOXES_FLAG_PREF, LINKED_BOXES_FLAG_EVENT, setLinkedBoxesSaving, false)}
+                    />
+                  </div>
+
+                  {/* Linked ClawBoxes on this kiosk's monitors — a second experiment */}
+                  <div className="border-t border-[var(--border-subtle)] pt-4 flex items-start justify-between gap-4">
+                    <div id={viewerScreensLabelId} className="text-sm text-gray-100 inline-flex items-center gap-2">
+                      <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">desktop_windows</span>
+                      {tr("update.linkedBoxesScreensExperimental", "Linked ClawBoxes use this ClawBox's monitors (experimental)")}
+                    </div>
+                    <BetaToggle
+                      enabled={viewerScreensOn === true}
+                      saving={viewerScreensSaving}
+                      labelledBy={viewerScreensLabelId}
+                      onEnable={() => void saveFlag(VIEWER_SCREENS_FLAG_PREF, VIEWER_SCREENS_FLAG_EVENT, setViewerScreensSaving, true)}
+                      onDisable={() => void saveFlag(VIEWER_SCREENS_FLAG_PREF, VIEWER_SCREENS_FLAG_EVENT, setViewerScreensSaving, false)}
+                    />
                   </div>
 
                   {/* Force full update — recovery for a device left with a stale

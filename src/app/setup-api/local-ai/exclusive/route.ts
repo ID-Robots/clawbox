@@ -11,6 +11,8 @@ import {
 import path, { untraced } from "@/lib/runtime-path";
 import { NextResponse } from "next/server";
 import { get, set, setMany } from "@/lib/config-store";
+import { externalEngineSelected } from "@/lib/external-engine";
+import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
 import {
   callGatewayRpc,
   gatewayIsAbsent,
@@ -387,7 +389,16 @@ export async function GET() {
   return NextResponse.json({ enabled });
 }
 
-export async function POST(request: Request) {
+/**
+ * One Local AI transition at a time (TASK-2376): switching Local-only and
+ * saving or removing the external engine each check the other's state, so
+ * they must not overlap (src/lib/local-ai-transition-lock.ts).
+ */
+export function POST(request: Request) {
+  return withLocalAiTransitionLock(() => postLocalOnly(request));
+}
+
+async function postLocalOnly(request: Request) {
   if (gatewayIsAbsent()) {
     return NextResponse.json(UNSUPPORTED, { status: 501 });
   }
@@ -414,6 +425,17 @@ export async function POST(request: Request) {
     let settlement: ConfigWriteSettlement = "applied";
 
     if (body.enabled) {
+      // Local-only promises that no conversation leaves this box; an external
+      // engine is by definition somewhere else (TASK-2376).
+      if (await externalEngineSelected()) {
+        return NextResponse.json(
+          {
+            error: "Local-only mode keeps every conversation on this box, so it is not available while an external AI engine is the Local AI.",
+            code: "external_engine_selected",
+          },
+          { status: 409 },
+        );
+      }
       const localModel = (await get("local_ai_model")) as string | undefined;
       if (!localModel) {
         return NextResponse.json({ error: "Local AI is not configured" }, { status: 400 });

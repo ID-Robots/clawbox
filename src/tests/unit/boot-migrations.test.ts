@@ -10,6 +10,7 @@ import fs from "fs";
 import path from "path";
 import {
   BOOT_MIGRATIONS_KEY,
+  clawboxAiOneModelMigration,
   parseRanMigrations,
   dropRemovedConsentMigration,
   dropRemovedProjectsMigration,
@@ -25,6 +26,7 @@ import {
   type BootMigration,
 } from "@/lib/boot-migrations";
 import { LOBSTER_ORBITAL_WALLPAPER } from "@/lib/builtin-wallpapers";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
 
 /** A config store in memory, with the two readers the runner is handed. */
 function store(initial: Record<string, unknown> = {}) {
@@ -541,5 +543,54 @@ describe("the pre-v4.0 webapp storage migration", () => {
     expect(await runBootMigrations([legacyWebappStorageMigration({ migrate })], s)).toEqual([]);
     expect(s.values[BOOT_MIGRATIONS_KEY]).toBeUndefined();
     errors.mockRestore();
+  });
+});
+
+describe("ClawBox AI's one model (TASK-2261)", () => {
+  const PICKS = "ai_model_explicit_picks";
+  const RETIRED = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
+
+  it("moves the owner's remembered pick of the retired Max-plan id to Flash, and asks Hermes", async () => {
+    const s = store({ [PICKS]: { clawai: `deepseek/${RETIRED}`, anthropic: "anthropic/claude-opus-5" } });
+    const migrateHermes = vi.fn(async () => false);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const ran = await runBootMigrations([clawboxAiOneModelMigration({ ...s, picksKey: PICKS, migrateHermes })], s);
+    log.mockRestore();
+    expect(ran).toEqual(["clawai-one-model-2026-11"]);
+    expect(s.values[PICKS]).toEqual({ clawai: "deepseek/deepseek-v4-flash", anthropic: "anthropic/claude-opus-5" });
+    expect(migrateHermes).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a pick the owner made of anything else alone", async () => {
+    const picks = { clawai: "deepseek/deepseek-v4-flash", openrouter: `deepseek/${RETIRED}` };
+    const s = store({ [PICKS]: picks });
+    const migration = clawboxAiOneModelMigration({ ...s, picksKey: PICKS, migrateHermes: async () => false });
+    expect(await migration.run()).toBe(false);
+    expect(s.set).not.toHaveBeenCalled();
+    expect(s.values[PICKS]).toEqual(picks);
+  });
+
+  it("reports what the Hermes half moved", async () => {
+    const s = store();
+    const migration = clawboxAiOneModelMigration({ ...s, picksKey: PICKS, migrateHermes: async () => true });
+    expect(await migration.run()).toBe(true);
+  });
+
+  it("is asked again at the next boot when Hermes' config could not be read", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const s = store();
+    const migrateHermes = vi.fn(async () => {
+      throw new Error("Hermes config could not be read at model.default");
+    });
+    expect(await runBootMigrations([clawboxAiOneModelMigration({ ...s, picksKey: PICKS, migrateHermes })], s)).toEqual([]);
+    expect(s.values[BOOT_MIGRATIONS_KEY]).toBeUndefined();
+    errors.mockRestore();
+  });
+
+  it("is registered at boot with the real picks key and the Hermes half", () => {
+    const source = fs.readFileSync(path.join(process.cwd(), "src/instrumentation.ts"), "utf8");
+    expect(source).toContain("clawboxAiOneModelMigration({");
+    expect(source).toContain("picksKey: EXPLICIT_MODEL_PICKS_KEY");
+    expect(source).toContain("require('./lib/hermes-clawai').migrateRetiredClawaiModelsInHermes()");
   });
 });

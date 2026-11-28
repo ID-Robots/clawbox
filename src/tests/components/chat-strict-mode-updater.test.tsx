@@ -161,11 +161,12 @@ async function streamThenAbort(ws: FakeGatewayWs): Promise<void> {
 }
 
 beforeEach(() => {
-  // jsdom has no `scrollIntoView`, and `scrollToBottomAfterLayout` (src/lib/scroll.ts)
-  // calls it from a double-rAF — OUTSIDE any test body, so vitest counts the
-  // TypeError as an unhandled error and the whole components project exits 1
-  // while every assertion here passes. Every other chat suite in this repo
-  // stubs it for the same reason.
+  // jsdom has no `scrollIntoView`. The chat used to call it from a double-rAF
+  // — OUTSIDE any test body, so vitest counted the TypeError as an unhandled
+  // error and the whole components project exited 1 while every assertion
+  // here passed. Nothing in the chat calls it now (TASK-2222: the transcript
+  // is scrolled by useStickToBottom alone), but a card or a panel it renders
+  // may, and every other chat suite in this repo stubs it the same way.
   Element.prototype.scrollIntoView = vi.fn();
   instances.length = 0;
   resetHarnessCache();

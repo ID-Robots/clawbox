@@ -18,8 +18,13 @@ export const LOCAL_PROVIDER = "llamacpp";
  * The tools a lean turn keeps. `read` and `write` stay direct (OpenClaw keeps
  * its core file tools visible); the others sit in OpenClaw's Tool Search
  * catalog, which OpenClaw turns on for every model when `tools.toolSearch` is
- * unset, and are reached through one `tool_call`. MCP tools carry their
- * server's prefix (`clawbox__`).
+ * unset, and are reached through one `dispatch_action` (`tool_call` before
+ * OpenClaw 2026.11.3). MCP tools carry their
+ * server's prefix (`clawbox__`). On OpenClaw 2026.11.5+ the hook's `toolsAllow`
+ * only narrows which tools may be called, so scripts/gateway-pre-start.sh also
+ * writes this list as `tools.byProvider.llamacpp.allow` (_LOCAL_LEAN_TOOLS
+ * there; src/tests/unit/gateway-pre-start-local-lean-tools.test.ts holds the two
+ * together).
  */
 export const LEAN_TOOLS = Object.freeze([
   "read",
@@ -213,11 +218,12 @@ export function todayLine(now = new Date()) {
  */
 export function leanSystemPrompt(opts = {}) {
   // Through Tool Search, the call is FLAT — the target tool's own fields beside
-  // `id` — which the core's tool_call accepts as well as `{"id", "args": {…}}`.
+  // `id` — which the core's dispatcher (`dispatch_action` from OpenClaw
+  // 2026.11.3, `tool_call` before it) accepts as well as `{"id", "args": {…}}`.
   // Measured on the box: asked to nest a whole HTML page under `args`, Gemma 4
   // E2B dropped `id` and the core took the page's `name` field for the tool.
   const call = (id, fields) => opts.toolSearch !== false
-    ? `call tool_call with {"id": "${id}", ${fields}}`
+    ? `call dispatch_action with {"id": "${id}", ${fields}}`
     : `call ${id} with {${fields}}`;
   const where = opts.workspaceDir ? ` Paths without a folder are in your workspace, ${opts.workspaceDir}.` : "";
   const language = languageLine(opts.language);

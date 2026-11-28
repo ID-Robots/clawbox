@@ -24,6 +24,12 @@ const cliMock = vi.hoisted(() => vi.fn());
 const forgetRefusal = vi.hoisted(() => vi.fn(async () => {}));
 const storedToken = vi.hoisted(() => ({ value: "claw_stored" }));
 
+// The link runs the vision check (src/lib/clawbox-ai-vision.ts), which SHOWS
+// the proxy a picture — network I/O no unit test may do. Here Flash sees.
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  probeClawboxAiVision: vi.fn(async () => ({ verdict: "flash", model: "deepseek-v4-flash", flash: "sees", fallback: null })),
+}));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: vi.fn(async () => true) }));
 vi.mock("@/lib/config-store", () => ({
@@ -45,10 +51,6 @@ vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: vi.fn() }));
 vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
   installHermesImagePlugin: vi.fn(),
-}));
-vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
-  resolveVisionModelId: vi.fn(async () => ({ id: null, verified: false, reason: "probe-failed" })),
 }));
 vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn(async () => ({ ready: true })) }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));

@@ -184,6 +184,22 @@ describe("appending a finished reply", () => {
     const shown = [user("hi", 1)];
     expect(withAssistantReply(shown, assistant("Hello!", 2))).toEqual([...shown, assistant("Hello!", 2)]);
   });
+
+  // TASK-2494: a read of the transcript — the one a tab switch makes on return
+  // — painted the reply before its live final arrived.
+  it("changes nothing for a final whose run is already shown under the question", () => {
+    const shown = [user("what is 37 x 199?", 1, "run-1:user"), assistant("7363.", 2, { idempotencyKey: "run-1" })];
+    expect(withAssistantReply(shown, assistant("7363.", 3, { idempotencyKey: "run-1" }))).toBe(shown);
+  });
+
+  it("still appends the same words from another run, or with no run to compare", () => {
+    const shown = [user("remind me", 1), assistant("Stretch.", 2, { idempotencyKey: "run-1" })];
+    expect(withAssistantReply(shown, assistant("Stretch.", 3, { idempotencyKey: "run-2" }))).toHaveLength(3);
+    expect(withAssistantReply(shown, assistant("Stretch.", 3))).toHaveLength(3);
+    // An identical answer to an EARLIER question is a reply of its own.
+    const asked = [...shown, user("again?", 4)];
+    expect(withAssistantReply(asked, assistant("Stretch.", 5, { idempotencyKey: "run-1" }))).toHaveLength(4);
+  });
 });
 
 describe("a session.message push", () => {

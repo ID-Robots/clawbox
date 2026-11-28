@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useId, useRef, useCallback } from "react";
+import { useState, useEffect, useId, useLayoutEffect, useRef, useCallback } from "react";
 import { useMobileBack } from "@/lib/mobile-back";
 import SystemUpdateApp, { componentNeedsUpdate, shipsOpenclaw, type VersionInfo } from "@/components/SystemUpdateApp";
 import Image from "next/image";
@@ -9,7 +9,9 @@ import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
 import AIProviderIcon from "./AIProviderIcon";
 import AiProviderList from "./AiProviderList";
+import { CloudProvidersSettings } from "./CloudProvidersPanel";
 import HarnessPicker from "./HarnessPicker";
+import MailDraftApprovalPanel from "./MailDraftApprovalPanel";
 import PetPicker from "./PetPicker";
 import SettingsDisclosureButton from "./SettingsDisclosureButton";
 import type { WifiNetwork } from "@/lib/wifi-utils";
@@ -32,6 +34,7 @@ import { emailEnding, endingAsAsked, type EmailEnding } from "@/lib/chat-email-b
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import { installPendingRefresh } from "@/lib/email-pending-refresh";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
+import WifiConnectedDialog, { wifiConnectStatusText, type WifiConnectStatus } from "./WifiConnectedDialog";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
 import { cachedEdition, fetchHarness } from "@/lib/client-harness";
@@ -39,6 +42,7 @@ import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/t
 import { QRCodeSVG } from "qrcode.react";
 import { cleanVersion } from "@/lib/version-utils";
 import { formatBytes as formatByteCount } from "@/lib/format-bytes";
+import ClusterPanel, { useClusterAvailable } from "@/components/ClusterPanel";
 import { BuildIdentityRows, useBuildIdentity } from "./BuildIdentityPanel";
 import { useReconnect } from "@/hooks/useReconnect";
 import { useModalDialog } from "@/hooks/useModalDialog";
@@ -51,7 +55,12 @@ import PathGuardPanel from "./PathGuardPanel";
 import ComputerUsePanel from "./ComputerUsePanel";
 import UsersPanel from "./UsersPanel";
 import { useSettledSessionUser } from "@/lib/use-session-user";
-import MonitorsPanel from "./MonitorsPanel";
+import { isOrgMember, ORG_USER_SETTINGS_SECTIONS } from "@/lib/org-mode";
+import { useLinkedBoxesFlag } from "@/lib/use-box-switcher";
+import OwnPasswordCard from "./OwnPasswordCard";
+import MonitorsPanel, { ViewedMonitors } from "./MonitorsPanel";
+import { useViewerMonitors } from "@/lib/use-monitor-layout";
+import LinkedBoxesPanel from "./LinkedBoxesPanel";
 // From the pure module, never `@/lib/plugin-repair`: that one reads the
 // marker file and would pull `fs` into the browser bundle.
 import { canonicalPluginId } from "@/lib/plugin-repair-id";
@@ -241,7 +250,7 @@ interface SystemStats {
 
 // codingAgent is gone from this list on purpose: its settings moved into the
 // Coding Agent app itself (the owner asked for them back there).
-const SECTIONS = ["appearance", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "update", "about"] as const;
+const SECTIONS = ["appearance", "account", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "linkedBoxes", "system", "update", "about"] as const;
 
 /**
  * Users is a part of System now — System → Users, beside the device's own
@@ -252,14 +261,24 @@ const SECTIONS = ["appearance", "monitors", "wifi", "ai", "localAi", "localModel
  */
 const USERS_LINK = "users";
 
-/** The two views System holds: the device's figures, and who can sign in. */
-type SystemView = "device" | "users";
+/**
+ * The views System holds: the device's figures, who can sign in, and — for the
+ * owner of a Workstation with other Sparks configured — the cluster (TASK-2670).
+ */
+type SystemView = "device" | "users" | "cluster";
 
 /** System's tabs, in order; each named by the key that already names it elsewhere in Settings. */
 const SYSTEM_VIEWS: { id: SystemView; icon: string; labelKey: string }[] = [
   { id: "device", icon: "computer", labelKey: "settings.device" },
   { id: "users", icon: "group", labelKey: "settings.users" },
 ];
+
+/** The Cluster tab, drawn after the others and only where there is a cluster (`useClusterAvailable`). */
+const CLUSTER_SYSTEM_VIEW: { id: SystemView; icon: string; labelKey: string } = {
+  id: "cluster",
+  icon: "hub",
+  labelKey: "cluster.tab",
+};
 
 /** The System view a deep-link value asks for: Users for the old Users link, the device's figures for any other. */
 function toSystemView(value: unknown): SystemView {
@@ -362,6 +381,9 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   // not by history: the brain and the ways to reach it first, the box's own
   // machinery next, the once-a-year pages last.
   { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
+  // A signed-in user other than the owner: their own password. Drawn for
+  // them alone (`sectionShown`); the owner's password is System's.
+  { id: "account", icon: "person", labelKey: "users.account" },
   // Monitor mode: the monitors the desktop is spread over. Only on a box that
   // has a monitor session (`monitorsAvailable` below) — every other box never
   // shows the row.
@@ -388,6 +410,9 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
+  // The owner's other ClawBoxes, switched to with Ctrl+Shift+1 … 9 like
+  // workspaces (TASK-2519). The owner's alone: the list is (`sectionShown`).
+  { id: "linkedBoxes", icon: "workspaces", labelKey: "settings.linkedBoxes" },
   // Who can sign in to the box — each a real Linux account — is System →
   // Users, the owner's alone; it had a row of its own here until TASK-2130.
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
@@ -522,6 +547,16 @@ function barColor(pct: number): string {
   return pct >= 90 ? "#ef4444" : pct >= 70 ? "#f97316" : pct >= 50 ? "#eab308" : "#06b6d4";
 }
 
+/** The temperature row's colour: red over 80 °C, orange over 60 °C, cyan below. */
+function temperatureColor(celsius: number): string {
+  return celsius > 80 ? "#ef4444" : celsius > 60 ? "#f97316" : "#22d3ee";
+}
+
+/** …and its caption, on the same thresholds. */
+function temperatureLevelKey(celsius: number): "settings.critical" | "settings.warm" | "settings.normal" {
+  return celsius > 80 ? "settings.critical" : celsius > 60 ? "settings.warm" : "settings.normal";
+}
+
 function Toggle({ on, onToggle, label }: { on: boolean; onToggle: (v: boolean) => void; label: string }) {
   return (
     <div className="flex items-center justify-between">
@@ -651,6 +686,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
   const [requestedAiProviderId, setRequestedAiProviderId] = useState<string | null>(null);
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
+  // The last of the two requests above the cloud-provider fold acted on, so a
+  // later visit to Providers does not open it again (CloudProvidersSettings).
+  const [cloudOpenSeen, setCloudOpenSeen] = useState(0);
   // A deep link asked for Providers with the Anthropic accounts open and in
   // view (the usage-limit notices). Held until the list says it showed them,
   // then cleared, so a later visit to Providers is not the same ask again.
@@ -662,6 +700,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const jobAlertsShown = useCallback(() => setShowJobAlerts(false), []);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(initialSection);
+  const [isMobile, setIsMobile] = useState(false);
+  // The System pane is the one on screen: on a phone Back closes the pane (the
+  // list shows again) while `section` stays "system".
+  const systemPaneVisible = (isMobile ? mobileSection : section) === "system";
   // Which of System's two views is open (System → Users or the device's
   // figures). Only the owner has the choice: anyone else signed in is never
   // shown Users, wherever a link asked to go — so until /users/me has said who
@@ -669,9 +711,64 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // No answer at all is the owner's, as it is on the desktop (page.tsx); the
   // route behind the panel judges each request itself either way.
   const [systemView, setSystemView] = useState<SystemView>(peekPendingSystemView);
-  const sessionUser = useSettledSessionUser();
+  // A lookup that failed (null) is asked again each time System opens: the
+  // Cluster tab is drawn only for a settled owner.
+  const sessionUser = useSettledSessionUser(systemPaneVisible);
   const usersAllowed: boolean | null = sessionUser === undefined ? null : sessionUser?.isOwner !== false;
-  const systemShows: SystemView | null = systemView === "device" ? "device" : usersAllowed === null ? null : usersAllowed ? "users" : "device";
+  // Which sections this person is drawn. Until /users/me answers, the owner's
+  // set (as the desktop draws), minus Account, which is a user's alone. A
+  // user never gets System Update — updating the box is the owner's on every
+  // box — and on an organisation box (src/lib/org-mode.ts) gets only their
+  // own: Appearance (language, wallpaper, look) and Account (password). The
+  // routes behind every other section answer them 403 whatever is drawn.
+  const nonOwner = sessionUser != null && sessionUser.isOwner === false;
+  const orgMember = isOrgMember(sessionUser);
+  // The box's own reads beyond a member's sections (its network, its figures,
+  // its jobs) are the owner's on an organisation box (src/lib/org-mode.ts).
+  // They wait for /users/me, so nobody is asked before it is known who is looking.
+  const boxReads = sessionUser !== undefined && !orgMember;
+  // Linked ClawBoxes is an experiment: its page is drawn only once the owner
+  // has switched it on (System update → Advanced options).
+  const linkedBoxesOn = useLinkedBoxesFlag(!nonOwner && !orgMember);
+  // Shown on another box's kiosk (its Linked ClawBoxes monitors switch is on):
+  // this box's own monitors are not this screen's, so Monitors only reports them.
+  const viewerMonitors = useViewerMonitors();
+  const sectionShown = useCallback((id: Section): boolean => {
+    if (id === "account") return nonOwner;
+    if (id === "update" && nonOwner) return false;
+    if (id === "linkedBoxes" && (nonOwner || linkedBoxesOn !== true)) return false;
+    if (orgMember) return ORG_USER_SETTINGS_SECTIONS.includes(id === "localModels" ? "localAi" : id);
+    return true;
+  }, [nonOwner, orgMember, linkedBoxesOn]);
+  // Once it is known who is looking, a section they are not drawn is not kept
+  // either — not only not rendered: every effect keyed on the section (the
+  // System figures' poll, a channel's status) then stops asking for it.
+  useEffect(() => {
+    if (sessionUser === undefined) return;
+    // A deep link to Linked ClawBoxes waits for the switch's answer (`null`):
+    // only an answered "off" sends it to Appearance. Until then the pane is not
+    // drawn either — `sectionShown` is false — so nothing of it is reachable.
+    const shown = (id: Section) => (isChannelSection(id)
+      ? sectionShown("channels")
+      : sectionShown(id) || (id === "linkedBoxes" && linkedBoxesOn === null));
+    if (!shown(section)) setSection(DEFAULT_SECTION);
+    if (mobileSection !== null && !shown(mobileSection)) setMobileSection(DEFAULT_SECTION);
+  }, [sessionUser, section, mobileSection, sectionShown, linkedBoxesOn]);
+  // The Cluster tab is the OWNER's alone and only on a box with a cluster to show
+  // (a Workstation with its other Sparks configured). Not `usersAllowed`, which
+  // is also true while /users/me has not answered: nobody but a settled owner
+  // asks the cluster route, so a staff user's Settings never calls it. The route
+  // refuses them 403 whatever is drawn.
+  const [clusterAvailable, clusterGone] = useClusterAvailable(boxReads && sessionUser?.isOwner === true && systemPaneVisible);
+  const systemShows: SystemView | null = systemView === "device"
+    ? "device"
+    : usersAllowed === null
+      ? null
+      : !usersAllowed
+        ? "device"
+        : systemView === "cluster" && !clusterAvailable
+          ? "device"
+          : systemView;
   useEffect(() => {
     let alive = true;
     const answer = (available: boolean) => {
@@ -684,12 +781,15 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       }
       monitorsLink.current = false;
     };
+    // The monitors are the box's: not asked for a member of staff on an
+    // organisation box, nor before it is known who is looking.
+    if (!boxReads) return () => { alive = false; };
     fetch("/setup-api/monitors", { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : null))
       .then((body: { available?: boolean } | null) => answer(body?.available === true))
       .catch(() => answer(false));
     return () => { alive = false; };
-  }, []);
+  }, [boxReads]);
 
   // ClawBox account gate — Remote Control needs the user to be signed in to
   // the portal so the tunnel can be claimed. The hook polls /ai-models/status
@@ -867,7 +967,6 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       window.removeEventListener(OPEN_CLAWAI_OFFER_EVENT, offerHandler);
     };
   }, []);
-  const [isMobile, setIsMobile] = useState(false);
   // On a phone a section is a level below the list: Back returns to the list
   // rather than closing Settings (lib/mobile-back).
   useMobileBack(isMobile && mobileSection !== null, () => setMobileSection(null));
@@ -930,7 +1029,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const [processesOpen, setProcessesOpen] = useState(false);
   // Which commit this box is really running, and whether that agrees with the
   // code on its disk. Fetched only where it is shown (About + System).
-  const buildIdentity = useBuildIdentity(section === "system" || section === "about");
+  const buildIdentity = useBuildIdentity(!orgMember && (section === "system" || section === "about"));
   // `processes` has always been the by-CPU list, so a server that predates the
   // second ordering simply has no memory view to switch to.
   const processRows = (processOrder === "mem" ? stats?.processesByMemory : stats?.processes) ?? stats?.processes ?? [];
@@ -939,7 +1038,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // keeps `section` while it is up — so neither polls.
   const systemFiguresShown = (isMobile ? mobileSection : section) === "system" && systemShows === "device";
   useEffect(() => {
-    if (!systemFiguresShown && section !== "about") return;
+    if (!boxReads || (!systemFiguresShown && section !== "about")) return;
     // Ask only for what is on screen. About draws neither block, and on System
     // each one is behind its own button — so a collapsed panel costs no `ps`
     // and no /proc/stat diff on the box, not merely a hidden <div> here.
@@ -955,7 +1054,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     if (!systemFiguresShown) return;
     const iv = setInterval(poll, 3000);
     return () => clearInterval(iv);
-  }, [section, systemFiguresShown, processesOpen, perCoreOpen]);
+  }, [boxReads, section, systemFiguresShown, processesOpen, perCoreOpen]);
 
   /* ── Versions, for About's rows and the sidebar subtitles. The update
      itself — its run, the beta channel, the branch pin, the force — is the
@@ -968,19 +1067,29 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
   // Load version info on mount
   useEffect(() => {
+    // Updating is the owner's on every box, and so are the versions: another
+    // user's Settings never asks (the route answers them 403).
+    if (usersAllowed !== true) return;
     // /update/status only returns versions when phase=idle and not completed.
     // Use the dedicated /update/versions endpoint which always reports them.
     fetch("/setup-api/update/versions")
       .then(r => r.ok ? r.json() : null)
       .then(data => { if (data?.clawbox || data?.openclaw) setVersionInfo(data); })
       .catch(() => {});
-  }, []);
+  }, [usersAllowed]);
 
   /* ── WiFi ── */
   const [ssid, setSsid] = useState("");
   const [wifiPass, setWifiPass] = useState("");
   const [wifiConnecting, setWifiConnecting] = useState(false);
-  const [wifiStatus, setWifiStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [wifiStatus, setWifiStatus] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
+  const [wifiJoined, setWifiJoined] = useState<{ ssid: string; ip: string | null } | null>(null);
+  // Settings still on screen: a connect's status poll stops once it is not.
+  const wifiPollAliveRef = useRef(true);
+  useEffect(() => {
+    wifiPollAliveRef.current = true;
+    return () => { wifiPollAliveRef.current = false; };
+  }, []);
   const [connectedSSID, setConnectedSSID] = useState<string | null>(null);
   const [wifiQuality, setWifiQuality] = useState<{ signalDbm: number | null; bitrateMbps: number | null; pingMs: number | null }>({ signalDbm: null, bitrateMbps: null, pingMs: null });
   const [ethernet, setEthernet] = useState<{ connected: boolean; iface: string | null }>({ connected: false, iface: null });
@@ -1056,7 +1165,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       console.warn("[SettingsApp] refreshSavedNetworks failed:", err);
     }
   };
-  useEffect(() => { void refreshSavedNetworks(); }, []);
+  useEffect(() => { if (boxReads) void refreshSavedNetworks(); }, [boxReads]);
   const updateSavedPassword = async (name: string) => {
     if (savedNewPassword.length < 8 || savedNewPassword.length > 63) {
       setSavedStatus({ type: "error", message: t("settings.security.wifiPasswordLength") });
@@ -1239,7 +1348,36 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     }
   };
 
+  // The switch and the radio, read together. `enabled` is the switch the AP
+  // scripts obey; `active` is whether the AP is really up. They can disagree
+  // (a stop that failed), and the card shows both. Re-read after every toggle,
+  // because the radio's answer is the one that counts (#1517).
+  //
+  // Only the newest read is applied. The switch unlocks before the re-read
+  // after a toggle lands, so an owner can switch off and on again while the
+  // first read is still probing the radio; answering last, it would set the
+  // switch back to off. Every read, toggle and save takes a new generation.
+  const hotspotStatusGen = useRef(0);
+  const loadHotspotStatus = useCallback((withSsidInput: boolean) => {
+    const gen = ++hotspotStatusGen.current;
+    // Only a 200 is an answer: an error body has no `enabled`, and reading it
+    // as "on" with the default name would let the next toggle rename the AP.
+    fetch("/setup-api/system/hotspot").then(r => (r.ok ? r.json() : null)).then(d => {
+      if (gen !== hotspotStatusGen.current) return;
+      if (!d || typeof d.enabled !== "boolean") return;
+      setHotspotEnabled(d.enabled);
+      if (d.ssid) {
+        setHotspotSSID(d.ssid);
+        if (withSsidInput) setHotspotSSIDInput(d.ssid);
+      }
+      setHotspotHasPassword(!!d.hasPassword);
+      setHotspotActive(!!d.active);
+      setHotspotBlockedBy(d.blockedBy ?? null);
+    }).catch(() => {});
+  }, []);
+
   useEffect(() => {
+    if (!boxReads) return;
     fetch("/setup-api/wifi/status").then(r => r.json()).then(d => {
       if (d.connected && d.ssid) setConnectedSSID(d.ssid);
       setWifiQuality({ signalDbm: d.signalDbm ?? null, bitrateMbps: d.bitrateMbps ?? null, pingMs: d.pingMs ?? null });
@@ -1247,13 +1385,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     fetch("/setup-api/wifi/ethernet").then(r => r.json()).then(d => {
       setEthernet({ connected: !!d.connected, iface: d.iface ?? null });
     }).catch(() => {});
-    fetch("/setup-api/system/hotspot").then(r => r.json()).then(d => {
-      setHotspotEnabled(d.enabled ?? true);
-      if (d.ssid) { setHotspotSSID(d.ssid); setHotspotSSIDInput(d.ssid); }
-      setHotspotHasPassword(!!d.hasPassword);
-      setHotspotActive(!!d.active);
-      setHotspotBlockedBy(d.blockedBy ?? null);
-    }).catch(() => {});
+    loadHotspotStatus(true);
     fetch("/setup-api/system/hostname").then(r => r.json()).then(d => {
       if (d.hostname) {
         setHostname(d.hostname);
@@ -1261,7 +1393,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       }
       if (typeof d.ipv4 === "string") setIpv4(d.ipv4);
     }).catch(() => {});
-  }, []);
+  }, [boxReads, loadHotspotStatus]);
 
   const saveHostname = async () => {
     const name = hostnameInput.trim().toLowerCase().replace(/\.local$/, "");
@@ -1335,6 +1467,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   };
 
   const performHotspotToggle = async (newEnabled: boolean) => {
+    // A read still in flight from before this toggle answers for the old state.
+    hotspotStatusGen.current++;
     setHotspotToggling(true);
     setHotspotApWarning(null);
     try {
@@ -1350,8 +1484,11 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       // control that says it stopped.
       setHotspotEnabled(newEnabled);
       setHotspotApWarning(await readHotspotVerdict(res));
-    } catch { /* leave state unchanged */ } finally {
+    } catch { /* the re-read below shows what is real */ } finally {
       setHotspotToggling(false);
+      // What the switch and the radio did is read back, not assumed: after a
+      // save that failed half-way too.
+      loadHotspotStatus(false);
     }
   };
 
@@ -1377,6 +1514,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       return;
     }
     if (next === hotspotSSID) return;
+    // A read from before this rename would put the old name back.
+    hotspotStatusGen.current++;
     setHotspotSSIDSaving(true);
     setHotspotSSIDStatus(null);
     try {
@@ -1414,6 +1553,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       setHotspotPasswordStatus({ type: "error", message: t("settings.hotspotPasswordTooLong") });
       return;
     }
+    hotspotStatusGen.current++;
     setHotspotPasswordSaving(true);
     setHotspotPasswordStatus(null);
     try {
@@ -1440,31 +1580,69 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   };
 
   const connectWifi = async () => {
-    if (!ssid.trim()) return;
+    const target = ssid.trim();
+    // Enter in the password field reaches here too: one switch at a time.
+    if (!target || wifiConnecting) return;
     setWifiConnecting(true);
-    setWifiStatus(null);
+    setWifiStatus({ type: "info", message: `${t("wifi.handoffJoining", { ssid: target })}…` });
     try {
       const res = await fetch("/setup-api/wifi/connect", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ssid: ssid.trim(), password: wifiPass }),
+        body: JSON.stringify({ ssid: target, password: wifiPass }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
-      setWifiStatus({ type: "success", message: t("settings.connectedTo", { ssid }) });
-      setConnectedSSID(ssid.trim());
-      setSsid("");
-      setWifiPass("");
     } catch (err) {
       setWifiStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.connectionFailed") });
-    } finally {
       setWifiConnecting(false);
+      return;
     }
+    // The POST only starts the switch; how it goes (turning the radio on,
+    // leaving the hotspot, the verdict) comes from connect-status. The box may
+    // drop off mid-switch when this page reaches it over that same WiFi.
+    const deadline = Date.now() + 180_000;
+    const poll = async () => {
+      if (!wifiPollAliveRef.current) return;
+      try {
+        // A box dropping off mid-switch can leave a request hanging rather than
+        // failing: give each one 5 s, then call it off.
+        const request = new AbortController();
+        const timer = setTimeout(() => request.abort(), 5000);
+        const s: WifiConnectStatus = await fetch("/setup-api/wifi/connect-status", { cache: "no-store", signal: request.signal })
+          .then((r) => r.json())
+          .finally(() => clearTimeout(timer));
+        if (s.phase === "connected") {
+          setWifiStatus(null);
+          setConnectedSSID(target);
+          setSsid("");
+          setWifiPass("");
+          setWifiConnecting(false);
+          setWifiJoined({ ssid: s.ssid || target, ip: s.ip ?? null });
+          return;
+        }
+        const text = wifiConnectStatusText(t, s, target);
+        if (text) setWifiStatus(text);
+        if (s.phase === "failed") {
+          setWifiConnecting(false);
+          return;
+        }
+      } catch {
+        // Unreachable mid-switch: keep asking until the deadline.
+      }
+      if (Date.now() > deadline) {
+        setWifiStatus({ type: "error", message: t("settings.connectionFailed") });
+        setWifiConnecting(false);
+        return;
+      }
+      setTimeout(() => { void poll(); }, 1500);
+    };
+    setTimeout(() => { void poll(); }, 1000);
   };
 
   /* ── AI Provider ── */
   const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null; clawaiTokenRejected?: boolean; clawaiConfigured?: boolean } | null>(null);
   useEffect(() => {
-    if (section !== "ai" && !isMobile) return;
+    if (!boxReads || (section !== "ai" && !isMobile)) return;
     const load = () => {
       fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
     };
@@ -1475,7 +1653,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     // while the card underneath still named the old one — until the section was
     // left and re-entered. Seen on a live box, in the same window.
     return onProvidersChanged(load);
-  }, [section, isMobile]);
+  }, [boxReads, section, isMobile]);
 
   // Device EDITION (openclaw | hermes | dual), tracked the same way AIModelsStep
   // tracks its own copy — seeded from the immutable cache, then confirmed once.
@@ -1503,7 +1681,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // its own inventory. Read once when the section opens and again when the
   // providers change — the subtitle names the configured model, which changes
   // through actions, not on its own.
-  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null } | null>(null);
+  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; externalName?: string | null } | null>(null);
   const localTabOpen = section === "localAi";
   useEffect(() => {
     if (!localTabOpen && !isMobile) return;
@@ -1514,6 +1692,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
           configured: !!data.local_ai_configured,
           provider: typeof data.local_ai_provider === "string" ? data.local_ai_provider : null,
           model: typeof data.local_ai_model === "string" ? data.local_ai_model : null,
+          // An external engine in the slot (TASK-2376) is named for its model,
+          // the way the chat header names it.
+          externalName: typeof data.external_engine?.displayName === "string" ? data.external_engine.displayName : null,
         }))
         .catch(() => setLocalAiStatus({ configured: false, provider: null, model: null }));
     };
@@ -1755,21 +1936,21 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // claiming the question is unanswerable while it is being asked. The other
   // three status effects below do the same, for the same reason.
   useEffect(() => {
-    if (!isMobile && section !== "telegram" && section !== "channels") return;
+    if (!boxReads || (!isMobile && section !== "telegram" && section !== "channels")) return;
     unsettleChannel("telegram");
     refreshTelegramStatus();
-  }, [section, isMobile, refreshTelegramStatus, unsettleChannel]);
+  }, [boxReads, section, isMobile, refreshTelegramStatus, unsettleChannel]);
 
   // Pane-only detail — the approved list and the streaming toggle have no
   // reader on the hub, so the hub must not pay for them.
   useEffect(() => {
-    if (section !== "telegram" && !isMobile) return;
+    if (!boxReads || (section !== "telegram" && !isMobile)) return;
     refreshPairing();
     fetch("/setup-api/telegram/streaming", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => setTgStreaming(d ? d.enabled !== false : true))
       .catch(() => setTgStreaming(true));
-  }, [section, isMobile, refreshPairing]);
+  }, [boxReads, section, isMobile, refreshPairing]);
 
   // Refresh the approved/pending lists when an approval happens anywhere (e.g.
   // the desktop popup) so the Settings list updates without a manual reload.
@@ -2109,17 +2290,17 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // The status the hub's dot and the pane's card both read. Unsettle-then-read,
   // as on the Telegram effect above.
   useEffect(() => {
-    if (!isMobile && section !== "email" && section !== "channels") return;
+    if (!boxReads || (!isMobile && section !== "email" && section !== "channels")) return;
     unsettleChannel("email");
     refreshEmailStatus();
-  }, [section, isMobile, refreshEmailStatus, unsettleChannel]);
+  }, [boxReads, section, isMobile, refreshEmailStatus, unsettleChannel]);
 
   // Pane-only detail — the approvals strip and the chat-approval bot.
   useEffect(() => {
-    if (section !== "email" && !isMobile) return;
+    if (!boxReads || (section !== "email" && !isMobile)) return;
     refreshEmailPending();
     refreshChatApproval();
-  }, [section, isMobile, refreshEmailPending, refreshChatApproval]);
+  }, [boxReads, section, isMobile, refreshEmailPending, refreshChatApproval]);
 
   /**
    * KEEP THE QUEUE HONEST WHILE THE PANEL IS OPEN.
@@ -2151,7 +2332,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const emailPanelVisible = isMobile ? mobileSection === "email" : section === "email";
 
   useEffect(() => {
-    if (!emailPanelVisible) return;
+    if (!boxReads || !emailPanelVisible) return;
     // The pacing — interval, focus, visible-edge, and never behind a hidden tab
     // — is `installPendingRefresh`, shared with the chat surface's batch card so
     // the two cannot drift into disagreeing about how fresh this list is.
@@ -2163,7 +2344,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       // being told nobody can be asked.
       refreshChatApproval();
     });
-  }, [emailPanelVisible, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
+  }, [boxReads, emailPanelVisible, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
 
   /** Save a token, flip the switch, or forget the bot. One busy flag for all three. */
   const submitChatApproval = async (body: { enabled?: boolean; botToken?: string } | null) => {
@@ -2500,10 +2681,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
   // Unsettle-then-read, as on the Telegram effect above.
   useEffect(() => {
-    if (!isMobile && section !== "whatsapp" && section !== "channels") return;
+    if (!boxReads || (!isMobile && section !== "whatsapp" && section !== "channels")) return;
     unsettleChannel("whatsapp");
     refreshWhatsapp();
-  }, [section, isMobile, refreshWhatsapp, unsettleChannel]);
+  }, [boxReads, section, isMobile, refreshWhatsapp, unsettleChannel]);
 
   const saveWhatsapp = useCallback(
     async (payload: { allowedUsers?: string[]; mode?: "bot" | "self-chat"; enabled?: boolean }) => {
@@ -2844,7 +3025,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     if (every || subjects.has("whatsapp")) void refreshWhatsapp();
     if (every || subjects.has("discord")) void refreshDiscordStatus();
   }, [refreshTelegramStatus, refreshPairing, refreshEmailStatus, refreshWhatsapp, refreshDiscordStatus]);
-  const { running: channelJob } = useSettingsJobs(CHANNEL_SETUP_GROUP, { onEnded: onChannelJobsEnded });
+  const { running: channelJob } = useSettingsJobs(CHANNEL_SETUP_GROUP, { enabled: boxReads, onEnded: onChannelJobsEnded });
   const channelJobFor = (subject: string): SettingsJob | null => (channelJob?.subject === subject ? channelJob : null);
   const telegramJob = channelJobFor("telegram");
   const emailJob = channelJobFor("email");
@@ -2876,10 +3057,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
   // Unsettle-then-read, as on the Telegram effect above.
   useEffect(() => {
-    if (!isMobile && section !== "discord" && section !== "channels") return;
+    if (!boxReads || (!isMobile && section !== "discord" && section !== "channels")) return;
     unsettleChannel("discord");
     refreshDiscordStatus();
-  }, [section, isMobile, refreshDiscordStatus, unsettleChannel]);
+  }, [boxReads, section, isMobile, refreshDiscordStatus, unsettleChannel]);
 
   useEffect(() => {
     if (section !== "discord") return;
@@ -3274,13 +3455,18 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     };
   }, []);
 
-  const activeSection = isMobile ? (mobileSection ?? section) : section;
+  const requestedSection = isMobile ? (mobileSection ?? section) : section;
+  // A section this person is not drawn (a deep link from an older page, a
+  // channel pane on an organisation box) opens on Appearance instead.
+  const activeSection: Section = isChannelSection(requestedSection)
+    ? (sectionShown("channels") ? requestedSection : DEFAULT_SECTION)
+    : sectionShown(requestedSection) ? requestedSection : DEFAULT_SECTION;
 
   // Read when the Channels list or a channel pane is on screen — the two
   // places the badge can appear — and not on every section, since it costs a
   // request that answers nothing anywhere else.
   useEffect(() => {
-    if (activeSection !== "channels" && !isChannelSection(activeSection)) return;
+    if (!boxReads || (activeSection !== "channels" && !isChannelSection(activeSection))) return;
     // `alive` because the answer comes back after an await and a Settings pane
     // is left by clicking another one.
     let alive = true;
@@ -3289,14 +3475,14 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       if (alive && rows) setPluginRepairs(rows);
     })();
     return () => { alive = false; };
-  }, [activeSection, fetchPluginRepairs]);
+  }, [boxReads, activeSection, fetchPluginRepairs]);
 
   // A channel pane keeps the Messaging Channels entry lit: the sidebar no longer has a
   // row of its own to highlight, and an unlit sidebar reads as "nowhere".
   const navSection: Section = isChannelSection(activeSection)
     ? "channels"
     : activeSection === "localModels" ? "localAi" : activeSection;
-  const visibleNavItems = monitorsAvailable ? NAV_ITEMS : NAV_ITEMS.filter((item) => item.id !== "monitors");
+  const visibleNavItems = NAV_ITEMS.filter((item) => (monitorsAvailable || item.id !== "monitors") && sectionShown(item.id));
   // The panel's own heading. Taken from the entry that already names it — the
   // channels list for a channel pane, the sidebar for every other section — so
   // a heading needs no new translation key and cannot drift from the row the
@@ -3561,31 +3747,70 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
    * which had a sidebar row of its own until TASK-2130. Anyone else signed in
    * gets System without the tabs, and no Users anywhere.
    */
+  const systemViews = clusterAvailable ? [...SYSTEM_VIEWS, CLUSTER_SYSTEM_VIEW] : SYSTEM_VIEWS;
   const systemTabId = (view: SystemView) => `${systemTabsId}-tab-${view}`;
   const systemPanelId = (view: SystemView) => `${systemTabsId}-panel-${view}`;
   /** A view's container is a tab panel where there are tabs, and a plain block where there are none. */
   const systemPanelProps = (view: SystemView) => usersAllowed === true
     ? { role: "tabpanel", id: systemPanelId(view), "aria-labelledby": systemTabId(view) }
     : {};
+  // When the Cluster tab goes — the panel's own read said there is no cluster,
+  // or the availability check did — focus on that tab or inside its panel would
+  // be left on nothing: it moves to Device. Focus anywhere else stays put. One
+  // rule for both ways the tab can go, so it lives on `clusterAvailable`.
+  const clusterHadFocus = useRef(false);
+  useEffect(() => {
+    const onFocusIn = (e: FocusEvent) => {
+      const target = e.target instanceof Element ? e.target : null;
+      clusterHadFocus.current = target !== null && (
+        target.id === `${systemTabsId}-tab-cluster`
+        || !!document.getElementById(`${systemTabsId}-panel-cluster`)?.contains(target)
+      );
+    };
+    // Focus that leaves for nowhere (a click on the page's background) is not
+    // on Cluster any more. Focus lost because the focused element was REMOVED
+    // is the case this rule is for, so an element no longer in the page keeps it.
+    const onFocusOut = (e: FocusEvent) => {
+      if (e.relatedTarget) return; // focusin on the new element decides
+      const left = e.target instanceof Element ? e.target : null;
+      queueMicrotask(() => {
+        if (left?.isConnected) clusterHadFocus.current = false;
+      });
+    };
+    document.addEventListener("focusin", onFocusIn);
+    document.addEventListener("focusout", onFocusOut);
+    return () => {
+      document.removeEventListener("focusin", onFocusIn);
+      document.removeEventListener("focusout", onFocusOut);
+    };
+  }, [systemTabsId]);
+  const clusterShownBefore = useRef(clusterAvailable);
+  useLayoutEffect(() => {
+    if (clusterShownBefore.current && !clusterAvailable && clusterHadFocus.current) {
+      clusterHadFocus.current = false;
+      document.getElementById(`${systemTabsId}-tab-device`)?.focus();
+    }
+    clusterShownBefore.current = clusterAvailable;
+  }, [clusterAvailable, systemTabsId]);
   // The tabs pattern's keys: the arrows move between the two (and open the
   // one they land on), Home and End go to the first and the last.
   const onSystemTabKey = (e: React.KeyboardEvent) => {
-    const at = SYSTEM_VIEWS.findIndex((v) => v.id === systemShows);
-    const last = SYSTEM_VIEWS.length - 1;
-    const to = e.key === "ArrowRight" ? (at + 1) % SYSTEM_VIEWS.length
-      : e.key === "ArrowLeft" ? (at + last) % SYSTEM_VIEWS.length
+    const at = systemViews.findIndex((v) => v.id === systemShows);
+    const last = systemViews.length - 1;
+    const to = e.key === "ArrowRight" ? (at + 1) % systemViews.length
+      : e.key === "ArrowLeft" ? (at + last) % systemViews.length
         : e.key === "Home" ? 0
           : e.key === "End" ? last
             : -1;
     if (to < 0) return;
     e.preventDefault();
-    const next = SYSTEM_VIEWS[to].id;
+    const next = systemViews[to].id;
     setSystemView(next);
     document.getElementById(systemTabId(next))?.focus();
   };
   const systemTabs = usersAllowed === true && (
     <div role="tablist" aria-label={t("settings.system")} onKeyDown={onSystemTabKey} className="max-w-xl flex gap-1 bg-white/[0.04] rounded-xl p-1 mb-5" data-testid="settings-system-tabs">
-      {SYSTEM_VIEWS.map((view) => {
+      {systemViews.map((view) => {
         const selected = systemShows === view.id;
         return (
           <button
@@ -3878,6 +4103,12 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         )}
 
         {/* ─── Network ─── */}
+        {activeSection === "account" && (
+          <div className="max-w-xl space-y-5">
+            <OwnPasswordCard />
+          </div>
+        )}
+
         {activeSection === "wifi" && (
           <div className="max-w-xl space-y-5">
 
@@ -3997,6 +4228,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                       {hotspotSSID}
                       {hotspotEnabled && hotspotActive === false && <span className="ml-2 text-amber-300/90">• not broadcasting</span>}
                       {hotspotEnabled && hotspotActive === true && <span className="ml-2 text-emerald-300/80">• broadcasting</span>}
+                      {hotspotEnabled === false && hotspotActive === true && <span className="ml-2 text-amber-300/90">• broadcasting</span>}
                     </div>
                   </div>
                 </div>
@@ -4014,6 +4246,26 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               </div>
               {hotspotApWarning && (
                 <div className="mt-3"><StatusMessage type="info" message={hotspotApWarning} /></div>
+              )}
+              {/* The switch is off but the setup AP (the ClawBox-Setup profile
+                  the stop owns) is still up — a stop that failed, or anything
+                  else that raised it. Say so, and offer the stop again, instead
+                  of a quiet "off" (#1517). */}
+              {hotspotEnabled === false && hotspotActive === true && (
+                <div data-testid="hotspot-off-but-broadcasting" className="mt-3 flex items-start gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2.5">
+                  <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 18 }}>warning</span>
+                  <div className="text-[11px] text-amber-100/90 leading-relaxed">
+                    {tr("settings.hotspotOffButBroadcasting", "The hotspot is switched off, but this ClawBox is still broadcasting it.")}{" "}
+                    <button
+                      type="button"
+                      onClick={() => { void performHotspotToggle(false); }}
+                      disabled={hotspotToggling}
+                      className="ml-1 underline font-semibold text-amber-100 bg-transparent border-none p-0 cursor-pointer disabled:opacity-50"
+                    >
+                      {tr("settings.hotspotStopNow", "Stop it now")}
+                    </button>
+                  </div>
+                </div>
               )}
               {hotspotEnabled && hotspotActive !== false && (
                 <p className="text-[11px] text-[var(--text-muted)] opacity-50 mt-3 leading-relaxed">
@@ -4235,6 +4487,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 </>
               )}
 
+              {/* Outside the form below: a join clears the form, and with it whatever it holds. */}
+              {wifiJoined && (
+                <WifiConnectedDialog ssid={wifiJoined.ssid} ip={wifiJoined.ip} onClose={() => setWifiJoined(null)} />
+              )}
               {/* Connect form (shown after selecting a network or manual entry) */}
               {(ssid !== "" || showManualWifi) && (
                 <div className="space-y-4">
@@ -4308,7 +4564,18 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 time this page opened. A refused credential is still a
                 configured one and is the connect panel's to fix, not this
                 card's to pitch over. */}
-            {aiProvider?.clawaiConfigured === false && (
+            {/* Never on an organisation box (src/lib/org-mode.ts): its ClawBox AI
+                offers are hidden for everyone, the owner included. */}
+            {/* On a box whose AI is the owner's own (an external engine,
+                Local-only mode) the local choice leads and the cloud cards
+                fold away or, with "Hide cloud AI providers" on, are not drawn
+                (src/components/CloudProvidersPanel.tsx, TASK-2497). */}
+            <CloudProvidersSettings
+              onOpenLocalAi={() => setSectionGated("localAi")}
+              openRequest={openClawAIOfferRequest + providerSelectionRequest}
+              openRequestSeen={cloudOpenSeen}
+              onOpenRequestSeen={setCloudOpenSeen}
+              pitch={aiProvider?.clawaiConfigured === false && !sessionUser?.orgMode && (
               <ClawboxAiPitchCard
                 onConnect={() => {
                   // Two panels answer this page, and only one of them acts on
@@ -4328,6 +4595,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 onLocalAi={() => setSectionGated("localAi")}
               />
             )}
+            >
 
             <AiProviderList
               showAnthropicAccounts={showAnthropicAccounts}
@@ -4361,6 +4629,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 window.dispatchEvent(new Event("clawbox:primary-ai-configured"));
               }}
             /></I18nProvider>
+            </CloudProvidersSettings>
 
             {/* The ClawBox AI allowances are no longer a card of their own down
                 here. They now hang off the ClawBox AI row in the list above,
@@ -5235,6 +5504,12 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 )}
               </div>
             )}
+
+            {/* Send approved drafts: the send service an e-mail draft the
+                assistant prepared goes out through, on a person's press in
+                the chat. Independent of the account above; the owner's
+                alone (the panel draws nothing for anyone else). */}
+            <MailDraftApprovalPanel />
 
             {/* Setup */}
             {(emailStatus === null || !emailStatus.configured || emailReconfigure) && (
@@ -6322,9 +6597,27 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
             <div className="spinner" role="status" aria-label={t("loading")} />
           </div>
         )}
+        {/* `max-w-xl` like the switch above and the Device panel below: the
+            column centres each of its direct children at its OWN width, and
+            without one this spanned the whole column, so the Users panel
+            inside started ~90 px left of the switch (x64 test, 2026-11-10). */}
         {activeSection === "system" && systemShows === "users" && (
-          <div {...systemPanelProps("users")}>
+          <div className="max-w-xl" {...systemPanelProps("users")}>
             <UsersPanel />
+          </div>
+        )}
+        {activeSection === "system" && systemShows === "cluster" && (
+          // tabIndex: the tabs pattern's way from the selected tab into the panel,
+          // which can hold nothing focusable yet (the first read is pending).
+          <div className="max-w-xl" {...systemPanelProps("cluster")} tabIndex={0}>
+            <ClusterPanel
+              onUnavailable={() => {
+                // The box says it has no cluster after all: the tab goes, and
+                // Device opens (focus follows, with the rule on `clusterAvailable`).
+                clusterGone();
+                setSystemView("device");
+              }}
+            />
           </div>
         )}
         {activeSection === "system" && systemShows === "device" && (
@@ -6347,8 +6640,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                   </div>
                 </div>
 
-                {/* CPU + Memory card */}
-                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                {/* Resources card: CPU, Memory, Swap, GPU, Temperature and
+                    each disk, one row style. Temperature and Storage were
+                    cards of their own until the x64 test (2026-11-10). */}
+                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-resources">
                   <div className="flex items-center gap-2 mb-4">
                     <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>speed</span>
                     <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.resources")}</h3>
@@ -6407,58 +6702,45 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                       </div>
                     </div>
                   )}
-                </div>
 
-                {/* Temperature card */}
-                {stats.temperature?.value != null && (
-                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                    <div className="flex items-center gap-2 mb-4">
-                      <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>thermostat</span>
-                      <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.temperature")}</h3>
-                    </div>
-                    <div className="flex items-end gap-3">
-                      <span className="text-3xl font-mono font-bold" style={{ color: stats.temperature.value > 80 ? "#ef4444" : stats.temperature.value > 60 ? "#f97316" : "#22d3ee" }}>
-                        {localeFixed(stats.temperature.value, 1, locale)}°C
-                      </span>
-                      <span className="text-xs text-[var(--text-muted)] opacity-50 mb-1.5">
-                        {stats.temperature.value > 80 ? t("settings.critical") : stats.temperature.value > 60 ? t("settings.warm") : t("settings.normal")}
-                      </span>
-                    </div>
-                    <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden mt-3">
-                      <div
-                        className="h-full rounded-full transition-all duration-700"
-                        style={{
-                          width: `${Math.min(100, (stats.temperature.value / 100) * 100)}%`,
-                          backgroundColor: stats.temperature.value > 80 ? "#ef4444" : stats.temperature.value > 60 ? "#f97316" : "#22d3ee",
-                        }}
-                      />
-                    </div>
-                    <div className="flex justify-between text-[10px] text-[var(--text-muted)] opacity-40 mt-1.5 font-mono">
-                      <span>0°C</span><span>50°C</span><span>100°C</span>
-                    </div>
-                  </div>
-                )}
-
-                {/* Storage card */}
-                <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                  <div className="flex items-center gap-2 mb-4">
-                    <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>hard_drive</span>
-                    <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.storage")}</h3>
-                  </div>
-                  <div className="space-y-3">
-                    {stats.storage.filter(m => m.mountpoint !== "/boot/efi").map(m => (
-                      <div key={m.mountpoint}>
-                        <div className="flex items-center justify-between mb-1.5">
-                          <span className="text-xs text-[var(--text-secondary)] font-mono">{m.mountpoint}</span>
-                          <span className="text-xs text-white/35 font-mono">{diskFigure(m.used, locale)} / {diskFigure(m.size, locale)}</span>
-                        </div>
-                        <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
-                          <div className="h-full rounded-full transition-all duration-700" style={{ width: `${m.usePercent}%`, backgroundColor: barColor(m.usePercent) }} />
-                        </div>
-                        <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{m.usePercent}% &middot; {t("settings.freeAmount", { amount: diskFigure(m.avail, locale) })}</div>
+                  {/* Temperature row: the reading on a 0–100 °C bar, in the
+                      colour its level is (red over 80, orange over 60). */}
+                  {stats.temperature?.value != null && (
+                    <div className="mt-4" data-testid="settings-resource-temperature">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-xs text-[var(--text-muted)]">{t("settings.temperature")}</span>
+                        <span className="text-xs font-mono font-semibold" style={{ color: temperatureColor(stats.temperature.value) }}>
+                          {localeFixed(stats.temperature.value, 1, locale)}°C
+                        </span>
                       </div>
-                    ))}
-                  </div>
+                      <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                        <div
+                          className="h-full rounded-full transition-all duration-700"
+                          style={{
+                            width: `${Math.min(100, Math.max(0, stats.temperature.value))}%`,
+                            backgroundColor: temperatureColor(stats.temperature.value),
+                          }}
+                        />
+                      </div>
+                      <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{t(temperatureLevelKey(stats.temperature.value))}</div>
+                    </div>
+                  )}
+
+                  {/* Storage rows: one per disk, the EFI partition left out. */}
+                  {stats.storage.filter(m => m.mountpoint !== "/boot/efi").map(m => (
+                    <div key={m.mountpoint} className="mt-4" data-testid="settings-resource-storage">
+                      <div className="flex items-center justify-between gap-3 mb-1.5">
+                        <span className="text-xs text-[var(--text-muted)] min-w-0 truncate">
+                          {t("settings.storage")} <span className="font-mono text-[var(--text-secondary)]">{m.mountpoint}</span>
+                        </span>
+                        <span className="text-xs font-mono text-[var(--text-muted)] shrink-0">{diskFigure(m.used, locale)} / {diskFigure(m.size, locale)}</span>
+                      </div>
+                      <div className="w-full h-2 rounded-full bg-white/[0.06] overflow-hidden">
+                        <div className="h-full rounded-full transition-all duration-700" style={{ width: `${m.usePercent}%`, backgroundColor: barColor(m.usePercent) }} />
+                      </div>
+                      <div className="text-right text-[10px] text-[var(--text-muted)] opacity-50 mt-1">{m.usePercent}% &middot; {t("settings.freeAmount", { amount: diskFigure(m.avail, locale) })}</div>
+                    </div>
+                  ))}
                 </div>
 
                 {/* Per core, and the busiest processes — the two things an
@@ -6615,7 +6897,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 It is about the box, not the assistant, so it lives with the box's
                 figures (owner, 2026-09-16); Desktop & power stays on Harness.
                 Rendered outside the stats ternary: a box whose stats call fails
-                must still let the owner change its password. */}
+                must still let the owner change its password. The OWNER's
+                password: another user changes their own under Account. */}
+            {!nonOwner && (
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-2">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>key</span>
@@ -6721,13 +7005,17 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               </div>
               {sysPasswordStatus && <div className="mt-3"><StatusMessage type={sysPasswordStatus.type} message={sysPasswordStatus.message} /></div>}
             </div>
+            )}
           </div>
         )}
 
         {/* ─── Remote Control ─── */}
         {activeSection === "remote" && renderRemoteSection()}
 
-        {activeSection === "monitors" && monitorsAvailable && <MonitorsPanel />}
+        {/* ─── Linked ClawBoxes ─── */}
+        {activeSection === "linkedBoxes" && <LinkedBoxesPanel />}
+
+        {activeSection === "monitors" && monitorsAvailable && (viewerMonitors === undefined ? <MonitorsPanel /> : <ViewedMonitors status={viewerMonitors} />)}
 
         {/* ─── About ─── */}
         {activeSection === "update" && (
@@ -6825,6 +7113,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 the pin. The current OpenClaw version is still displayed
                 in the version-info section above. */}
             <div className="flex gap-2">
+              {/* Updating is the owner's on every box: nobody else is offered it. */}
+              {sectionShown("update") && (
               <button
                 onClick={() => { setSection("update"); setMobileSection("update"); }}
                 data-testid="settings-about-open-update"
@@ -6841,6 +7131,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                   )}
                 </div>
               </button>
+              )}
             </div>
 
             <button
@@ -6998,6 +7289,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       case "localAi": {
         if (localAiStatus === null) return { subtitle: null };
         if (!localAiStatus.configured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        if (localAiStatus.externalName) {
+          return { subtitle: t("localModels.external.subtitle", { model: localAiStatus.externalName }) };
+        }
         return { subtitle: localAiStatus.model || localAiStatus.provider };
       }
       case "telegram": {

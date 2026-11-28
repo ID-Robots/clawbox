@@ -81,7 +81,7 @@ let binDir: string;
 let projectDir: string;
 let restore: () => void;
 
-const INIT = '{"type":"system","subtype":"init","session_id":"sess-durable-1","model":"deepseek-v4-pro","permissionMode":"acceptEdits"}';
+const INIT = '{"type":"system","subtype":"init","session_id":"sess-durable-1","model":"deepseek-v4-flash","permissionMode":"acceptEdits"}';
 
 /**
  * One entry per harness invocation — what the box said to it on stdin.

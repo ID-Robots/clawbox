@@ -3,6 +3,10 @@ import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { PERSIST_KEY_PREFIX } from "@/lib/chat-reasoning";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a box not yet migrated still names (TASK-2261). */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 
 // A jsdom mount of `ChatPopup` — the fake gateway handshake, the model seed,
 // the transcript — costs seconds under a full parallel run, and a case does it
@@ -24,7 +28,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  */
 
 const SEED_TEXT = "Your tabby is ready";
-const PRO_MODEL = "deepseek/deepseek-v4-pro";
+const PRO_MODEL = `deepseek/${RETIRED_CHAT_ID}`;
 const FLASH_MODEL = "deepseek/deepseek-v4-flash";
 
 let history: unknown[] = [];
@@ -103,7 +107,7 @@ function installFetch(model: string) {
       return { ok: true, json: async () => ({
         clawaiAccountTier: "pro",
         clawaiTier: "pro",
-        clawaiAllowedModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+        clawaiAllowedModels: ["deepseek-v4-flash", RETIRED_CHAT_ID],
         clawaiConfigured: true,
         clawaiLoggedIn: true,
       }) };

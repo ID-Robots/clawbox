@@ -97,10 +97,10 @@ beforeEach(() => {
 });
 
 describe("the vocabulary", () => {
-  it("offers exactly the three accounts a run can be paid from, ClawBox AI first", () => {
+  it("offers exactly the three accounts a run can be paid from and the box's own engine, ClawBox AI first", () => {
     // Appended, never inserted: the order is the readiness fallback's and the
     // pickers', and a box whose stored list predates OpenAI reads the same.
-    expect([...CODING_PROVIDERS]).toEqual(["clawbox-ai", "anthropic", "openai"]);
+    expect([...CODING_PROVIDERS]).toEqual(["clawbox-ai", "anthropic", "openai", "local"]);
     // The whole installed base is on this one, and a default that moved would
     // put every existing box on its owner's personal bill.
     expect(DEFAULT_CODING_PROVIDER).toBe("clawbox-ai");
@@ -157,13 +157,15 @@ describe("the vocabulary", () => {
     expect(CODING_PROVIDERS.filter(runsOnCodex)).toEqual(["openai"]);
   });
 
-  it("offers Opus 5.5 first and defaults to it, with the plain id spelled out", () => {
+  it("offers Opus 5.5 first and defaults to Sonnet 5.5, with the plain id spelled out", () => {
     // The literal is the point. An unnamed run's model reaches Claude Code as
     // a string, so a typo here ("claude-opus-5.5", an alias) is not a type
     // error — it is a run that fails several minutes in, on the owner's bill.
-    expect([...ANTHROPIC_MODELS]).toEqual(["claude-opus-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"]);
-    expect(DEFAULT_ANTHROPIC_MODEL).toBe("claude-opus-5-5");
-    expect(defaultModelForProvider("anthropic")).toBe("claude-opus-5-5");
+    expect([...ANTHROPIC_MODELS]).toEqual(["claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"]);
+    // Sonnet 5.5 since 2026-11-10 — the model a team's worker gets, so a plan
+    // of one task run as a single run is written by the same model.
+    expect(DEFAULT_ANTHROPIC_MODEL).toBe("claude-sonnet-5-5");
+    expect(defaultModelForProvider("anthropic")).toBe("claude-sonnet-5-5");
     expect(defaultModelForProvider("clawbox-ai")).toBeNull();
   });
 
@@ -187,8 +189,14 @@ describe("what the panel is offered", () => {
   // left out unless the owner already has the account (SCA A3, 2026-10-30).
   const NONE = { codexInstalled: false, openaiConnected: false, connected: ["clawbox-ai"] as const, defaultProvider: "clawbox-ai" as const };
 
-  it("offers every provider on a box with the Codex CLI", () => {
-    expect(offeredProviders({ ...NONE, codexInstalled: true })).toEqual([...CODING_PROVIDERS]);
+  it("offers every cloud provider on a box with the Codex CLI, and the box's engine only where the owner put it", () => {
+    expect(offeredProviders({ ...NONE, codexInstalled: true })).toEqual(["clawbox-ai", "anthropic", "openai"]);
+    expect(offeredProviders({ ...NONE, codexInstalled: true, connected: ["clawbox-ai", "local"] })).toEqual([...CODING_PROVIDERS]);
+    expect(offeredProviders({ ...NONE, codexInstalled: true, defaultProvider: "local" })).toContain("local");
+  });
+
+  it("offers the box's engine alone under the local-only AI lock, whatever the box holds", () => {
+    expect(offeredProviders({ codexInstalled: true, openaiConnected: true, connected: ["clawbox-ai", "openai"], defaultProvider: "openai", locked: true })).toEqual(["local"]);
   });
 
   it("leaves OpenAI out on a box without the CLI that never asked for it, in the same order", () => {
@@ -208,7 +216,7 @@ describe("what the panel is offered", () => {
     expect([...(await lib.getCodingAgentStatus()).providers]).toEqual(["clawbox-ai", "anthropic"]);
     // The CLI arrives: offered on the next poll, nothing to restart.
     getOpenAIConnection.mockResolvedValue(OPENAI_OFF);
-    expect([...(await lib.getCodingAgentStatus()).providers]).toEqual([...CODING_PROVIDERS]);
+    expect([...(await lib.getCodingAgentStatus()).providers]).toEqual(["clawbox-ai", "anthropic", "openai"]);
     // Connected once, then the CLI went: still drawn, so the owner sees why it cannot run.
     getOpenAIConnection.mockResolvedValue({ ...OPENAI_OFF, codexInstalled: false });
     configGetAll.mockResolvedValue({ coding_agent_providers: ["clawbox-ai", "openai"] });
@@ -448,14 +456,14 @@ describe("the run environment", () => {
 
   it("passes the run's model, and drops an inherited one on a provider that would not honour it", () => {
     const prev = process.env.CLAUDE_DS_MODEL;
-    process.env.CLAUDE_DS_MODEL = "deepseek-v4-pro[1m]";
+    process.env.CLAUDE_DS_MODEL = "deepseek-v4-flash[1m]";
     try {
       expect(buildRunEnv({ provider: "anthropic", model: "claude-sonnet-5" }).CLAUDE_DS_MODEL).toBe("claude-sonnet-5");
       // An Anthropic run with no model named must not inherit a DeepSeek one:
       // the model name would reach real Anthropic, which has never heard of it.
       expect(buildRunEnv({ provider: "anthropic" }).CLAUDE_DS_MODEL).toBeUndefined();
       // The ClawBox AI branch keeps the owner's own documented override.
-      expect(buildRunEnv({ provider: "clawbox-ai" }).CLAUDE_DS_MODEL).toBe("deepseek-v4-pro[1m]");
+      expect(buildRunEnv({ provider: "clawbox-ai" }).CLAUDE_DS_MODEL).toBe("deepseek-v4-flash[1m]");
     } finally {
       if (prev === undefined) delete process.env.CLAUDE_DS_MODEL;
       else process.env.CLAUDE_DS_MODEL = prev;
@@ -464,7 +472,7 @@ describe("the run environment", () => {
 
   it("gives an OpenAI run the coding agent's own Codex home and none of the wrapper's knobs", () => {
     const saved = Object.fromEntries(["CLAUDE_DS_MODEL", "CLAUDE_DS_CONFIG_DIR", "CLAWBOX_AI_PROXY_URL"].map((k) => [k, process.env[k]]));
-    Object.assign(process.env, { CLAUDE_DS_MODEL: "deepseek-v4-pro[1m]", CLAUDE_DS_CONFIG_DIR: "/srv/elsewhere", CLAWBOX_AI_PROXY_URL: "https://proxy.example.invalid" });
+    Object.assign(process.env, { CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]", CLAUDE_DS_CONFIG_DIR: "/srv/elsewhere", CLAWBOX_AI_PROXY_URL: "https://proxy.example.invalid" });
     try {
       const env = buildRunEnv({ effort: "max", provider: "openai", model: "gpt-5.6-sol" });
       // Never ~/.codex: that is the gateway's ChatGPT sign-in.
@@ -498,7 +506,7 @@ describe("the run environment", () => {
     const saved = Object.fromEntries(["CLAUDE_DS_PROVIDER", "CLAUDE_DS_MODEL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"].map((k) => [k, process.env[k]]));
     Object.assign(process.env, {
       CLAUDE_DS_PROVIDER: "anthropic",
-      CLAUDE_DS_MODEL: "deepseek-v4-pro[1m]",
+      CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]",
       ANTHROPIC_API_KEY: "server-env-anthropic-key",
       ANTHROPIC_AUTH_TOKEN: "server-env-proxy-token",
       ANTHROPIC_BASE_URL: "https://proxy.example.invalid",
@@ -508,7 +516,7 @@ describe("the run environment", () => {
       const worker = buildRunEnv({ effort: "ultracode", provider: "clawbox-ai", model: null });
       const economyWorker = buildRunEnv({ effort: "ultracode", provider: "clawbox-ai", model: "deepseek-v4-flash" });
       expect(planner).toMatchObject({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_MODEL: "claude-fable-5-1", CLAUDE_DS_EFFORT: "xhigh" });
-      expect(worker).toMatchObject({ CLAUDE_DS_PROVIDER: "clawbox-ai", CLAUDE_DS_MODEL: "deepseek-v4-pro[1m]", CLAUDE_DS_EFFORT: "ultracode" });
+      expect(worker).toMatchObject({ CLAUDE_DS_PROVIDER: "clawbox-ai", CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]", CLAUDE_DS_EFFORT: "ultracode" });
       expect(economyWorker).toMatchObject({ CLAUDE_DS_PROVIDER: "clawbox-ai", CLAUDE_DS_MODEL: "deepseek-v4-flash" });
       for (const env of [planner, worker, economyWorker]) {
         expect(env.ANTHROPIC_API_KEY).toBeUndefined();

@@ -36,6 +36,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const cliMock = vi.hoisted(() => vi.fn());
+// The link runs the vision check (src/lib/clawbox-ai-vision.ts), which SHOWS
+// the proxy a picture — network I/O no unit test may do. Here Flash sees.
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  probeClawboxAiVision: vi.fn(async () => ({ verdict: "flash", model: "deepseek-v4-flash", flash: "sees", fallback: null })),
+}));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 const invalidateMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: invalidateMock }));
@@ -62,11 +68,6 @@ vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
   installHermesImagePlugin: vi.fn(),
 }));
-const resolveVisionMock = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
-  resolveVisionModelId: resolveVisionMock,
-}));
 
 import {
   CLAWAI_PROVIDER,
@@ -75,11 +76,14 @@ import {
   _resetClawaiModelsReconcileForTests,
 } from "@/lib/hermes-clawai";
 import { hermesPickerModels } from "@/tests/helpers/hermes-picker-catalogue";
+import { CLAWBOX_AI_FLASH_MODEL_ID } from "@/lib/clawbox-ai-models";
 import {
-  CLAWBOX_AI_FLASH_MODEL_ID,
-  CLAWBOX_AI_PRO_MODEL_ID,
-  CLAWBOX_AI_VISION_MODEL_ID,
-} from "@/lib/clawbox-ai-models";
+  RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS,
+  RETIRED_CLAWBOX_AI_VISION_MODEL_IDS,
+} from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id, which every link before TASK-2261 declared here. */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 
 /**
  * The `providers.<slug>` block the writer left behind, decoded the way
@@ -114,12 +118,6 @@ describe("what Hermes' own /model picker knows about ClawBox AI", () => {
   beforeEach(() => {
     cliMock.mockReset();
     cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
-    resolveVisionMock.mockReset();
-    resolveVisionMock.mockResolvedValue({
-      id: CLAWBOX_AI_VISION_MODEL_ID,
-      verified: true,
-      reason: "proxy-allows",
-    });
   });
 
   it("offers both tier models even though the proxy's /models is unreadable", async () => {
@@ -127,10 +125,7 @@ describe("what Hermes' own /model picker knows about ClawBox AI", () => {
     // `[]` is not a guess: the live proxy answers 200 with
     // {"status":"ok","service":"ClawBox AI Proxy","models":[…]} and Hermes reads
     // `data[].id`, so its probe comes back empty on every box.
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("still defers to the endpoint when it does answer", async () => {
@@ -153,21 +148,20 @@ describe("what Hermes' own /model picker knows about ClawBox AI", () => {
     // whatever the flag says, which is the one case the clawai repair writes
     // into; see the branch in `clawaiCatalogueVerdict` for the limit that
     // leaves.
-    const declared = { models: [CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID] };
-    expect(hermesPickerModels(declared, [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    const declared = { models: [CLAWBOX_AI_FLASH_MODEL_ID, "deepseek-v5"] };
+    expect(hermesPickerModels(declared, [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID, "deepseek-v5"]);
     expect(hermesPickerModels({ ...declared, models_discovered: true }, [])).toEqual([]);
   });
 
-  it("does not offer the vision model as something to chat with", async () => {
+  it("declares the one model on every plan, and no retired id (TASK-2261)", async () => {
+    // The Max plan used to add its own chat id, and a separate vision model
+    // looked at pictures. Both are gone: Flash does both, for every plan.
     await applyClawaiToHermes("claw_token_abc", "pro");
-    // It exists so an attached picture gets looked at (`auxiliary.vision`), and
-    // it is not a chat tier. Declaring it here would put it in the keyboard.
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).not.toContain(
-      CLAWBOX_AI_VISION_MODEL_ID,
-    );
+    const offered = hermesPickerModels(providerEntry(CLAWAI_PROVIDER), []);
+    expect(offered).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
+    for (const retired of [...RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS, ...RETIRED_CLAWBOX_AI_VISION_MODEL_IDS]) {
+      expect(offered).not.toContain(retired);
+    }
   });
 
 });
@@ -254,10 +248,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     // without a repair the bot keeps saying "clawai (0)" forever.
     providerBlock(LINKED);
     await reconcileClawaiModelsWithHermes();
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("asks for the whole provider block in one call", async () => {
@@ -276,10 +267,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     await reconcileClawaiModelsWithHermes();
     expect(cliMock.mock.calls.map((c) => c[0] as string[])).toEqual([
       ["config", "get", `providers.${CLAWAI_PROVIDER}`, "--json"],
-      ["config", "set", `providers.${CLAWAI_PROVIDER}.models`, JSON.stringify([
-        CLAWBOX_AI_FLASH_MODEL_ID,
-        CLAWBOX_AI_PRO_MODEL_ID,
-      ])],
+      ["config", "set", `providers.${CLAWAI_PROVIDER}.models`, JSON.stringify([CLAWBOX_AI_FLASH_MODEL_ID])],
       ["config", "get", `providers.${CLAWAI_PROVIDER}.models`, "--json"],
     ]);
   });
@@ -301,9 +289,23 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
   });
 
   it("leaves a catalogue that is already there alone", async () => {
-    providerBlock({ ...LINKED, models: [CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID] });
+    providerBlock({ ...LINKED, models: [CLAWBOX_AI_FLASH_MODEL_ID] });
     await reconcileClawaiModelsWithHermes();
     expect(wrote()).toBe(false);
+  });
+
+  it("re-declares a catalogue that still names the retired Max-plan id (TASK-2261)", async () => {
+    // Every link before the one model declared it here, and nothing re-links a
+    // box, so the keyboard would go on offering it.
+    providerBlock({ ...LINKED, models: [CLAWBOX_AI_FLASH_MODEL_ID, RETIRED_CHAT_ID] });
+    await reconcileClawaiModelsWithHermes();
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
+  });
+
+  it("re-declares it even under a discover_models: false pin, which pins nothing the owner chose", async () => {
+    providerBlock({ ...LINKED, discover_models: false, models: [CLAWBOX_AI_FLASH_MODEL_ID, RETIRED_CHAT_ID] });
+    await reconcileClawaiModelsWithHermes();
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("leaves a single id the owner pinned by hand alone", async () => {
@@ -343,10 +345,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     providerBlock(block);
     await reconcileClawaiModelsWithHermes();
     // `null`, not `[]`: with discovery off there is no probe to answer.
-    expect(hermesPickerModels({ ...block, ...providerEntry(CLAWAI_PROVIDER) }, null)).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels({ ...block, ...providerEntry(CLAWAI_PROVIDER) }, null)).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("declares the catalogue over a value Hermes does not read as an allowlist", async () => {
@@ -357,10 +356,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     // is not a key Hermes reads.
     providerBlock({ ...LINKED, models: { [CLAWBOX_AI_FLASH_MODEL_ID]: { context_length: 65536 } } });
     await reconcileClawaiModelsWithHermes();
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("declares a catalogue for a pin that pins nothing", async () => {
@@ -371,20 +367,14 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     // reached by the one path that used to walk away logging "pinned".
     providerBlock({ ...LINKED, discover_models: false });
     await reconcileClawaiModelsWithHermes();
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("declares a catalogue for a pin holding an empty list", async () => {
     // Same hole, the other spelling.
     providerBlock({ ...LINKED, discover_models: false, models: [] });
     await reconcileClawaiModelsWithHermes();
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("still honours a pin that actually pins something", async () => {
@@ -414,10 +404,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
       models: { [CLAWBOX_AI_FLASH_MODEL_ID]: { context_length: 65536 } },
     });
     await reconcileClawaiModelsWithHermes();
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("says so when the block carries no endpoint", async () => {
@@ -581,10 +568,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
       rebuilding = false;
       await reconcileClawaiModelsWithHermes();
       expect(invalidateMock).toHaveBeenCalled();
-      expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-        CLAWBOX_AI_FLASH_MODEL_ID,
-        CLAWBOX_AI_PRO_MODEL_ID,
-      ]);
+      expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
     } finally {
       warn.mockRestore();
     }
@@ -641,10 +625,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
       // so it declares nothing a second time. An unverified write costs another
       // question, not another rewrite of the customer's config.yaml.
       expect(setCount()).toBe(1);
-      expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-        CLAWBOX_AI_FLASH_MODEL_ID,
-        CLAWBOX_AI_PRO_MODEL_ID,
-      ]);
+      expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
     } finally {
       warn.mockRestore();
     }
@@ -657,7 +638,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
    * unlatches and asks again — and what the re-read finds is a `models:` that
    * is a STRING. Confirmed against the installed Hermes 0.20.5 by running its
    * own functions over that value: `_declared_model_ids` returns ONE id, the
-   * whole literal `["deepseek-v4-flash","deepseek-v4-pro"]`, and
+   * whole literal of a two-id JSON list, and
    * `_models_config_is_allowlist` returns True. So Hermes reads it as a
    * perfectly good one-model allowlist, the keyboard offers that one unusable
    * entry, and every "already declared" branch here walks away from it —
@@ -665,7 +646,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
    * outlives the process: the residue is in the file, and only a re-declare
    * clears it.
    */
-  const STORED_AS_TEXT = JSON.stringify([CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID]);
+  const STORED_AS_TEXT = JSON.stringify([CLAWBOX_AI_FLASH_MODEL_ID, "deepseek-v5"]);
 
   it("shows the symptom a stored-as-text catalogue leaves on the keyboard", async () => {
     // The premise, stated through Hermes' own reader rather than asserted: one
@@ -676,10 +657,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
   it("re-declares a catalogue an earlier write stored as text", async () => {
     providerBlock({ ...LINKED, models: STORED_AS_TEXT });
     await reconcileClawaiModelsWithHermes();
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("re-declares stored-as-text even where a pin claims to protect it", async () => {
@@ -687,10 +665,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     // the bogus id is not merely offered — it is the whole row, permanently.
     providerBlock({ ...LINKED, discover_models: false, models: STORED_AS_TEXT });
     await reconcileClawaiModelsWithHermes();
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("leaves stored-as-text alone when Hermes owns the catalogue", async () => {
@@ -708,10 +683,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     // so `models: []` leaves the probe free to win with nothing.
     providerBlock({ ...LINKED, models: [] });
     await reconcileClawaiModelsWithHermes();
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("looks again at the catalogue the LINK path just wrote", async () => {
@@ -729,22 +701,13 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     providerBlock(null);
     await reconcileClawaiModelsWithHermes();
     expect(wrote()).toBe(false);
-
-    resolveVisionMock.mockResolvedValue({
-      id: CLAWBOX_AI_VISION_MODEL_ID,
-      verified: true,
-      reason: "proxy-allows",
-    });
     cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
     await applyClawaiToHermes("claw_token_abc", "flash");
 
     cliMock.mockReset();
     providerBlock(LINKED);
     await reconcileClawaiModelsWithHermes();
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("writes nothing on a box that has no ClawBox AI provider block", async () => {
@@ -782,10 +745,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     cliMock.mockReset();
     providerBlock(LINKED);
     await reconcileClawaiModelsWithHermes();
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("tries again after a read the CLI never answered", async () => {
@@ -801,10 +761,7 @@ describe("repairing a ClawBox AI box that was linked earlier", () => {
     cliMock.mockReset();
     providerBlock(LINKED);
     await reconcileClawaiModelsWithHermes();
-    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([
-      CLAWBOX_AI_FLASH_MODEL_ID,
-      CLAWBOX_AI_PRO_MODEL_ID,
-    ]);
+    expect(hermesPickerModels(providerEntry(CLAWAI_PROVIDER), [])).toEqual([CLAWBOX_AI_FLASH_MODEL_ID]);
   });
 
   it("tries again after a write that failed", async () => {

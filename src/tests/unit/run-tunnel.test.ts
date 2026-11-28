@@ -46,7 +46,17 @@ const spawned: ChildProcess[] = [];
 
 function startFixture(scriptPath: string, cloudflaredBin: string): ChildProcess {
   const child = spawn("bash", [scriptPath], {
-    env: { ...process.env, CLAWBOX_ROOT: root, CLOUDFLARED_BIN: cloudflaredBin },
+    // Nothing from the host decides the port: no LOCAL_SERVICE_URL/PORT, and
+    // the web UI unit the script would ask about is "unknown".
+    env: {
+      ...process.env,
+      LOCAL_SERVICE_URL: "",
+      PORT: "",
+      CLAWBOX_PORT: "",
+      SYSTEMCTL_BIN: "false",
+      CLAWBOX_ROOT: root,
+      CLOUDFLARED_BIN: cloudflaredBin,
+    },
     detached: true, // its own process group, so we can signal the group
     stdio: "ignore",
   });

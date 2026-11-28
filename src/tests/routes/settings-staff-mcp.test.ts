@@ -1,0 +1,366 @@
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * TASK-2377 (G2) — `settings/staff-mcp`, the owner's grants: owner only
+ * (another user, the agent's bearer and another site's page are refused 403),
+ * a bad or unknown server name 400, credentials stored 0600 and answered only
+ * masked, and every change synced to the staff agents.
+ */
+
+const ROOT = path.join(fs.realpathSync(os.tmpdir()), `clawbox-settings-staff-mcp-${process.pid}-${Date.now()}`);
+
+const h = vi.hoisted(() => ({
+  who: vi.fn(),
+  sameOrigin: vi.fn(() => true),
+  harness: "openclaw" as "openclaw" | "hermes",
+  users: ["ivan", "maria"],
+  sync: vi.fn(async () => true),
+  // Called as a save, its checks done, asks for the store's lock.
+  atStore: null as null | (() => void),
+}));
+
+vi.mock("@/lib/staff-mcp", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/staff-mcp")>();
+  return {
+    ...real,
+    updateStaffMcpStore: ((...args: Parameters<typeof real.updateStaffMcpStore>) => {
+      h.atStore?.();
+      return real.updateStaffMcpStore(...args);
+    }) as typeof real.updateStaffMcpStore,
+  };
+});
+
+vi.mock("@/lib/owner-session", () => ({ personSession: h.who }));
+vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: h.sameOrigin }));
+vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => h.harness) }));
+vi.mock("@/lib/org-mode-server", () => ({ readOrgMode: vi.fn(async () => true) }));
+vi.mock("@/lib/org-staff-agents", () => ({ syncStaffAgents: h.sync }));
+vi.mock("@/lib/clawbox-users", () => ({
+  listUsers: vi.fn(async () => h.users.map((username) => ({ username, createdAt: "x", sv: "1" }))),
+}));
+vi.mock("@/lib/auth", () => ({ getSystemUsername: () => "owner" }));
+vi.mock("@/lib/openclaw-config", () => ({
+  isPlainObject: (v: unknown) => v !== null && typeof v === "object" && !Array.isArray(v),
+  readConfigStrict: vi.fn(async () => ({
+    mcp: {
+      servers: {
+        clawbox: { command: "bun", args: ["mcp.ts"] },
+        docs: { url: "https://docs.example.com/mcp", transport: "streamable-http" },
+        local: { command: "node", args: ["x.js"] },
+        "cbstaff-12345678-docs": { url: "http://127.0.0.1/setup-api/staff-mcp/docs", transport: "streamable-http" },
+      },
+    },
+  })),
+}));
+vi.mock("@/lib/clawbox-mcp-registration", () => ({ harnessesHere: () => ({ openclaw: true, hermes: false }) }));
+vi.mock("@/lib/clawbox-mcp-switch", () => ({ readClawboxMcpEnabled: vi.fn(async () => true) }));
+
+let route: typeof import("@/app/setup-api/settings/staff-mcp/route");
+let storePath: string;
+
+const get = () => route.GET(new Request("http://box.local/setup-api/settings/staff-mcp"));
+const post = (body: unknown) => route.POST(new Request("http://box.local/setup-api/settings/staff-mcp", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", Origin: "http://box.local" },
+  body: JSON.stringify(body),
+}));
+
+beforeAll(async () => {
+  fs.mkdirSync(ROOT, { recursive: true });
+  process.env.CLAWBOX_ROOT = ROOT;
+  vi.resetModules();
+  route = await import("@/app/setup-api/settings/staff-mcp/route");
+  storePath = (await import("@/lib/staff-mcp")).STAFF_MCP_STORE_PATH;
+});
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  h.who.mockResolvedValue({ username: "owner", isOwner: true });
+  h.sameOrigin.mockReturnValue(true);
+  h.harness = "openclaw";
+  h.atStore = null;
+  fs.rmSync(storePath, { force: true });
+});
+
+afterAll(() => {
+  delete process.env.CLAWBOX_ROOT;
+  fs.rmSync(ROOT, { recursive: true, force: true });
+});
+
+describe("who may read and change the grants", () => {
+  it("refuses another user and the agent's bearer (no person), both ways", async () => {
+    for (const person of [{ username: "ivan", isOwner: false }, null]) {
+      h.who.mockResolvedValue(person);
+      for (const res of [await get(), await post({ servers: { docs: {} } })]) {
+        expect(res.status).toBe(403);
+        expect((await res.json()).code).toBe("owner_only");
+      }
+    }
+    expect(fs.existsSync(storePath)).toBe(false);
+  });
+
+  it("refuses a write from another site's page", async () => {
+    h.sameOrigin.mockReturnValue(false);
+    const res = await post({ servers: { docs: {} } });
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("cross_origin");
+  });
+});
+
+describe("the grants", () => {
+  it("lists the box's servers but the box's own and the relay entries", async () => {
+    const body = await (await get()).json();
+    expect(body.servers.map((s: { name: string }) => s.name)).toEqual(["docs", "local"]);
+    expect(body.servers.find((s: { name: string }) => s.name === "local")).toMatchObject({ usable: false, reason: "transport" });
+    expect(body.staffMcpSupported).toBe(true);
+  });
+
+  it("answers 400 for a bad name, an unknown server, one staff cannot use, or a bad header", async () => {
+    for (const [servers, code] of [
+      [{ "bad name": {} }, "bad_server"],
+      [{ clawbox: {} }, "unknown_server"],
+      [{ nope: {} }, "unknown_server"],
+      [{ local: {} }, "server_not_usable"],
+      [{ "cbstaff-12345678-docs": {} }, "bad_server"],
+      [{ docs: { header: "Cookie" } }, "bad_header"],
+    ] as const) {
+      const res = await post({ servers });
+      expect(res.status, JSON.stringify(servers)).toBe(400);
+      expect((await res.json()).code).toBe(code);
+    }
+    expect(h.sync).not.toHaveBeenCalled();
+  });
+
+  it("grants a server, keeps credentials 0600 and answers them masked only", async () => {
+    expect((await post({ servers: { docs: { header: "X-Api-Key" } } })).status).toBe(200);
+    const res = await post({ username: "ivan", server: "docs", credential: "ivan-secret-token-0001" });
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain("ivan-secret-token-0001");
+    const body = JSON.parse(text);
+    expect(body.users.find((u: { username: string }) => u.username === "ivan").credentials).toEqual({ docs: "••••0001" });
+    expect(body.users.find((u: { username: string }) => u.username === "maria").credentials).toEqual({});
+    expect(body.servers.find((s: { name: string }) => s.name === "docs")).toMatchObject({ granted: true, header: "X-Api-Key" });
+    expect(fs.statSync(storePath).mode & 0o777).toBe(0o600);
+    expect(h.sync).toHaveBeenCalledTimes(2);
+    expect(await (await get()).text()).not.toContain("ivan-secret-token-0001");
+  });
+
+  it("never writes a credential for a member removed while the change waited for the store", async () => {
+    await post({ servers: { docs: {} } });
+    const { listUsers } = await import("@/lib/clawbox-users");
+    const users = vi.mocked(listUsers);
+    users.mockImplementationOnce(async () => [{ username: "ivan", createdAt: "x", sv: "1" }]); // the route's first check
+    users.mockImplementationOnce(async () => []); // under the store's lock
+    const res = await post({ username: "ivan", server: "docs", credential: "ivan-secret-token-0001" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("unknown_user");
+    expect(fs.readFileSync(storePath, "utf-8")).not.toContain("ivan-secret-token-0001");
+  });
+
+  it("never writes the old account's credential for an account removed and created again under the same name", async () => {
+    await post({ servers: { docs: {} } });
+    const { listUsers } = await import("@/lib/clawbox-users");
+    const users = vi.mocked(listUsers);
+    users.mockImplementationOnce(async () => [{ username: "ivan", createdAt: "2026-11-01T00:00:00Z", sv: "1" }]); // the old account
+    users.mockImplementationOnce(async () => [{ username: "ivan", createdAt: "2026-11-12T00:00:00Z", sv: "9" }]); // re-created meanwhile
+    const res = await post({ username: "ivan", server: "docs", credential: "old-account-token-0001" });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("unknown_user");
+    expect(fs.readFileSync(storePath, "utf-8")).not.toContain("old-account-token-0001");
+  });
+
+  it("tells two accounts of one name apart even when they share a createdAt", async () => {
+    await post({ servers: { docs: {} } });
+    const { listUsers } = await import("@/lib/clawbox-users");
+    const users = vi.mocked(listUsers);
+    users.mockImplementationOnce(async () => [{ username: "ivan", createdAt: "2026-11-12T00:00:00.000Z", sv: "a".repeat(32) }]);
+    users.mockImplementationOnce(async () => [{ username: "ivan", createdAt: "2026-11-12T00:00:00.000Z", sv: "b".repeat(32) }]);
+    const res = await post({ username: "ivan", server: "docs", credential: "same-clock-token-0001" });
+    expect(res.status).toBe(400);
+    expect(fs.readFileSync(storePath, "utf-8")).not.toContain("same-clock-token-0001");
+  });
+
+  it("clears a credential with null", async () => {
+    await post({ servers: { docs: {} } });
+    await post({ username: "ivan", server: "docs", credential: "ivan-secret-token-0001" });
+    const res = await post({ username: "ivan", server: "docs", credential: null });
+    expect((await res.json()).users.find((u: { username: string }) => u.username === "ivan").credentials).toEqual({});
+  });
+
+  it("refuses a credential for someone who is not a member of staff, a server not granted, or a value with a line break", async () => {
+    await post({ servers: { docs: {} } });
+    expect((await (await post({ username: "owner", server: "docs", credential: "x" })).json()).code).toBe("unknown_user");
+    expect((await (await post({ username: "olga", server: "docs", credential: "x" })).json()).code).toBe("unknown_user");
+    expect((await (await post({ username: "ivan", server: "local", credential: "x" })).json()).code).toBe("unknown_server");
+    expect((await (await post({ username: "ivan", server: "docs", credential: "a\r\nX-Evil: 1" })).json()).code).toBe("bad_credential");
+  });
+
+  it("says when a saved change could not be applied to the assistant yet", async () => {
+    h.sync.mockResolvedValueOnce(false);
+    const res = await post({ servers: { docs: {} } });
+    expect(res.status).toBe(200);
+    expect((await res.json()).applied).toBe(false);
+    expect((await (await post({ servers: { docs: {} } })).json()).applied).toBe(true);
+  });
+
+  it("stores a server that takes no credential, its create/edit tools and a member list (TASK-2516), and lists them back", async () => {
+    const res = await post({ servers: { docs: { needsCredential: false, writeTools: true, members: ["maria", "ivan", "maria"] } } });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.servers.find((s: { name: string }) => s.name === "docs")).toMatchObject({ granted: true, needsCredential: false, writeTools: true, members: ["ivan", "maria"] });
+    // Ungranted: listed for the owner, granted to nobody.
+    expect(body.servers.find((s: { name: string }) => s.name === "local")).toMatchObject({ granted: false });
+    const stored = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+    expect(stored.servers).toEqual({ docs: { header: "Authorization", needsCredential: false, writeTools: true, members: ["ivan", "maria"], harness: "openclaw" } });
+    // Every member of staff (no list), and back to the strict defaults.
+    expect((await (await post({ servers: { docs: {} } })).json()).servers.find((s: { name: string }) => s.name === "docs")).toMatchObject({ needsCredential: true, writeTools: false, members: null });
+  });
+
+  it("refuses a member list naming someone who is not a user here, and a flag that is not true or false", async () => {
+    for (const [servers, code] of [
+      [{ docs: { members: ["ghost"] } }, "bad_members"],
+      [{ docs: { members: ["owner"] } }, "bad_members"],
+      [{ docs: { members: "ivan" } }, "bad_members"],
+      [{ docs: { needsCredential: "no" } }, "bad_setting"],
+      [{ docs: { writeTools: 1 } }, "bad_setting"],
+    ] as const) {
+      const res = await post({ servers });
+      expect(res.status, JSON.stringify(servers)).toBe(400);
+      expect((await res.json()).code).toBe(code);
+    }
+    expect(fs.existsSync(storePath)).toBe(false);
+  });
+
+  it("refuses a member grant whose account was replaced while the change waited for the store", async () => {
+    const { listUsers } = await import("@/lib/clawbox-users");
+    vi.mocked(listUsers)
+      .mockResolvedValueOnce([{ username: "ivan", createdAt: "x", sv: "1" }, { username: "maria", createdAt: "x", sv: "1" }] as never)
+      .mockResolvedValueOnce([{ username: "ivan", createdAt: "y", sv: "2" }, { username: "maria", createdAt: "x", sv: "1" }] as never);
+    const res = await post({ servers: { docs: { needsCredential: false, members: ["ivan"] } } });
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("unknown_user");
+    expect(fs.existsSync(storePath)).toBe(false);
+  });
+
+  it("keeps a grant to the runtime it was made on: hidden and untouched on the other, its credentials never carried over", async () => {
+    expect((await post({ servers: { docs: {} } })).status).toBe(200);
+    expect((await post({ username: "ivan", server: "docs", credential: "ivan-secret-token-0001" })).status).toBe(200);
+    h.harness = "hermes";
+    const onHermes = await (await get()).json();
+    expect(onHermes.servers.some((s: { name: string; granted: boolean }) => s.name === "docs" && s.granted)).toBe(false);
+    // A credential cannot be set for the OpenClaw grant from the Hermes side.
+    expect((await post({ username: "ivan", server: "docs", credential: "x-token-0000000002" })).status).toBe(400);
+    // Saving Hermes' (empty) list leaves the OpenClaw grant and its credential as they were.
+    expect((await post({ servers: {} })).status).toBe(200);
+    const stored = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+    expect(stored.servers.docs).toMatchObject({ harness: "openclaw" });
+    expect(stored.credentials.ivan).toEqual({ docs: "ivan-secret-token-0001" });
+    h.harness = "openclaw";
+    // Withdrawn on its own runtime, it takes its credentials with it.
+    expect((await post({ servers: {} })).status).toBe(200);
+    expect(JSON.parse(fs.readFileSync(storePath, "utf-8")).credentials).toEqual({});
+  });
+
+  it("never lands a credential on a grant that a queued save moved to the other runtime (overlapping saves)", async () => {
+    const hermesHome = fs.mkdtempSync(path.join(os.tmpdir(), "staff-mcp-hermes-"));
+    const savedHome = process.env.HERMES_HOME;
+    process.env.HERMES_HOME = hermesHome;
+    fs.writeFileSync(path.join(hermesHome, "config.yaml"), "mcp_servers:\n  docs:\n    url: https://hermes-docs.example.com/mcp\n");
+    try {
+      expect((await post({ servers: { docs: {} } })).status).toBe(200); // the OpenClaw grant
+      const { listUsers } = await import("@/lib/clawbox-users");
+      const users = [{ username: "ivan", createdAt: "x", sv: "1" }, { username: "maria", createdAt: "x", sv: "1" }];
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      let reached!: () => void;
+      const atLock = new Promise<void>((r) => { reached = r; });
+      vi.mocked(listUsers)
+        .mockResolvedValueOnce(users as never) // the Hermes grant save, before the lock
+        .mockImplementationOnce(async () => { reached(); await gate; return users as never; }); // …and under it, held
+      // On Hermes, the owner re-makes `docs` there; the save holds the store's lock.
+      h.harness = "hermes";
+      const grantSave = post({ servers: { docs: {} } });
+      await atLock;
+      // Meanwhile, back on OpenClaw, a credential save reads the OLD OpenClaw grant,
+      // passes its first checks and queues for the lock; only then is the grant save let go.
+      h.harness = "openclaw";
+      const queued = new Promise<void>((r) => { h.atStore = r; });
+      const credentialSave = post({ username: "ivan", server: "docs", credential: "ivan-secret-token-0009" });
+      await queued;
+      release();
+      expect((await grantSave).status).toBe(200);
+      const res = await credentialSave;
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("unknown_server");
+      const stored = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      expect(stored.servers.docs).toMatchObject({ harness: "hermes" });
+      expect(stored.credentials).toEqual({});
+    } finally {
+      if (savedHome === undefined) delete process.env.HERMES_HOME;
+      else process.env.HERMES_HOME = savedHome;
+      fs.rmSync(hermesHome, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a credential of a member whose username is `__proto__` across a grant save", async () => {
+    const saved = h.users;
+    h.users = ["ivan", "__proto__"];
+    try {
+      expect((await post({ servers: { docs: {} } })).status).toBe(200);
+      expect((await post({ username: "__proto__", server: "docs", credential: "proto-secret-token-01" })).status).toBe(200);
+      expect((await post({ servers: { docs: { writeTools: true } } })).status).toBe(200);
+      const stored = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      expect(Object.hasOwn(stored.credentials, "__proto__")).toBe(true);
+      expect(stored.credentials.__proto__).toEqual({ docs: "proto-secret-token-01" });
+    } finally {
+      h.users = saved;
+    }
+  });
+
+  it("never drops a grant the other runtime saved while this runtime's save waited (overlapping saves)", async () => {
+    const hermesHome = fs.mkdtempSync(path.join(os.tmpdir(), "staff-mcp-hermes-"));
+    const savedHome = process.env.HERMES_HOME;
+    process.env.HERMES_HOME = hermesHome;
+    fs.writeFileSync(path.join(hermesHome, "config.yaml"), "mcp_servers:\n  wiki:\n    url: https://wiki.example.com/mcp\n");
+    try {
+      expect((await post({ servers: { docs: {} } })).status).toBe(200); // the OpenClaw grant
+      const { listUsers } = await import("@/lib/clawbox-users");
+      const users = [{ username: "ivan", createdAt: "x", sv: "1" }, { username: "maria", createdAt: "x", sv: "1" }];
+      let release!: () => void;
+      const gate = new Promise<void>((r) => { release = r; });
+      let reached!: () => void;
+      const atLock = new Promise<void>((r) => { reached = r; });
+      vi.mocked(listUsers)
+        .mockResolvedValueOnce(users as never) // the Hermes save, before the lock
+        .mockImplementationOnce(async () => { reached(); await gate; return users as never; }); // …and under it, held
+      // On Hermes, the owner grants `wiki`; the save holds the store's lock.
+      h.harness = "hermes";
+      const hermesSave = post({ servers: { wiki: {} } });
+      await atLock;
+      // Meanwhile on OpenClaw, a save of `docs` reads the store WITHOUT `wiki` and queues.
+      h.harness = "openclaw";
+      const queued = new Promise<void>((r) => { h.atStore = r; });
+      const openclawSave = post({ servers: { docs: { writeTools: true } } });
+      await queued;
+      release();
+      expect((await hermesSave).status).toBe(200);
+      expect((await openclawSave).status).toBe(200);
+      const stored = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      expect(stored.servers.wiki).toMatchObject({ harness: "hermes" });
+      expect(stored.servers.docs).toMatchObject({ harness: "openclaw", writeTools: true });
+    } finally {
+      if (savedHome === undefined) delete process.env.HERMES_HOME;
+      else process.env.HERMES_HOME = savedHome;
+      fs.rmSync(hermesHome, { recursive: true, force: true });
+    }
+  });
+
+  it("is offered on a Hermes box too since TASK-2516 (each member's own profile carries the relay entries)", async () => {
+    h.harness = "hermes";
+    expect((await (await get()).json()).staffMcpSupported).toBe(true);
+  });
+});

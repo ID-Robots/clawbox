@@ -5,8 +5,8 @@
 #
 # A coding team's role with nothing stored for it starts on its own default
 # model (TASK-2217): the planner on the provider's best model, a worker and a
-# reviewer on its middle one; ClawBox AI on its flash tier for all three,
-# never the pro tier.
+# reviewer on its middle one; ClawBox AI and the box's own engine (`local`,
+# TASK-2501 PR-E) on their one model for all three.
 #
 #   * The running server's answer — GET /setup-api/coding-agent/settings, the
 #     route the coding_settings_get tool reads — names that model for every
@@ -20,16 +20,22 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 # provider role model — what a role gets with nothing stored.
-EXPECTED='anthropic planner claude-fable-5-1
-anthropic worker claude-opus-5-5
+EXPECTED='anthropic planner claude-fable-5-2
+anthropic worker claude-sonnet-5-5
 anthropic reviewer claude-opus-5-5
 openai planner gpt-6-astra
 openai worker gpt-5.6-sol
 openai reviewer gpt-5.6-sol
 clawbox-ai planner deepseek-v4-flash
 clawbox-ai worker deepseek-v4-flash
-clawbox-ai reviewer deepseek-v4-flash'
+clawbox-ai reviewer deepseek-v4-flash
+local planner local-engine
+local worker local-engine
+local reviewer local-engine'
 expected_model() { awk -v p="$1" -v r="$2" '$1 == p && $2 == r { print $3 }' <<<"$EXPECTED"; }
+# Every provider CODING_PROVIDERS lists x every role: the table above IS that
+# list, so a provider added to the code with no row here fails loudly.
+EXPECTED_ROWS=$(grep -c . <<<"$EXPECTED")
 
 RUNTIME=$(board_runtime)
 note "runtime: $RUNTIME"
@@ -79,8 +85,9 @@ RESOLVE='
 # shellcheck disable=SC2016  # expanded on the board
 RAW=$(board 'cd "$REPO" && exec timeout 120 bun -e "$1"' "$RESOLVE")
 LINES=$(printf '%s\n' "$RAW" | sed -n 's/^@@ //p')
-if [ "$(printf '%s\n' "$LINES" | grep -c .)" != 9 ]; then
-  not_ok "the resolver did not answer for 3 providers × 3 roles on the board: $(printf '%s' "$RAW" | tail -n 3 | tr '\n' ' ' | head -c 300)"
+GOT_ROWS=$(printf '%s\n' "$LINES" | grep -c .)
+if [ "$GOT_ROWS" != "$EXPECTED_ROWS" ]; then
+  not_ok "the resolver did not answer for every provider × role on the board ($GOT_ROWS of $EXPECTED_ROWS): $(printf '%s' "$RAW" | tail -n 3 | tr '\n' ' ' | head -c 300)"
   finish
 fi
 while read -r provider role model tier auto effort; do

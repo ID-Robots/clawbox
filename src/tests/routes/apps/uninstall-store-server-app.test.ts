@@ -162,6 +162,20 @@ afterAll(() => {
 });
 
 describe("uninstalling a Store app that runs a server", () => {
+  it("forgets the app's failed start, so its window has nothing left to explain (TASK-2323)", async () => {
+    const port = await freePort();
+    const { dir, manifest } = storeServerApp(port);
+    expect(await start.startServerApp({ id: APP_ID, directory: dir, manifest: { ...manifest, start: "echo build failed; exit 3" }, searchPath, noScope: true, waitMs: 20_000 })).toMatchObject({ ok: false });
+    const failures = await import("@/lib/app-start-failure");
+    expect(await failures.readAppStartFailure(APP_ID)).toMatchObject({ exitCode: 3 });
+
+    const res = await POST(post(APP_ID));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, appId: APP_ID, projectRemoved: true });
+    expect(fs.existsSync(failures.appStartFailurePath(APP_ID))).toBe(false);
+  });
+
   it("stops the app's server before its folder goes", async () => {
     const port = await freePort();
     const { dir, manifest } = storeServerApp(port);

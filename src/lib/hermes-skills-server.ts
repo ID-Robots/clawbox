@@ -42,7 +42,7 @@ import { isValidSkillName, MAX_FACET_SELECTION, REQUEST_REFUSAL } from '@/lib/he
  * reads any such body as "the id was wrong" — advice that sends the agent
  * round the same guard again, since every skills route sits behind it. The
  * status and the human-readable string are unchanged: the browser and
- * `src/middleware.ts` see exactly what they saw before.
+ * `src/proxy.ts` see exactly what they saw before.
  */
 export async function hermesSkillsGuard(): Promise<NextResponse | null> {
   if ((await getActiveHarness()) !== 'hermes') {

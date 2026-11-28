@@ -12,6 +12,7 @@ import { getDefaultLlamaCppModel, getLlamaCppBaseUrl } from "@/lib/llamacpp";
 import { getLlamaCppProvisioningStatus, resolveConfiguredLlamaCppAlias } from "@/lib/llamacpp-server";
 import { getEmbedProvisioningStatus } from "@/lib/embed-server";
 import { peekMemoryStatus } from "@/lib/clawkeep-memory";
+import { externalEngineSummary, readExternalEngine } from "@/lib/external-engine";
 
 /** Is llama.cpp answering right now? Same probe the llamacpp status route uses. */
 async function llamaCppRunning(baseUrl: string): Promise<string | null> {
@@ -80,8 +81,16 @@ async function probes(): Promise<InventoryProbes> {
 }
 
 export async function GET() {
-  const snapshot = await buildLocalModelInventory(await probes());
-  return NextResponse.json(snapshot, { headers: { "Cache-Control": "no-store" } });
+  const [snapshot, external] = await Promise.all([
+    probes().then(buildLocalModelInventory),
+    readExternalEngine(),
+  ]);
+  // The external AI engine in the Local AI slot (TASK-2376), beside the
+  // inventory of what runs on the box: null when none is selected.
+  return NextResponse.json(
+    { ...snapshot, externalEngine: externalEngineSummary(external) },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }
 
 export async function POST(req: Request) {

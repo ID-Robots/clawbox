@@ -9,6 +9,7 @@ import {
   useFollowSessionSwitch,
   type SessionSwitchDestination,
 } from "@/lib/session-switch";
+import { takeCarriedFromLocation } from "@/lib/use-box-switcher";
 
 /**
  * Who may sign in here (GET /login-api/users, TASK-1256). `multiUser: false`
@@ -72,6 +73,13 @@ function LoginForm() {
   // The picked (or typed) user. Empty means the owner, which is also what a
   // single-user box sends by sending no name at all.
   const [username, setUsername] = useState("");
+
+  // A Ctrl+Shift+<n> switch from another ClawBox lands here first when this
+  // box is not signed in yet: keep the numbering it carried (the address's
+  // fragment) for the desktop the sign-in leads to (src/lib/use-box-switcher.ts).
+  useEffect(() => {
+    takeCarriedFromLocation();
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -273,7 +281,9 @@ function LoginForm() {
                 type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder={t("login.passwordPlaceholder")}
+                // "System password" is the owner's word for a single-user box;
+                // where several people sign in, each types their own password.
+                placeholder={t(loginUsers.multiUser ? "login.password" : "login.passwordPlaceholder")}
                 autoFocus
                 autoComplete="current-password"
                 className="w-full h-12 px-4 pr-12 bg-white/[0.06] border border-white/10 rounded-xl text-base text-white outline-none focus:border-[var(--coral-bright)] focus:bg-white/[0.08] transition-colors placeholder-white/30"

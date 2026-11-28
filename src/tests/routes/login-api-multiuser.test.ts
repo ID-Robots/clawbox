@@ -82,6 +82,51 @@ describe("/login-api — multi-user", () => {
     expect(res.headers.get("set-cookie")).toContain("clawbox_session=session.cookie");
   });
 
+  // TASK-2435: Settings → Account ends a user's sessions BEFORE it changes
+  // their password; the old password still works in between, so no sign-in
+  // may be issued then (src/lib/password-change-lock.ts).
+  it("refuses a user's sign-in while their own password change runs, and checks nothing", async () => {
+    vi.mocked(checkUserPassword).mockResolvedValue("ok");
+    const lock = await import("@/lib/password-change-lock");
+    expect(lock.beginPasswordChange("alice")).toBe(true);
+    try {
+      const res = await POST(login({ username: "alice", password: "alices-password" }));
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: "password_changing" });
+      expect(checkUserPassword).not.toHaveBeenCalled();
+      expect(createSessionCookie).not.toHaveBeenCalled();
+    } finally {
+      lock.endPasswordChange("alice");
+    }
+    // Once it is over, the sign-in works again.
+    expect((await POST(login({ username: "alice", password: "alices-password" }))).status).toBe(200);
+  });
+
+  it("refuses a sign-in that was checked while a change began and ended — it issues no cookie", async () => {
+    const lock = await import("@/lib/password-change-lock");
+    vi.mocked(checkUserPassword).mockImplementation(async () => {
+      // The change runs to its end while this sign-in's password is being checked.
+      lock.beginPasswordChange("alice");
+      lock.endPasswordChange("alice");
+      return "ok";
+    });
+    const res = await POST(login({ username: "alice", password: "the-old-password" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "password_changing" });
+    expect(createSessionCookie).not.toHaveBeenCalled();
+  });
+
+  it("leaves the owner's sign-in and other users' alone while one user changes their password", async () => {
+    const lock = await import("@/lib/password-change-lock");
+    lock.beginPasswordChange("alice");
+    try {
+      vi.mocked(verifyPassword).mockResolvedValue(true);
+      expect((await POST(login({ password: "owner-password" }))).status).toBe(200);
+    } finally {
+      lock.endPasswordChange("alice");
+    }
+  });
+
   it("with no username is the owner's login, exactly as before multi-user", async () => {
     vi.mocked(verifyPassword).mockResolvedValue(true);
 

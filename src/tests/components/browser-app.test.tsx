@@ -111,7 +111,8 @@ describe("BrowserApp", () => {
   it("shows the device's screen, not a panel of steps", async () => {
     const { findByTestId, queryByRole } = render(<BrowserApp />);
 
-    expect(await findByTestId("browser-state")).toHaveTextContent("Running · PID 4242");
+    expect(await findByTestId("browser-close")).toBeInTheDocument();
+    expect(await findByTestId("browser-state")).not.toHaveTextContent(/PID|4242/);
     // The install/link cards moved to the settings page.
     expect(queryByRole("button", { name: /Install Chromium/i })).toBeNull();
   });
@@ -333,6 +334,52 @@ describe("BrowserApp", () => {
     expect(header.className).not.toContain("flex-nowrap");
   });
 
+  /**
+   * The x64 laptop test (2026-11-10): the header said "● Running · PID
+   * 1339876" beside four 44 px buttons. A PID is nothing an owner acts on, and
+   * the buttons were a phone's touch size on a 1150 px window. The header now
+   * says nothing while the browser simply runs, its buttons are compact at
+   * every width, and the ones that drop their label on a narrow window are
+   * still named — by aria-label and title — for a screen reader and a hover.
+   */
+  it("shows no PID for a running browser, and compact, named buttons", async () => {
+    const { findByTestId, getByTestId } = render(<BrowserApp />);
+    const header = await findByTestId("browser-header");
+    await findByTestId("browser-close");
+    expect(document.body.textContent ?? "").not.toMatch(/PID|4242/);
+
+    const buttons = Array.from(header.querySelectorAll("button"));
+    expect(buttons.map((b) => b.dataset.testid)).toEqual(["browser-close", "browser-paste", "browser-open-vnc", "browser-open-settings"]);
+    for (const button of buttons) {
+      expect(button, button.dataset.testid).toHaveAccessibleName();
+      // 32 px tall at every width: not the shared 44-px-below-@md geometry.
+      expect(button.className, button.dataset.testid).toMatch(/(^|\s)h-8(\s|$)/);
+      expect(button.className, button.dataset.testid).not.toContain("min-h-[44px]");
+    }
+    expect(getByTestId("browser-close")).toHaveAccessibleName("Close Browser");
+    // The three that go icon-only on a narrow window keep their names.
+    for (const [id, name] of [["browser-paste", "vnc.pasteToRemote"], ["browser-open-vnc", "Open in VNC"], ["browser-open-settings", "Settings"]]) {
+      expect(getByTestId(id), id).toHaveAccessibleName(name);
+      expect(getByTestId(id), id).toHaveAttribute("aria-label", name);
+      expect(getByTestId(id), id).toHaveAttribute("title", name);
+    }
+
+    fireEvent.click(getByTestId("browser-open-settings"));
+    const back = await findByTestId("browser-settings-back");
+    expect(back).toHaveAccessibleName("Back");
+    expect(back).toHaveAttribute("title", "Back");
+    expect(back.className).toMatch(/(^|\s)h-8(\s|$)/);
+  });
+
+  it("names the Open Browser button too, and keeps it compact", async () => {
+    stubDevice({ ...READY_STATUS, browser: { running: false, cdpReady: false }, autoOpen: false });
+    const { findByTestId } = render(<BrowserApp />);
+    const open = await findByTestId("browser-open");
+    expect(open).toHaveAccessibleName("Open Browser");
+    expect(open.className).toMatch(/(^|\s)h-8(\s|$)/);
+    expect(await findByTestId("browser-state")).toHaveTextContent("Not running");
+  });
+
   it("opens the screen's paste dialog from the header's Paste to VNC button", async () => {
     const { findByTestId, findByRole } = render(<BrowserApp />);
     fireEvent.click(await findByTestId("browser-paste"));
@@ -394,11 +441,11 @@ describe("BrowserApp", () => {
       browser: { running: true, pid: 4242, cdpReady: true, external: true },
     };
 
-    it("is Running, offers Open rather than Close, and is never auto-launched over", async () => {
+    it("is running (no PID shown), offers Open rather than Close, and is never auto-launched over", async () => {
       const fetchMock = stubDevice(OWNER_STATUS);
       const { findByTestId, queryByTestId } = render(<BrowserApp />);
 
-      expect(await findByTestId("browser-state")).toHaveTextContent("Running · PID 4242");
+      expect(await findByTestId("browser-state")).not.toHaveTextContent(/PID|4242|Not running|Starting/);
       expect(await findByTestId("browser-open")).toBeEnabled();
       expect(queryByTestId("browser-close")).toBeNull();
       expect(postedActions(fetchMock)).toEqual([]);

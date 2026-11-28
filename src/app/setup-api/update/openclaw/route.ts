@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { startOpenclawUpdate } from "@/lib/updater";
+import { startOpenclawUpdate, startWouldOverlapUpdate } from "@/lib/updater";
 import { requireSession } from "@/lib/route-auth";
 import { hasPersonSession } from "@/lib/owner-session";
 
@@ -25,6 +25,11 @@ export async function POST(request: Request) {
   }
 
   try {
+    // The full update's in-flight check (update/run): beside a restarted
+    // server's update this run would also release that update's desktop lock.
+    if (await startWouldOverlapUpdate()) {
+      return NextResponse.json({ started: false, error: "Update already in progress" }, { status: 409 });
+    }
     const result = startOpenclawUpdate();
     if (!result.started) {
       return NextResponse.json(result, { status: 409 });

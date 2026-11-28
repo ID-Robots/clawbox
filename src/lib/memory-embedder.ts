@@ -36,9 +36,11 @@ import {
   CLOUD_EMBEDDING_MODEL,
   CLOUD_EMBEDDING_PROVIDER,
 } from "@/lib/clawai-cloud-embeddings";
-import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
+import { getEmbedProxyBaseUrl, readActiveLocalEmbeddingModel } from "@/lib/embed-server";
+import { DEFAULT_LOCAL_EMBEDDING_MODEL_ID, localEmbeddingModelSpec } from "@/lib/embed-runtime-ids";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 import { resolveClawaiToken } from "@/lib/harness/credentials";
+import { cloudAiLockOn } from "@/lib/feature-engine";
 import { resolveClawaiCloudDefaults } from "@/lib/clawai-cloud-defaults-state";
 import {
   LOCAL_EMBEDDING_DIMENSIONS,
@@ -79,9 +81,11 @@ export interface ResolvedEmbedder {
    */
   dimensions: number;
   /**
-   * The bearer. Null only on the cloud arm of a box that holds no ClawBox AI
-   * credential — a state {@link embedderUsable} answers for, rather than one
-   * that throws inside a status read.
+   * The bearer. Null on the local arm, whose proxy token is read at request
+   * time. {@link resolveMemoryEmbedder} sends a box with no ClawBox AI
+   * credential to the local arm, so a cloud arm without one is only ever
+   * built by hand — a state {@link embedderUsable} still answers for, rather
+   * than one that throws inside a status read.
    */
   token: string | null;
   /**
@@ -146,15 +150,23 @@ export async function defaultEmbedderSource(): Promise<EmbeddingSource> {
   return resolveClawaiCloudDefaults(facts).embeddings.source;
 }
 
-function localEmbedder(): ResolvedEmbedder {
+/**
+ * The model on this box the owner picked (TASK-2411). The default slot keeps
+ * the name and width it always had, so its index identity does not move; any
+ * other model is named by its catalog id, which is also the `--alias` the
+ * unit serves it under.
+ */
+async function localEmbedder(): Promise<ResolvedEmbedder> {
   const baseUrl = getEmbedProxyBaseUrl();
+  const active = await readActiveLocalEmbeddingModel().catch(() => null);
+  const picked = active && active.id !== DEFAULT_LOCAL_EMBEDDING_MODEL_ID ? active.id : null;
   return {
     source: "local",
     provider: LOCAL_EMBEDDING_PROVIDER,
-    model: LOCAL_EMBEDDING_MODEL,
+    model: picked ?? LOCAL_EMBEDDING_MODEL,
     baseUrl,
     requestUrl: `${baseUrl}/embeddings`,
-    dimensions: LOCAL_EMBEDDING_DIMENSIONS,
+    dimensions: picked ? localEmbeddingModelSpec(picked).dimensions : LOCAL_EMBEDDING_DIMENSIONS,
     // The proxy holds the per-install service token; read at request time by the
     // caller, which is why it is not carried here.
     token: null,
@@ -193,14 +205,36 @@ async function cloudEmbedder(): Promise<ResolvedEmbedder> {
  * full reindex", exactly as any other embedder change does, and clearing the key
  * puts the box back where the owner left it.
  *
+ * AND THE BOX'S OWN ENGINE IS WHERE A CLOUD THAT CANNOT ANSWER LANDS (TASK-2501
+ * PR-C: Memory Shard on the local engine). Two more facts send a `cloud` box to
+ * the model on this box, the pin again left as it is:
+ *
+ *  - the local-only AI lock is on (`feature-engine.ts`): nothing the owner
+ *    indexed goes to the cloud while it is, and unlocking puts the box back
+ *    where the owner left it;
+ *  - the box holds no ClawBox AI credential: a box that runs its local engine
+ *    only — signed out of ClawBox AI, or linked for its plan alone — has no
+ *    account the cloud embedder could bill, and an index embedded slowly on
+ *    the box beats one that cannot be embedded at all. Signing in again
+ *    brings the cloud back.
+ *
+ * Either way the index reads `mismatched` against what it was built with and
+ * the card offers its full reindex, as for the field switch.
+ *
  * @param fallback what an unpinned box uses, when the caller has already worked
  *   the cloud-defaults verdict out and would otherwise pay for it twice.
  */
 export async function resolveMemoryEmbedder(fallback?: EmbeddingSource): Promise<ResolvedEmbedder> {
+  // The lock first: working the default out asks the cloud embeddings route
+  // (`defaultEmbedderSource` probes it on an unpinned box), and nothing may go
+  // to the cloud while the local-only lock is on — not even that question.
+  if (await cloudAiLockOn()) return await localEmbedder();
   const pinned = await readEmbedderPin();
   const source = pinned ?? fallback ?? (await defaultEmbedderSource());
-  if (source !== "cloud") return localEmbedder();
-  return (await cloudEmbeddingsSwitchedOff()) ? localEmbedder() : await cloudEmbedder();
+  if (source !== "cloud") return await localEmbedder();
+  if (await cloudEmbeddingsSwitchedOff()) return await localEmbedder();
+  const cloud = await cloudEmbedder();
+  return cloud.token === null ? await localEmbedder() : cloud;
 }
 
 /** Trailing slashes are not part of an address. */

@@ -45,7 +45,7 @@ const WHISPER_STATE = {
 };
 const EMBED_STATUS = { installed: true, binaryAvailable: true, modelAvailable: true, modelBytes: 640 * 1024 * 1024, model: "qwen3-embedding-0.6b", engine: "llama.cpp" };
 
-function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?: string; sttPrimary?: string; sttCloud?: boolean; sttChain?: string[]; post?: PostAnswer; del?: PostAnswer; models?: unknown[] } = {}) {
+function stubFetch(over: { external?: boolean; llmDefault?: boolean; llmWired?: boolean; ttsChoice?: string; sttPrimary?: string; sttCloud?: boolean; sttChain?: string[]; post?: PostAnswer; del?: PostAnswer; models?: unknown[]; embedStatus?: unknown; memorySource?: "cloud" | "local" } = {}) {
   posts = [];
   deletes = [];
   const json = (body: unknown, status = 200) =>
@@ -64,14 +64,18 @@ function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?:
     }
     if (url.startsWith("/setup-api/local-models")) return json({ models: over.models ?? MODELS, unavailable: [] });
     if (url.startsWith("/setup-api/providers/status")) {
-      return json({ harness: "openclaw", degraded: false, defaultProvider: over.llmDefault ? "llamacpp" : "clawai", providers: [
-        { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: !over.llmDefault, section: "ai", enabled: true },
+      // ONE default: the external engine's, when it holds the slot.
+      return json({ harness: "openclaw", degraded: false, defaultProvider: over.external ? "clawext" : over.llmDefault ? "llamacpp" : "clawai", providers: [
+        { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: !over.llmDefault && !over.external, section: "ai", enabled: true },
         // `llmWired: false` is a Gemma that is on the disk but wired to nothing.
-        { id: "llamacpp", label: "Gemma 4", state: over.llmWired === false ? "not_configured" : "connected", isDefault: !!over.llmDefault, section: "localAi", enabled: true },
+        { id: "llamacpp", label: "Gemma 4", state: over.llmWired === false ? "not_configured" : "connected", isDefault: !!over.llmDefault && !over.external, section: "localAi", enabled: true },
+        // TASK-2376: the owner's external engine holds the Local AI slot.
+        ...(over.external ? [{ id: "clawext", label: "Qwen3-32B (external engine)", state: "connected", isDefault: true, section: "localAi", enabled: true }] : []),
       ] });
     }
     if (url.startsWith("/setup-api/whisper")) return json(WHISPER_STATE);
-    if (url.startsWith("/setup-api/embed/status")) return json(EMBED_STATUS);
+    if (url.startsWith("/setup-api/embed/status")) return json(over.embedStatus ?? EMBED_STATUS);
+    if (over.memorySource && url.startsWith("/setup-api/clawkeep/memory/provider")) return json({ source: over.memorySource });
     if (url.startsWith("/setup-api/tts")) {
       return json({ choice: over.ttsChoice ?? "auto", engines: [{ id: "local", configured: true }, { id: "cloud", configured: true }] });
     }
@@ -85,6 +89,15 @@ function stubFetch(over: { llmDefault?: boolean; llmWired?: boolean; ttsChoice?:
       });
     }
     if (url.startsWith("/setup-api/local-ai/exclusive")) return json({ enabled: false });
+    if (url.startsWith("/setup-api/local-ai/external")) {
+      return json(over.external
+        ? {
+          configured: true, providerId: "clawext", modelRef: "clawext/Qwen/Qwen3-32B", displayName: "Qwen3-32B",
+          baseUrl: "http://192.0.2.10:8000/v1", modelId: "Qwen/Qwen3-32B", contextWindow: 131072, maxTokens: 8192,
+          imageInput: false, apiKeySet: true, activeHarness: "openclaw", localOnlyMode: false, hermesMinContextWindow: 64000, unsupported: [],
+        }
+        : { configured: false, activeHarness: "openclaw", localOnlyMode: false, hermesMinContextWindow: 64000, unsupported: [] });
+    }
     return json({ error: "unexpected" }, 404);
   }));
 }
@@ -98,6 +111,18 @@ afterEach(() => {
 });
 
 describe("LocalAiPanel", () => {
+
+  it("offers no way to wire Gemma to the chat while an external engine holds the slot (TASK-2376)", async () => {
+    stubFetch({ external: true, llmWired: false });
+    renderPanel();
+    const row = await screen.findByTestId("local-model-llamacpp");
+    // The card names the engine that holds the slot.
+    await waitFor(() => expect(screen.getByTestId("local-ai-external-summary").textContent).toContain("Qwen3-32B"));
+    await waitFor(() => expect(within(row).queryByTestId("local-model-action-llamacpp-uninstall")).not.toBeNull());
+    expect(within(row).queryByTestId("local-model-action-llamacpp-enable")).toBeNull();
+    expect(within(row).queryByTestId("local-model-action-llamacpp-disable")).toBeNull();
+    expect(screen.queryByTestId("local-ai-local-only")).toBeNull();
+  });
 
   it("refreshes other provider surfaces only after a successful streamed model activation", async () => {
     let finish!: () => void;
@@ -944,6 +969,51 @@ describe("LocalAiPanel", () => {
     renderPanel();
     await screen.findByTestId("local-model-action-embedding-install");
     expect(screen.queryByTestId("local-ai-embed-card")).not.toBeInTheDocument();
+  });
+
+  /**
+   * Memory search on the cloud used to draw only "Manage in Memory Shard"
+   * here: no card, so no way to download a model for this box until the index
+   * had already moved off the cloud (TASK-2418). The card is under the cloud's
+   * row now; switching onto a model stays Memory Shard's.
+   */
+  it("offers the models on this box for download under the cloud's row, while memory search stays in the cloud", async () => {
+    const ndjson = (body: unknown) => new Response(JSON.stringify(body) + "\n", { status: 200, headers: { "content-type": "application/x-ndjson" } });
+    const onCloud = MODELS.map((m) => (m.id !== "embedding" ? m : {
+      ...m, runtime: "Qwen3 Embedding via ClawBox AI", running: "on-demand", detailCode: "embeddingsCloud", detail: "Searching your memory in the cloud.",
+    }));
+    stubFetch({
+      models: onCloud,
+      memorySource: "cloud",
+      embedStatus: {
+        ...EMBED_STATUS, installed: false, modelAvailable: false, modelBytes: null,
+        models: [
+          { id: "qwen3-embedding-0.6b", label: "Qwen3-Embedding-0.6B", dimensions: 1024, active: true, installed: false, bytes: 639_150_592, quant: "Q8_0", available: true, reason: null, detail: null },
+          { id: "qwen3-embedding-4b", label: "Qwen3-Embedding-4B", dimensions: 2560, active: false, installed: false, bytes: 4_280_000_000, quant: "Q8_0", available: true, reason: null, detail: null },
+        ],
+      },
+      post: (url) => (url === "/setup-api/embed/install" ? ndjson({ success: true }) : undefined),
+    });
+    renderPanel();
+
+    const card = await screen.findByTestId("local-ai-embed-card");
+    // The row is still the cloud's: Memory Shard manages it, and it has nothing of this box's to remove.
+    expect(screen.getByTestId("local-model-manage-embedding")).toBeInTheDocument();
+    expect(screen.queryByTestId("local-model-action-embedding-install")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("local-model-action-embedding-uninstall")).not.toBeInTheDocument();
+    // …and the card says the model is not here, and offers it, and the other one too.
+    expect(within(card).getByTestId("local-ai-embed-state")).toHaveTextContent(/not on this box/i);
+    expect(within(card).getByTestId("local-ai-embed-download")).toHaveTextContent(/^Download$/);
+    expect(within(card).getByTestId("local-ai-embed-model-qwen3-embedding-4b-download")).toBeInTheDocument();
+    // Using one is Memory Shard's switch, and the card says so.
+    expect(await within(card).findByTestId("local-ai-embed-models-cloud")).toBeInTheDocument();
+    // …and the model the box is set to is not "In use" while the cloud is.
+    expect(within(card).getByTestId("local-ai-embed-model-qwen3-embedding-0.6b-state")).toHaveTextContent(/^Not downloaded$/);
+
+    fireEvent.click(within(card).getByTestId("local-ai-embed-download"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/embed/install", body: { force: false } }));
+    // A download, not a switch: memory search was not moved off the cloud.
+    expect(posts.some((p) => p.url === "/setup-api/clawkeep/memory/provider")).toBe(false);
   });
 
   it("installs an absent Whisper through the engine form of its route, and the embedder through its own", async () => {

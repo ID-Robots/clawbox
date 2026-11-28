@@ -17,6 +17,21 @@ import { resetBackgroundTasksForTests } from "@/lib/background-tasks";
 let modelPath: string;
 const owner = { value: true };
 vi.mock("@/lib/owner-session", () => ({ hasPersonSession: async () => owner.value }));
+/** What the gate says about the 4B on this box (TASK-2411). */
+const gate4b = { value: { available: false, quant: null as string | null, reason: "jetson" as string | null, detail: "Qwen3-Embedding-4B does not fit on a Jetson Orin Nano Super." as string | null } };
+vi.mock("@/lib/local-embedding-model", () => ({
+  gateLocalModel: async () => gate4b.value,
+  installedLocalEmbeddingVariant: async () => {
+    const file = path.join(path.dirname(modelPath), "Qwen3-Embedding-4B-Q8_0.gguf");
+    return fs.existsSync(file) ? { quant: "Q8_0", file: path.basename(file), bytes: fs.statSync(file).size } : null;
+  },
+}));
+
+// The appliance: install.sh's `embed_model` is what fetches the default slot
+// there. Pinned, because the runner may itself be an x86 PC with a record
+// naming CLAWBOX_ROOT — whose default slot is fetched without a root step
+// (TASK-2418, src/tests/unit/embed-install-task-x86.test.ts).
+vi.mock("@/lib/x64-integration", () => ({ hasX64Install: () => false, hasX64DesktopIntegration: () => false }));
 
 const followed = vi.fn(async () => ({ ok: true as boolean, error: undefined as string | undefined }));
 vi.mock("@/lib/root-step-follow", () => ({ followRootStep: (...a: unknown[]) => followed(...(a as [])) }));
@@ -26,6 +41,9 @@ vi.mock("@/lib/local-ai-runtime", () => ({ stopLocalAiProvider: (...a: unknown[]
 
 vi.mock("@/lib/embed-server", () => ({
   getEmbedLaunchSpec: () => ({ modelPath }),
+  getEmbedModelDir: () => path.dirname(modelPath),
+  readActiveLocalEmbeddingModel: async () => ({ id: "qwen3-embedding-0.6b", quant: "Q8_0" }),
+
   getEmbedProvisioningStatus: async () => {
     const present = fs.existsSync(modelPath);
     return { installed: present, modelAvailable: present, binaryAvailable: true, modelBytes: present ? fs.statSync(modelPath).size : null };
@@ -46,6 +64,7 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-embed-"));
   modelPath = path.join(dir, "qwen3-embedding.gguf");
   owner.value = true;
+  gate4b.value = { available: false, quant: null, reason: "jetson", detail: "Qwen3-Embedding-4B does not fit on a Jetson Orin Nano Super." };
   followed.mockReset().mockResolvedValue({ ok: true, error: undefined });
   stopped.mockClear();
   resetBackgroundTasksForTests();
@@ -184,6 +203,51 @@ describe("POST", () => {
   });
 });
 
+describe("which model (TASK-2411)", () => {
+  it("refuses a model that is not in the catalog", async () => {
+    const { POST } = await load();
+    const res = await POST(post({ model: "qwen3-embedding-8b" }));
+    expect(res.status).toBe(400);
+    expect(followed).not.toHaveBeenCalled();
+  });
+
+  it("refuses to fetch the 4B where this box cannot run it, with the gate's reason", async () => {
+    const { POST } = await load();
+    const res = await POST(post({ model: "qwen3-embedding-4b" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ kind: "local_model_unavailable", reason: "jetson" });
+    expect(followed).not.toHaveBeenCalled();
+  });
+
+  it("answers at once for a 4B copy that is already here, without a root step", async () => {
+    fs.writeFileSync(path.join(dir, "Qwen3-Embedding-4B-Q8_0.gguf"), "x");
+    const { POST } = await load();
+    const lines = await readStream(await POST(post({ model: "qwen3-embedding-4b" })));
+    expect(lines.at(-1)).toMatchObject({ success: true });
+    expect(followed).not.toHaveBeenCalled();
+  });
+
+  it("removes the 4B's files on ?model= without stopping the embedder that runs the 0.6B", async () => {
+    fs.writeFileSync(path.join(dir, "Qwen3-Embedding-4B-Q8_0.gguf"), "x".repeat(10));
+    fs.writeFileSync(path.join(dir, "Qwen3-Embedding-4B-Q4_K_M.gguf.part"), "x".repeat(5));
+    fs.writeFileSync(modelPath, "0.6b");
+    const { DELETE } = await load();
+    const res = await DELETE(new Request("http://localhost/setup-api/embed/install?model=qwen3-embedding-4b", { method: "DELETE" }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).freedBytes).toBe(15);
+    expect(fs.existsSync(path.join(dir, "Qwen3-Embedding-4B-Q8_0.gguf"))).toBe(false);
+    expect(fs.existsSync(path.join(dir, "Qwen3-Embedding-4B-Q4_K_M.gguf.part"))).toBe(false);
+    expect(fs.existsSync(modelPath)).toBe(true);
+    expect(stopped).not.toHaveBeenCalled();
+  });
+
+  it("refuses ?model= for an id that is not in the catalog", async () => {
+    const { DELETE } = await load();
+    const res = await DELETE(new Request("http://localhost/setup-api/embed/install?model=..%2Fconfig", { method: "DELETE" }));
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("DELETE", () => {
   function del(headers: Record<string, string> = {}): Request {
     return new Request("http://localhost/setup-api/embed/install", { method: "DELETE", headers });
@@ -208,6 +272,50 @@ describe("DELETE", () => {
     const { DELETE } = await load();
     expect((await DELETE(del())).status).toBe(200);
     expect(fs.existsSync(aside())).toBe(false);
+  });
+
+  it("drops a part an x86 PC's fetch left, so the next download does not resume it, and counts it", async () => {
+    fs.writeFileSync(modelPath, "weights");
+    const part = path.join(dir, "Qwen3-Embedding-0.6B-Q8_0.gguf.part");
+    fs.writeFileSync(part, "half");
+    const { DELETE } = await load();
+    const res = await DELETE(del());
+    expect(res.status).toBe(200);
+    expect((await res.json()).freedBytes).toBe("weights".length + "half".length);
+    expect(fs.existsSync(part)).toBe(false);
+    expect(fs.existsSync(modelPath)).toBe(false);
+  });
+
+  it("removes a part that is all there is, and says so rather than 'not on this box'", async () => {
+    const part = path.join(dir, "Qwen3-Embedding-0.6B-Q8_0.gguf.part");
+    fs.writeFileSync(part, "half");
+    const { DELETE } = await load();
+    const res = await DELETE(del());
+    expect(res.status).toBe(200);
+    expect((await res.json()).freedBytes).toBe("half".length);
+    expect(fs.existsSync(part)).toBe(false);
+    // Nothing was running it: the embedder is left alone.
+    expect(stopped).not.toHaveBeenCalled();
+  });
+
+  it("leaves a part alone while a download started meanwhile owns it", async () => {
+    fs.writeFileSync(modelPath, "weights");
+    const part = path.join(dir, "Qwen3-Embedding-0.6B-Q8_0.gguf.part");
+    fs.writeFileSync(part, "half");
+    const { DELETE } = await load();
+    // The route's own registry, imported after its module reset.
+    const { startBackgroundTask } = await import("@/lib/background-tasks");
+    // The download starts from another tab while the embedder is being stopped.
+    stopped.mockImplementationOnce(async () => {
+      startBackgroundTask({
+        kind: "embed-model-download", group: "embed-model", title: "t", label: "l", meta: {}, status: "s",
+        run: () => new Promise(() => {}),
+      });
+    });
+    const res = await DELETE(del());
+    expect(res.status).toBe(409);
+    expect(fs.existsSync(part)).toBe(true);
+    expect(fs.existsSync(modelPath)).toBe(true);
   });
 
   it("answers 404 when there is nothing to remove, and touches the engine either way not at all", async () => {

@@ -9,7 +9,8 @@
  * are gone (the owner's ruling of 2026-09-15), and so are their suites.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { notifyMemoryShardChanged } from "@/lib/ui-events";
 import { I18nProvider } from "@/lib/i18n";
 import EmbeddingModelCard from "@/components/local-ai/EmbeddingModelCard";
 import WhisperSizesCard from "@/components/local-ai/WhisperSizesCard";
@@ -169,6 +170,117 @@ describe("EmbeddingModelCard", () => {
     fireEvent.click(await screen.findByTestId("local-ai-embed-download"));
     await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
     expect(calls.find((c) => c.method === "POST")?.body).toEqual({ force: false });
+  });
+
+  describe("which model (TASK-2411)", () => {
+    const row = (over: Record<string, unknown>) => ({
+      id: "qwen3-embedding-4b", label: "Qwen3-Embedding-4B", dimensions: 2560, active: false, installed: false,
+      bytes: 4_279_660_224, quant: "Q8_0", available: true, reason: null, detail: null, ...over,
+    });
+    const SMALL = { id: "qwen3-embedding-0.6b", label: "Qwen3-Embedding-0.6B", dimensions: 1024, active: true, installed: true, bytes: 639_150_592, quant: "Q8_0", available: true, reason: null, detail: null };
+    const withModels = (fourB: Record<string, unknown>) => ({ ...PRESENT, models: [SMALL, row(fourB)] });
+
+    it("shows the 4B as unavailable on a Jetson, with the reason and nothing to press", async () => {
+      stub(() => json(withModels({ available: false, quant: null, reason: "jetson" })));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      const reason = await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-unavailable");
+      expect(reason.textContent).toMatch(/Jetson Orin Nano Super/);
+      expect(screen.queryByTestId("local-ai-embed-model-qwen3-embedding-4b-download")).toBeNull();
+      expect(screen.queryByTestId("local-ai-embed-model-qwen3-embedding-4b-use")).toBeNull();
+      expect(screen.getByTestId("local-ai-embed-model-qwen3-embedding-0.6b-state").textContent).toMatch(/In use/);
+    });
+
+    it("downloads the 4B by name where the box can run it", async () => {
+      stub((url, init) => (init?.method === "POST" ? ndjson([{ success: true }]) : json(withModels({}))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      fireEvent.click(await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-download"));
+      await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
+      expect(calls.find((c) => c.method === "POST")).toMatchObject({ url: "/setup-api/embed/install", body: { model: "qwen3-embedding-4b" } });
+    });
+
+    it("switches memory search onto a downloaded 4B, then asks for the full pass", async () => {
+      stub((url, init) => (init?.method === "POST"
+        ? json({ ok: true })
+        : url === "/setup-api/clawkeep/memory/provider" ? json({ source: "local" }) : json(withModels({ installed: true }))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      const use = await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-use");
+      // Enabled only once the provider read says the index is on the box.
+      await waitFor(() => expect(use).toBeEnabled());
+      fireEvent.click(use);
+      await waitFor(() => expect(calls.filter((c) => c.method === "POST")).toHaveLength(2));
+      const posts = calls.filter((c) => c.method === "POST");
+      expect(screen.queryByTestId("local-ai-embed-models-cloud")).toBeNull();
+      expect(posts[0]).toMatchObject({ url: "/setup-api/clawkeep/memory/provider", body: { source: "local", localModel: "qwen3-embedding-4b" } });
+      expect(posts[1]).toMatchObject({ url: "/setup-api/clawkeep/memory/index", body: { mode: "full" } });
+    });
+
+    it("does not move an index that lives in the cloud: Use waits for Memory Shard's own switch", async () => {
+      stub((url) => (url === "/setup-api/clawkeep/memory/provider" ? json({ source: "cloud" }) : json(withModels({ installed: true }))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      expect(await screen.findByTestId("local-ai-embed-models-cloud")).toBeTruthy();
+      expect(screen.getByTestId("local-ai-embed-model-qwen3-embedding-4b-use")).toBeDisabled();
+    });
+
+    /**
+     * The card stays mounted under the cloud's row now (TASK-2418), so an
+     * index Memory Shard moves to the cloud while it is open must not be
+     * moved back by a "Use" drawn from the old answer.
+     */
+    it("asks where the index is again at the click, and moves an index that went to the cloud nowhere", async () => {
+      let source = "local";
+      stub((url, init) => (init?.method === "POST"
+        ? json({ ok: true })
+        : url === "/setup-api/clawkeep/memory/provider" ? json({ source }) : json(withModels({ installed: true }))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      const use = await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-use");
+      await waitFor(() => expect(use).toBeEnabled());
+      // Memory Shard moved it to the cloud from another tab: this card never heard.
+      source = "cloud";
+      fireEvent.click(use);
+      expect(await screen.findByTestId("local-ai-embed-models-error")).toHaveTextContent(/ClawBox AI cloud/);
+      expect(calls.filter((c) => c.method === "POST")).toEqual([]);
+      await waitFor(() => expect(screen.getByTestId("local-ai-embed-model-qwen3-embedding-4b-use")).toBeDisabled());
+    });
+
+    it("reads where the index is again when Memory Shard says it moved", async () => {
+      let source = "local";
+      stub((url) => (url === "/setup-api/clawkeep/memory/provider" ? json({ source }) : json(withModels({ installed: true }))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      const use = await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-use");
+      await waitFor(() => expect(use).toBeEnabled());
+      source = "cloud";
+      act(() => notifyMemoryShardChanged());
+      await waitFor(() => expect(screen.getByTestId("local-ai-embed-model-qwen3-embedding-4b-use")).toBeDisabled());
+      expect(screen.getByTestId("local-ai-embed-models-cloud")).toBeInTheDocument();
+    });
+
+    it("removes a downloaded model that is not in use by its own id, never the one in use", async () => {
+      let removed = false;
+      stub((url, init) => {
+        if (init?.method === "DELETE") {
+          removed = true;
+          return json({ ok: true });
+        }
+        return json(withModels({ installed: !removed }));
+      });
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      expect(screen.queryByTestId("local-ai-embed-model-qwen3-embedding-0.6b-remove")).toBeNull();
+      fireEvent.click(await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-remove"));
+      await waitFor(() => expect(calls.some((c) => c.method === "DELETE")).toBe(true));
+      expect(calls.find((c) => c.method === "DELETE")?.url).toBe("/setup-api/embed/install?model=qwen3-embedding-4b");
+      // The card reads the box again: the row offers Download, not Remove.
+      expect(await screen.findByTestId("local-ai-embed-model-qwen3-embedding-4b-download")).toBeTruthy();
+      expect(screen.queryByTestId("local-ai-embed-model-qwen3-embedding-4b-remove")).toBeNull();
+    });
+
+    it("says why Use waits while where the index lives cannot be read", async () => {
+      stub((url) => (url === "/setup-api/clawkeep/memory/provider"
+        ? json({ error: "unreadable", kind: "unreadable" }, 503)
+        : json(withModels({ installed: true }))));
+      render(<I18nProvider><EmbeddingModelCard /></I18nProvider>);
+      expect(await screen.findByTestId("local-ai-embed-models-source-unknown")).toBeTruthy();
+      expect(screen.getByTestId("local-ai-embed-model-qwen3-embedding-4b-use")).toBeDisabled();
+    });
   });
 
   it("offers no removal of its own: taking the model off is the row's Uninstall", async () => {

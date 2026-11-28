@@ -1,9 +1,10 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach, type MockInstance } from "vitest";
 import * as childProcess from "child_process";
 import { EventEmitter } from "node:events";
 import * as fs from "fs/promises";
 import { existsSync } from "fs";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import nodePath from "node:path";
 
 /**
@@ -50,9 +51,14 @@ vi.mock("@/lib/openclaw-maintenance", async (importOriginal) => {
 // through the link `postbuild` writes for the NESTED standalone layout, so a
 // mock without it would make every case that reaches the entry throw inside
 // readBuildId's `try` and answer "" — i.e. pass for the wrong reason.
+// `rm` so a case can see what the updater removes, and when (the handover
+// marker). It throws as the absent function it replaces did unless a case
+// says otherwise: runs that other cases leave going end where they always did,
+// instead of dispatching root steps into the cases after them.
 vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
   realpath: vi.fn(),
+  rm: vi.fn(() => { throw new TypeError("rm is not a function"); }),
 }));
 
 // `existsSync` is how readBuildId decides WHICH tree the server runs from — the
@@ -180,16 +186,32 @@ vi.mock("@/lib/plugin-repair-after-update", () => ({
 // `fs/promises` — so only the cases about a large box move.
 // The migration status the pre-start wrote: none by default, which is what the
 // real reader answers under the mocked `fs/promises`.
-const { mockOpenclawDatabaseBytes, mockReadMigrationStatus } = vi.hoisted(() => ({
+// Whether doctor's own run is recorded complete for the installed core: no by
+// default, so every case below that does not say otherwise keeps the verify's
+// full repair after a quiesced root step.
+const { mockOpenclawDatabaseBytes, mockReadMigrationStatus, mockDoctorRefusal } = vi.hoisted(() => ({
   mockOpenclawDatabaseBytes: vi.fn<(stateDir: string) => Promise<number>>(async () => 0),
   mockReadMigrationStatus: vi.fn<() => Promise<import("@/lib/openclaw-migration-status").OpenclawMigrationStatus | null>>(
     async () => null,
   ),
+  mockDoctorRefusal: vi.fn<() => Promise<string | null>>(async () => "there is no readable migration record"),
 }));
 vi.mock("@/lib/openclaw-migration-status", async (orig) => ({
   ...(await orig<typeof import("@/lib/openclaw-migration-status")>()),
   openclawDatabaseBytes: mockOpenclawDatabaseBytes,
   readOpenclawMigrationStatus: mockReadMigrationStatus,
+  doctorRecordRefusal: mockDoctorRefusal,
+}));
+// The record of a `doctor --fix` the verify saw complete: the helper run itself
+// is openclaw-db-maintenance-lib.test.ts's; here, when it is asked for.
+const { mockRecordDoctorComplete, mockMarkDoctorDue } = vi.hoisted(() => ({
+  mockRecordDoctorComplete: vi.fn<() => Promise<boolean>>(async () => true),
+  mockMarkDoctorDue: vi.fn<() => Promise<boolean>>(async () => true),
+}));
+vi.mock("@/lib/openclaw-db-maintenance", async (orig) => ({
+  ...(await orig<typeof import("@/lib/openclaw-db-maintenance")>()),
+  recordOpenclawDoctorComplete: mockRecordDoctorComplete,
+  markOpenclawDoctorDue: mockMarkDoctorDue,
 }));
 
 // The session check's one network call (TASK-2153): the `chat.history` the
@@ -221,6 +243,15 @@ import { get, set, setMany } from "@/lib/config-store";
 import { GatewayRpcError, GatewayWsUnavailableError } from "@/lib/openclaw-gateway-ws";
 import { waitForPortOpen } from "@/lib/port-probe";
 import { deferred } from "@/tests/helpers/deferred";
+import {
+  answerJournalctl,
+  cannedJournal,
+  journalctlModel,
+  numberedEntries,
+  type ExecAnswer,
+  type JournalEntry,
+} from "@/tests/helpers/journalctl-model";
+import { OPENCLAW_INSTALL_FAILED_JOURNAL, OPENCLAW_INSTALL_FAILED_REASON } from "@/tests/fixtures/openclaw-install-failed-journal";
 
 const mockGet = vi.mocked(get);
 const mockSet = vi.mocked(set);
@@ -229,6 +260,7 @@ const mockExec = vi.mocked(childProcess.exec);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockReadFile = vi.mocked(fs.readFile);
 const mockRealpath = vi.mocked(fs.realpath);
+const mockRm = vi.mocked(fs.rm);
 const mockExists = vi.mocked(existsSync);
 const mockGatewayUp = vi.mocked(waitForPortOpen);
 const mockSpawn = vi.mocked(childProcess.spawn);
@@ -317,7 +349,14 @@ function setupExecMock(results: Record<string, { stdout: string; stderr: string 
   }) as unknown as typeof childProcess.exec);
 }
 
-function setupExecFileMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
+/**
+ * A fixed answer, or one computed from the argv — the form the journalctl
+ * model (helpers/journalctl-model.ts) needs, since what a journal read returns
+ * depends on what it asked for.
+ */
+type ExecFileAnswer = ExecAnswer | ((cmd: string, args: readonly string[]) => ExecAnswer);
+
+function setupExecFileMock(results: Record<string, ExecFileAnswer> = {}) {
   mockExecFile.mockImplementation(((
     cmd: string,
     args: string[],
@@ -326,12 +365,24 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
   ) => {
     const key = `${cmd} ${args.join(" ")}`;
 
-    let result: { stdout: string; stderr: string } | Error | undefined;
+    let result: ExecAnswer | undefined;
     for (const k of [...Object.keys(results), ...Object.keys(execFileFallbackResults)]) {
       if (key.includes(k) || k.includes(cmd)) {
-        result = results[k] ?? execFileFallbackResults[k];
+        const answer = results[k] ?? execFileFallbackResults[k];
+        result = typeof answer === "function" ? answer(cmd, args) : answer;
         break;
       }
+    }
+
+    // The rebuild step's dispatch never returns unless the case answers it with
+    // an error: on a box the unit it queues replaces this server, and a test
+    // can only model that as a run that stops here (as `mockRestartUiProcess`
+    // does for the install-x64.sh restart). Answered with success, it left the
+    // run in waitForRebuildToTakeOver for twenty minutes, asking the rebuild
+    // unit's Result every 5 s through whichever case came next.
+    if (!(result instanceof Error) && args.includes("--no-block") && args.includes("rebuild_reboot")) {
+      const replaced = { then: () => replaced, catch: () => replaced };
+      return replaced as unknown as ReturnType<typeof childProcess.execFile>;
     }
 
     const callback = typeof optsOrCallback === "function" ? optsOrCallback : maybeCallback;
@@ -416,6 +467,11 @@ describe("updater", () => {
     mockMainChatHistory.mockResolvedValue({ sessionKey: "main" });
     mockReadMigrationStatus.mockReset();
     mockReadMigrationStatus.mockResolvedValue(null);
+    mockDoctorRefusal.mockReset();
+    mockDoctorRefusal.mockResolvedValue("there is no readable migration record");
+    // The note install.sh's gateway setup step leaves when it keeps a running
+    // gateway: none, and never the machine's own /run.
+    process.env.CLAWBOX_GATEWAY_LEFT_RUNNING = nodePath.join(tmpdir(), `clawbox-updater-test-no-note-${process.pid}`);
     // Pin the SKU: the step list is edition-dependent, so without this the
     // expectations below that look for `gateway_verify` would fail on a Hermes
     // box, where it is (correctly) filtered out. Only the edition VALUE is set
@@ -437,6 +493,11 @@ describe("updater", () => {
     // The FLAT standalone layout — the entry is where it looks like it is.
     // The nested one has a case of its own.
     mockRealpath.mockImplementation((async (p: unknown) => String(p)) as never);
+    // Back to their factory defaults (the real existsSync; an rm that throws):
+    // a case that overrides one and does not put it back must not hand its
+    // files to every case after it.
+    mockExists.mockReset();
+    mockRm.mockReset();
     mockGatewayUp.mockResolvedValue(true);
 
     setupExecMock({
@@ -598,15 +659,43 @@ describe("updater", () => {
       expect(state.phase).toBe("running");
     });
 
+    it("refuses before step 1 when CLAWBOX_UPDATE_CHANNEL cannot be honoured (TASK-2602)", async () => {
+      // On an appliance step 0 is install.sh, which never reads the channel: a
+      // value the updater refuses must stop the run BEFORE that step moves the
+      // tree, not at the restart step's resolveUpdateBranch.
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", "workstaton");
+      updater.resetUpdateState();
+      expect(updater.startUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const state = updater.getUpdateState();
+      expect(state.error).toMatch(/"workstaton", which is not an update channel/);
+      expect(state.currentStepIndex).toBe(-1);
+      expect(state.steps.every((step) => step.status === "pending")).toBe(true);
+      const dispatched = mockExecFile.mock.calls
+        .map(([cmd, args]) => [cmd, ...((args as string[] | undefined) ?? [])].join(" "))
+        .filter((line) => line.includes("root-step") || line.includes("clawbox-root-update@"));
+      expect(dispatched).toEqual([]);
+    });
+
+    it("a box with no channel override runs step 1 as before (TASK-2602)", async () => {
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().steps[0].status).not.toBe("pending");
+      });
+      expect(updater.getUpdateState().error ?? "").not.toMatch(/update channel/);
+    });
+
     it("uses the root step journal output when a root update step fails", async () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         // The journal only overrides the error when the unit reports failed.
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": {
-          stdout: "Waiting for apt lock...\nE: Could not get lock /var/lib/dpkg/lock-frontend\n",
-          stderr: "",
-        },
+        "/usr/bin/journalctl": cannedJournal([
+          "Waiting for apt lock...",
+          "E: Could not get lock /var/lib/dpkg/lock-frontend",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -645,7 +734,7 @@ describe("updater", () => {
       // The mock is the OS: the window this run opened sees only this run.
       let dispatchedAt = 0;
       const previousAttempt = "Error: apt-get update failed (exit 100)";
-      const thisAttempt = ["Fetching package lists...", "Killed"].join(String.fromCharCode(10));
+      const thisAttempt = ["Fetching package lists...", "Killed"];
       setupExecFileMock({
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
         ping: { stdout: "", stderr: "" },
@@ -688,10 +777,7 @@ describe("updater", () => {
         if (key.includes("journalctl") && key.includes("clawbox-root-update@apt_update.service")) {
           const since = Number(/--since @([\d.]+)/.exec(key)?.[1] ?? NaN);
           const bounded = since * 1000 <= dispatchedAt;
-          return answer({
-            stdout: bounded ? thisAttempt : [previousAttempt, thisAttempt].join(String.fromCharCode(10)),
-            stderr: "",
-          });
+          return answer(answerJournalctl(bounded ? thisAttempt : [previousAttempt, ...thisAttempt], args));
         }
         return (fallback as unknown as (
           cmd: string,
@@ -774,6 +860,48 @@ describe("updater", () => {
       // And the CODE is install.sh's, so a condition both sides can report —
       // the doctor refusal — collapses to one card rather than two.
       expect(warning?.code).toBe("post-update-fixups");
+    });
+
+    /**
+     * A marker can be anywhere in a long run: install.sh prints the fixups'
+     * one as the LAST line of `post_update`, the doctor refusal mid-run. A
+     * `--since T -n 500` read is the run's FIRST 500 entries on journalctl 249
+     * and its LAST 500 on 255, so each of them dropped one of the two ends
+     * without a word, and the owner was told the update landed whole.
+     */
+    it.each([
+      [249, "last"],
+      [249, "first"],
+      [255, "last"],
+      [255, "first"],
+    ] as const)("journalctl %i: raises a marker that is the %s of a run's 600 entries", async (generation, where) => {
+      const marker = "CLAWBOX-WARN[post-update-fixups]: these system fixups failed and were skipped: vnc_refresh";
+      const filler = numberedEntries(599, (i) => `  Fixup ${i}: done`);
+      setupExecFileMock({
+        "-u clawbox-root-update@apt_update.service": journalctlModel(
+          { "clawbox-root-update@apt_update.service": where === "last" ? [...filler, marker] : [marker, ...filler] },
+          generation,
+        ),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockGet.mockResolvedValue(undefined);
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      updater.startUpdate();
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().steps.find((s) => s.id === "apt_update")?.status).toBe("completed");
+      });
+
+      const warning = updater.getUpdateState().warnings?.find((w) => w.code === "post-update-fixups");
+      expect(warning?.message ?? "no post-update-fixups warning was raised").toContain("vnc_refresh");
     });
 
     it("raises the marker after systemd has UNLOADED the step's unit", async () => {
@@ -954,23 +1082,19 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": {
-          stdout: [
-            "Starting ClawBox Root Update Step (apt_update).",
-            "    root : PWD=/ ; USER=clawbox ; COMMAND=/usr/bin/systemctl --user stop kokoro-server.service",
-            "pam_unix(sudo:session): session opened for user clawbox(uid=1000) by (uid=0)",
-            "Running bun build...",
-            "(to clawbox) root on none",
-            "Error: rebuild failed (exit 137)",
-            "  Restored the previous build; the dashboard answers on :80 again",
-            "clawbox-root-update@apt_update.service: Main process exited, code=exited, status=137/n/a",
-            "clawbox-root-update@apt_update.service: Failed with result 'exit-code'.",
-            "Failed to start ClawBox Root Update Step (apt_update).",
-            "clawbox-root-update@apt_update.service: Consumed 8.523s CPU time.",
-            "",
-          ].join("\n"),
-          stderr: "",
-        },
+        "/usr/bin/journalctl": cannedJournal([
+          "Starting ClawBox Root Update Step (apt_update).",
+          "    root : PWD=/ ; USER=clawbox ; COMMAND=/usr/bin/systemctl --user stop kokoro-server.service",
+          "pam_unix(sudo:session): session opened for user clawbox(uid=1000) by (uid=0)",
+          "Running bun build...",
+          "(to clawbox) root on none",
+          "Error: rebuild failed (exit 137)",
+          "  Restored the previous build; the dashboard answers on :80 again",
+          "clawbox-root-update@apt_update.service: Main process exited, code=exited, status=137/n/a",
+          "clawbox-root-update@apt_update.service: Failed with result 'exit-code'.",
+          "Failed to start ClawBox Root Update Step (apt_update).",
+          "clawbox-root-update@apt_update.service: Consumed 8.523s CPU time.",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -1000,16 +1124,12 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": {
-          stdout: [
-            "E: Could not get lock /var/lib/dpkg/lock-frontend",
-            "pam_unix(sudo:session): session closed for user clawbox",
-            "clawbox-root-update@apt_update.service: Failed with result 'exit-code'.",
-            "clawbox-root-update@apt_update.service: Consumed 1.204s CPU time.",
-            "",
-          ].join("\n"),
-          stderr: "",
-        },
+        "/usr/bin/journalctl": cannedJournal([
+          "E: Could not get lock /var/lib/dpkg/lock-frontend",
+          "pam_unix(sudo:session): session closed for user clawbox",
+          "clawbox-root-update@apt_update.service: Failed with result 'exit-code'.",
+          "clawbox-root-update@apt_update.service: Consumed 1.204s CPU time.",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -1043,19 +1163,15 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": {
-          stdout: [
-            "  Swapfile already active: 4G",
-            "  Memory available for the build: 712 MB (was 690 MB)",
-            "Running bun build...",
-            "clawbox-root-update@apt_update.service: Main process exited, code=killed, status=9/KILL",
-            // systemd's cgroup OOM verdict — the evidence, not the inference.
-            "clawbox-root-update@apt_update.service: Failed with result 'oom-kill'.",
-            "clawbox-root-update@apt_update.service: Consumed 611.183s CPU time.",
-            "",
-          ].join("\n"),
-          stderr: "",
-        },
+        "/usr/bin/journalctl": cannedJournal([
+          "  Swapfile already active: 4G",
+          "  Memory available for the build: 712 MB (was 690 MB)",
+          "Running bun build...",
+          "clawbox-root-update@apt_update.service: Main process exited, code=killed, status=9/KILL",
+          // systemd's cgroup OOM verdict — the evidence, not the inference.
+          "clawbox-root-update@apt_update.service: Failed with result 'oom-kill'.",
+          "clawbox-root-update@apt_update.service: Consumed 611.183s CPU time.",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -1115,19 +1231,19 @@ describe("updater", () => {
       ].join("\n");
       const dispatched = spawnSync("bash", ["-c", program, "bash", "--step", "post_update"], { encoding: "utf-8" });
       expect(dispatched.status, dispatched.stdout).not.toBe(0);
-      // What `journalctl -u … -n 40` hands the reader: the step's tail and
-      // systemd's epilogue, newest last.
+      // The run as the journal holds it, systemd's epilogue last; the reader
+      // asks for the newest 40 entries itself.
       const journal = [
         ...dispatched.stdout.split("\n").filter(Boolean),
         "clawbox-root-update@post_update.service: Main process exited, code=exited, status=1/FAILURE",
         "clawbox-root-update@post_update.service: Failed with result 'exit-code'.",
         "clawbox-root-update@post_update.service: Consumed 9min 3.112s CPU time.",
-      ].slice(-40).join("\n");
+      ];
 
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": new Error("systemctl failed"),
         "show clawbox-root-update@post_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": { stdout: `${journal}\n`, stderr: "" },
+        "/usr/bin/journalctl": cannedJournal(journal),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -1148,7 +1264,7 @@ describe("updater", () => {
 
       const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
       expect(postStep?.status).toBe("failed");
-      expect(postStep?.error, `the reason does not name the fixup that failed:\n${journal}`).toMatch(/^Error: .*openclaw_tts/);
+      expect(postStep?.error, `the reason does not name the fixup that failed:\n${journal.join("\n")}`).toMatch(/^Error: .*openclaw_tts/);
       // The owner reads this line: the step, not an operator's command or path.
       expect(postStep?.error).not.toMatch(/sudo|\/home\//);
     });
@@ -1170,12 +1286,11 @@ describe("updater", () => {
         "[provision-run] 20261013T183500Z-4242",
         "clawbox-root-update@post_update.service: Main process exited, code=exited, status=1/FAILURE",
         "clawbox-root-update@post_update.service: Failed with result 'exit-code'.",
-        "",
-      ].join("\n");
+      ];
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": new Error("systemctl failed"),
         "show clawbox-root-update@post_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": { stdout: journal, stderr: "" },
+        "/usr/bin/journalctl": cannedJournal(journal),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -1206,15 +1321,11 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": {
-          stdout: [
-            "Running bun build...",
-            "clawbox-root-update@apt_update.service: Main process exited, code=killed, status=9/KILL",
-            "clawbox-root-update@apt_update.service: Failed with result 'signal'.",
-            "",
-          ].join("\n"),
-          stderr: "",
-        },
+        "/usr/bin/journalctl": cannedJournal([
+          "Running bun build...",
+          "clawbox-root-update@apt_update.service: Main process exited, code=killed, status=9/KILL",
+          "clawbox-root-update@apt_update.service: Failed with result 'signal'.",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -1249,16 +1360,12 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
-        "/usr/bin/journalctl": {
-          stdout: [
-            "Running bun build...",
-            "clawbox-root-update@apt_update.service: Main process exited, code=exited, status=137/n/a",
-            "clawbox-root-update@apt_update.service: Failed with result 'oom-kill'.",
-            "clawbox-root-update@apt_update.service: Consumed 611.183s CPU time.",
-            "",
-          ].join("\n"),
-          stderr: "",
-        },
+        "/usr/bin/journalctl": cannedJournal([
+          "Running bun build...",
+          "clawbox-root-update@apt_update.service: Main process exited, code=exited, status=137/n/a",
+          "clawbox-root-update@apt_update.service: Failed with result 'oom-kill'.",
+          "clawbox-root-update@apt_update.service: Consumed 611.183s CPU time.",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
         openclaw: { stdout: "1.0.0", stderr: "" },
@@ -2206,6 +2313,737 @@ describe("updater", () => {
         .toBe("/tmp/clawbox-updater-openclaw-home");
       expect(preStartOptions?.env?.OPENCLAW_CONFIG_PATH)
         .toBe("/tmp/clawbox-updater-openclaw-home/openclaw.json");
+      // No gateway runs after this pre-start: its start record must say so, or
+      // the unit's next start takes it for a previous start that never came up.
+      expect(preStartOptions?.env?.CLAWBOX_PRESTART_OUTSIDE_UNIT).toBe("1");
+    });
+
+    /**
+     * The verify after post_update on a box with nothing to repair: the gateway
+     * is down only because the update's own quiesce stopped it, its journal
+     * names nothing the repair exists for, and doctor's own run is recorded
+     * complete for the installed core. The unit's ExecStartPre runs the same
+     * new pre-start, so the verify starts the unit and waits for it; the full
+     * repair (pre-start outside the unit and doctor --fix, under the mask) is
+     * kept for a start that does not come up, and for every other case.
+     */
+    describe("the gateway's start after a quiesced root step", () => {
+      const POST_UPDATE = "clawbox-run-root-step.sh post_update";
+      const RESTART = "systemctl restart clawbox-gateway.service";
+      const PRE_START = "scripts/gateway-pre-start.sh";
+      const DOCTOR = "openclaw doctor --fix --yes --non-interactive";
+      const ENTER = "clawbox-gateway-maintenance.sh enter";
+      const LEAVE = "clawbox-gateway-maintenance.sh leave";
+      const ROUTINE_LINE = "[Updater] gateway_verify: nothing to repair (no blocker in the gateway journal; "
+        + "doctor recorded complete for";
+      /** The line every way into the full repair logs: which gate sent it there. */
+      const REFUSED = "[Updater] gateway_verify: running the full repair: ";
+      const FALLBACK_LINE = `${REFUSED}the gateway did not come up on its own pre-start`;
+      const RECORD_OLD = "doctor's recorded run is more than 30 days old";
+      const PRE_START_WAIT_LINE = "[Updater] waiting for clawbox-gateway to finish its pre-start before stopping it";
+      const OWN_START_CLEAN_LINE = "[Updater] gateway_verify: its own start's journal names nothing to repair";
+      const ownStartNames = (what: string) => `${REFUSED}its own start's journal names ${what}`;
+      const refusedFor = (why: string) => logged.some((line) => line === `${REFUSED}${why}`);
+      const OWN_START_UNREAD_LINE = `${REFUSED}its own start's journal could not be read`;
+      const OWN_START_SILENT_LINE = `${REFUSED}the chat did not answer after its own start`;
+      /** The line the check logs when it starts a gateway it would otherwise have accepted: why. */
+      const STARTING_AGAIN = "[Updater] gateway_verify: starting the gateway on the updated tree: ";
+      const LEFT_RUNNING_LINE = `${STARTING_AGAIN}it is still the run the update's gateway setup step left running`;
+      const STOPPED = () => unitShow({ ActiveState: "inactive", SubState: "dead" });
+      const START_JOURNAL = "_SYSTEMD_INVOCATION_ID=";
+      const ASK_RUN = "systemctl show clawbox-gateway.service -p InvocationID";
+      /** systemd's id for the gateway's n-th run in a case: a new one at every restart. */
+      const runId = (n: number) => `a${n.toString(16).padStart(31, "0")}`;
+      /** The one line each doctor run of the full repair logs after its bound line: what its record now says. */
+      const DOCTOR_LINE = "[Updater] openclaw doctor --fix: ";
+      const doctorOutcomes = () => logged.filter((line) => line.startsWith(DOCTOR_LINE) && !line.startsWith(`${DOCTOR_LINE}bound `));
+      const RECORDED_LINE = `${DOCTOR_LINE}completed; its run is recorded complete`;
+      const DUE = "its recorded run is due, so the next update runs doctor again";
+      const NOT_DUE = "its recorded run could not be marked due, so the record stays as it was";
+
+      let logged: string[];
+      let logSpy: MockInstance<typeof console.log>;
+      let noteDir: string;
+      let note: string;
+      /** How many execFile calls had been made each time the session check asked the chat. */
+      let chatAsks: number[];
+      /** The same, each time doctor's run was recorded complete, and each time it was marked due again. */
+      let doctorRecorded: number[];
+      let doctorMarkedDue: number[];
+      beforeEach(() => {
+        logged = [];
+        logSpy = vi.spyOn(console, "log").mockImplementation((...parts: unknown[]) => {
+          logged.push(parts.map(String).join(" "));
+        });
+        mockDoctorRefusal.mockResolvedValue(null);
+        noteDir = mkdtempSync(nodePath.join(tmpdir(), "clawbox-gateway-note-"));
+        note = nodePath.join(noteDir, "gateway-left-running");
+        process.env.CLAWBOX_GATEWAY_LEFT_RUNNING = note;
+        chatAsks = [];
+        mockMainChatHistory.mockImplementation(async () => {
+          chatAsks.push(mockExecFile.mock.calls.length);
+          return { sessionKey: "main" };
+        });
+        doctorRecorded = [];
+        mockRecordDoctorComplete.mockImplementation(async () => {
+          doctorRecorded.push(mockExecFile.mock.calls.length);
+          return true;
+        });
+        doctorMarkedDue = [];
+        mockMarkDoctorDue.mockImplementation(async () => {
+          doctorMarkedDue.push(mockExecFile.mock.calls.length);
+          return true;
+        });
+      });
+      afterEach(() => {
+        logSpy.mockRestore();
+        rmSync(noteDir, { recursive: true, force: true });
+      });
+
+      const commands = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+      const indexesOf = (needle: string) => commands()
+        .map((call, index) => (call.includes(needle) ? index : -1))
+        .filter((index) => index >= 0);
+
+      /**
+       * One continuation through post_update and gateway_verify. `unit` answers
+       * the start-state read (`systemctl show … -p NRestarts`), `subState` the
+       * pre-start wait's `-p SubState --value` reads once post_update has run,
+       * and the port listens once the gateway has been restarted `listensAfter`
+       * times (or whenever `up` says, given the restarts so far).
+       *
+       * journalctl answers the way the real one does: `-q` drops its own
+       * `-- … --` lines, so a unit with no entries is `-- No entries --` to a
+       * plain read and nothing at all to a quiet one. `startJournal` answers a
+       * read of one run (`_SYSTEMD_INVOCATION_ID=`), `run` the gateway's
+       * `-p InvocationID` (by default a new id at every restart), and
+       * `quiesceRefused` makes post_update's maintenance mask fail, so nothing
+       * stops the gateway after gateway_setup.
+       */
+      async function verifyAfterPostUpdate(options: {
+        journal?: string | Error;
+        startJournal?: string | Error;
+        run?: (restarts: number) => string | Error;
+        unit?: () => string | Error;
+        subState?: (read: number) => string;
+        listensAfter?: number;
+        up?: (restarts: number) => boolean;
+        start?: "continuation" | "openclaw-only";
+        firstRestartRefused?: boolean;
+        quiesceRefused?: boolean;
+        doctor?: string | Error;
+      } = {}) {
+        setupExecFileMock({
+          [POST_UPDATE]: { stdout: "", stderr: "" },
+          "/usr/bin/journalctl -u clawbox-gateway.service": options.journal instanceof Error
+            ? options.journal
+            : { stdout: options.journal ?? "[gateway] ready (5 plugins)\n", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+          openclaw: { stdout: "1.0.0", stderr: "" },
+          "/bin/bash": { stdout: "", stderr: "" },
+        });
+        const base = mockExecFile.getMockImplementation() as (...call: unknown[]) => unknown;
+        let subStateReads = 0;
+        mockExecFile.mockImplementation(((cmd: string, args: string[], ...rest: unknown[]) => {
+          const callback = rest.find((part) => typeof part === "function") as
+            | ((error: Error | null, result: { stdout: string; stderr: string }) => void)
+            | undefined;
+          const answer = (result: string | Error) => {
+            if (result instanceof Error) callback?.(result, { stdout: "", stderr: "" });
+            else callback?.(null, { stdout: result, stderr: "" });
+            return {};
+          };
+          if (Array.isArray(args) && args.includes("NRestarts")) {
+            return answer(options.unit ? options.unit() : STOPPED());
+          }
+          const call = `${cmd} ${(args ?? []).join(" ")}`;
+          if (options.firstRestartRefused && call.includes(RESTART)
+            && indexesOf(RESTART).length === 1) {
+            return answer(new Error(
+              "Job for clawbox-gateway.service failed because the control process exited with error code.",
+            ));
+          }
+          if (options.quiesceRefused && call.includes(ENTER) && indexesOf(ENTER).length === 1) {
+            return answer(new Error("sudo: a password is required"));
+          }
+          if (options.doctor !== undefined && call.includes(DOCTOR)) return answer(options.doctor);
+          if (call.includes(ASK_RUN)) {
+            const restarts = indexesOf(RESTART).length;
+            return answer(options.run ? options.run(restarts) : `InvocationID=${runId(restarts)}\n`);
+          }
+          if (cmd === "/usr/bin/journalctl") {
+            const ownRun = args.some((arg) => arg.startsWith(START_JOURNAL));
+            const text = ownRun && options.startJournal !== undefined
+              ? options.startJournal
+              : options.journal ?? "[gateway] ready (5 plugins)\n";
+            if (text instanceof Error) return answer(text);
+            return answer(args.includes("-q")
+              ? text.split("\n").filter((line) => !/^-- .* --$/.test(line)).join("\n")
+              : text);
+          }
+          if (options.subState && Array.isArray(args) && args.includes("SubState") && args.includes("--value")
+            && commands().some((call) => call.includes(POST_UPDATE))) {
+            return answer(`${options.subState(subStateReads++)}\n`);
+          }
+          return base(cmd, args, ...rest);
+        }) as unknown as typeof childProcess.execFile);
+
+        // The checkout's own scripts/gateway-pre-start.sh, so the out-of-unit
+        // run is really reachable: under a root without it, "no pre-start"
+        // would hold on beta too.
+        const priorRoot = process.env.CLAWBOX_ROOT;
+        process.env.CLAWBOX_ROOT = process.cwd();
+        vi.resetModules();
+        mockGet.mockResolvedValue(true);
+        mockSet.mockResolvedValue();
+        mockSetMany.mockResolvedValue();
+        mockRebuiltBox();
+        const listensAfter = options.listensAfter ?? 1;
+        const up = options.up ?? ((restarts: number) => restarts >= listensAfter);
+        mockGatewayUp.mockImplementation(async () => up(indexesOf(RESTART).length));
+        updater = await import("@/lib/updater");
+        if (priorRoot === undefined) delete process.env.CLAWBOX_ROOT;
+        else process.env.CLAWBOX_ROOT = priorRoot;
+
+        updater.resetUpdateState();
+        if (options.start === "openclaw-only") {
+          expect(updater.startOpenclawUpdate().started).toBe(true);
+        } else {
+          expect(await updater.checkContinuation()).toBe(true);
+        }
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+        return updater.getUpdateState();
+      }
+
+      /** The full repair ran after the root step: mask, stop, pre-start outside the unit, doctor, unmask, restart. */
+      function expectFullRepair() {
+        const calls = commands();
+        const postUpdate = calls.findIndex((call) => call.includes(POST_UPDATE) || call.includes("openclaw_install"));
+        const preStart = calls.findIndex((call) => call.includes("/bin/bash") && call.includes(PRE_START));
+        const doctor = indexesOf(DOCTOR)[0];
+        expect(preStart).toBeGreaterThan(postUpdate);
+        expect(indexesOf(ENTER)).toHaveLength(2);
+        expect(indexesOf(LEAVE)).toHaveLength(2);
+        expect(indexesOf(ENTER)[1]).toBeLessThan(preStart);
+        expect(preStart).toBeLessThan(doctor);
+        expect(doctor).toBeLessThan(indexesOf(LEAVE)[1]);
+        expect(indexesOf(RESTART).at(-1)).toBeGreaterThan(indexesOf(LEAVE)[1]);
+        const env = (mockExecFile.mock.calls[preStart]?.[2] as { env?: NodeJS.ProcessEnv } | undefined)?.env;
+        expect(env?.CLAWBOX_PRESTART_OUTSIDE_UNIT).toBe("1");
+        expect(logged.some((line) => line.startsWith(ROUTINE_LINE))).toBe(false);
+      }
+
+      it("starts the stopped gateway on its own pre-start when nothing names a repair", async () => {
+        const state = await verifyAfterPostUpdate();
+        expect(state.error).toBeUndefined();
+        expect(state.phase).toBe("completed");
+
+        const calls = commands();
+        // No second run of the pre-start outside the unit and no doctor: the
+        // unit's ExecStartPre is the same script, and doctor's record covers
+        // this core.
+        expect(calls.some((call) => call.includes("/bin/bash") && call.includes(PRE_START))).toBe(false);
+        expect(calls.some((call) => call.includes(DOCTOR))).toBe(false);
+        // post_update's mask is the only one.
+        expect(indexesOf(ENTER)).toHaveLength(1);
+        expect(indexesOf(LEAVE)).toHaveLength(1);
+        const postUpdate = calls.findIndex((call) => call.includes(POST_UPDATE));
+        expect(indexesOf(RESTART)).toHaveLength(1);
+        expect(indexesOf(RESTART)[0]).toBeGreaterThan(postUpdate);
+        expect(logged.some((line) => line.startsWith(ROUTINE_LINE))).toBe(true);
+        expect(logged).toContain("[Updater] gateway sessions: serving");
+        // That start's own journal, read once by its run's id, after the chat
+        // answered (the wait the step already has), and nothing else follows.
+        const ownJournal = indexesOf(START_JOURNAL);
+        expect(ownJournal).toHaveLength(1);
+        expect(calls[ownJournal[0]]).toContain(`${START_JOURNAL}${runId(1)}`);
+        expect(calls[ownJournal[0]]).toContain("-q");
+        expect(chatAsks).toHaveLength(1);
+        expect(ownJournal[0]).toBeGreaterThanOrEqual(chatAsks[0]);
+        expect(indexesOf(ASK_RUN)).toHaveLength(1);
+        expect(indexesOf(ASK_RUN)[0]).toBeGreaterThan(indexesOf(RESTART)[0]);
+        expect(logged.some((line) => line.startsWith(OWN_START_CLEAN_LINE))).toBe(true);
+      });
+
+      /**
+       * The routine start is the updated tree's first gateway start on a box
+       * that neither reboots nor pauses the gateway for the build, and a
+       * refusal at plugin load can come after the port opens. Its own journal,
+       * read after the session check, decides: a blocker the full repair
+       * reads, or a journal that cannot be read, gets that repair, with the
+       * start's own lines as its evidence, and the chat is asked again.
+       */
+      it.each([
+        ["a capability consent refusal", 'Plugin "discord" requires capability consent; rerun with --accept-capabilities.\n'],
+        ["a plugin payload refusal", 'Plugin "discord": configured plugin payload verification failed (missing): gone.\n'],
+        ["legacy state", "conflicting plugin install metadata in installs.json\n"],
+        ["a SQLite lock failure", "[sqlite/transaction] SQLite transaction lock wait failed\n"],
+      ])("runs the full repair after the chat answered when its own start's journal names %s", async (what, startJournal) => {
+        const state = await verifyAfterPostUpdate({ startJournal: `[gateway] starting\n${startJournal}[gateway] ready\n` });
+        expect(state.error).toBeUndefined();
+        expect(state.phase).toBe("completed");
+        expect(logged.some((line) => line.startsWith(ROUTINE_LINE))).toBe(true);
+        expect(logged.filter((line) => line.startsWith(REFUSED))).toEqual([ownStartNames(what)]);
+        const restarts = indexesOf(RESTART);
+        const preStart = commands().findIndex((call) => call.includes("/bin/bash") && call.includes(PRE_START));
+        expect(restarts).toHaveLength(2);
+        expect(chatAsks).toHaveLength(2);
+        // The routine start, the chat, its journal; then today's sequence; then the chat again.
+        expect(restarts[0]).toBeLessThan(chatAsks[0]);
+        expect(indexesOf(START_JOURNAL)).toHaveLength(1);
+        expect(indexesOf(START_JOURNAL)[0]).toBeGreaterThanOrEqual(chatAsks[0]);
+        expect(indexesOf(ENTER)[1]).toBeGreaterThan(indexesOf(START_JOURNAL)[0]);
+        expect(indexesOf(ENTER)[1]).toBeLessThan(preStart);
+        expect(preStart).toBeLessThan(indexesOf(DOCTOR)[0]);
+        expect(indexesOf(DOCTOR)[0]).toBeLessThan(indexesOf(LEAVE)[1]);
+        expect(indexesOf(LEAVE)[1]).toBeLessThan(restarts[1]);
+        expect(restarts[1]).toBeLessThan(chatAsks[1]);
+      });
+
+      it("hands the full repair the start's own refusal, wherever the boot's tail has scrolled to", async () => {
+        await verifyAfterPostUpdate({
+          startJournal: 'Plugin "discord" requires capability consent; rerun with --accept-capabilities.\n',
+        });
+        expect(logged.filter((line) => line.startsWith(REFUSED))).toEqual([ownStartNames("a capability consent refusal")]);
+        const consent = commands().findIndex((call) => call.includes("plugins enable discord --accept-capabilities"));
+        expect(consent).toBeGreaterThan(indexesOf(ENTER)[1]);
+        expect(consent).toBeLessThan(indexesOf(LEAVE)[1]);
+      });
+
+      it.each<[string, { startJournal?: string | Error; run?: (restarts: number) => string | Error }]>([
+        ["journalctl fails", { startJournal: new Error("Failed to open the journal") }],
+        ["journalctl finds nothing for it", { startJournal: "-- No entries --\n" }],
+        ["systemd cannot name the run", { run: () => new Error("Connection timed out") }],
+        ["systemd answers no id for the run", { run: () => "InvocationID=\n" }],
+      ])("runs the full repair after the chat answered when its own start's journal cannot be read: %s", async (_what, extra) => {
+        const state = await verifyAfterPostUpdate(extra);
+        expect(state.phase).toBe("completed");
+        expect(logged.filter((line) => line.startsWith(REFUSED))).toEqual([OWN_START_UNREAD_LINE]);
+        expect(indexesOf(RESTART)).toHaveLength(2);
+        expect(indexesOf(DOCTOR)).toHaveLength(1);
+        expect(chatAsks).toHaveLength(2);
+        expect(indexesOf(DOCTOR)[0]).toBeGreaterThan(chatAsks[0]);
+        // A run with no id is not read by an empty one.
+        if (extra.run) expect(indexesOf(START_JOURNAL)).toHaveLength(0);
+      });
+
+      it("runs the full repair when the chat did not answer after its own start", async () => {
+        mockMainChatHistory.mockImplementation(async () => {
+          chatAsks.push(mockExecFile.mock.calls.length);
+          throw new Error("connect ECONNREFUSED 127.0.0.1:18789");
+        });
+        const state = await verifyAfterPostUpdate();
+        expect(state.phase).toBe("completed");
+        expect(logged.filter((line) => line.startsWith(REFUSED))).toEqual([OWN_START_SILENT_LINE]);
+        expect(indexesOf(START_JOURNAL)).toHaveLength(0);
+        expect(indexesOf(RESTART)).toHaveLength(2);
+        expect(indexesOf(DOCTOR)).toHaveLength(1);
+        expect(indexesOf(DOCTOR)[0]).toBeGreaterThan(chatAsks[0]);
+        // Asked again on the gateway the repair left, once: no second round.
+        expect(chatAsks.length).toBeGreaterThan(1);
+        expect(chatAsks.at(-1)).toBeGreaterThan(indexesOf(RESTART)[1]);
+      });
+
+      it.each<[string, () => Error, string]>([
+        ["could not be asked (no gateway token this server can read)",
+          () => Object.assign(new Error("no gateway token"), { name: "GatewayWsUnavailableError" }),
+          "the chat could not be asked after its own start"],
+        ["refused the request with an answer of its own",
+          () => Object.assign(new Error("not allowed"), { name: "GatewayRpcError", code: "FORBIDDEN" }),
+          "the chat refused its request after its own start"],
+      ])("runs the full repair, and says so, when the chat %s after its own start", async (_what, error, why) => {
+        // Only a served chat proves the start's lines are all in: anything else
+        // is the sequence the check ran before it had a routine start.
+        mockMainChatHistory.mockImplementation(async () => {
+          chatAsks.push(mockExecFile.mock.calls.length);
+          throw error();
+        });
+        const state = await verifyAfterPostUpdate();
+        expect(state.phase).toBe("completed");
+        expect(logged.filter((line) => line.startsWith(REFUSED))).toEqual([`${REFUSED}${why}`]);
+        expect(indexesOf(START_JOURNAL)).toHaveLength(0);
+        expect(indexesOf(RESTART)).toHaveLength(2);
+        expect(indexesOf(DOCTOR)).toHaveLength(1);
+      });
+
+      it("takes back the first check's warning when the chat answers after the full repair", async () => {
+        // Unreachable until the repair's own restart, then served: the gateway
+        // the owner is left with answers, and the result says nothing else.
+        mockMainChatHistory.mockImplementation(async () => {
+          chatAsks.push(mockExecFile.mock.calls.length);
+          if (indexesOf(RESTART).length < 2) throw new Error("connect ECONNREFUSED 127.0.0.1:18789");
+          return { sessionKey: "main" };
+        });
+        const state = await verifyAfterPostUpdate();
+        expect(state.phase).toBe("completed");
+        expect(logged).toContain(OWN_START_SILENT_LINE);
+        expect(logged).toContain("[Updater] gateway sessions: serving");
+        expect((state.warnings ?? []).map((w) => w.code)).not.toContain("gateway-sessions-unconfirmed");
+      });
+
+      it("keeps the warning when the chat still does not answer after the full repair", async () => {
+        mockMainChatHistory.mockImplementation(async () => {
+          chatAsks.push(mockExecFile.mock.calls.length);
+          throw new Error("connect ECONNREFUSED 127.0.0.1:18789");
+        });
+        const state = await verifyAfterPostUpdate();
+        expect((state.warnings ?? []).map((w) => w.code)).toContain("gateway-sessions-unconfirmed");
+      });
+
+      it("reads the journal of the start it made, not of a start the session check made after it", async () => {
+        // The chat names the store failure once: the session check restarts
+        // the gateway (run 2) and asks again. The routine start was run 1.
+        let asks = 0;
+        mockMainChatHistory.mockImplementation(async () => {
+          chatAsks.push(mockExecFile.mock.calls.length);
+          asks += 1;
+          if (asks === 1) {
+            throw Object.assign(new Error("SQLite session reclamation commit checkpoint expired"), {
+              name: "GatewayRpcError", code: "UNAVAILABLE",
+            });
+          }
+          return { sessionKey: "main" };
+        });
+        const state = await verifyAfterPostUpdate();
+        expect(state.phase).toBe("completed");
+        expect(indexesOf(RESTART)).toHaveLength(2);
+        expect(indexesOf(START_JOURNAL)).toHaveLength(1);
+        expect(commands()[indexesOf(START_JOURNAL)[0]]).toContain(`${START_JOURNAL}${runId(1)}`);
+        expect(logged.some((line) => line.startsWith(OWN_START_CLEAN_LINE))).toBe(true);
+        expect(indexesOf(DOCTOR)).toHaveLength(0);
+      });
+
+      it("does not read it again, nor repair twice, when the after-update plugin retry already ran the full repair", async () => {
+        mockRetryAfterCoreUpdate.mockImplementationOnce(async (hooks) => {
+          await hooks.restartAndVerify();
+          return { release: "2026.10.9", repaired: ["codex"], failed: [] };
+        });
+        const state = await verifyAfterPostUpdate({
+          startJournal: 'Plugin "discord" requires capability consent; rerun with --accept-capabilities.\n',
+        });
+        expect(state.phase).toBe("completed");
+        expect(indexesOf(DOCTOR)).toHaveLength(1);
+        expect(indexesOf(RESTART)).toHaveLength(2);
+        expect(indexesOf(START_JOURNAL)).toHaveLength(0);
+        expect(logged.some((line) => line.includes("its own start's journal names"))).toBe(false);
+        expect(refusedFor("the after-update plugin repair restarts the gateway")).toBe(true);
+      });
+
+      it("runs the full repair, from the top, when that start does not come up", async () => {
+        const state = await verifyAfterPostUpdate({ listensAfter: 2 });
+        expect(state.error).toBeUndefined();
+        expect(state.phase).toBe("completed");
+
+        expect(logged.some((line) => line.startsWith(ROUTINE_LINE))).toBe(true);
+        expect(logged).toContain(FALLBACK_LINE);
+        const calls = commands();
+        const preStart = calls.findIndex((call) => call.includes("/bin/bash") && call.includes(PRE_START));
+        const restarts = indexesOf(RESTART);
+        expect(restarts).toHaveLength(2);
+        // The routine start first, then today's sequence with its own restart.
+        expect(restarts[0]).toBeLessThan(indexesOf(ENTER)[1]);
+        expect(indexesOf(ENTER)[1]).toBeLessThan(indexesOf("systemctl stop clawbox-gateway.service").at(-1)!);
+        expect(indexesOf("systemctl stop clawbox-gateway.service").at(-1)).toBeLessThan(preStart);
+        expect(preStart).toBeLessThan(indexesOf(DOCTOR)[0]);
+        expect(indexesOf(DOCTOR)[0]).toBeLessThan(indexesOf(LEAVE)[1]);
+        expect(indexesOf(LEAVE)[1]).toBeLessThan(restarts[1]);
+        const env = (mockExecFile.mock.calls[preStart]?.[2] as { env?: NodeJS.ProcessEnv } | undefined)?.env;
+        expect(env?.CLAWBOX_PRESTART_OUTSIDE_UNIT).toBe("1");
+      });
+
+      it("runs the full repair, not a failed step, when systemd refuses that start", async () => {
+        // The unit's pre-start exited non-zero: `systemctl restart` fails. That
+        // is the start the repair exists for, so the step's verdict is the
+        // repair's own restart, which comes up here.
+        const state = await verifyAfterPostUpdate({ firstRestartRefused: true, listensAfter: 2 });
+        expect(state.error).toBeUndefined();
+        expect(state.phase).toBe("completed");
+        expect(logged).toContain(FALLBACK_LINE);
+        expect(indexesOf(RESTART)).toHaveLength(2);
+        expect(indexesOf(RESTART)[0]).toBeLessThan(indexesOf(ENTER)[1]);
+        expect(indexesOf(DOCTOR)[0]).toBeLessThan(indexesOf(RESTART)[1]);
+      });
+
+      it("keeps the full repair when doctor's record does not cover the installed core", async () => {
+        // incomplete, another core, no file, unreadable: all `false` from the
+        // reader (openclaw-migration-status-doctor.test.ts).
+        mockDoctorRefusal.mockResolvedValue(RECORD_OLD);
+        const state = await verifyAfterPostUpdate();
+        expect(state.phase).toBe("completed");
+        expectFullRepair();
+        expect(indexesOf(RESTART)).toHaveLength(1);
+        expect(refusedFor(RECORD_OLD)).toBe(true);
+      });
+
+      // That run is recorded as install.sh records its own, so the next
+      // updates start without doctor for another 30 days. Inside the mask:
+      // after doctor, before the gateway is let start again.
+      it("records a fresh doctor verdict when the full repair's doctor completed", async () => {
+        mockDoctorRefusal.mockResolvedValue(RECORD_OLD);
+        await verifyAfterPostUpdate({ doctor: "Doctor complete.\n" });
+        expect(doctorRecorded).toHaveLength(1);
+        expect(doctorRecorded[0]).toBeGreaterThan(indexesOf(DOCTOR)[0]);
+        expect(doctorRecorded[0]).toBeLessThanOrEqual(indexesOf(LEAVE)[1]);
+        expect(doctorMarkedDue).toHaveLength(0);
+        // …and the update's log says so, once.
+        expect(doctorOutcomes()).toEqual([RECORDED_LINE]);
+      });
+
+      it("never says the run is recorded when the helper could not record it", async () => {
+        mockDoctorRefusal.mockResolvedValue(RECORD_OLD);
+        mockRecordDoctorComplete.mockResolvedValueOnce(false);
+        await verifyAfterPostUpdate({ doctor: "Doctor complete.\n" });
+        expect(doctorOutcomes()).toEqual([`${DOCTOR_LINE}completed, but its run could not be recorded; the record stays as it was`]);
+        expect(logged.some((line) => line.includes("its run is recorded"))).toBe(false);
+      });
+
+      const NOT_COMPLETED: [string, string | Error, string][] = [
+        ["doctor failed", new Error("Command failed: openclaw doctor --fix"), "did not complete"],
+        ["a signal the updater did not send ended doctor",
+          Object.assign(new Error("Command failed: openclaw doctor --fix"), {
+            code: null, killed: false, signal: "SIGKILL", stdout: "Checking agent main…\n", stderr: "",
+          }), "did not complete"],
+        ["doctor says its migration did not finish", "Legacy session store requires migration; run doctor again\n",
+          "exited 0 but its migration did not finish"],
+      ];
+
+      it.each(NOT_COMPLETED)("records no verdict, and marks the recorded run due again, when %s", async (_what, doctor, how) => {
+        // A `complete` from before this run must not stand in for it: the next
+        // update runs doctor again, as it did at every update before.
+        mockDoctorRefusal.mockResolvedValue("the gateway journal names legacy state");
+        const state = await verifyAfterPostUpdate({ doctor });
+        expect(indexesOf(DOCTOR)).toHaveLength(1);
+        expect(doctorRecorded).toHaveLength(0);
+        expect(doctorMarkedDue).toHaveLength(1);
+        expect(doctorMarkedDue[0]).toBeGreaterThan(indexesOf(DOCTOR)[0]);
+        expect(doctorMarkedDue[0]).toBeLessThanOrEqual(indexesOf(LEAVE)[1]);
+        expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+        expect(doctorOutcomes()).toEqual([`${DOCTOR_LINE}${how}; ${DUE}`]);
+      });
+
+      it.each(NOT_COMPLETED)("never says the run is marked due when the helper could not mark it, when %s", async (_what, doctor, how) => {
+        mockDoctorRefusal.mockResolvedValue("the gateway journal names legacy state");
+        mockMarkDoctorDue.mockResolvedValueOnce(false);
+        await verifyAfterPostUpdate({ doctor });
+        expect(doctorOutcomes()).toEqual([`${DOCTOR_LINE}${how}; ${NOT_DUE}`]);
+        expect(logged.some((line) => line.includes(DUE))).toBe(false);
+      });
+
+      it("records nothing on a routine start, which runs no doctor", async () => {
+        await verifyAfterPostUpdate();
+        expect(indexesOf(DOCTOR)).toHaveLength(0);
+        expect(doctorRecorded).toHaveLength(0);
+        expect(doctorMarkedDue).toHaveLength(0);
+        expect(logged.filter((line) => line.startsWith(DOCTOR_LINE))).toEqual([]);
+      });
+
+      it.each([
+        ["a capability consent refusal", 'Plugin "discord" requires capability consent; rerun with --accept-capabilities.\n'],
+        ["a plugin payload refusal", 'Plugin "discord": configured plugin payload verification failed (missing): gone.\n'],
+        ["legacy state", "conflicting plugin install metadata in installs.json\n"],
+        ["a SQLite lock failure", "[sqlite/transaction] SQLite transaction lock wait failed\n"],
+      ])("keeps the full repair when the journal names %s", async (what, journal) => {
+        await verifyAfterPostUpdate({ journal });
+        expectFullRepair();
+        expect(refusedFor(`the gateway journal names ${what}`)).toBe(true);
+      });
+
+      // journalctl's own text for a unit with no entries this boot, without
+      // `-q`: alone, and under the header line some versions print.
+      it.each([
+        ["journalctl failed", new Error("Failed to open the journal")],
+        ["the gateway logged nothing this boot", "-- No entries --\n"],
+        ["the gateway logged nothing this boot (with the journal's header)",
+          "-- Journal begins at Mon 2026-11-09 10:00:00 UTC, ends at Thu 2026-11-12 19:00:00 UTC. --\n-- No entries --\n"],
+      ])("keeps the full repair when the journal says nothing: %s", async (_what, journal) => {
+        // Silence is not "no blocker": it is no evidence either way.
+        const state = await verifyAfterPostUpdate({ journal });
+        expect(state.phase).toBe("completed");
+        expectFullRepair();
+        expect(indexesOf(RESTART)).toHaveLength(1);
+        expect(refusedFor("the gateway journal says nothing this boot, or could not be read")).toBe(true);
+      });
+
+      it.each<[string, () => string | Error, string]>([
+        ["still in its pre-start", () => unitShow({ ActiveState: "activating", SubState: "start-pre", Job: "41" }),
+          "clawbox-gateway.service is activating (start-pre) with a job queued"],
+        ["failed", () => unitShow({ ActiveState: "failed", SubState: "failed", Result: "exit-code" }),
+          "clawbox-gateway.service is failed (failed, exit-code)"],
+        ["stopped with a start queued", () => unitShow({ ActiveState: "inactive", SubState: "dead", Job: "42" }),
+          "clawbox-gateway.service is inactive (dead) with a job queued"],
+        ["up already", () => unitShow({ ActiveState: "active", SubState: "running" }),
+          "clawbox-gateway.service is active (running)"],
+        ["not answering systemctl", () => new Error("Connection timed out"),
+          "systemctl could not describe clawbox-gateway.service"],
+      ])("keeps the full repair when the unit is %s", async (what, unit, why) => {
+        const state = await verifyAfterPostUpdate({
+          unit,
+          // A pre-start is left to finish before the stop, never killed by a
+          // restart of the routine start's.
+          subState: what === "still in its pre-start" ? (read) => (read === 0 ? "start-pre" : "dead") : undefined,
+        });
+        expect(state.phase).toBe("completed");
+        expectFullRepair();
+        expect(indexesOf(RESTART)).toHaveLength(1);
+        if (what === "still in its pre-start") expect(logged).toContain(PRE_START_WAIT_LINE);
+        // The log names the gate: which state, or that systemctl could not say.
+        expect(logged.filter((line) => line.startsWith(REFUSED))).toEqual([`${REFUSED}${why}`]);
+      });
+
+      it("keeps the full repair for the OpenClaw-only update's restart-first verify", async () => {
+        await verifyAfterPostUpdate({ start: "openclaw-only" });
+        expectFullRepair();
+        expect(logged.filter((line) => line.startsWith(REFUSED))).toEqual([`${REFUSED}the OpenClaw update restarts the gateway`]);
+        // restartFirst never asks: the record is not what decides that path.
+        expect(mockDoctorRefusal).not.toHaveBeenCalled();
+      });
+
+      it("brings the gateway back after a failed plugin retry without asking the record again", async () => {
+        // retryPluginRepairsLeftByOlderCore's fallback is a plain health check:
+        // the verify's first call has already cleared the root step's flag, so
+        // it waits for the running gateway the way it always did.
+        mockRetryAfterCoreUpdate.mockRejectedValueOnce(new Error("codex install refused"));
+        const state = await verifyAfterPostUpdate();
+        expect(state.phase).toBe("completed");
+        expect(mockDoctorRefusal).toHaveBeenCalledTimes(1);
+        expect(indexesOf(RESTART)).toHaveLength(1);
+        expect(commands().some((call) => call.includes(DOCTOR))).toBe(false);
+      });
+
+      it("says the failed plugin retry, not a missing quiesce, when the retry's own quiesce left the gateway down", async () => {
+        // The retry stops the gateway under its own quiesce, then fails: the
+        // mask is lifted and nothing starts it, so the plain health check that
+        // follows finds it down and takes the full repair.
+        mockRetryAfterCoreUpdate.mockImplementationOnce(async (hooks) => {
+          await hooks.quiesce(async () => {
+            throw new Error("codex install refused");
+          });
+          return { release: null, repaired: [], failed: [] };
+        });
+        const stops = () => indexesOf("systemctl stop clawbox-gateway.service");
+        const state = await verifyAfterPostUpdate({
+          up: () => {
+            const restarts = indexesOf(RESTART);
+            return restarts.length > 0 && (stops().length === 0 || restarts.at(-1)! > stops().at(-1)!);
+          },
+        });
+        expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+        expect(logged.filter((line) => line.startsWith(REFUSED))).toEqual([
+          `${REFUSED}the gateway is not listening after the after-update plugin repair did not complete`,
+        ]);
+        expect(indexesOf(DOCTOR)).toHaveLength(1);
+        expect(indexesOf(RESTART)).toHaveLength(2);
+      });
+
+      it("keeps the full repair, with no routine start, for a gateway that is down when this update's quiesce did not stop it", async () => {
+        // post_update's mask was refused, so nothing of this update stopped the
+        // gateway, yet it is down (it crashed, say): the routine start is only
+        // for a gateway the update's own quiesce stopped.
+        const state = await verifyAfterPostUpdate({ quiesceRefused: true });
+        expect(logged.some((line) => line.startsWith(ROUTINE_LINE))).toBe(false);
+        expect(mockDoctorRefusal).not.toHaveBeenCalled();
+        expect(logged.filter((line) => line.startsWith(REFUSED))).toEqual([
+          `${REFUSED}the gateway is not listening, and this update's own quiesce did not stop it`,
+        ]);
+        const calls = commands();
+        const preStart = calls.findIndex((call) => call.includes("/bin/bash") && call.includes(PRE_START));
+        expect(calls.some((call) => call.includes(POST_UPDATE))).toBe(false);
+        expect(indexesOf(RESTART)).toHaveLength(1);
+        expect(indexesOf(ENTER)).toHaveLength(2);
+        expect(indexesOf(ENTER)[1]).toBeLessThan(preStart);
+        expect(preStart).toBeLessThan(indexesOf(DOCTOR)[0]);
+        expect(indexesOf(DOCTOR)[0]).toBeLessThan(indexesOf(RESTART)[0]);
+        expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+      });
+
+      /**
+       * install.sh's gateway setup step leaves a running gateway to this check
+       * and notes which run of the unit it left (systemd's InvocationID). If
+       * nothing stopped that run afterwards — post_update's quiesce failed at
+       * or before its stop and the update went on — the check must not accept
+       * it: it is the process from before the update. It is started the
+       * routine way and verified. A gateway started again since (the build
+       * pause, a boot, the quiesce) is another run and costs nothing.
+       */
+      describe("a gateway the update's gateway setup step left running", () => {
+        const leave = (run: string) => writeFileSync(note, `${run}\n`);
+
+        it("starts it again, the routine way, when nothing stopped it after that step", async () => {
+          leave(runId(0));
+          const state = await verifyAfterPostUpdate({ quiesceRefused: true, listensAfter: 0 });
+          expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+          expect(logged).toContain(LEFT_RUNNING_LINE);
+          const calls = commands();
+          expect(calls.some((call) => call.includes(POST_UPDATE))).toBe(false);
+          expect(indexesOf(RESTART)).toHaveLength(1);
+          // No repair it would not have had: no pre-start outside the unit, no doctor.
+          expect(calls.some((call) => call.includes("/bin/bash") && call.includes(PRE_START))).toBe(false);
+          expect(indexesOf(DOCTOR)).toHaveLength(0);
+          // Its run was asked before the start, and the start's own journal read after the chat.
+          expect(indexesOf(ASK_RUN)[0]).toBeLessThan(indexesOf(RESTART)[0]);
+          expect(indexesOf(START_JOURNAL)).toHaveLength(1);
+          expect(calls[indexesOf(START_JOURNAL)[0]]).toContain(`${START_JOURNAL}${runId(1)}`);
+        });
+
+        it("runs the full repair when that start does not come up", async () => {
+          leave(runId(0));
+          const state = await verifyAfterPostUpdate({
+            quiesceRefused: true,
+            up: (restarts) => restarts === 0 || restarts >= 2,
+          });
+          expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+          expect(logged).toContain(LEFT_RUNNING_LINE);
+          expect(logged).toContain(FALLBACK_LINE);
+          expect(indexesOf(RESTART)).toHaveLength(2);
+          expect(indexesOf(DOCTOR)[0]).toBeLessThan(indexesOf(RESTART)[1]);
+          expect(indexesOf(DOCTOR)[0]).toBeGreaterThan(indexesOf(RESTART)[0]);
+        });
+
+        it.each<[string, () => void, ((restarts: number) => string | Error) | undefined, string]>([
+          ["the note cannot be read", () => mkdirSync(note), undefined, "the gateway setup step's note cannot be read"],
+          ["the note is empty", () => writeFileSync(note, ""), undefined, "the gateway setup step's note cannot be read"],
+          ["the note is not an id", () => writeFileSync(note, "not an id\n"), undefined, "the gateway setup step's note cannot be read"],
+          ["systemd cannot name the running gateway's run", () => leave(runId(0)), () => new Error("Connection timed out"),
+            "systemctl could not name the gateway's run"],
+          ["systemd answers no id for the running gateway", () => leave(runId(0)), () => "InvocationID=\n",
+            "systemctl could not name the gateway's run"],
+        ])("starts it again when %s", async (_what, arrange, run, why) => {
+          arrange();
+          await verifyAfterPostUpdate({ quiesceRefused: true, listensAfter: 0, run });
+          expect(logged).toContain(`${STARTING_AGAIN}${why}`);
+          expect(indexesOf(RESTART).length).toBeGreaterThanOrEqual(1);
+        });
+
+        // The normal paths cost nothing.
+        it("accepts a gateway started again since that step (the build pause), with no restart", async () => {
+          leave("f".repeat(32));
+          const state = await verifyAfterPostUpdate({ quiesceRefused: true, listensAfter: 0 });
+          expect(state.steps.find((step) => step.id === "gateway_verify")?.status).toBe("completed");
+          expect(logged.some((line) => line.startsWith(STARTING_AGAIN))).toBe(false);
+          expect(indexesOf(RESTART)).toHaveLength(0);
+          expect(indexesOf(START_JOURNAL)).toHaveLength(0);
+        });
+
+        it("accepts the running gateway with no note, without asking systemd for its run (the box rebooted)", async () => {
+          await verifyAfterPostUpdate({ quiesceRefused: true, listensAfter: 0 });
+          expect(logged.some((line) => line.startsWith(STARTING_AGAIN))).toBe(false);
+          expect(indexesOf(RESTART)).toHaveLength(0);
+          expect(indexesOf(ASK_RUN)).toHaveLength(0);
+        });
+
+        it("adds nothing when post_update's quiesce stopped it: the routine start is the one restart", async () => {
+          leave(runId(0));
+          const state = await verifyAfterPostUpdate();
+          expect(state.phase).toBe("completed");
+          expect(logged.some((line) => line.startsWith(STARTING_AGAIN))).toBe(false);
+          expect(logged.some((line) => line.startsWith(ROUTINE_LINE))).toBe(true);
+          expect(indexesOf(RESTART)).toHaveLength(1);
+          // The one run asked is the routine start's, after it.
+          expect(indexesOf(ASK_RUN)).toHaveLength(1);
+          expect(indexesOf(ASK_RUN)[0]).toBeGreaterThan(indexesOf(RESTART)[0]);
+        });
+      });
     });
 
     it("records consent for a NON-Codex managed plugin the gateway named", async () => {
@@ -3006,6 +3844,485 @@ describe("updater", () => {
       expect(calls.some((call) => call.includes("systemctl restart clawbox-gateway.service"))).toBe(false);
     });
 
+    /**
+     * B2-02. The pre-start the verify runs OUTSIDE the gateway unit, while the
+     * gateway is stopped, printed its steps, its WARNs and a "Timing:" line per
+     * check, and all of it went nowhere: on the test box three such runs left
+     * no line at all, and their length had to be inferred from the gap between
+     * two other lines. The in-unit runs reach the journal through the unit;
+     * this one reaches it through the updater's own log, or not at all.
+     */
+    describe("what the pre-start outside the unit printed", () => {
+      const PRE_START = `${process.cwd()}/scripts/gateway-pre-start.sh`;
+      const TAG = "[Updater] pre-start (outside the unit)";
+      // The script's EXIT trap prints this last on every exit, with the real
+      // stamp names: it is the reuse hit/miss summary, so no bound may cut it.
+      const TOTAL = "  Timing: pre-start total 5912 ms (exit 0); "
+        + "reused instead of re-checked: plugin-consent, codex-registry, claude-code";
+
+      /**
+       * How node's promisified execFile rejects: stderr in the message, both
+       * streams beside it. A maxBuffer overflow carries a string `code` and
+       * leaves `killed`/`signal` undefined, so those are passed explicitly.
+       */
+      function nodeExecFileError(fields: {
+        stdout: string;
+        stderr: string;
+        code?: number | string | null;
+        killed?: boolean | undefined;
+        signal?: string | null | undefined;
+      }) {
+        return Object.assign(new Error(`Command failed: /bin/bash ${PRE_START}\n${fields.stderr}`), {
+          code: 1, killed: false, signal: null, ...fields,
+        });
+      }
+
+      /** Everything the updater logged, one journal line per array entry. */
+      function loggedLines(...spies: Array<{ mock: { calls: unknown[][] } }>): string[] {
+        return spies.flatMap((spy) => spy.mock.calls.map((call) => call.map(String).join(" ")))
+          .flatMap((entry) => entry.split("\n"));
+      }
+
+      /** Take a box through gateway_verify's quiesced repair with this pre-start answer. */
+      async function verifyWithPreStart(
+        answer: { stdout: string; stderr: string } | Error,
+        journal = "",
+      ) {
+        setupExecFileMock({
+          "scripts/gateway-pre-start.sh": answer,
+          "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+          "/usr/bin/journalctl -u clawbox-gateway.service": { stdout: journal, stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+          openclaw: { stdout: "1.0.0", stderr: "" },
+        });
+        // The pre-start has to exist where the updater looks for it to run at all.
+        const priorRoot = process.env.CLAWBOX_ROOT;
+        process.env.CLAWBOX_ROOT = process.cwd();
+        vi.resetModules();
+        mockGet.mockResolvedValue(true);
+        mockSet.mockResolvedValue();
+        mockSetMany.mockResolvedValue();
+        mockRebuiltBox();
+        // Down until the recovery's own restart, so the verify reaches the pre-start.
+        mockGatewayUp.mockImplementation(async () =>
+          mockExecFile.mock.calls.some(([cmd, args]) =>
+            cmd === "/usr/bin/sudo"
+              && (args as string[]).join(" ").includes("systemctl restart clawbox-gateway.service"),
+          ),
+        );
+        updater = await import("@/lib/updater");
+        if (priorRoot === undefined) delete process.env.CLAWBOX_ROOT;
+        else process.env.CLAWBOX_ROOT = priorRoot;
+
+        updater.resetUpdateState();
+        expect(await updater.checkContinuation()).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+        expect(mockExecFile.mock.calls.some(([, args]) =>
+          (args as string[]).join(" ").includes("scripts/gateway-pre-start.sh"))).toBe(true);
+      }
+
+      it("logs a successful run's stdout and stderr, every line tagged as run outside the unit", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        await verifyWithPreStart({
+          stdout: [
+            "  Plugin consent: asking the core (the core package changed)",
+            "  Timing: Codex plugin check 812 ms",
+            TOTAL,
+          ].join("\n") + "\n",
+          stderr: "  WARN: could not record the plugin-consent check in /var/lib/clawbox/prestart-stamps.json; "
+            + "the next start runs it in full\n",
+        });
+        const lines = loggedLines(logged);
+        logged.mockRestore();
+
+        expect(updater.getUpdateState().phase).toBe("completed");
+        expect(lines).toContain(`${TAG}:   Plugin consent: asking the core (the core package changed)`);
+        expect(lines).toContain(`${TAG}:   Timing: Codex plugin check 812 ms`);
+        expect(lines).toContain(`${TAG}: ${TOTAL}`);
+        expect(lines.some((line) => line.startsWith(`${TAG} stderr:`)
+          && line.includes("WARN: could not record the plugin-consent check"))).toBe(true);
+        // journald makes each line its own entry: an untagged one is a stray.
+        for (const line of lines.filter((l) => l.includes("Timing:") || l.includes("WARN:"))) {
+          expect(line.startsWith(TAG)).toBe(true);
+        }
+      });
+
+      it("logs what a failed run printed on stdout, and fails the step with one line naming where it stopped", async () => {
+        // `set -euo pipefail` can stop the script with nothing on stderr; the
+        // step and Timing lines on stdout are then the only record of where.
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        const failure = nodeExecFileError({
+          stdout: "  Migrating the auth profiles\n  Timing: legacy auth sweep 4410 ms\n"
+            + "  Timing: pre-start total 6120 ms (exit 1); reused instead of re-checked: nothing\n",
+          stderr: "  ERROR: OpenClaw 2 auth-profile migration failed\n",
+        });
+        const original = failure.message;
+        await verifyWithPreStart(failure);
+        const lines = loggedLines(logged, errors);
+        logged.mockRestore();
+        errors.mockRestore();
+
+        expect(updater.getUpdateState().phase).toBe("failed");
+        expect(lines).toContain(`${TAG}:   Migrating the auth profiles`);
+        expect(lines).toContain(
+          `${TAG}:   Timing: pre-start total 6120 ms (exit 1); reused instead of re-checked: nothing`,
+        );
+        expect(lines.some((line) => line.startsWith(`${TAG} failed`) && line.includes("exit 1"))).toBe(true);
+        // node's error rides as the cause, unmutated; the owner reads one line
+        // built from it instead of node's `Command failed: …` and all of stderr.
+        expect(failure.message).toBe(original);
+        expect(updater.getUpdateState().steps.find((s) => s.id === "gateway_verify")?.error).toBe(
+          'The gateway pre-start failed (exit 1) in "legacy auth sweep"; '
+            + "last error output: ERROR: OpenClaw 2 auth-profile migration failed",
+        );
+      });
+
+      /** The step error the owner reads, and every console.error call the run made, unsplit. */
+      async function failWith(failure: Error) {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        await verifyWithPreStart(failure);
+        const calls = errors.mock.calls.map((call) => call.map(String).join(" "));
+        const state = updater.getUpdateState();
+        logged.mockRestore();
+        errors.mockRestore();
+        expect(state.phase).toBe("failed");
+        return {
+          stepError: state.steps.find((s) => s.id === "gateway_verify")?.error ?? "",
+          runError: state.error ?? "",
+          calls,
+          lines: calls.flatMap((entry) => entry.split("\n")),
+        };
+      }
+
+      it("names a signal sent from outside the updater, and quotes no stderr line for a kill", async () => {
+        const { stepError, lines } = await failWith(nodeExecFileError({
+          stdout: "  Timing: config check 9100 ms\n  Migrating the auth profiles\n",
+          stderr: "  ERROR: the core still refuses this config — the gateway will exit 78 until this is fixed: x\n",
+          code: null,
+          killed: false,
+          signal: "SIGKILL",
+        }));
+
+        expect(lines.some((line) => line.startsWith(`${TAG} failed`)
+          && line.includes("killed by SIGKILL from outside the updater"))).toBe(true);
+        expect(stepError).toBe(
+          'The gateway pre-start failed (killed by SIGKILL from outside the updater) after "config check".',
+        );
+        expect(stepError).not.toContain("core still refuses");
+      });
+
+      it("fails the step with one bounded, redacted line, however much the pre-start printed", async () => {
+        const failure = nodeExecFileError({
+          stdout: "  Migrating the auth profiles\n  Timing: auth profiles 4410 ms\n"
+            + "  Timing: pre-start total 6120 ms (exit 1); reused instead of re-checked: nothing\n",
+          stderr: Array.from({ length: 5_000 }, (_, i) => `  migrated row batch ${i}`).join("\n")
+            + "\n  ERROR: OpenClaw 2 auth-profile migration failed: gateway refused token=abcdef123456ghij\n",
+        });
+        const { stepError, runError, calls } = await failWith(failure);
+
+        const failedLine = calls.find((call) => call.startsWith("[Updater] Failed:"));
+        expect(failedLine).toBeTruthy();
+        for (const text of [stepError, runError, failedLine!]) {
+          expect(text).toContain(
+            'The gateway pre-start failed (exit 1) in "auth profiles"; last error output: '
+              + "ERROR: OpenClaw 2 auth-profile migration failed: gateway refused token=[redacted]",
+          );
+          for (const absent of ["Command failed", "migrated row batch", "abcdef123456ghij", "pre-start total"]) {
+            expect(text).not.toContain(absent);
+          }
+        }
+        expect(stepError.startsWith('The gateway pre-start failed (exit 1) in "auth profiles"; last error output: '))
+          .toBe(true);
+        expect(stepError.length).toBeLessThan(500);
+        expect(runError.length).toBeLessThan(500);
+      });
+
+      it("quotes the last error output, not an earlier non-fatal ERROR line, and never calls it the cause", async () => {
+        const { stepError } = await failWith(nodeExecFileError({
+          stdout: "  Timing: config check 9100 ms\n  Timing: provider plugin payload and local AI auth 2100 ms\n"
+            + "  Timing: pre-start total 11300 ms (exit 5); reused instead of re-checked: nothing\n",
+          stderr: "  ERROR: the core still refuses this config — the gateway will exit 78 until this is fixed: x\n"
+            + 'jq: error (at <stdin>:0): Cannot index string with "gateway"\n',
+          code: 5,
+        }));
+
+        expect(stepError).toBe(
+          'The gateway pre-start failed (exit 5) in "provider plugin payload and local AI auth"; '
+            + 'last error output: jq: error (at <stdin>:0): Cannot index string with "gateway"',
+        );
+        expect(stepError).not.toContain("core still refuses");
+      });
+
+      it("ends the line at the step when a failed run printed nothing on stderr", async () => {
+        const { stepError } = await failWith(nodeExecFileError({
+          stdout: "  Migrating the auth profiles\n  Timing: legacy auth sweep 4410 ms\n"
+            + "  Timing: pre-start total 6120 ms (exit 1); reused instead of re-checked: nothing\n",
+          stderr: "",
+        }));
+
+        expect(stepError).toBe('The gateway pre-start failed (exit 1) in "legacy auth sweep".');
+      });
+
+      it("cuts a long last error line to 300 characters", async () => {
+        const { stepError } = await failWith(nodeExecFileError({
+          stdout: "  Timing: config check 9100 ms\n"
+            + "  Timing: pre-start total 9200 ms (exit 1); reused instead of re-checked: nothing\n",
+          stderr: `  ERROR: config dump ${"y".repeat(2_000)}\n`,
+        }));
+
+        const marker = "; last error output: ";
+        expect(stepError).toContain(marker);
+        const quoted = stepError.slice(stepError.indexOf(marker) + marker.length);
+        expect(quoted).toHaveLength(300);
+        expect(quoted.endsWith("…")).toBe(true);
+        expect(quoted.startsWith("ERROR: config dump yyy")).toBe(true);
+        expect(stepError.length).toBeLessThan(500);
+      });
+
+      it("tells the updater's own time limit apart by `killed`, whatever signal node reports", async () => {
+        // node 24 destroys the pipes before its kill, so the EXIT trap's echo
+        // dies of SIGPIPE: the signal name cannot say whose limit it was.
+        const { stepError, lines } = await failWith(nodeExecFileError({
+          stdout: "  Timing: config pass 2210 ms\n  Rebuilding the memory index\n",
+          stderr: "  WARN: slow disk\n",
+          code: null,
+          killed: true,
+          signal: "SIGPIPE",
+        }));
+
+        expect(lines.some((line) => line.startsWith(`${TAG} failed`)
+          && line.includes("stopped at the updater's 650 s limit, signal SIGPIPE"))).toBe(true);
+        expect(stepError).toBe(
+          "The gateway pre-start failed (stopped at the updater's 650 s limit, signal SIGPIPE) "
+            + 'after "config pass".',
+        );
+      });
+
+      it("still calls a run the updater stopped its own limit when node reports no signal", async () => {
+        // A child that handles node's SIGTERM and exits with its own code: still
+        // the updater's kill, so no stderr line is quoted as if it explained it.
+        const { stepError, lines } = await failWith(nodeExecFileError({
+          stdout: "  Timing: config pass 2210 ms\n"
+            + "  Timing: plugin scan 640000 ms\n"
+            + "  Timing: pre-start total 650010 ms (exit 143); reused instead of re-checked: nothing\n",
+          stderr: "  WARN: slow disk\n",
+          code: 143,
+          killed: true,
+          signal: null,
+        }));
+
+        expect(lines.some((line) => line.startsWith(`${TAG} failed (stopped at the updater's 650 s limit)`)))
+          .toBe(true);
+        expect(stepError).toBe(
+          "The gateway pre-start failed (stopped at the updater's 650 s limit) in \"plugin scan\".",
+        );
+      });
+
+      it("quotes bash's own notice for a child the kernel killed (exit 137)", async () => {
+        // The realistic OOM shape (measured, node 24): bash survives the kill of
+        // its child, `set -e` exits 137, the EXIT trap runs, and bash's notice
+        // is the last stderr line.
+        const killedNotice = `${PRE_START}: line 5090: 48213 Killed                  `
+          + '"$OPENCLAW_BIN" doctor --fix --non-interactive';
+        const { stepError } = await failWith(nodeExecFileError({
+          stdout: "  Migrating legacy auth profiles into OpenClaw 2 SQLite state...\n"
+            + "  Timing: legacy auth sweep 61200 ms\n"
+            + "  Timing: pre-start total 70100 ms (exit 137); reused instead of re-checked: nothing\n",
+          stderr: `  WARN: slow disk\n${killedNotice}\n`,
+          code: 137,
+          killed: false,
+          signal: null,
+        }));
+
+        expect(stepError).toBe(
+          `The gateway pre-start failed (exit 137) in "legacy auth sweep"; last error output: ${killedNotice}`,
+        );
+      });
+
+      it("keeps the maxBuffer header byte-identical and fails the step without a stderr line", async () => {
+        const { stepError, lines } = await failWith(Object.assign(new Error("stdout maxBuffer length exceeded"), {
+          code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+          killed: undefined,
+          signal: undefined,
+          stdout: "  Timing: config check 9100 ms\n  plugin scan 001\n",
+          stderr: "  WARN: slow disk\n",
+        }));
+
+        expect(lines).toContain(`${TAG} failed (ERR_CHILD_PROCESS_STDIO_MAXBUFFER)`);
+        expect(stepError).toBe('The gateway pre-start failed (ERR_CHILD_PROCESS_STDIO_MAXBUFFER) after "config check".');
+      });
+
+      // node's shape when the fork itself fails (measured on node 24): a string
+      // errno code, as a maxBuffer overflow has, but `syscall` names the spawn.
+      it("says the pre-start could not be started when node could not spawn it", async () => {
+        const { stepError, lines } = await failWith(Object.assign(new Error("spawn /bin/bash EAGAIN"), {
+          code: "EAGAIN",
+          errno: -11,
+          syscall: "spawn /bin/bash",
+          path: "/bin/bash",
+          stdout: "",
+          stderr: "",
+        }));
+
+        expect(lines).toContain(`${TAG} failed (could not be started: EAGAIN)`);
+        expect(stepError).toBe("The gateway pre-start could not be started (EAGAIN).");
+      });
+
+      it("describes any rejection without throwing, and falls back to a plain sentence", () => {
+        expect(updater.describePreStartFailure(undefined)).toBe("The gateway pre-start failed (no exit code).");
+        expect(updater.describePreStartFailure(new Error("pre-start failed")))
+          .toBe("The gateway pre-start failed (no exit code).");
+        const hostile = Object.defineProperty({ code: 1 }, "stdout", {
+          get() { throw new Error("unreadable"); },
+        });
+        expect(updater.describePreStartFailure(hostile)).toBe("The gateway pre-start failed.");
+        expect(updater.describePreStartExit({ code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }))
+          .toBe("ERR_CHILD_PROCESS_STDIO_MAXBUFFER");
+        expect(updater.describePreStartExit({ code: 2, killed: false, signal: null })).toBe("exit 2");
+      });
+
+      it("logs the partial output of a run the timeout killed", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+        await verifyWithPreStart(nodeExecFileError({
+          stdout: "  Timing: config pass 2210 ms\n  Rebuilding the memory index\n",
+          stderr: "",
+          code: null,
+          killed: true,
+          signal: "SIGTERM",
+        }));
+        const lines = loggedLines(logged, errors);
+        logged.mockRestore();
+        errors.mockRestore();
+
+        expect(updater.getUpdateState().phase).toBe("failed");
+        expect(lines).toContain(`${TAG}:   Rebuilding the memory index`);
+        expect(lines.some((line) => line.startsWith(`${TAG} failed`) && line.includes("SIGTERM")
+          && line.includes("the updater's 650 s limit"))).toBe(true);
+      });
+
+      it("keeps the tail of a long run, says how much it dropped, and keeps the closing Timing line", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        const body = Array.from({ length: 1_000 }, (_, i) => `  migrated row batch ${i}`);
+        await verifyWithPreStart({ stdout: [...body, TOTAL].join("\n") + "\n", stderr: "" });
+        const lines = loggedLines(logged).filter((line) => line.startsWith(`${TAG}:`));
+        logged.mockRestore();
+
+        const note = lines.map((line) => /(\d+) earlier lines? dropped/.exec(line)).find(Boolean);
+        expect(note).toBeTruthy();
+        const kept = lines.filter((line) => !/earlier lines? dropped/.test(line));
+        expect(Number(note![1]) + kept.length).toBe(body.length + 1);
+        expect(kept.length).toBeLessThan(body.length);
+        expect(kept.at(-1)).toBe(`${TAG}: ${TOTAL}`);
+        expect(lines.some((line) => line.endsWith("migrated row batch 0"))).toBe(false);
+      });
+
+      it("keeps the tail within 16 KB when fewer than 200 lines already pass it", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        // About 30 KB in 101 lines: under the line bound, over the character one.
+        const body = Array.from({ length: 100 }, (_, i) => `  plugin scan ${String(i).padStart(3, "0")} ${"x".repeat(280)}`);
+        await verifyWithPreStart({ stdout: [...body, TOTAL].join("\n") + "\n", stderr: "" });
+        const lines = loggedLines(logged).filter((line) => line.startsWith(`${TAG}:`));
+        logged.mockRestore();
+
+        const note = lines.map((line) => /(\d+) earlier lines? dropped/.exec(line)).find(Boolean);
+        expect(note).toBeTruthy();
+        const kept = lines
+          .filter((line) => !/earlier lines? dropped/.test(line))
+          .map((line) => line.slice(`${TAG}: `.length));
+        expect(Number(note![1]) + kept.length).toBe(body.length + 1);
+        expect(kept.length).toBeLessThan(body.length);
+        expect(kept.join("\n").length).toBeLessThanOrEqual(16 * 1024);
+        expect(kept.at(-1)).toBe(TOTAL);
+      });
+
+      it("cuts a last line over 16 KB to its own tail and drops every line before it", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        const long = `  Timing: plugin payload list ${"p".repeat(20_000)} end-of-line`;
+        await verifyWithPreStart({ stdout: `  Plugin consent: asking the core\n${long}\n`, stderr: "" });
+        const lines = loggedLines(logged).filter((line) => line.startsWith(`${TAG}:`));
+        logged.mockRestore();
+
+        expect(lines).toContain(`${TAG}: … 1 earlier line dropped`);
+        expect(lines.some((line) => line.includes("Plugin consent"))).toBe(false);
+        const last = lines.at(-1)!.slice(`${TAG}: `.length);
+        expect(last).toBe(`…${long.slice(-16 * 1024)}`);
+        expect(last.endsWith("end-of-line")).toBe(true);
+      });
+
+      it("still completes a run that succeeded when logging its output throws", async () => {
+        const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+          if (String(args[0]).startsWith(TAG)) throw new Error("stdout write failed");
+        });
+        await verifyWithPreStart({ stdout: `${TOTAL}\n`, stderr: "" });
+
+        expect(updater.getUpdateState().phase).toBe("completed");
+        expect(loggedLines(warned).some((line) =>
+          line.includes("could not be logged") && line.includes("stdout write failed"))).toBe(true);
+      });
+
+      it("still fails the step with the pre-start's own line when logging a failed run's output throws", async () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+          if (String(args[0]).startsWith(TAG)) throw new Error("stderr write failed");
+        });
+        const failure = nodeExecFileError({
+          stdout: "  Migrating the auth profiles\n",
+          stderr: "  ERROR: OpenClaw 2 auth-profile migration failed\n",
+        });
+        await verifyWithPreStart(failure);
+
+        expect(updater.getUpdateState().phase).toBe("failed");
+        // Its stdout has no Timing line, so the line names no step.
+        expect(updater.getUpdateState().steps.find((s) => s.id === "gateway_verify")?.error).toBe(
+          "The gateway pre-start failed (exit 1); last error output: ERROR: OpenClaw 2 auth-profile migration failed",
+        );
+      });
+
+      it("redacts a credential shape in what it logs and leaves the Timing line intact", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        await verifyWithPreStart({
+          stdout: `  provider check answered 401 for key sk-proj-abcdefgh12345678\n${TOTAL}\n`,
+          stderr: "  WARN: gateway refused token=abcdef123456ghij\n",
+        });
+        const lines = loggedLines(logged);
+        logged.mockRestore();
+
+        expect(lines).toContain(`${TAG}:   provider check answered 401 for key [redacted]`);
+        expect(lines).toContain(`${TAG} stderr:   WARN: gateway refused token=[redacted]`);
+        expect(lines).toContain(`${TAG}: ${TOTAL}`);
+        expect(lines.join("\n")).not.toContain("sk-proj-abcdefgh12345678");
+        expect(lines.join("\n")).not.toContain("abcdef123456ghij");
+      });
+
+      it("still reads every payload it reinstalled from the raw stdout, past the log's bound", async () => {
+        const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+        await verifyWithPreStart(
+          {
+            stdout: [
+              `  discord plugin payload reinstalled (@openclaw/discord@${PINNED_CORE})`,
+              ...Array.from({ length: 1_000 }, (_, i) => `  migrated row batch ${i}`),
+              TOTAL,
+            ].join("\n") + "\n",
+            stderr: "",
+          },
+          '- Plugin "discord": configured plugin payload verification failed '
+            + "(missing-install-path): install path is missing.\n",
+        );
+        const lines = loggedLines(logged);
+        logged.mockRestore();
+
+        // Cut from the log, still read for the repair.
+        expect(lines.some((line) => line.includes("discord plugin payload reinstalled"))).toBe(false);
+        const calls = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+        expect(calls.some((call) => call.includes("plugins install @openclaw/discord"))).toBe(false);
+      });
+    });
+
     it("quarantines known legacy gateway blockers and completes when the gateway recovers", async () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
@@ -3036,12 +4353,24 @@ describe("updater", () => {
       updater = await import("@/lib/updater");
 
       updater.resetUpdateState();
-      const result = await updater.checkContinuation();
-      expect(result).toBe(true);
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const result = await updater.checkContinuation();
+        expect(result).toBe(true);
 
-      await vi.waitFor(() => {
-        expect(updater.getUpdateState().phase).toBe("completed");
-      });
+        await vi.waitFor(() => {
+          expect(updater.getUpdateState().phase).toBe("completed");
+        });
+        // Doctor ran twice, in the full repair and again after the quarantine:
+        // one outcome line for each run.
+        expect(log.mock.calls.map((args) => args.map(String).join(" "))
+          .filter((line) => line.startsWith("[Updater] openclaw doctor --fix: ") && !line.includes("--fix: bound "))).toEqual([
+          "[Updater] openclaw doctor --fix: completed; its run is recorded complete",
+          "[Updater] openclaw doctor --fix: completed; its run is recorded complete",
+        ]);
+      } finally {
+        log.mockRestore();
+      }
       const bashCall = mockExecFile.mock.calls.find(([cmd]) => cmd === "/bin/bash");
       expect(bashCall?.[1]).toEqual(expect.arrayContaining(["-lc", expect.stringContaining("installs.json")]));
       expect(String((bashCall?.[1] as string[] | undefined)?.[1])).toContain("carl_pir.sqlite");
@@ -3252,7 +4581,7 @@ describe("updater", () => {
       expectNoApplianceOnlyWork();
 
       // The continuation flag carries the serving build, like the appliance's.
-      expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", "rebuilt-build-id");
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({ update_needs_continuation: "rebuilt-build-id" }));
       expect(mockRebuildAsOwner).toHaveBeenCalledTimes(1);
       expect(mockRebuildAsOwner.mock.calls[0][0]).toBe(process.env.CLAWBOX_ROOT);
       const state = updater.getUpdateState();
@@ -3299,10 +4628,10 @@ describe("updater", () => {
       setupExecFileMock({
         "clawbox-run-root-step.sh openclaw_install": new Error("Job for clawbox-root-update@openclaw_install.service failed"),
         "show clawbox-root-update@openclaw_install.service -p Result": { stdout: "exit-code\n", stderr: "" },
-        "-u clawbox-root-update@openclaw_install.service": {
-          stdout: "Installed: none, Target: 2026.9.4\nError: OpenClaw installation failed — /home/clawbox/.npm-global/bin/openclaw not found\n",
-          stderr: "",
-        },
+        "-u clawbox-root-update@openclaw_install.service": cannedJournal([
+          "Installed: none, Target: 2026.9.4",
+          "Error: OpenClaw installation failed — /home/clawbox/.npm-global/bin/openclaw not found",
+        ]),
         ping: { stdout: "", stderr: "" },
         systemctl: { stdout: "", stderr: "" },
       });
@@ -3330,8 +4659,13 @@ describe("updater", () => {
       expect(restart?.error).toBe(
         "Rebuild failed: bun run build did not succeed: Error: Build failed because of webpack errors. The previous build was put back.",
       );
-      const flagWrites = mockSet.mock.calls.filter(([key]) => key === "update_needs_continuation").map(([, v]) => v);
-      expect(flagWrites).toEqual(["rebuilt-build-id", undefined]);
+      // Written with the rebuild step's dispatch moment, which this path has
+      // none of (TASK-2517): both keys travel in one write.
+      const flagWrites = mockSetMany.mock.calls
+        .map(([entries]) => entries as Record<string, unknown>)
+        .filter((entries) => "update_needs_continuation" in entries);
+      expect(flagWrites.map((e) => e.update_needs_continuation)).toEqual(["rebuilt-build-id", undefined]);
+      expect(flagWrites.every((e) => "update_rebuild_dispatched" in e && e.update_rebuild_dispatched === undefined)).toBe(true);
       expect(mockRestartUiProcess).not.toHaveBeenCalled();
       expectNoApplianceOnlyWork();
     });
@@ -3373,6 +4707,22 @@ describe("updater", () => {
       expect(state.error).toBe("ClawBox restarted without producing a new build — see the clawbox-setup service log");
     });
 
+    it("judges at once on the owner's path, whatever an older updater's rebuild unit is doing", async () => {
+      // The appliance waits for a rebuild unit that is still running; on this
+      // PC that unit is never this run's, so nothing waits on it.
+      setupExecFileMock({
+        "show clawbox-root-update@rebuild_reboot.service -p ActiveState": { stdout: "activating\n", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      mockGet.mockImplementation(async (key) => key === "update_needs_continuation" ? "same-build" : undefined);
+      mockRebuiltBox("same-build");
+      expect(await updater.checkContinuation()).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toBe("ClawBox restarted without producing a new build — see the clawbox-setup service log");
+    });
+
     it("restarts a stopped gateway through its granted unit restart, and diagnoses one that stays down", async () => {
       mockGet.mockResolvedValue(true);
       mockGatewayUp.mockImplementation(async () => commands().some((call) => call.includes("restart clawbox-gateway")));
@@ -3391,6 +4741,44 @@ describe("updater", () => {
       await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
       expect(updater.getUpdateState().error).toContain("OpenClaw gateway is not listening");
       expectNoApplianceOnlyWork();
+    });
+
+    it("never asks doctor's record in the verify, whatever it says: the PC's restart stays as it was", async () => {
+      // The appliance's start without a repair is decided below this PC's own
+      // branch, and the record is not consulted on the way.
+      mockDoctorRefusal.mockResolvedValue(null);
+      mockGet.mockResolvedValue(true);
+      mockGatewayUp.mockImplementation(async () => commands().some((call) => call.includes("restart clawbox-gateway")));
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      expect(commands().some(rootStep("post_update"))).toBe(true);
+      expect(mockDoctorRefusal).not.toHaveBeenCalled();
+      expect(commands().filter((call) => call.includes("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service"))).toHaveLength(1);
+      // Nor the appliance's reads around its own start: no run id, no journal of one run.
+      expect(commands().some((call) => call.includes("-p InvocationID"))).toBe(false);
+      expect(commands().some((call) => call.includes("_SYSTEMD_INVOCATION_ID="))).toBe(false);
+      expectNoApplianceOnlyWork();
+    });
+
+    it("never restarts the PC's gateway over the appliance's gateway setup note", async () => {
+      const dir = mkdtempSync(nodePath.join(tmpdir(), "clawbox-x64-note-"));
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        process.env.CLAWBOX_GATEWAY_LEFT_RUNNING = nodePath.join(dir, "gateway-left-running");
+        writeFileSync(process.env.CLAWBOX_GATEWAY_LEFT_RUNNING, "0123456789abcdef0123456789abcdef\n");
+        mockGet.mockResolvedValue(true);
+        mockGatewayUp.mockResolvedValue(true);
+        expect(await updater.checkContinuation()).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+        expect(commands().some((call) => call.includes("restart clawbox-gateway"))).toBe(false);
+        expect(commands().some((call) => call.includes("-p InvocationID"))).toBe(false);
+        // The PC runs no full repair, so its log has no doctor line of any kind.
+        expect(log.mock.calls.map((args) => args.map(String).join(" "))
+          .filter((line) => line.startsWith("[Updater] openclaw doctor --fix:"))).toEqual([]);
+      } finally {
+        log.mockRestore();
+        rmSync(dir, { recursive: true, force: true });
+      }
     });
 
     it("waits for a gateway still starting instead of restarting it over its slow start", async () => {
@@ -3453,6 +4841,32 @@ describe("updater", () => {
       expect(mockRestartUiProcess).not.toHaveBeenCalled();
       expect(mockX64Install).toHaveBeenCalled();
     });
+
+    it("records when it dispatched the rebuild, on the clock the journal stamps its lines with", async () => {
+      // The server that judges the rebuild after the restart did not dispatch
+      // it: this moment is what keeps its read of the unit's journal to this run.
+      setupExecFileMock({
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      const before = Date.now();
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      const flagWrite = mockSetMany.mock.calls.findIndex(
+        ([entries]) => typeof (entries as Record<string, unknown>).update_needs_continuation === "string",
+      );
+      const record = (mockSetMany.mock.calls[flagWrite]?.[0] as Record<string, unknown> | undefined)
+        ?.update_rebuild_dispatched as { at?: unknown } | undefined;
+      expect(record?.at).toBeGreaterThanOrEqual(before);
+      expect(record?.at).toBeLessThanOrEqual(Date.now());
+      // Written BEFORE the dispatch: no line of this run can predate it.
+      const dispatch = mockExecFile.mock.calls.findIndex(([, args]) => (args as string[]).includes("rebuild_reboot"));
+      expect(mockSetMany.mock.invocationCallOrder[flagWrite])
+        .toBeLessThan(mockExecFile.mock.invocationCallOrder[dispatch]);
+    });
   });
 
   describe("the OpenClaw step's fast path", () => {
@@ -3464,7 +4878,7 @@ describe("updater", () => {
     const commands = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
 
     /** A full update that ends at the rebuild dispatch, refused so the run settles. */
-    function runUpdate(results: Record<string, { stdout: string; stderr: string } | Error>) {
+    function runUpdate(results: Record<string, ExecFileAnswer>) {
       setupExecFileMock({
         "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
           stderr: "sudo: a password is required\n",
@@ -3554,6 +4968,251 @@ describe("updater", () => {
       const calls = commands();
       expect(calls.some((call) => call.includes(FAST_STEP))).toBe(false);
       expect(calls.some(isFullStep)).toBe(true);
+    });
+
+    /**
+     * The fast check's fast-path line is printed near the START of its run;
+     * doctor and plugin output can follow it. On journalctl 255 `--since T
+     * -n 80` is the window's last 80 entries, so a long run lost the line and
+     * paid for a quiesced full step it did not need.
+     */
+    it.each([249, 255] as const)("takes the fast path from an early line of a long run (journalctl %i)", async (generation) => {
+      runUpdate({
+        "-u clawbox-root-update@openclaw_install_fast.service": journalctlModel({
+          "clawbox-root-update@openclaw_install_fast.service": [
+            `  Installed: OpenClaw ${PINNED_CORE} (abc1234), Target: ${PINNED_CORE}`,
+            `  OpenClaw refresh: fast path (the core, the plugins ClawBox manages and the last full refresh are all at ${PINNED_CORE}, and the gateway is serving) — no gateway stop, no doctor, no plugin reinstall`,
+            ...numberedEntries(98, (i) => `  plugin check ${i}: current`),
+          ],
+        }, generation),
+      });
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      expect(commands().some(isFullStep)).toBe(false);
+      expect(commands().some((call) => call.includes("clawbox-gateway-maintenance.sh enter"))).toBe(false);
+    });
+
+    /**
+     * Seen on an owner's box: "Updating OpenClaw" failed and the page
+     * said "npm notice". On systemd up to 253 (the boxes' 249) `journalctl
+     * --since T -n 40` is the FIRST 40 entries of the run, and the last line
+     * the failure picker keeps there is the close of npm's update banner, two
+     * minutes before the installer's own `Error:` line. The journal is that
+     * box's (fixtures/openclaw-install-failed-journal.ts), read through the
+     * runner exactly as the update reads it.
+     */
+    describe.each([249, 255] as const)("a full step that failed, read on journalctl %i", (generation) => {
+      async function failFullStep(journal: readonly string[]) {
+        runUpdate({
+          "-u clawbox-root-update@openclaw_install_fast.service": {
+            stdout: "  OpenClaw refresh: full path needed (the core on the box is older than the pin) — nothing changed here; the updater runs it with the gateway quiesced\n",
+            stderr: "",
+          },
+          // Before the full step's key, which is a prefix of this one.
+          [FAST_STEP]: { stdout: "", stderr: "" },
+          "clawbox-run-root-step.sh openclaw_install": new Error("systemctl failed"),
+          "show clawbox-root-update@openclaw_install.service -p Result": { stdout: "exit-code\n", stderr: "" },
+          "-u clawbox-root-update@openclaw_install.service": journalctlModel(
+            { "clawbox-root-update@openclaw_install.service": journal },
+            generation,
+          ),
+        });
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        const state = updater.getUpdateState();
+        return { step: state.steps.find((s) => s.id === "openclaw_install"), runError: state.error };
+      }
+
+      it("reports the installer's own Error: line, not a line from the start of the run", async () => {
+        const { step, runError } = await failFullStep(OPENCLAW_INSTALL_FAILED_JOURNAL);
+
+        expect(step?.status).toBe("failed");
+        expect(step?.error).toBe(OPENCLAW_INSTALL_FAILED_REASON);
+        expect(runError).toBe(OPENCLAW_INSTALL_FAILED_REASON);
+      });
+
+      it("falls back to the NEWEST line the step wrote when it printed no Error: line", async () => {
+        // Without entry 313 the picker's last resort decides, and that only
+        // comes out right when the newest lines reach it in journal order.
+        const { step, runError } = await failFullStep(
+          OPENCLAW_INSTALL_FAILED_JOURNAL.filter((line) => line !== OPENCLAW_INSTALL_FAILED_REASON),
+        );
+
+        expect(step?.error).toBe("[db-maintenance] recorded the migration as incomplete (degraded)");
+        expect(runError).toBe("[db-maintenance] recorded the migration as incomplete (degraded)");
+      });
+
+      it("keeps the launcher's own error when the run wrote nothing", async () => {
+        // `-o cat` is quiet by itself, so an empty window prints nothing at
+        // all: never a "-- No entries --" banner for the picker to report.
+        const { step, runError } = await failFullStep([]);
+
+        expect(step?.error).toBe("systemctl failed");
+        expect(runError).toBe("systemctl failed");
+      });
+    });
+  });
+
+  /**
+   * The full update skips its OpenClaw step outright on an x64 PC whose core
+   * already IS the pin. Without the skip, install-x64.sh's step_openclaw_install
+   * skips only the npm install and still stops the gateway, runs `doctor --fix`
+   * and starts it again, on every system update.
+   */
+  describe("the OpenClaw step when the core is already at the pin", () => {
+    const SKIPPED_LINE = `OpenClaw already at ${PINNED_CORE}; skipped`;
+    const INTEGRATION_ENV = "/etc/clawbox/x64-integration.env";
+    const DESKTOP_HOME = "/home/desk-owner"; // public-hygiene: allow a made-up account in a test fixture
+    const DESKTOP_PREFIX = `${DESKTOP_HOME}/.nvm/versions/node/v24.0.0`;
+    const commands = () => mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+    const rootStep = (step: string) => (call: string) => new RegExp(`clawbox-run-root-step\\.sh (--no-block )?${step}$`).test(call);
+    let log: MockInstance<typeof console.log>;
+    const skippedLines = () => log.mock.calls.filter((args: unknown[]) => args.some((a) => String(a).includes("OpenClaw already at")));
+
+    beforeEach(() => {
+      updater.resetUpdateState();
+      log = vi.spyOn(console, "log");
+      // The pin file as it is written in the tree, with text after the version;
+      // and the desktop integration's host file, for the cases that use it.
+      mockReadFile.mockImplementation(async (file) => {
+        const name = String(file);
+        if (name.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+        if (name.endsWith("config/openclaw-target.txt")) return `${PINNED_CORE}  # the pin\n`;
+        if (name === INTEGRATION_ENV) {
+          return `INSTALL_USER=desk-owner\nINSTALL_UID=1000\nINSTALL_HOME=${DESKTOP_HOME}\nPROJECT_DIR=${DESKTOP_HOME}/clawbox\nNODE_DIR=/usr/bin\nNPM_PREFIX=${DESKTOP_PREFIX}\n`;
+        }
+        throw new Error("ENOENT");
+      });
+    });
+    afterEach(() => { log.mockRestore(); });
+
+    /** A full update on an install-x64.sh PC, run to the UI restart. */
+    async function runX64Update(banner: string) {
+      mockX64Install.mockReturnValue(true);
+      setupExecFileMock({
+        "openclaw --version": { stdout: banner, stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(mockRestartUiProcess).toHaveBeenCalledTimes(1));
+    }
+
+    it("x64 install: skips the step when the installed core equals the pin, and says so once", async () => {
+      await runX64Update(`OpenClaw ${PINNED_CORE} (3f2a1bc)\n`);
+      const calls = commands();
+      // No root step for it: no gateway stop, no doctor, no npm.
+      expect(calls.some(rootStep("openclaw_install"))).toBe(false);
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+      expect(skippedLines()).toHaveLength(1);
+      expect(String(skippedLines()[0][0])).toContain(SKIPPED_LINE);
+      // What a ClawBox change to the patches or the config needs still runs.
+      expect(calls.some(rootStep("openclaw_patch"))).toBe(true);
+      expect(calls.some(rootStep("gateway_setup"))).toBe(true);
+    });
+
+    it("x64 install: runs the step when the installed core differs from the pin", async () => {
+      await runX64Update("OpenClaw 2026.1.1 (3f2a1bc)\n");
+      expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+      expect(skippedLines()).toHaveLength(0);
+    });
+
+    it("x64 install: runs the step when the version cannot be read", async () => {
+      await runX64Update("");
+      expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+      expect(skippedLines()).toHaveLength(0);
+    });
+
+    it("desktop integration: skips the step at the pin when no core replacement is pending", async () => {
+      mockX64Integration.mockReturnValue(true);
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(commands().some(rootStep("openclaw_install"))).toBe(false);
+      expect(updater.getUpdateState().steps.find((s) => s.id === "openclaw_install")?.status).toBe("completed");
+      expect(skippedLines()).toHaveLength(1);
+      expect(commands().some(rootStep("openclaw_patch"))).toBe(true);
+    });
+
+    it("desktop integration: runs the step when an interrupted core replacement is pending, even at the pin", async () => {
+      mockX64Integration.mockReturnValue(true);
+      mockExists.mockImplementation((p) => String(p) === `${DESKTOP_PREFIX}/.openclaw-migration-pending`);
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      try {
+        updater.startUpdate();
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+        expect(skippedLines()).toHaveLength(0);
+      } finally {
+        const actual = await vi.importActual<typeof import("fs")>("fs");
+        mockExists.mockImplementation(actual.existsSync);
+      }
+    });
+
+    it("appliance: keeps install.sh's fast-path gate and logs the same line when it is taken", async () => {
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: `  OpenClaw refresh: fast path (the core, the plugins ClawBox manages and the last full refresh are all at ${PINNED_CORE}, and the gateway is serving) — no gateway stop, no doctor, no plugin reinstall\n`,
+          stderr: "",
+        },
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      // The appliance still asks install.sh, whose gate asks more than the version.
+      expect(commands().some((call) => call.includes("clawbox-run-root-step.sh openclaw_install_fast"))).toBe(true);
+      expect(skippedLines()).toHaveLength(1);
+      expect(String(skippedLines()[0][0])).toContain(SKIPPED_LINE);
+    });
+
+    it("appliance: an equal version alone does not skip what install.sh's gate says needs the full step", async () => {
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        "-u clawbox-root-update@openclaw_install_fast.service": {
+          stdout: `  OpenClaw refresh: full path needed (no full refresh has finished for ${PINNED_CORE}; the last on record is none) — nothing changed here\n`,
+          stderr: "",
+        },
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+      expect(skippedLines()).toHaveLength(0);
+    });
+
+    it("never skips the OpenClaw-only update, the owner's repair", async () => {
+      mockX64Install.mockReturnValue(true);
+      setupExecFileMock({
+        "openclaw --version": { stdout: `OpenClaw ${PINNED_CORE} (3f2a1bc)\n`, stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      expect(updater.startOpenclawUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      expect(commands().some(rootStep("openclaw_install"))).toBe(true);
+      expect(skippedLines()).toHaveLength(0);
     });
   });
 
@@ -4031,12 +5690,34 @@ describe("updater", () => {
   });
 
   describe("checkContinuation", () => {
+    // The runtime is process-wide (it outlives the module reset above), so each
+    // case starts from a reset one and leaves a reset one, on the real clock.
+    beforeEach(() => {
+      updater.resetUpdateState();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      updater.resetUpdateState();
+    });
+
+    // While the continuation waits on a root unit, nothing may start a run: a
+    // Try again on a second window still showing an older failed card, a chat
+    // approval, a direct POST. A run started then cuts the wait off for good,
+    // leaves this run's flag on disk, and runs its own `git reset --hard`
+    // beside the unit's exit guard. Each case below that lets a run start
+    // gives it this channel. It must stay INVALID: the run is refused before
+    // step 1 and settles, where a real channel would let it go on into the
+    // cases after this one.
+    const REFUSED_CHANNEL = "not-a-channel";
+
     it("returns false when already running", async () => {
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
       updater.resetUpdateState();
       updater.startUpdate();
 
       const result = await updater.checkContinuation();
       expect(result).toBe(false);
+      await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
     });
 
     it("returns false when no continuation needed", async () => {
@@ -4135,6 +5816,7 @@ describe("updater", () => {
           update_interrupted_at: undefined,
         }),
       );
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("resumes once when a boot check and a status poll overlap, and tells both", async () => {
@@ -4159,6 +5841,7 @@ describe("updater", () => {
         mockSetMany.mock.calls.filter(([entries]) => "update_needs_continuation" in entries),
       ).toHaveLength(1);
       expect(mockGet.mock.calls.filter(([key]) => key === "update_needs_continuation")).toHaveLength(1);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("refuses a full or scoped update while the continuation is being read", async () => {
@@ -4177,6 +5860,7 @@ describe("updater", () => {
 
       flagRead.resolve();
       expect(await continuation).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("reports a failed update instead of resuming when the rebuild unit failed", async () => {
@@ -4230,6 +5914,69 @@ describe("updater", () => {
       expect(state.error).toContain("without producing a new build");
     });
 
+    // TASK-2517: an update whose target is the build already serving keeps that
+    // build (install.sh's build_is_current_for_checkout) and notes so on disk
+    // ("<BUILD_ID> <boot id> <seconds since boot>"); the unchanged BUILD_ID is
+    // then not evidence of a rebuild that never happened.
+    const BOOT = "d967658f-3b5f-4c6d-ac1e-390b669e2fd4";
+    const NEXT_BOOT = "0b7c6f4e-1111-4c6d-ac1e-390b669e2fd4";
+    function keptBuildBox(opts: { note: string; dispatched: unknown; bootNow?: string }): void {
+      mockGet.mockImplementation(async (key: string) => {
+        if (key === "update_needs_continuation") return "build-aaa";
+        if (key === "update_rebuild_dispatched") return opts.dispatched;
+        return undefined;
+      });
+      mockReadFile.mockImplementation(async (file) => {
+        const f = String(file);
+        if (f.endsWith("BUILD_ID")) return "build-aaa\n";
+        if (f.endsWith("rebuild-kept-build")) return opts.note;
+        if (f.endsWith("boot_id")) return `${opts.bootNow ?? BOOT}\n`;
+        throw new Error("ENOENT");
+      });
+    }
+
+    it.each([
+      ["in the same boot, after the dispatch", undefined],
+      // The reboot arm: the step kept the build, then rebooted, and this half
+      // resumes in the next boot. The note binds to the DISPATCH's boot.
+      ["after the reboot arm's reboot", NEXT_BOOT],
+    ])("resumes when this run's rebuild step kept the serving build on purpose, %s (TASK-2517)", async (_when, bootNow) => {
+      updater.resetUpdateState();
+      keptBuildBox({ note: `build-aaa ${BOOT} 1042.17\n`, dispatched: { boot: BOOT, uptime: 1000.5 }, bootNow });
+      const log = vi.spyOn(console, "log");
+
+      expect(await updater.checkContinuation()).toBe(true);
+
+      expect(log.mock.calls.some(([m]) => String(m).includes("The rebuild step kept build build-aaa"))).toBe(true);
+      // Both halves of the record go with the flag.
+      expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({
+        update_needs_continuation: undefined,
+        update_rebuild_dispatched: undefined,
+      }));
+      log.mockRestore();
+      // Let the continuation it started finish here, as the case above does.
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
+    });
+
+    it.each([
+      ["a note written before this run dispatched the step", `build-aaa ${BOOT} 999.9\n`, { boot: BOOT, uptime: 1000.5 }],
+      ["a note from another boot than the dispatch's", `build-aaa ${NEXT_BOOT} 1042.17\n`, { boot: BOOT, uptime: 1000.5 }],
+      ["a note naming another build", `build-bbb ${BOOT} 1042.17\n`, { boot: BOOT, uptime: 1000.5 }],
+      ["no dispatch moment recorded", `build-aaa ${BOOT} 1042.17\n`, undefined],
+      ["a dispatch moment of the old shape", `build-aaa ${BOOT} 1042.17\n`, 1000.5],
+      ["a dispatch moment with no boot", `build-aaa ${BOOT} 1042.17\n`, { uptime: 1000.5 }],
+      ["a note of the old shape", "build-aaa 1042.17\n", { boot: BOOT, uptime: 1000.5 }],
+      ["a note that is not one", "kept\n", { boot: BOOT, uptime: 1000.5 }],
+    ])("still reports no new build with %s (TASK-2517)", async (_why, note, dispatched) => {
+      updater.resetUpdateState();
+      keptBuildBox({ note, dispatched });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toContain("without producing a new build");
+    });
+
     it("moves the checkout back to the served build when the rebuild failed (TASK-1423)", async () => {
       // The killed `next build`: do_rebuild restored the previous build, the
       // box came back on it, but step 1 had left the checkout on the NEW
@@ -4268,6 +6015,763 @@ describe("updater", () => {
       const state = updater.getUpdateState();
       expect(state.phase).toBe("failed");
       expect(state.warnings?.some((w) => w.code === "checkout-rolled-back")).toBe(true);
+    });
+
+    // A failed build restores the previous one and restarts this server BEFORE
+    // its rebuild unit ends (install.sh: restore_previous_build, then the
+    // engines, node-pty and the exit traps). A oneshot that is still running
+    // answers `Result=success`, so the server that comes back sees no failure.
+    const REBUILD_UNIT = "clawbox-root-update@rebuild_reboot.service";
+    const DISPATCHED_AT = Date.parse("2026-01-01T12:00:00Z");
+    const THIS_RUN_ERROR = "Error: rebuild failed (exit 137) — bun run build was killed by signal 9 "
+      + "(no OOM kill in the kernel log; a stop, a timeout or an operator looks the same).";
+    const NO_NEW_BUILD = "ClawBox restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
+    /** A unit's `active` when systemd does not answer the ActiveState question at all. */
+    const NO_ANSWER = "(systemd did not answer)";
+    interface RestoredBox {
+      /** The rebuild unit, which a case moves on; still running unless it says otherwise. */
+      unit?: { active: string; result: string };
+      /** The dispatch record: this run's, with its moment, unless a case says otherwise. */
+      record?: unknown;
+      /** More of the store, more files (by the end of their path), more commands. */
+      store?: Record<string, unknown>;
+      files?: Record<string, string>;
+      exec?: Record<string, ExecFileAnswer>;
+    }
+    /** The restored box: the same build, this run's dispatch record, and a rebuild unit the case moves on. */
+    function restoredBox(journal: JournalEntry[], options: RestoredBox = {}) {
+      const unit = options.unit ?? { active: "activating", result: "success" };
+      const record = "record" in options ? options.record : { boot: BOOT, uptime: 1000.5, at: DISPATCHED_AT };
+      mockGet.mockImplementation(async (key: string) => {
+        if (key === "update_needs_continuation") return "build-aaa";
+        if (key === "update_rebuild_dispatched") return record;
+        return options.store?.[key];
+      });
+      mockReadFile.mockImplementation(async (file) => {
+        const f = String(file);
+        if (f.endsWith("BUILD_ID")) return "build-aaa\n";
+        const known = Object.entries(options.files ?? {}).find(([suffix]) => f.endsWith(suffix));
+        if (known) return known[1];
+        throw new Error("ENOENT");
+      });
+      setupExecFileMock({
+        ...options.exec,
+        [`show ${REBUILD_UNIT} -p ActiveState`]: () => (unit.active === NO_ANSWER
+          ? new Error("Failed to connect to bus: Connection timed out")
+          : { stdout: `${unit.active}\n`, stderr: "" }),
+        [`show ${REBUILD_UNIT} -p Result`]: () => ({ stdout: `${unit.result}\n`, stderr: "" }),
+        "/usr/bin/journalctl": journalctlModel({ [REBUILD_UNIT]: journal }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      return unit;
+    }
+    const flagCleared = () => mockSetMany.mock.calls.some(
+      ([entries]) => "update_needs_continuation" in entries && entries.update_needs_continuation === undefined,
+    );
+
+    it("leaves no full update going that reads a later case's rebuild unit", async () => {
+      // A case that waits only on an early step leaves its run going, and the
+      // run goes on into the rebuild step. On a box the unit that step queues
+      // replaces this server; nothing replaces a test. A dispatch the fixture
+      // answered left the run in waitForRebuildToTakeOver, asking the rebuild
+      // unit's Result every 5 s through whichever case came next — and a case
+      // whose unit had failed got that run's "Rebuild failed — see …" over its
+      // own state and one more clear of its continuation flag.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        updater.resetUpdateState();
+        updater.startUpdate();
+        await vi.advanceTimersByTimeAsync(60_000);
+        const dispatches = mockExecFile.mock.calls
+          .filter(([, args]) => (args as string[]).join(" ").includes("--no-block rebuild_reboot"));
+        expect(dispatches).toHaveLength(1);
+
+        // What the next case does first: a reset, and a rebuild unit that failed.
+        updater.resetUpdateState();
+        setupExecFileMock({
+          [`show ${REBUILD_UNIT} -p Result`]: { stdout: "exit-code\n", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+        mockExecFile.mockClear();
+        mockSetMany.mockClear();
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(updater.getUpdateState().error).toBeUndefined();
+        expect(updater.getUpdateState().phase).toBe("idle");
+        expect(mockSetMany).not.toHaveBeenCalled();
+        const resultAsks = mockExecFile.mock.calls
+          .filter(([, args]) => (args as string[]).join(" ").includes(`${REBUILD_UNIT} -p Result`));
+        expect(resultAsks).toEqual([]);
+      } finally {
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("shows the rebuild's own error line when the server came back before the rebuild unit ended", async () => {
+      updater.resetUpdateState();
+      const journal: JournalEntry[] = [
+        { message: "Running bun build...", atMs: DISPATCHED_AT + 51_000 },
+        { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
+        { message: "  Restored the previous build; the dashboard answers on :80 again", atMs: DISPATCHED_AT + 57_000 },
+      ];
+      // The checkout still on the new commit beside the restored build, so the
+      // rollback has something to do (install.sh's exit guard normally has).
+      const OLD = "a".repeat(40);
+      const NEW = "b".repeat(40);
+      const unit = restoredBox(journal, {
+        store: { update_rollback_target: JSON.stringify({ commit: OLD, branch: "main", recordedAt: "2026-01-01T00:00:00Z" }) },
+        files: { "build-info.json": JSON.stringify({ commit: OLD, builtAt: "2026-01-01T00:00:00Z", buildId: "build-aaa" }) },
+        exec: {
+          "rev-parse --abbrev-ref HEAD": { stdout: "beta\n", stderr: "" },
+          "rev-parse HEAD": { stdout: `${NEW}\n`, stderr: "" },
+        },
+      });
+      const checkoutMoves = () => mockExecFile.mock.calls
+        .filter(([cmd, args]) => cmd === "git" && (args as string[]).join(" ").endsWith(`checkout -q -f -B main ${OLD}`))
+        .length;
+      const log = vi.spyOn(console, "log");
+      const waitLines = () => log.mock.calls.map(([m]) => String(m)).filter((m) => m.includes("rebuild step"));
+
+      // The restored server's first polls: the unit has not ended, so there is
+      // no verdict yet — the restart step is still running, the flag stays, and
+      // the checkout is not moved under the unit.
+      for (let poll = 0; poll < 2; poll++) {
+        expect(await updater.checkContinuation()).toBe(false);
+        const waiting = updater.getUpdateState();
+        expect(waiting.error ?? null).toBeNull();
+        expect(waiting.phase).toBe("running");
+        expect(waiting.steps.find((step) => step.id === "restart")?.status).toBe("running");
+      }
+      expect(flagCleared()).toBe(false);
+      expect(checkoutMoves()).toBe(0);
+
+      // The unit ends as it does on the box: failed, with its exit code.
+      journal.push(
+        { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 64_000 },
+        { message: `${REBUILD_UNIT}: Failed with result 'exit-code'.`, atMs: DISPATCHED_AT + 64_000 },
+      );
+      unit.active = "failed";
+      unit.result = "exit-code";
+
+      expect(await updater.checkContinuation()).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toBe(THIS_RUN_ERROR);
+      expect(state.steps.find((step) => step.id === "restart")?.error).toBe(THIS_RUN_ERROR);
+      expect(flagCleared()).toBe(true);
+      // Judged once the unit had ended, so the checkout rollback ran.
+      expect(checkoutMoves()).toBe(1);
+      // One line when the wait began, one when it ended — never one per poll.
+      expect(waitLines()).toHaveLength(2);
+      expect(waitLines()[1]).toMatch(/rebuild step ended \d+ s after .*: the update failed: Error: rebuild failed \(exit 137\)/);
+      log.mockRestore();
+    });
+
+    it("gives its verdict with nobody watching: the server asks again by itself until the unit ends", async () => {
+      // Approved from a chat, on a box with no page open: the boot hook's one
+      // ask lands while the unit still runs, and no status poll ever comes.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const log = vi.spyOn(console, "log");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+
+        unit.active = "failed";
+        unit.result = "exit-code";
+        await vi.advanceTimersByTimeAsync(30_000);
+
+        expect(updater.getUpdateState().phase).toBe("failed");
+        expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+        expect(log.mock.calls.map(([m]) => String(m))).toContainEqual(
+          expect.stringMatching(/rebuild step ended \d+ s after .*: the update failed: Error: rebuild failed \(exit 137\)/),
+        );
+        // Its own clear of the flag (with the interruption record beside it),
+        // and the desktop lock released after it.
+        const writes = mockSetMany.mock.calls.map(([entries]) => entries as Record<string, unknown>);
+        const ownClear = writes.findIndex((e) => "update_needs_continuation" in e && "update_interrupted_at" in e);
+        expect(ownClear).toBeGreaterThan(-1);
+        expect(writes.slice(ownClear).some((e) => "update_in_progress" in e && e.update_in_progress === undefined)).toBe(true);
+      } finally {
+        log.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps every status poll off git while the rebuild unit still runs", async () => {
+      // `git status` takes the index lock, and the unit's exit guard runs
+      // `git reset --hard` in that window: a collision fails the reset.
+      try {
+        updater.resetUpdateState();
+        restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        const { GET } = await import("@/app/setup-api/update/status/route");
+        const phases: string[] = [];
+        for (let poll = 0; poll < 2; poll++) phases.push((await (await GET()).json()).phase);
+        const gitStatus = mockExecFile.mock.calls
+          .filter(([cmd, args]) => cmd === "git" && (args as string[]).includes("status"))
+          .map(([, args]) => (args as string[]).join(" "));
+        expect(gitStatus).toEqual([]);
+        expect(phases).toEqual(["running", "running"]);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("names the rebuild's own failure, not a later error line from the unit's exit", async () => {
+      updater.resetUpdateState();
+      restoredBox([
+        { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
+        { message: "  Moving the checkout back from bbbbbbb to aaaaaaa, the commit the restored build was made from", atMs: DISPATCHED_AT + 62_000 },
+        { message: "fatal: Unable to create '/home/clawbox/clawbox/.git/index.lock': File exists.", atMs: DISPATCHED_AT + 62_100 },
+        { message: "  Warning: could not move the checkout back to aaaaaaa", atMs: DISPATCHED_AT + 62_200 },
+        { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 64_000 },
+      ], { unit: { active: "failed", result: "exit-code" } });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+    });
+
+    it("reads an older updater's record, which carries no dispatch moment, as before: the unit's last 40 entries", async () => {
+      updater.resetUpdateState();
+      restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }], {
+        unit: { active: "failed", result: "exit-code" },
+        record: { boot: BOOT, uptime: 1000.5 },
+      });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      const reads = mockExecFile.mock.calls
+        .filter(([cmd, args]) => cmd === "/usr/bin/journalctl" && (args as string[]).includes(REBUILD_UNIT))
+        .map(([, args]) => args);
+      expect(reads).toEqual([["-u", REBUILD_UNIT, "-n", "40", "--no-pager", "-o", "cat"]]);
+      expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+    });
+
+    it("asks the handover again by itself while the root bootstrap still runs", async () => {
+      // The same probe-once hole as the rebuild's wait: the boot hook asks once.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
+      try {
+        updater.resetUpdateState();
+        mockReadFile.mockImplementation(async (file) => {
+          const f = String(file);
+          if (f.endsWith("updater-handover.json")) return JSON.stringify({ version: 1, previousBuildId: "build-old" });
+          if (f.endsWith("BUILD_ID")) return "build-new\n";
+          throw new Error("ENOENT");
+        });
+        setupExecFileMock({
+          "show clawbox-root-update@bootstrap_updater.service -p ActiveState": { stdout: "activating\n", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+        const asks = () => mockExecFile.mock.calls
+          .filter(([, args]) => (args as string[]).join(" ").includes("bootstrap_updater.service -p ActiveState"))
+          .length;
+
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(asks()).toBe(1);
+        await vi.advanceTimersByTimeAsync(11_000);
+        expect(asks()).toBeGreaterThanOrEqual(2);
+      } finally {
+        updater.resetUpdateState();
+        vi.useRealTimers();
+        const actual = await vi.importActual<typeof import("fs")>("fs");
+        mockExists.mockImplementation(actual.existsSync);
+      }
+    });
+
+    const waitLog = (spy: { mock: { calls: unknown[][] } }, part: string) =>
+      spy.mock.calls.map(([m]) => String(m)).filter((m) => m.includes(part));
+
+    it("starts no update while it waits on the rebuild unit, and still judges when the unit ends", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      const log = vi.spyOn(console, "log");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.getUpdateState().phase).toBe("running");
+
+        // Right after the ask that began the wait, and between two later asks.
+        for (let ask = 0; ask < 2; ask++) {
+          expect(updater.startUpdate()).toEqual({ started: false, error: "Update already in progress" });
+          expect(updater.startOpenclawUpdate()).toEqual({ started: false, error: "Update already in progress" });
+          expect(await updater.dismissSettledUpdate()).toMatchObject({ dismissed: false, reason: "in-progress" });
+          await vi.advanceTimersByTimeAsync(5_000);
+        }
+        expect(flagCleared()).toBe(false);
+
+        // The unit ends: the next ask of the server's own still judges, and the
+        // reason is the rebuild's own line.
+        unit.active = "failed";
+        unit.result = "exit-code";
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([
+          expect.stringMatching(/rebuild step ended \d+ s after .*: the update failed: Error: rebuild failed \(exit 137\)/),
+        ]);
+        expect(flagCleared()).toBe(true);
+
+        // Nothing waits any more: an update can start again.
+        await vi.waitFor(() => expect(updater.startUpdate().started).toBe(true));
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        log.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps waiting while the unit runs though the continuation flag is gone, then lets go: nothing left running or refused", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      const log = vi.spyOn(console, "log");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.startUpdate().started).toBe(false);
+
+        // The store no longer holds the flag by the next ask (wiped or rewritten
+        // under the wait). The unit still runs, or systemd cannot say: its tail
+        // may still reset the checkout, so the update keeps the box.
+        const store = mockGet.getMockImplementation()!;
+        mockGet.mockImplementation(async (key: string) => (key === "update_needs_continuation" ? undefined : store(key)));
+        for (const active of ["activating", NO_ANSWER]) {
+          unit.active = active;
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(updater.getUpdateState().phase).toBe("running");
+          expect(waitLog(log, "Stopped waiting for the rebuild step")).toEqual([]);
+          expect(updater.startUpdate().started).toBe(false);
+        }
+
+        // The unit has ended: nothing is left to judge.
+        unit.active = "failed";
+        unit.result = "exit-code";
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(updater.getUpdateState().phase).toBe("idle");
+        expect(waitLog(log, "Stopped waiting for the rebuild step")).toHaveLength(1);
+        expect(await updater.dismissSettledUpdate()).toEqual({ dismissed: true });
+        expect(updater.startUpdate().started).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        log.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps waiting when systemd does not answer in the middle of the wait, unless the unit is known to have failed", async () => {
+      // Seen running once, the unit is not "ended" because one question went
+      // unanswered: a `success` Result then is the running oneshot's, and judging
+      // on it would give the fixed sentence and release the lock beside its tail.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const log = vi.spyOn(console, "log");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+
+        unit.active = NO_ANSWER;
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([]);
+        expect(flagCleared()).toBe(false);
+        expect(updater.startUpdate().started).toBe(false);
+
+        // Still unanswered, but the Result says it failed: that ends the wait.
+        unit.result = "exit-code";
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([
+          expect.stringMatching(/the update failed: Error: rebuild failed \(exit 137\)/),
+        ]);
+      } finally {
+        log.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("judges at once, as before, when systemd does not answer this process's first ask", async () => {
+      // No wait has begun: a box whose systemd cannot be asked is not held
+      // waiting on a unit nobody has seen run.
+      updater.resetUpdateState();
+      restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }], { unit: { active: NO_ANSWER, result: "success" } });
+      try {
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.getUpdateState().phase).toBe("failed");
+        expect(updater.getUpdateState().error).toBe(NO_NEW_BUILD);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("goes on asking when the store will not take the verdict, keeps the box, and says so sparsely", async () => {
+      // A full disk: once the unit has ended, the verdict's first write fails,
+      // and each ask fails the same way until it does not.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      const log = vi.spyOn(console, "log");
+      const warn = vi.spyOn(console, "warn");
+      try {
+        updater.resetUpdateState();
+        const unit = restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        expect(await updater.checkContinuation()).toBe(false);
+        unit.active = "failed";
+        unit.result = "exit-code";
+        mockSetMany.mockRejectedValue(new Error("ENOSPC: no space left on device, write"));
+
+        for (let ask = 0; ask < 12; ask++) {
+          await vi.advanceTimersByTimeAsync(5_000);
+          expect(updater.startUpdate().started).toBe(false);
+        }
+        expect(waitLog(warn, "judge the update")).toHaveLength(1);
+        // …and a line now and then while it lasts, not one every 5 s.
+        await vi.advanceTimersByTimeAsync(600_000);
+        expect(waitLog(warn, "judge the update")).toHaveLength(2);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([]);
+
+        mockSetMany.mockResolvedValue();
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(waitLog(log, "The rebuild step ended")).toEqual([
+          expect.stringMatching(/the update failed: Error: rebuild failed \(exit 137\)/),
+        ]);
+        await vi.waitFor(() => expect(updater.startUpdate().started).toBe(true));
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        log.mockRestore();
+        warn.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("starts no update while the handover waits on the root bootstrap, and says once that systemd does not answer", async () => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
+      const warn = vi.spyOn(console, "warn");
+      const actual = await vi.importActual<typeof import("fs")>("fs");
+      try {
+        updater.resetUpdateState();
+        mockReadFile.mockImplementation(async (file) => {
+          const f = String(file);
+          if (f.endsWith("updater-handover.json")) return JSON.stringify({ version: 1, previousBuildId: "build-old" });
+          if (f.endsWith("BUILD_ID")) return "build-new\n";
+          throw new Error("ENOENT");
+        });
+        setupExecFileMock({
+          "show clawbox-root-update@bootstrap_updater.service -p ActiveState":
+            new Error("Failed to connect to bus: No such file or directory"),
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.startUpdate()).toEqual({ started: false, error: "Update already in progress" });
+        expect(await updater.updateInFlight()).toBe(true);
+        await vi.advanceTimersByTimeAsync(20_000);
+        expect(updater.startUpdate().started).toBe(false);
+        expect(waitLog(warn, "systemd")).toEqual([expect.stringContaining("Failed to connect to bus")]);
+
+        // The handover is over (its marker gone): nothing waits, an update can start.
+        mockExists.mockImplementation(actual.existsSync);
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(updater.startUpdate().started).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        warn.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+        mockExists.mockImplementation(actual.existsSync);
+      }
+    });
+
+    it("keeps the update's warnings on the screen while it waits", async () => {
+      updater.resetUpdateState();
+      const repinned = { code: "repinned", message: "This box now follows the main branch." };
+      restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }], {
+        store: { update_warnings: JSON.stringify([repinned]) },
+      });
+      try {
+        expect(await updater.checkContinuation()).toBe(false);
+        expect(updater.getUpdateState().phase).toBe("running");
+        expect(updater.getUpdateState().warnings).toEqual([repinned]);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("starts nothing on the owner's approval before a restarted server has first asked about its update", async () => {
+      // Between the restart and the first ask (the boot hook's, five seconds and
+      // the boot config repair later) nothing in this process owns the update,
+      // while the flag on disk says the rebuild unit may still be running.
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      vi.doMock("@/lib/update-whats-new-server", () => ({ prefetchUpdateWhatsNew: vi.fn(async () => undefined) }));
+      vi.doMock("@/lib/pending-actions", () => ({ pushPendingAction: vi.fn(async () => ({})) }));
+      try {
+        updater.resetUpdateState();
+        restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }]);
+        const { dispatchPowerAction, PowerApprovalConflict } = await import("@/lib/power-approval");
+
+        await expect(dispatchPowerAction("update")).rejects.toBeInstanceOf(PowerApprovalConflict);
+        expect(updater.getUpdateState().phase).toBe("idle");
+        expect(await updater.startWouldOverlapUpdate()).toBe(true);
+      } finally {
+        vi.doUnmock("@/lib/update-whats-new-server");
+        vi.doUnmock("@/lib/pending-actions");
+        updater.resetUpdateState();
+      }
+    });
+
+    /** The rebuild dispatch, answered as a case says; the run settles when it fails. */
+    const failedDispatch = (error: Error) => setupExecFileMock({
+      "--no-block rebuild_reboot": error,
+      ping: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+    });
+    const flagWrites = () => mockSetMany.mock.calls
+      .map(([entries]) => entries as Record<string, unknown>)
+      .filter((entries) => "update_needs_continuation" in entries)
+      .map((entries) => entries.update_needs_continuation);
+
+    it("clears its flag when the rebuild step was refused before systemd could queue it, and keeps the refusal as the reason", async () => {
+      // Nothing will restart this server, so the flag would only hold every later
+      // start and every background job off until it did.
+      failedDispatch(Object.assign(new Error("sudo: a password is required"), { stderr: "sudo: a password is required\n" }));
+      // The clear itself cannot be written: the step still says why it failed.
+      mockSetMany.mockImplementation(async (entries: Record<string, unknown>) => {
+        if ("update_needs_continuation" in entries && entries.update_needs_continuation === undefined) {
+          throw new Error("ENOSPC: no space left on device, write");
+        }
+      });
+      try {
+        updater.resetUpdateState();
+        updater.startUpdate();
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        expect(flagWrites()).toEqual([expect.any(String), undefined]);
+        const restart = updater.getUpdateState().steps.find((step) => step.id === "restart");
+        expect(restart?.error).toMatch(/not allowed to start root steps/);
+        expect(restart?.error).not.toMatch(/ENOSPC/);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("still lets a run this process saw fail start again when its rebuild dispatch may have queued the unit", async () => {
+      // Cut off by its own timeout, the dispatch may have reached systemd: the
+      // flag stays for the server that unit would restart. The failed card
+      // offers Try again, which must start, as it always could; only a
+      // restarted process, which shows "idle" until its first ask, reads that
+      // flag as an update in flight.
+      failedDispatch(Object.assign(new Error("Command failed: timed out"), { killed: true, signal: "SIGTERM" }));
+      try {
+        updater.resetUpdateState();
+        updater.startUpdate();
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+        const written = flagWrites();
+        expect(written).toEqual([expect.any(String)]);
+        mockGet.mockImplementation(async (key: string) => (key === "update_needs_continuation" ? written[0] : undefined));
+
+        expect(await updater.startWouldOverlapUpdate()).toBe(false);
+        // The same disk, read by a restarted server before its first ask.
+        updater.resetUpdateState();
+        expect(await updater.startWouldOverlapUpdate()).toBe(true);
+      } finally {
+        updater.resetUpdateState();
+      }
+    });
+
+    it("lets nothing start while a legacy updater's handover marker is on disk, before the first ask too", async () => {
+      // install.sh's handover writes only its marker, no continuation flag, and
+      // restarts this server while its root bootstrap still runs.
+      const actual = await vi.importActual<typeof import("fs")>("fs");
+      mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
+      try {
+        updater.resetUpdateState();
+        expect(await updater.startWouldOverlapUpdate()).toBe(true);
+      } finally {
+        mockExists.mockImplementation(actual.existsSync);
+        updater.resetUpdateState();
+      }
+    });
+
+    it("asks again by itself when the first ask cannot write its verdict, with no page open", async () => {
+      // The boot hook's first ask finds the unit already ended, and the
+      // verdict's first write fails (a full disk). No wait was ever entered, and
+      // the flag on disk holds every start off until somebody asks again.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const warn = vi.spyOn(console, "warn");
+      try {
+        updater.resetUpdateState();
+        restoredBox([{ message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 }], { unit: { active: "failed", result: "exit-code" } });
+        mockSetMany.mockRejectedValueOnce(new Error("ENOSPC: no space left on device, write"));
+        await expect(updater.checkContinuation()).rejects.toThrow(/ENOSPC/);
+        expect(waitLog(warn, "judge the update")).toHaveLength(1);
+        expect(updater.startUpdate().started).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        const writes = mockSetMany.mock.calls.map(([entries]) => entries as Record<string, unknown>);
+        const clears = writes.flatMap((e, i) => ("update_needs_continuation" in e && e.update_needs_continuation === undefined ? [i] : []));
+        expect(clears).toHaveLength(2);
+        expect(writes.slice(clears[1]).some((e) => "update_in_progress" in e && e.update_in_progress === undefined)).toBe(true);
+      } finally {
+        warn.mockRestore();
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("takes nothing when an ask fails with no update on disk", async () => {
+      // A box with no continuation flag and no handover marker: a failed ask is
+      // the caller's to report, not a wait that holds the box.
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        updater.resetUpdateState();
+        // A lock with nothing to resume: the ask stamps an interruption, and that write fails.
+        mockGet.mockImplementation(async (key: string) => (key === "update_in_progress" ? true : undefined));
+        mockSet.mockRejectedValue(new Error("ENOSPC: no space left on device, write"));
+        await expect(updater.checkContinuation()).rejects.toThrow(/ENOSPC/);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(updater.startUpdate().started).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("keeps a legacy updater's handover marker until the resume's own write has landed", async () => {
+      // A failed write that took the marker with it would leave the next ask no
+      // handover to resume: it would find a lock and nothing to resume, and
+      // report an interruption instead of running the update from step 1.
+      vi.stubEnv("CLAWBOX_UPDATE_CHANNEL", REFUSED_CHANNEL);
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const actual = await vi.importActual<typeof import("fs")>("fs");
+      mockExists.mockImplementation((file) => String(file).endsWith("updater-handover.json"));
+      mockRm.mockImplementation(async () => undefined);
+      try {
+        updater.resetUpdateState();
+        mockReadFile.mockImplementation(async (file) => {
+          const f = String(file);
+          if (f.endsWith("updater-handover.json")) return JSON.stringify({ version: 1, previousBuildId: "build-old" });
+          if (f.endsWith("BUILD_ID")) return "build-new\n";
+          throw new Error("ENOENT");
+        });
+        setupExecFileMock({
+          "show clawbox-root-update@bootstrap_updater.service -p ActiveState": { stdout: "inactive\n", stderr: "" },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+        });
+        // Only this marker's removals.
+        const markerRemovals = () => mockRm.mock.calls.flatMap(([file], i) =>
+          (String(file).endsWith("updater-handover.json") ? [mockRm.mock.invocationCallOrder[i]] : []));
+        mockSetMany.mockRejectedValueOnce(new Error("ENOSPC: no space left on device, write"));
+        await expect(updater.checkContinuation()).rejects.toThrow(/ENOSPC/);
+        expect(markerRemovals()).toEqual([]);
+
+        // The next ask, its own, finds the same handover and resumes it.
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(markerRemovals()).toHaveLength(1);
+        const resumeWrite = mockSetMany.mock.calls.findLastIndex(([entries]) => "update_needs_continuation" in (entries as Record<string, unknown>));
+        expect(mockSetMany.mock.invocationCallOrder[resumeWrite]).toBeLessThan(markerRemovals()[0]);
+        // The resume is a full run from step 1: refused by the channel above, here.
+        await vi.waitFor(() => expect(updater.getUpdateState().error ?? "").toMatch(/not an update channel/));
+      } finally {
+        mockExists.mockImplementation(actual.existsSync);
+        updater.resetUpdateState();
+        vi.useRealTimers();
+      }
+    });
+
+    it("reads the unit's state before its result, so a unit that ends between the two is still judged failed", async () => {
+      updater.resetUpdateState();
+      // Whichever systemd question comes first sees the unit running; it has
+      // ended, failed, by the next one.
+      let asked = 0;
+      restoredBox([
+        { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
+        { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 64_000 },
+      ], {
+        unit: {
+          get active() { return asked++ === 0 ? "activating" : "failed"; },
+          get result() { return asked++ === 0 ? "success" : "exit-code"; },
+        },
+      });
+
+      for (let poll = 0; poll < 3 && updater.getUpdateState().phase !== "failed"; poll++) {
+        await updater.checkContinuation();
+      }
+      expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+    });
+
+    it("finds this run's error line behind a long tail of what the unit did after the restore", async () => {
+      // Engines resumed, node-pty rebuilt, the exit traps: each sudo leaves
+      // session lines in the unit's journal, and they all come after the error.
+      updater.resetUpdateState();
+      const tail = Array.from({ length: 60 }, (_, i) => ({
+        message: i % 2 ? "pam_unix(sudo:session): session closed for user clawbox" : "  Still waiting for node-pty...",
+        atMs: DISPATCHED_AT + 60_000 + i,
+      }));
+      restoredBox([
+        { message: THIS_RUN_ERROR, atMs: DISPATCHED_AT + 54_000 },
+        ...tail,
+        { message: `${REBUILD_UNIT}: Main process exited, code=exited, status=137/n/a`, atMs: DISPATCHED_AT + 70_000 },
+      ], { unit: { active: "failed", result: "exit-code" } });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().error).toBe(THIS_RUN_ERROR);
+    });
+
+    it("keeps the no-new-build sentence when the rebuild unit ended without failing, whatever it printed last", async () => {
+      updater.resetUpdateState();
+      const unit = restoredBox([
+        { message: "Rebuilding: .env changed after the build", atMs: DISPATCHED_AT + 48_000 },
+        { message: "Running bun build...", atMs: DISPATCHED_AT + 51_000 },
+      ]);
+
+      expect(await updater.checkContinuation()).toBe(false);
+      expect(updater.getUpdateState().error ?? null).toBeNull();
+
+      unit.active = "inactive";
+      expect(await updater.checkContinuation()).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      // The unit said no reason, and its last progress line is not one.
+      expect(state.error).toBe(NO_NEW_BUILD);
+    });
+
+    it("never shows an earlier run's error line as this run's reason", async () => {
+      updater.resetUpdateState();
+      restoredBox([
+        // The owner's previous attempt, an hour before this run dispatched.
+        { message: "Error: rebuild failed (exit 1) — bun run build did not succeed.", atMs: DISPATCHED_AT - 3_600_000 },
+        { message: `${REBUILD_UNIT}: Failed with result 'exit-code'.`, atMs: DISPATCHED_AT - 3_599_000 },
+        // This run: its shell was killed before it could say why.
+        { message: "Running bun build...", atMs: DISPATCHED_AT + 51_000 },
+        { message: `${REBUILD_UNIT}: Main process exited, code=killed, status=9/KILL`, atMs: DISPATCHED_AT + 54_000 },
+        { message: `${REBUILD_UNIT}: Failed with result 'signal'.`, atMs: DISPATCHED_AT + 54_000 },
+      ], { unit: { active: "failed", result: "signal" } });
+
+      expect(await updater.checkContinuation()).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toBe("Error: the step was killed (SIGKILL, exit 137) without reporting a reason — "
+        + "the journal shows no OOM kill, so a stop or a timeout looks the same.");
+    });
+
+    it("resumes at once when the rebuild produced a new build, though its unit has not ended", async () => {
+      // The restart arm restarts this server before its unit's exit traps run:
+      // a good update must not wait on that.
+      updater.resetUpdateState();
+      restoredBox([]);
+      mockRebuiltBox("build-bbb");
+
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("reports a failed update when the rebuild left no build at all", async () => {
@@ -4333,6 +6837,7 @@ describe("updater", () => {
       // continuation is allowed to run.
       expect(await updater.checkContinuation()).toBe(true);
       expect(updater.getUpdateState().phase).not.toBe("failed");
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("reports a failed update when a box that had no build still has none", async () => {
@@ -4695,6 +7200,9 @@ describe("updater", () => {
       const fresh = await loadUpdater("dual");
 
       expect(fresh.startOpenclawUpdate().started).toBe(true);
+      // Let the run end before the state is reset: one left going writes its
+      // step results by index into whatever run the next test starts.
+      await vi.waitFor(() => expect(fresh.getUpdateState().phase).not.toBe("running"), { timeout: 5_000 });
       fresh.resetUpdateState();
     });
 
@@ -4767,8 +7275,8 @@ describe("updater", () => {
 
     let doctorTimeouts: number[];
 
-    /** Every answer as before, and a doctor that takes `bytes`' worth of time. */
-    function doctorTakesTimeFor(bytes: number) {
+    /** Every answer as before, and a doctor that takes `bytes`' worth of time, or ends with `failure`. */
+    function doctorTakesTimeFor(bytes: number, failure?: Error) {
       setupExecFileMock({
         "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         ping: { stdout: "", stderr: "" },
@@ -4785,7 +7293,9 @@ describe("updater", () => {
         const needsMs = Math.ceil(bytes / GiB) * DOCTOR_MS_PER_GIB;
         // The gateway comes back once doctor has had its turn, however it ended.
         mockGatewayUp.mockResolvedValue(true);
-        if (timeout > 0 && needsMs > timeout) {
+        if (failure) {
+          cb?.(failure, { stdout: "", stderr: "" });
+        } else if (timeout > 0 && needsMs > timeout) {
           cb?.(Object.assign(new Error("Command failed: openclaw doctor --fix --yes --non-interactive"), {
             killed: true, signal: "SIGTERM", stdout: "Checking agent databases...\n", stderr: "",
           }), { stdout: "", stderr: "" });
@@ -4796,14 +7306,14 @@ describe("updater", () => {
       }) as unknown as typeof childProcess.execFile);
     }
 
-    async function verifyOnBoxWith(bytes: number) {
+    async function verifyOnBoxWith(bytes: number, failure?: Error) {
       vi.resetModules();
       mockOpenclawDatabaseBytes.mockResolvedValue(bytes);
       mockGet.mockResolvedValue(true);
       mockSet.mockResolvedValue();
       mockSetMany.mockResolvedValue();
       mockRebuiltBox();
-      doctorTakesTimeFor(bytes);
+      doctorTakesTimeFor(bytes, failure);
       // Down until doctor has run: the verify's recovery is what runs it.
       mockGatewayUp.mockResolvedValue(false);
       updater = await import("@/lib/updater");
@@ -4860,6 +7370,35 @@ describe("updater", () => {
       expect(killedWarning()?.message).toContain("it was still running after 1200s and was stopped");
       // A doctor that could not finish is a warning, not a failed update: the
       // restart and the port probe after it are the verdict.
+      expect(updater.getUpdateState().phase).toBe("completed");
+    });
+
+    /** node's execFile rejection: the output rides on the error, its message names the command. */
+    type DoctorEnd = { code?: number | null; killed?: boolean; signal?: string | null };
+    const doctorEnded = (end: DoctorEnd, stdout = "", stderr = "") =>
+      Object.assign(new Error(`Command failed: openclaw doctor --fix --yes --non-interactive\n${stderr}`), {
+        code: null, killed: false, signal: null, ...end, stdout, stderr,
+      });
+
+    it.each([
+      // node sets `killed` only for a kill it sent; a signal without it came
+      // from elsewhere (the kernel's OOM killer while doctor reads every agent
+      // database, a stray kill), and doctor's last line is progress, not a cause.
+      ["a SIGKILL the updater did not send", doctorEnded({ signal: "SIGKILL" }, "Checking agent main…\n"),
+        "it was killed by SIGKILL from outside the updater"],
+      // Its own crash has the same shape, and reads the same.
+      ["a crash", doctorEnded({ signal: "SIGSEGV" }, "Checking agent main…\n"),
+        "it was killed by SIGSEGV from outside the updater"],
+      ["the updater's own bound", doctorEnded({ killed: true, signal: "SIGTERM" }, "Checking agent main…\n"),
+        "it was still running after 90s and was stopped"],
+      ["a refusal",
+        doctorEnded({ code: 1 }, "Checking agent main…\n", "Config invalid: gateway.port must be a number\n"),
+        "Config invalid: gateway.port must be a number"],
+      ["an exit with nothing said", doctorEnded({ code: 1 }), "it gave no reason"],
+    ])("says why doctor did not complete after %s", async (_what, failure, reason) => {
+      await verifyOnBoxWith(0, failure);
+      expect(killedWarning()?.message).toBe("`openclaw doctor --fix` did not complete. "
+        + `Config and session migrations it performs may still be pending: ${reason}`);
       expect(updater.getUpdateState().phase).toBe("completed");
     });
   });

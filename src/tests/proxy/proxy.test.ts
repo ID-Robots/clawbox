@@ -1,0 +1,1389 @@
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { NextRequest } from "next/server";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
+
+describe("proxy", () => {
+  let proxy: typeof import("@/proxy").proxy;
+  let tmpRoot: string;
+
+  /**
+   * Mark the wizard as finished by writing data/config.json under the
+   * temp CLAWBOX_ROOT — the auth gate skips /setup-api/* until this flag
+   * flips, so most authenticated tests need to call this first.
+   */
+  function markSetupComplete() {
+    const dataDir = path.join(tmpRoot, "data");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dataDir, "config.json"),
+      JSON.stringify({ setup_complete: true }),
+    );
+  }
+
+  beforeEach(async () => {
+    vi.resetModules();
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-mw-"));
+    process.env.CLAWBOX_ROOT = tmpRoot;
+    delete process.env.PORTAL_URL;
+    delete process.env.SESSION_SECRET;
+    delete process.env.CLAWBOX_TEST_MODE;
+    const mod = await import("@/proxy");
+    proxy = mod.proxy;
+  });
+
+  afterEach(() => {
+    delete process.env.PORTAL_URL;
+    delete process.env.SESSION_SECRET;
+    delete process.env.CLAWBOX_TEST_MODE;
+    delete process.env.CLAWBOX_ROOT;
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  function createRequest(pathname: string): NextRequest {
+    return new NextRequest(new URL(`http://localhost${pathname}`));
+  }
+
+  function writeConfig(fields: Record<string, unknown>) {
+    const dataDir = path.join(tmpRoot, "data");
+    fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, "config.json"), JSON.stringify(fields));
+  }
+
+  async function createSignedSessionCookie(exp: number, gen?: number): Promise<string> {
+    const body: Record<string, number> = { exp };
+    if (gen !== undefined) body.gen = gen;
+    const payload = Buffer.from(JSON.stringify(body)).toString("base64url");
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode("test-secret"),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    const signature = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload)));
+    const signatureHex = Array.from(signature)
+      .map(byte => byte.toString(16).padStart(2, "0"))
+      .join("");
+    return `${payload}.${signatureHex}`;
+  }
+
+  describe("trailing-slash redirect (step 0)", () => {
+    /**
+     * The redirect has to land on the SLASHLESS path. It did not: `NextURL`
+     * captures `trailingSlash` when it parses the URL, its `pathname` setter
+     * leaves that flag alone, and `href`/`toString()` — which is what
+     * `NextResponse.redirect` serialises — re-adds the slash from it. So every
+     * page path typed with a trailing slash 308'd to itself, forever.
+     */
+    it.each(["/setup/", "/login/", "/portal/", "/updating/", "/app/", "/apps/", "/chat/"])(
+      "sends %s to the same path without the slash, not back to itself",
+      async (pathname) => {
+        const response = await proxy(createRequest(pathname));
+
+        expect(response.status).toBe(308);
+        const target = new URL(response.headers.get("location")!, "http://localhost");
+        expect(target.pathname).toBe(pathname.replace(/\/+$/, ""));
+      },
+    );
+
+    it("collapses repeated trailing slashes in one hop", async () => {
+      const response = await proxy(createRequest("/setup///"));
+
+      expect(response.status).toBe(308);
+      expect(new URL(response.headers.get("location")!, "http://localhost").pathname).toBe("/setup");
+    });
+
+    it("is not cacheable, so a browser cannot replay a stale one", async () => {
+      // A 308 is cacheable by default (RFC 7538 §3) and browsers treat a
+      // permanent redirect as durable. Both shipped boxes served the
+      // self-referencing loop AS a permanent redirect, so without this a
+      // browser that cached it stays broken after the box is updated.
+      const response = await proxy(createRequest("/setup/"));
+
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    });
+
+    it("keeps the query string", async () => {
+      const response = await proxy(createRequest("/login/?next=%2Fportal"));
+
+      expect(response.status).toBe(308);
+      const target = new URL(response.headers.get("location")!, "http://localhost");
+      expect(target.pathname).toBe("/login");
+      expect(target.searchParams.get("next")).toBe("/portal");
+    });
+
+    /**
+     * FOLLOW the chain, the way a browser does. The box shipped
+     * `/login/ → 308 /login/` and every single-hop assertion about it was
+     * satisfied: only walking the Location to a non-redirect sees a loop,
+     * and only walking it proves that the two halves of this block — a page
+     * path LOSING its slash, an app's base path GAINING one — cannot hand
+     * each other the same path forever.
+     */
+    async function follow(start: string, max = 6): Promise<string> {
+      let pathname = start;
+      for (let hop = 0; hop <= max; hop++) {
+        const response = await proxy(createRequest(pathname));
+        const location = response.headers.get("location");
+        if (response.status < 300 || response.status >= 400 || !location) return pathname;
+        const next = new URL(location, "http://localhost").pathname;
+        expect(next, `${pathname} redirected to itself`).not.toBe(pathname);
+        pathname = next;
+      }
+      throw new Error(`${start} never settled: still redirecting after ${max} hops`);
+    }
+
+    it.each([
+      ["/login/", "/login"],
+      ["/setup/", "/setup"],
+      ["/updating/", "/updating"],
+      ["/app/terminal/", "/app/terminal"],
+      ["/code-server/", "/code-server"],
+      // The app proxy's base path is canonical WITH the slash, and settles there
+      // whichever way it was typed.
+      ["/apps/angry-pigs", "/apps/angry-pigs/"],
+      ["/apps/angry-pigs/", "/apps/angry-pigs/"],
+      // Everything under it is what the app answers, as typed.
+      ["/apps/angry-pigs/assets/index-BpDL3fMp.js", "/apps/angry-pigs/assets/index-BpDL3fMp.js"],
+      ["/apps/angry-pigs/api/items", "/apps/angry-pigs/api/items"],
+    ])("%s settles on %s without looping", async (start, settled) => {
+      expect(await follow(start)).toBe(settled);
+    });
+
+    it("gives a proxied app's base path the slash it is served under", async () => {
+      // Without it the document's relative links resolve one level up and a
+      // Vite build answers its own "did you mean /apps/<id>/?" 404, which the
+      // owner saw as a bare page of upstream text.
+      const response = await proxy(createRequest("/apps/angry-pigs?debug=1"));
+
+      expect(response.status).toBe(308);
+      const target = new URL(response.headers.get("location")!, "http://localhost");
+      expect(target.pathname).toBe("/apps/angry-pigs/");
+      expect(target.searchParams.get("debug")).toBe("1");
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    });
+  });
+
+  describe("Android captive portal", () => {
+    it("redirects /generate_204 to portal", async () => {
+      const request = createRequest("/generate_204");
+      const response = await proxy(request);
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
+    });
+
+    it("redirects /gen_204 to portal", async () => {
+      const request = createRequest("/gen_204");
+      const response = await proxy(request);
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
+    });
+  });
+
+  describe("Windows NCSI", () => {
+    it("redirects /connecttest.txt to portal", async () => {
+      const request = createRequest("/connecttest.txt");
+      const response = await proxy(request);
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
+    });
+
+    it("redirects /redirect to portal", async () => {
+      const request = createRequest("/redirect");
+      const response = await proxy(request);
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
+    });
+
+    it("redirects /ncsi.txt to portal", async () => {
+      const request = createRequest("/ncsi.txt");
+      const response = await proxy(request);
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
+    });
+  });
+
+  describe("Firefox captive portal", () => {
+    it("redirects /canonical.html to portal", async () => {
+      const request = createRequest("/canonical.html");
+      const response = await proxy(request);
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
+    });
+
+    it("redirects /success.txt to portal", async () => {
+      const request = createRequest("/success.txt");
+      const response = await proxy(request);
+
+      expect(response.status).toBe(302);
+      expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
+    });
+  });
+
+  describe("Apple captive portal", () => {
+    it("returns HTML response for /hotspot-detect.html", async () => {
+      const request = createRequest("/hotspot-detect.html");
+      const response = await proxy(request);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/html");
+
+      const body = await response.text();
+      expect(body).toContain("ClawBox Setup");
+      expect(body).toContain("<!DOCTYPE html>");
+    });
+
+    it("returns HTML response for /library/test/success.html", async () => {
+      const request = createRequest("/library/test/success.html");
+      const response = await proxy(request);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/html");
+    });
+  });
+
+  describe("non-captive portal paths", () => {
+    it("passes through other paths", async () => {
+      const request = createRequest("/setup");
+      const response = await proxy(request);
+
+      // NextResponse.next() returns a response that continues to the route
+      expect(response.status).toBe(200);
+    });
+
+    it("passes through API paths when auth is not yet active", async () => {
+      // No SESSION_SECRET = pre-setup state. /setup-api/* must work for the
+      // wizard to bootstrap.
+      const request = createRequest("/setup-api/wifi/scan");
+      const response = await proxy(request);
+
+      expect(response.status).toBe(200);
+    });
+  });
+
+  describe("case insensitivity", () => {
+    it("handles uppercase paths", async () => {
+      const request = createRequest("/GENERATE_204");
+      const response = await proxy(request);
+
+      expect(response.status).toBe(302);
+    });
+
+    it("handles mixed case paths", async () => {
+      const request = createRequest("/Hotspot-Detect.html");
+      const response = await proxy(request);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/html");
+    });
+  });
+
+  describe("custom PORTAL_URL", () => {
+    it("uses custom PORTAL_URL when set", async () => {
+      vi.resetModules();
+      process.env.PORTAL_URL = "http://192.168.1.1/setup";
+      const mod = await import("@/proxy");
+
+      const request = createRequest("/generate_204");
+      const response = await mod.proxy(request);
+
+      expect(response.headers.get("Location")).toBe("http://192.168.1.1/setup");
+    });
+
+    it("falls back to default for invalid PORTAL_URL", async () => {
+      vi.resetModules();
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      process.env.PORTAL_URL = "not-a-valid-url";
+      const mod = await import("@/proxy");
+
+      const request = createRequest("/generate_204");
+      const response = await mod.proxy(request);
+
+      expect(response.headers.get("Location")).toBe("http://10.42.0.1/");
+      expect(consoleSpy).toHaveBeenCalled();
+
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe("public webapps (InstalledMeta.public)", () => {
+    // The owner marks one webapp public in its meta; that app's files are
+    // served read-only without a session. Nothing else opens: another app,
+    // POST, or a pre-setup box.
+    function writeConfig(extra: Record<string, unknown>) {
+      const dataDir = path.join(tmpRoot, "data");
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(path.join(dataDir, "config.json"), JSON.stringify({ setup_complete: true, ...extra }));
+    }
+    const meta = {
+      "pref:installed_meta": {
+        "shared-game": { name: "Game", color: "#000", iconUrl: "", webappUrl: "/setup-api/webapps?app=shared-game", public: true },
+        "private-app": { name: "Private", color: "#000", iconUrl: "", webappUrl: "/setup-api/webapps?app=private-app" },
+      },
+    };
+
+    async function load() {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      return (await import("@/proxy")).proxy;
+    }
+
+    it("serves a public webapp and its files to anyone, GET only", async () => {
+      writeConfig(meta);
+      const mw = await load();
+      expect((await mw(createRequest("/setup-api/webapps?app=shared-game"))).status).toBe(200);
+      expect((await mw(createRequest("/setup-api/webapps?app=shared-game&file=app.js"))).status).toBe(200);
+      const post = new NextRequest(new URL("http://localhost/setup-api/webapps?app=shared-game"), { method: "POST" });
+      expect((await mw(post)).status).toBe(401);
+    });
+
+    it("keeps every other webapp, and the path without an app, behind the session", async () => {
+      writeConfig(meta);
+      const mw = await load();
+      expect((await mw(createRequest("/setup-api/webapps?app=private-app"))).status).toBe(401);
+      expect((await mw(createRequest("/setup-api/webapps"))).status).toBe(401);
+    });
+
+    it("shares nothing when no meta says public, and picks up a flag flipped later", async () => {
+      writeConfig({});
+      const mw = await load();
+      expect((await mw(createRequest("/setup-api/webapps?app=shared-game"))).status).toBe(401);
+      // The snapshot is keyed on the file's mtime; force a distinct one.
+      await new Promise((r) => setTimeout(r, 15));
+      writeConfig(meta);
+      expect((await mw(createRequest("/setup-api/webapps?app=shared-game"))).status).toBe(200);
+    });
+  });
+
+  describe("the login page's language read (UI_LANGUAGE_READ)", () => {
+    // /login mounts the desktop's I18nProvider, which asks for the box's UI
+    // language before a session exists; answered 401, the page fell back to
+    // the browser's language (UI sweep 2026-09-07, shell-5). That one request
+    // — the exact path with the exact query, GET — is answered. The rest of
+    // the preference store stays behind the session.
+    async function load() {
+      markSetupComplete();
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      return (await import("@/proxy")).proxy;
+    }
+
+    it("answers the request the provider sends — UI_LANGUAGE_READ.url — without a session", async () => {
+      const mw = await load();
+      expect(UI_LANGUAGE_READ.url).toBe("/setup-api/preferences?keys=ui_language");
+      expect((await mw(createRequest(UI_LANGUAGE_READ.url))).status).toBe(200);
+    });
+
+    it("compares the raw path and query the shared object is built from", () => {
+      // The middleware matches `pathname` and `search`, the provider fetches
+      // `url`, the route reads `keys` — one object (src/lib/ui-language-read.ts),
+      // so none of the three can drift from the others.
+      expect(UI_LANGUAGE_READ.url).toBe(`${UI_LANGUAGE_READ.pathname}${UI_LANGUAGE_READ.search}`);
+      expect(UI_LANGUAGE_READ.search).toBe(`?keys=${UI_LANGUAGE_READ.keys.join(",")}`);
+    });
+
+    it.each([
+      "/setup-api/preferences?keys=ui_language,ui_user_name",
+      "/setup-api/preferences?keys=ui_user_name",
+      "/setup-api/preferences?keys=installed_meta",
+      "/setup-api/preferences?all=1",
+      "/setup-api/preferences?keys=ui_language&all=1",
+      "/setup-api/preferences?all=1&keys=ui_language",
+      "/setup-api/preferences?keys=ui_language%2Cui_user_name",
+      "/setup-api/preferences",
+      "/setup-api/preferences/?keys=ui_language",
+      "/setup-api/Preferences?keys=ui_language",
+    ])("keeps every other read behind the session: %s", async (path) => {
+      const mw = await load();
+      const res = await mw(createRequest(path));
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "Authentication required" });
+    });
+
+    it("is a read, never a write", async () => {
+      const mw = await load();
+      const post = new NextRequest(new URL("http://localhost/setup-api/preferences?keys=ui_language"), { method: "POST" });
+      expect((await mw(post)).status).toBe(401);
+    });
+
+    it("sits after the session check, so the owner's wider read is untouched", async () => {
+      const mw = await load();
+      const req = new NextRequest(new URL("http://localhost/setup-api/preferences?all=1"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}` },
+      });
+      expect((await mw(req)).status).toBe(200);
+    });
+  });
+
+  describe("authentication", () => {
+    it("allows public paths without auth", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = createRequest("/login");
+      const response = await mod.proxy(req);
+      expect(response.status).toBe(200);
+    });
+
+    it("allows requests when no session secret configured", async () => {
+      delete process.env.SESSION_SECRET;
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = createRequest("/some-page");
+      const response = await mod.proxy(req);
+      expect(response.status).toBe(200);
+    });
+
+    it("redirects unauthenticated page requests to login", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = createRequest("/dashboard");
+      const response = await mod.proxy(req);
+      expect(response.status).toBe(307);
+      expect(response.headers.get("Location")).toContain("/login");
+    });
+
+    it("returns 401 for unauthenticated API requests", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = new NextRequest(new URL("http://localhost/api/data"), {
+        headers: { accept: "application/json" },
+      });
+      const response = await mod.proxy(req);
+      expect(response.status).toBe(401);
+    });
+
+    it("returns a parseable JSON 401 for /setup-api/* with no Accept header (#304)", async () => {
+      // The bug: a raw fetch("/setup-api/...") sends Accept: */*, hit the login
+      // *redirect*, and the caller's `.json()` threw on the login page's HTML.
+      // Guard that an expired session now yields a JSON 401 the caller can parse.
+      process.env.SESSION_SECRET = "test-secret";
+      markSetupComplete();
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const response = await mod.proxy(createRequest("/setup-api/system/info"));
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({ error: "Authentication required" });
+    });
+
+    it("answers the /setup-api ROOT as the API namespace, not as a page", async () => {
+      // TASK-631. Every gate here tested `startsWith("/setup-api/")`, WITH the
+      // slash, so the namespace root itself was treated as an ordinary page:
+      // an unauthenticated caller got a redirect to /login, and an
+      // authenticated one fell through to the gateway catch-all, which answers
+      // a navigation with the Control UI shell and the gateway token in it.
+      // The root belongs to the same namespace as everything under it.
+      process.env.SESSION_SECRET = "test-secret";
+      markSetupComplete();
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const response = await mod.proxy(createRequest("/setup-api"));
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({ error: "Authentication required" });
+    });
+
+    it("lets an anonymous /login-api/* path through to the route, which now 404s it", async () => {
+      // The one namespace where an ANONYMOUS caller reached the gateway shell:
+      // `/login-api` is in PUBLIC_PREFIXES (the login POST needs it), so
+      // `GET /login-api/nope` was `NextResponse.next()` → the catch-all →
+      // `serveGatewayHTML` → 200 Control UI. No token (`serveGatewayHTML`
+      // injects only for an owner session), so not a credential leak — but it
+      // is the only one of the five that answered a stranger with a 200 HTML
+      // page, and the route's namespace gate is what turns it into a 404.
+      // Middleware's own behaviour is deliberately unchanged here: taking
+      // /login-api out of PUBLIC_PREFIXES would break signing in.
+      process.env.SESSION_SECRET = "test-secret";
+      markSetupComplete();
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const response = await mod.proxy(createRequest("/login-api/nope"));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("location")).toBeNull();
+    });
+
+    it("does not fold /setupsomething into the /setup-api namespace", async () => {
+      // The matching is on a segment boundary in both directions: `/setup-api`
+      // must not fold into `/setup` (the original auth-bypass) and a path that
+      // merely starts with the same letters must not fold into either.
+      process.env.SESSION_SECRET = "test-secret";
+      markSetupComplete();
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const response = await mod.proxy(createRequest("/setup-apiary"));
+      expect(response.status).toBe(307);
+      expect(response.headers.get("location")).toContain("/login");
+    });
+
+    it.each(["/login", "/setup", "/setup-api/setup/status", "/_next/chunk.js", "/fonts/test.woff", "/fonts/JetBrainsMono-Regular.woff2", "/manifest.json", "/sw.js", "/favicon.ico", "/portal/subscribe"])("allows public path %s", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = createRequest(p);
+      const response = await mod.proxy(req);
+      expect(response.status).toBe(200);
+    });
+
+    // `/fonts/` and `/images/` used to be public PREFIXES — and skipped by the
+    // matcher outright — so a path nobody serves under either name went to the
+    // gateway catch-all, which answered the Control UI shell to an anonymous
+    // caller (and, before that route gated it, the shell carried the gateway
+    // token). A font FILE is still admitted, by step 2a's extension allow-list
+    // above; a bare name under those trees is an unknown page and gets /login.
+    it.each(["/images/logo.png", "/images/nope", "/fonts/nope", "/fonts"])(
+      "sends %s to /login rather than treating the tree as public",
+      async (p) => {
+        process.env.SESSION_SECRET = "test-secret";
+        vi.resetModules();
+        const mod = await import("@/proxy");
+
+        const response = await mod.proxy(createRequest(p));
+        expect(response.status).toBe(307);
+        expect(response.headers.get("location")).toContain("/login");
+      },
+    );
+
+    it("runs for the /fonts and /images trees — the matcher no longer skips them", async () => {
+      // The gates above are only worth anything if this file is ENTERED for
+      // those paths. The matcher is compiled into the build's middleware
+      // manifest, so the regex itself is the thing to pin: Next's own build
+      // output stays excluded, nothing else does.
+      const { config } = await import("@/proxy");
+      const [pattern] = config.matcher;
+      expect(pattern).toContain("_next/static");
+      expect(pattern).toContain("_next/image");
+      expect(pattern).not.toContain("fonts");
+      expect(pattern).not.toContain("images");
+      const re = new RegExp(`^${pattern}$`);
+      expect(re.test("/fonts/JetBrainsMono-Regular.woff2")).toBe(true);
+      expect(re.test("/images/nope")).toBe(true);
+      expect(re.test("/_next/static/chunk.js")).toBe(false);
+    });
+
+    it.each(["/setup-api/wifi/scan", "/setup-api/system/power", "/setup-api/setup/reset", "/setup-api/clawkeep/backup"])("shields %s once setup is complete and auth is active", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      markSetupComplete();
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      // createRequest() sends no Accept header — exactly like a raw fetch()
+      // (Accept: */*). Every /setup-api/* consumer parses JSON, so an expired
+      // session must return a JSON 401, not an HTML login redirect that makes
+      // the caller's .json() throw (#304).
+      const req = createRequest(p);
+      const response = await mod.proxy(req);
+      expect(response.status).toBe(401);
+    });
+
+    it.each([
+      "/setup-api/local-ai/llamacpp/v1/chat/completions",
+      "/setup-api/local-ai/ollama/api/chat",
+      "/setup-api/local-ai/embed/v1/embeddings",
+    ])("passes %s through with no session — the proxy verifies its own bearer", async (p) => {
+      // OpenClaw is a separate process with no cookie. A 401 from here would
+      // trip its auth-failure cooldown; for the embed prefix it would also
+      // fail every memory search, since its embedding client gives a refused
+      // request three attempts inside two seconds and then gives up.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+      const response = await mod.proxy(createRequest(p));
+      expect(response.status).toBe(200);
+    });
+
+    it.each([
+      "/setup-api/wifi/scan",
+      "/setup-api/wifi/connect",
+      "/setup-api/update/status",
+      "/setup-api/update/run",
+      "/setup-api/system/credentials",
+      "/setup-api/system/hostname",
+      "/setup-api/system/hotspot",
+      "/setup-api/gateway/health",
+      "/setup-api/harness/active",
+      // "Choose your assistant" on a unified-image box runs between WiFi and
+      // the password step (TASK-1149).
+      "/setup-api/setup/edition",
+    ])("allows %s during setup wizard bootstrap", async (p) => {
+      // production-server.js auto-creates SESSION_SECRET so the env-var
+      // short-circuit never fires; the wizard must still reach the routes
+      // steps 1-3 need before a password can exist. Regression for the
+      // "Failed to check update status" wizard breakage.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = createRequest(p);
+      const response = await mod.proxy(req);
+      expect(response.status).toBe(200);
+    });
+
+    // TASK-443. The gate is an ALLOW-list now, so a route nobody thought about
+    // is closed rather than open. These six were all reachable with no
+    // credential from radio range of the OPEN `ClawBox-Setup` AP; setup/reset
+    // in that state really did wipe the QA box.
+    it.each([
+      "/setup-api/setup/reset",
+      "/setup-api/system/power",
+      "/setup-api/install/run-step",
+      "/setup-api/ollama/pull",
+      // The telemetry family (TASK-446). Every one of these answered 200 with
+      // no session while the open AP was up: hostname, kernel, CPU model, RAM,
+      // uptime, disk, the LAN address, raw UI state, and which AI provider and
+      // Telegram bot the box is wired to.
+      "/setup-api/system/info",
+      "/setup-api/system/stats",
+      "/setup-api/wifi/status",
+      "/setup-api/kv",
+      "/setup-api/ai-models/status",
+      "/setup-api/telegram/status",
+      // The route that mints a 24 h owner session. The wizard posts it only
+      // after CredentialsStep, holding the cookie that step was handed, so it
+      // has no business in the bootstrap allow-list — and it is the one path a
+      // scan of the old deny-list named, so it is pinned here by name rather
+      // than by the list's default alone.
+      "/setup-api/setup/complete",
+    ])("gates %s even during setup wizard bootstrap", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const response = await mod.proxy(createRequest(p));
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({ error: "Authentication required" });
+    });
+
+    // TASK-443. The window used to be keyed on setup_complete alone, so a box
+    // that had a password but an unfinished wizard — including one whose
+    // config.json had simply lost the setup_complete key — served the whole
+    // bootstrap surface to anyone. A device with a password has an owner.
+    it.each([
+      "/setup-api/wifi/connect",
+      "/setup-api/update/run",
+      "/setup-api/system/credentials",
+      "/setup-api/harness/active",
+      "/setup-api/setup/complete",
+    ])("closes the bootstrap window for %s once a password is configured", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ password_configured: true }); // setup_complete still absent
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const response = await mod.proxy(createRequest(p));
+      expect(response.status).toBe(401);
+    });
+
+    it("fails closed when config.json exists but cannot be parsed", async () => {
+      // A missing config.json is a first-boot device and must open the window.
+      // A corrupt one is a provisioned box with a damaged (or clobbered) file,
+      // and treating that as "pre-setup" hands the window back. TASK-446.
+      process.env.SESSION_SECRET = "test-secret";
+      const dataDir = path.join(tmpRoot, "data");
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(path.join(dataDir, "config.json"), "{ this is not json");
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      expect((await mod.proxy(createRequest("/setup-api/update/run"))).status).toBe(401);
+      expect((await mod.proxy(createRequest("/setup-api/wifi/scan"))).status).toBe(401);
+    });
+
+    it("re-locks /setup-api/* after config.json flips setup_complete", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const open = await mod.proxy(createRequest("/setup-api/wifi/scan"));
+      expect(open.status).toBe(200);
+
+      markSetupComplete();
+      const locked = await mod.proxy(createRequest("/setup-api/wifi/scan"));
+      // Re-locked API surface returns a JSON 401 (not a login redirect) so
+      // fetch() callers can detect the expired session — see #304.
+      expect(locked.status).toBe(401);
+    });
+
+    it("skips auth on /setup-api/* when CLAWBOX_TEST_MODE=1 (e2e-install harness)", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      process.env.CLAWBOX_TEST_MODE = "1";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = createRequest("/setup-api/wifi/scan");
+      const response = await mod.proxy(req);
+      // Pass-through, not a 307 redirect — the trusted test environment
+      // exercises every /setup-api endpoint directly via fetch().
+      expect(response.status).toBe(200);
+    });
+
+    it("does NOT bypass auth when CLAWBOX_TEST_MODE is a non-'1' truthy value", async () => {
+      // Strict equality on "1" — `true`, "true", "yes" et al. must not
+      // open the API surface in production environments where the env
+      // var was set casually by something else.
+      process.env.SESSION_SECRET = "test-secret";
+      process.env.CLAWBOX_TEST_MODE = "true";
+      markSetupComplete();
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = createRequest("/setup-api/wifi/scan");
+      const response = await mod.proxy(req);
+      // Auth still enforced -> /setup-api/* yields a JSON 401 (not a bypass).
+      expect(response.status).toBe(401);
+    });
+
+    it("still redirects page requests to /login under CLAWBOX_TEST_MODE", async () => {
+      // The login-round-trip e2e spec depends on this — clearing cookies
+      // and visiting `/` must still bounce to /login even in test mode.
+      process.env.SESSION_SECRET = "test-secret";
+      process.env.CLAWBOX_TEST_MODE = "1";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = createRequest("/");
+      const response = await mod.proxy(req);
+      expect(response.status).toBe(307);
+      expect(response.headers.get("Location")).toContain("/login");
+    });
+
+    it("rejects invalid session cookie", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: { cookie: "clawbox_session=invalid.cookie" },
+      });
+      const response = await mod.proxy(req);
+      expect(response.status).toBe(307);
+    });
+
+    it("allows requests with a valid signed session cookie", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
+        },
+      });
+      const response = await mod.proxy(req);
+
+      expect(response.status).toBe(200);
+    });
+
+    it("rejects expired signed session cookies", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) - 60)}`,
+        },
+      });
+      const response = await mod.proxy(req);
+
+      expect(response.status).toBe(307);
+    });
+  });
+
+  describe("session generation revocation", () => {
+    const future = () => Math.floor(Date.now() / 1000) + 60;
+
+    it("accepts a matching-generation cookie", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ setup_complete: true, session_generation: 3 });
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future(), 3)}` },
+      });
+      expect((await mod.proxy(req)).status).toBe(200);
+    });
+
+    it("rejects a cookie from before the last password change", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      // Generation bumped to 4; a cookie stamped gen 3 is now revoked.
+      writeConfig({ setup_complete: true, session_generation: 4 });
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future(), 3)}` },
+      });
+      expect((await mod.proxy(req)).status).toBe(307);
+    });
+
+    it("treats a legacy cookie with no generation as generation 0", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ setup_complete: true }); // session_generation defaults to 0
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = new NextRequest(new URL("http://localhost/dashboard"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future())}` },
+      });
+      expect((await mod.proxy(req)).status).toBe(200);
+    });
+  });
+
+  describe("an expired session on the chat's own routes", () => {
+    // The chat reads its socket's address and token from ws-config and sends
+    // through /setup-api/chat; a session that ran out must be refused there
+    // like everywhere else, with the 401 the page reads as "signed out"
+    // (src/lib/session-expiry.ts) — not a route's own 401 for a wrong password.
+    const past = () => Math.floor(Date.now() / 1000) - 1;
+    const future = () => Math.floor(Date.now() / 1000) + 60;
+
+    for (const route of ["/setup-api/gateway/ws-config", "/setup-api/chat/tabs", "/api/chat"]) {
+      it(`refuses ${route} with the session gate's marked 401 once the cookie has expired`, async () => {
+        process.env.SESSION_SECRET = "test-secret";
+        writeConfig({ setup_complete: true, password_configured: true });
+        vi.resetModules();
+        const mod = await import("@/proxy");
+        const { SESSION_EXPIRED_HEADER, isSessionExpiredResponse } = await import("@/lib/session-expiry");
+
+        const res = await mod.proxy(new NextRequest(new URL(`http://localhost${route}`), {
+          headers: { cookie: `clawbox_session=${await createSignedSessionCookie(past())}` },
+        }));
+        expect(res.status).toBe(401);
+        expect(res.headers.get(SESSION_EXPIRED_HEADER)).toBe("expired");
+        expect(isSessionExpiredResponse(res)).toBe(true);
+        await expect(res.json()).resolves.toEqual({ error: "Authentication required" });
+      });
+    }
+
+    it("lets the same request through while the session is live", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ setup_complete: true, password_configured: true });
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const res = await mod.proxy(new NextRequest(new URL("http://localhost/setup-api/gateway/ws-config"), {
+        headers: { cookie: `clawbox_session=${await createSignedSessionCookie(future())}` },
+      }));
+      expect(res.status).toBe(200);
+    });
+  });
+
+  describe("pre-auth sensitive-surface gate (setup window)", () => {
+    // SESSION_SECRET is provisioned but setup_complete is NOT yet written — the
+    // pre-setup wizard window. Sensitive desktop/agent backends must stay gated
+    // here (they play no part in onboarding), even though the wizard's own
+    // routes pass. Regression guard for the pre-auth reachability multiplier.
+    it.each([
+      "/setup-api/files/clawbox/data/.session-secret",
+      "/setup-api/files",
+      "/setup-api/browser/navigate",
+      "/setup-api/code/project/init",
+      "/setup-api/code-server/start",
+      "/setup-api/webapps",
+      "/setup-api/vnc/status",
+      "/setup-api/terminal",
+      "/setup-api/clawkeep/restore",
+      // Writes a bot credential; configured from Settings, never the wizard.
+      "/setup-api/discord/configure",
+      "/setup-api/discord/status",
+      // Same prefix, and it reads guild member lists through the bot token.
+      "/setup-api/discord/members",
+      "/setup-api/tunnel/enable",
+      "/setup-api/portal/start", // same privileged tunnel control as /tunnel
+      "/setup-api/portal/stop",
+      "/setup-api/apps/settings",
+      "/setup-api/apps/install",
+      "/setup-api/apps/uninstall",
+      "/setup-api/gateway/ws-config",
+      // Reads generated images straight off the harness media tree.
+      "/setup-api/chat/media",
+      // POST turns real systemd units on and off through sudo, and has no part
+      // in onboarding — during the setup window the device is broadcasting an
+      // OPEN AP, so anyone in radio range would otherwise reach it.
+      "/setup-api/local-models",
+      // POST rewrites messages.tts.provider and spawns the openclaw CLI. Same
+      // radio-range reasoning as local-models: onboarding never calls it.
+      "/setup-api/tts",
+      // POST downloads ~2.2 MB from a third-party CDN and rewrites
+      // display.pet.*. Cosmetic, desktop-only, and never part of onboarding.
+      "/setup-api/pets",
+      "/setup-api/pets/select",
+      "/setup-api/gateway",
+      "/setup-api/gateway/", // trailing slash must not dodge the exact match
+      // Each call cold-loads a ~3.8 GB model on a Jetson for up to three
+      // minutes, and its only caller is a desktop Settings button — so during
+      // the open-AP setup window it was a free way for anyone in radio range
+      // to pin the box's memory and CPU.
+      "/setup-api/mascot-lines/regenerate",
+    ])("gates sensitive %s during the setup window", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const response = await mod.proxy(createRequest(p));
+      // Falls through to the session gate → JSON 401 (no valid cookie).
+      expect(response.status).toBe(401);
+    });
+
+    it("still allows /setup-api/gateway/health during the setup window", async () => {
+      // The wizard polls gateway readiness before setup_complete is written, so
+      // health must stay open even though the sibling ws-config / SPA proxy are
+      // gated.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const response = await mod.proxy(createRequest("/setup-api/gateway/health"));
+      expect(response.status).toBe(200);
+    });
+
+    it("still allows the mascot GET during the setup window", async () => {
+      // Only the /regenerate leaf is gated, not the subtree: the crab reads
+      // its phrases from the bare path and it renders on the wizard, so
+      // gating the subtree would leave the mascot mute during setup.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const response = await mod.proxy(createRequest("/setup-api/mascot-lines"));
+      expect(response.status).toBe(200);
+    });
+
+    it("still allows /setup-api/portal/heartbeat-tick during the setup window", async () => {
+      // The heartbeat timer hits this on a freshly-booted device before login;
+      // gating the /setup-api/portal prefix must not catch this whitelisted
+      // sibling (it does no privileged work).
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const response = await mod.proxy(createRequest("/setup-api/portal/heartbeat-tick"));
+      expect(response.status).toBe(200);
+    });
+
+    it("allows a sensitive route once a valid session is presented", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = new NextRequest(new URL("http://localhost/setup-api/files"), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
+        },
+      });
+      const response = await mod.proxy(req);
+      expect(response.status).toBe(200);
+    });
+  });
+
+  describe("Hermes surfaces during the setup window", () => {
+    // The device broadcasts an OPEN AP while the wizard runs, so anything left
+    // pre-auth is reachable by anyone in radio range.
+    it.each([
+      "/setup-api/hermes/chat",        // agent turn with shell/tool access
+      "/setup-api/hermes/skills",
+      "/setup-api/hermes/skills/install",
+      "/setup-api/hermes/skills/uninstall",
+      "/setup-api/harness/select",     // rewrites which agent the device runs
+      "/setup-api/harness/status",     // desktop picker only, never the wizard
+      "/setup-api/whatsapp/status",    // WhatsApp lives only in Settings
+      "/setup-api/whatsapp/configure", // writes who may talk to the agent
+      "/setup-api/whatsapp/pair",      // hands back live QR pairing material
+      "/setup-api/whatsapp/unpair",    // deletes the linked-device session
+    ])("gates %s during the setup window", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      expect((await mod.proxy(createRequest(p))).status).toBe(401);
+    });
+
+    it("still allows the wizard's /setup-api/harness/active during the setup window", async () => {
+      // AIModelsStep reads which agent this SKU runs on the step boundary,
+      // before a password can exist, so it is on the bootstrap allow-list.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      expect((await mod.proxy(createRequest("/setup-api/harness/active"))).status).toBe(200);
+    });
+
+    it.each([
+      "/setup-api/hermes/models",
+      "/setup-api/hermes/clawai",
+      "/setup-api/hermes/oauth",
+      // The four leaves of the provider sign-in flow, named one by one rather
+      // than inferred from the parent path above. They mint, advance and destroy
+      // a real provider-OAuth session, and the parent's assertion does not cover
+      // them: a single entry in BOOTSTRAP_ALLOWED_EXACT for one leaf opens that
+      // leaf while `/setup-api/hermes/oauth` itself keeps answering 401, so the
+      // line above would still pass. That exact-vs-prefix distinction is live in
+      // the allow-list already — it is what holds `mascot-lines` open while the
+      // `/regenerate` leaf beside it stays shut. TASK-527.
+      "/setup-api/hermes/oauth/start",
+      "/setup-api/hermes/oauth/submit",
+      "/setup-api/hermes/oauth/poll",
+      "/setup-api/hermes/oauth/cancel",
+      "/setup-api/hermes/provider-key",
+      "/setup-api/ai-models/configure",
+      "/setup-api/telegram/configure",
+    ])("requires the wizard's own session for %s", async (p) => {
+      // These are steps 4-5, which run AFTER CredentialsStep. The password set
+      // hands back a session cookie, so the wizard reaches them authenticated
+      // and they need no pre-auth carve-out — which matters because the device
+      // is broadcasting an OPEN AP for this whole window. TASK-443/446.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      expect((await mod.proxy(createRequest(p))).status).toBe(401);
+
+      const authed = new NextRequest(new URL(`http://localhost${p}`), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
+        },
+      });
+      expect((await mod.proxy(authed)).status).toBe(200);
+    });
+  });
+
+  describe("the wizard page follows the same window as its API", () => {
+    it("serves /setup unauthenticated while the device has no owner", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      expect((await mod.proxy(createRequest("/setup"))).status).toBe(200);
+    });
+
+    it("redirects /setup to /login once a password is configured", async () => {
+      // A resumed or half-finished wizard has an owner, so it logs in first —
+      // and then steps 4-5 work through the session gate rather than needing a
+      // pre-auth carve-out. TASK-443.
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ password_configured: true });
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const response = await mod.proxy(createRequest("/setup"));
+      expect(response.status).toBe(307);
+      const location = new URL(response.headers.get("Location")!);
+      expect(location.pathname).toBe("/login");
+      expect(location.searchParams.get("redirect")).toBe("/setup");
+    });
+
+    it("serves /setup again to a caller with a valid session", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ password_configured: true });
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      const req = new NextRequest(new URL("http://localhost/setup"), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
+        },
+      });
+      expect((await mod.proxy(req)).status).toBe(200);
+    });
+
+    it("does not let the /setup prefix leak /setup-api past the gate", async () => {
+      // `startsWith("/setup")` also matches `/setup-api/...`; that was the
+      // original auth bypass, and the wizard-page carve-out must not reopen it.
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ setup_complete: true, password_configured: true });
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      expect((await mod.proxy(createRequest("/setup-api/system/info"))).status).toBe(401);
+      expect((await mod.proxy(createRequest("/setupmagic"))).status).toBe(307);
+    });
+  });
+
+  describe("gateway paths are edition-aware", () => {
+    function writeEditionFile(edition: string): string {
+      const file = path.join(tmpRoot, "edition.env");
+      fs.writeFileSync(file, `CLAWBOX_EDITION=${edition}\n`);
+      return file;
+    }
+
+    afterEach(() => {
+      delete process.env.CLAWBOX_EDITION_FILE;
+      delete process.env.CLAWBOX_EDITION;
+    });
+
+    it.each(["/api/state", "/assets/app.js", "/favicon.svg", "/favicon-32.png"])(
+      "404s the gateway-only path %s on the hermes edition",
+      async (p) => {
+        process.env.CLAWBOX_EDITION_FILE = writeEditionFile("hermes");
+        vi.resetModules();
+        const mod = await import("@/proxy");
+
+        // The OpenClaw gateway is disabled+masked on this SKU, so the
+        // next.config rewrite would 502 instead of serving ClawBox's own 404.
+        expect((await mod.proxy(createRequest(p))).status).toBe(404);
+      },
+    );
+
+    it.each(["/api/state", "/assets/app.js", "/favicon.svg"])(
+      "leaves %s alone on the openclaw edition",
+      async (p) => {
+        process.env.CLAWBOX_EDITION_FILE = writeEditionFile("openclaw");
+        vi.resetModules();
+        const mod = await import("@/proxy");
+
+        expect((await mod.proxy(createRequest(p))).status).toBe(200);
+      },
+    );
+
+    it("does not 404 ClawBox's own paths on hermes", async () => {
+      process.env.CLAWBOX_EDITION_FILE = writeEditionFile("hermes");
+      vi.resetModules();
+      const mod = await import("@/proxy");
+
+      for (const p of ["/", "/login", "/setup-api/setup/status", "/apiary", "/assetstore"]) {
+        expect((await mod.proxy(createRequest(p))).status).not.toBe(404);
+      }
+    });
+  });
+
+  describe("config export", () => {
+    it("exports matcher config", async () => {
+      const mod = await import("@/proxy");
+
+      expect(mod.config).toBeDefined();
+      expect(mod.config.matcher).toBeDefined();
+      expect(mod.config.matcher.length).toBeGreaterThan(0);
+    });
+  });
+
+  /**
+   * The update lock. `updateClawBoxAndReboot` runs `git reset --hard` and
+   * `git clean -fd` over the project while the desktop is still on screen, and
+   * every app on it can write through /setup-api — so a window left open can
+   * save into a tree being rewritten underneath it. While an update owns the
+   * box, page navigations go to the updating screen instead.
+   */
+  describe("update lock", () => {
+    async function authed(pathname: string) {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/proxy");
+      const req = new NextRequest(new URL(`http://localhost${pathname}`), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
+        },
+      });
+      return mod.proxy(req);
+    }
+
+    it("sends the desktop to the updating page while an update runs", async () => {
+      writeConfig({ setup_complete: true, update_in_progress: true });
+      const res = await authed("/");
+      expect(res.status).toBe(307);
+      expect(res.headers.get("location")).toContain("/updating");
+    });
+
+    it("sends a standalone app page there too", async () => {
+      // /app/<id> is a real surface an owner can be sitting on, and it can
+      // write through the same routes as the desktop.
+      writeConfig({ setup_complete: true, update_in_progress: true });
+      const res = await authed("/app/notes");
+      expect(res.status).toBe(307);
+      expect(res.headers.get("location")).toContain("/updating");
+    });
+
+    it("does not redirect the updating page to itself", async () => {
+      writeConfig({ setup_complete: true, update_in_progress: true });
+      expect((await authed("/updating")).status).toBe(200);
+    });
+
+    it("leaves /setup-api alone, because the updating page polls it", async () => {
+      // And because an API answering a navigation redirect with HTML is the
+      // defect #304 fixed — every caller parses the body as JSON.
+      writeConfig({ setup_complete: true, update_in_progress: true });
+      expect((await authed("/setup-api/update/status")).status).toBe(200);
+    });
+
+    it("stamps the lock on a /setup-api answer, so an OPEN desktop learns of it", async () => {
+      // The redirect above only fires on a NAVIGATION, and a page that was
+      // already on screen when the update began makes none: it sat there, kept
+      // polling, and went blank when the rebuild stopped the server under it.
+      // The header rides on a request the desktop already makes.
+      writeConfig({ setup_complete: true, update_in_progress: true });
+      const res = await authed("/setup-api/kv?key=ui:pending-actions");
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-clawbox-update-lock")).toBe("1");
+    });
+
+    it("stamps nothing while no update is running", async () => {
+      writeConfig({ setup_complete: true });
+      const res = await authed("/setup-api/kv?key=ui:pending-actions");
+      expect(res.headers.get("x-clawbox-update-lock")).toBeNull();
+    });
+
+    it("stamps nothing on a path that only LOOKS like the API namespace", async () => {
+      // `/setup-api` also starts with `/setup`, and the whole namespace guard
+      // is written on segment boundaries for that reason.
+      writeConfig({ setup_complete: true, update_in_progress: true });
+      const res = await authed("/setup-apinotreally");
+      expect(res.headers.get("x-clawbox-update-lock")).toBeNull();
+    });
+
+    it("does nothing when no update is running", async () => {
+      writeConfig({ setup_complete: true });
+      expect((await authed("/")).status).toBe(200);
+    });
+
+    it("fails OPEN on an unreadable config", async () => {
+      // The auth fields fail CLOSED on a corrupt config; this one must not. A
+      // config.json that will not parse is no evidence of an update, and
+      // locking the desktop on it would take away the surfaces the owner needs
+      // to fix the box.
+      const dataDir = path.join(tmpRoot, "data");
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(path.join(dataDir, "config.json"), "{ not json");
+      expect((await authed("/")).status).toBe(200);
+    });
+  });
+
+  describe("a server app's window (/apps/<id>/, src/lib/app-window.ts)", () => {
+    // What Chromium sends for the requests a CSP-sandboxed document makes
+    // itself (measured over plain-HTTP LAN): no cookie, no Sec-Fetch-*, no
+    // Referer — a link it follows carries `Accept: text/html` and nothing
+    // else; a form it posts and a fetch it makes add `Origin: null`. Through
+    // the tunnel the same requests say `Sec-Fetch-Site: cross-site`.
+    const PAGE_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
+    async function load() {
+      process.env.SESSION_SECRET = "test-secret";
+      markSetupComplete();
+      vi.resetModules();
+      return (await import("@/proxy")).proxy;
+    }
+
+    function request(pathname: string, init: { method?: string; headers?: Record<string, string> } = {}) {
+      return new NextRequest(new URL(`http://localhost${pathname}`), { method: init.method ?? "GET", headers: init.headers ?? {} });
+    }
+
+    async function ownerCookie(exp = Math.floor(Date.now() / 1000) + 60) {
+      return `clawbox_session=${await createSignedSessionCookie(exp)}`;
+    }
+
+    it("answers a page the frame navigated to without a cookie with the page that asks the desktop to reopen it — not the login redirect", async () => {
+      const mw = await load();
+      const variants: Record<string, string>[] = [
+        // plain-HTTP LAN: nothing but the Accept header
+        { accept: PAGE_ACCEPT },
+        // the tunnel: a frame navigation, cross-site
+        { accept: PAGE_ACCEPT, "sec-fetch-dest": "iframe", "sec-fetch-mode": "navigate", "sec-fetch-site": "cross-site" },
+      ];
+      for (const headers of variants) {
+        const res = await mw(request("/apps/notes/notes/2", { headers }));
+        expect(res.status, JSON.stringify(headers)).toBe(401);
+        expect(res.headers.get("location")).toBeNull();
+        expect(res.headers.get("content-type")).toContain("text/html");
+        expect(res.headers.get("cache-control")).toBe("no-store");
+        // The same opaque origin as the app it stands in for.
+        expect(res.headers.get("content-security-policy")).toMatch(/^sandbox allow-scripts;/);
+        const html = await res.text();
+        expect(html).toContain("clawboxAppReopen");
+        expect(html).toContain("window.parent.postMessage");
+        // Nobody answers → /login, back to this page once signed in.
+        expect(html).toContain(JSON.stringify("/login?redirect=%2Fapps%2Fnotes%2Fnotes%2F2"));
+      }
+    });
+
+    it("still sends a visitor's top-level navigation straight to /login", async () => {
+      const mw = await load();
+      const res = await mw(request("/apps/notes/", { headers: { accept: PAGE_ACCEPT, "sec-fetch-dest": "document", "sec-fetch-mode": "navigate", "sec-fetch-site": "none" } }));
+      expect(res.status).toBe(307);
+      expect(new URL(res.headers.get("location")!).pathname).toBe("/login");
+    });
+
+    it("lets the desktop's reopened navigation — the owner's cookie — through to the app", async () => {
+      const mw = await load();
+      const res = await mw(request("/apps/notes/notes/2", { headers: { accept: PAGE_ACCEPT, cookie: await ownerCookie() } }));
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-middleware-next")).toBe("1");
+    });
+
+    it("does not ask again when the desktop's own navigation came back signed out — that would loop", async () => {
+      const mw = await load();
+      const res = await mw(request("/apps/notes/notes/2", { headers: { accept: PAGE_ACCEPT, cookie: await ownerCookie(Math.floor(Date.now() / 1000) - 60) } }));
+      expect(res.status).toBe(401);
+      const { appReopenPage } = await import("@/lib/app-window");
+      const login = "/login?redirect=%2Fapps%2Fnotes%2Fnotes%2F2";
+      expect(await res.text()).toBe(appReopenPage(login, false));
+      // …while a request with no cookie at all asks.
+      expect(await (await mw(request("/apps/notes/notes/2", { headers: { accept: PAGE_ACCEPT } }))).text()).toBe(appReopenPage(login, true));
+    });
+
+    it("lets a form the frame posts reach the app, as the frame's other requests do — never a top-level one", async () => {
+      const mw = await load();
+      const post = await mw(request("/apps/notes/notes/new", { method: "POST", headers: { accept: PAGE_ACCEPT, origin: "null", "content-type": "application/x-www-form-urlencoded" } }));
+      expect(post.headers.get("x-middleware-next")).toBe("1");
+      const tunnelPost = await mw(request("/apps/notes/notes/new", { method: "POST", headers: { accept: PAGE_ACCEPT, origin: "null", "sec-fetch-dest": "iframe", "sec-fetch-site": "cross-site" } }));
+      expect(tunnelPost.headers.get("x-middleware-next")).toBe("1");
+      // A fetch for HTML (htmx and friends) from the same document.
+      const htmlFetch = await mw(request("/apps/notes/fragment", { headers: { accept: "text/html", origin: "null" } }));
+      expect(htmlFetch.headers.get("x-middleware-next")).toBe("1");
+      const topLevel = await mw(request("/apps/notes/notes/new", { method: "POST", headers: { accept: PAGE_ACCEPT, origin: "null", "sec-fetch-dest": "document" } }));
+      expect(topLevel.status).toBe(307);
+      // A POST from a real origin is not the app's frame: the session gate as before.
+      const foreign = await mw(request("/apps/notes/notes/new", { method: "POST", headers: { accept: PAGE_ACCEPT, origin: "http://evil.example" } }));
+      expect(foreign.status).toBe(307);
+    });
+
+    it("carries the App Router's Next-Url past the box's own Next.js, which deletes it before the proxy runs", async () => {
+      // Without it the app's server recomputes the `_rsc` hash without it,
+      // answers 307, and every client navigation turns into a full page load.
+      const mw = await load();
+      const nav = await mw(request("/apps/notes/books/2?_rsc=sx22p", { headers: { origin: "null", rsc: "1", "next-router-state-tree": "%5B%5D", "next-url": "/books" } }));
+      expect(nav.headers.get("x-middleware-next")).toBe("1");
+      expect(nav.headers.get("x-middleware-request-x-clawbox-next-url")).toBe("/books");
+      expect(nav.headers.get("x-middleware-override-headers")).toContain("x-clawbox-next-url");
+      // Everything else passes untouched.
+      const asset = await mw(request("/apps/notes/_next/static/chunks/a.js", { headers: { accept: "*/*" } }));
+      expect(asset.headers.get("x-middleware-next")).toBe("1");
+      expect(asset.headers.get("x-middleware-override-headers")).toBeNull();
+      // And it is never a way past the session gate for anything else.
+      const elsewhere = await mw(request("/setup-api/system/version", { headers: { rsc: "1", "next-url": "/x" } }));
+      expect(elsewhere.status).toBe(401);
+    });
+
+    it("keeps the box's own API and pages closed to the frame: no session, no reopen page", async () => {
+      const mw = await load();
+      for (const pathname of ["/setup-api/system/version", "/setup-api/webapps?app=notes", "/api/sessions"]) {
+        const res = await mw(request(pathname, { headers: { accept: "*/*", origin: "null" } }));
+        expect(res.status, pathname).toBe(401);
+        expect(res.headers.get("content-type"), pathname).toContain("application/json");
+      }
+      // A navigation to the desktop from inside the frame is the login redirect, never the reopen page.
+      const desktop = await mw(request("/", { headers: { accept: PAGE_ACCEPT } }));
+      expect(desktop.status).toBe(307);
+      const other = await mw(request("/app/notes", { headers: { accept: PAGE_ACCEPT } }));
+      expect(other.status).toBe(307);
+    });
+  });
+
+});

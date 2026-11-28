@@ -146,19 +146,22 @@ export function ptyHostArgs(argv: string[]): string[] {
 }
 
 /**
- * The agent database `openclaw memory index --agent main` writes.
+ * The agent database `openclaw memory index --agent <agentId>` writes.
  *
  * Not configurable in OpenClaw's memory settings: both versions resolve it as
  * `<state dir>/agents/<id>/agent/openclaw-agent.sqlite`, the state directory
  * being `OPENCLAW_STATE_DIR` or `~/.openclaw` — so the caller hands in the
  * environment the pass is spawned with, which pins `OPENCLAW_STATE_DIR`, and
- * this resolves the same one.
+ * this resolves the same one. The id is the one the pass was started for
+ * (`openclawDefaultAgentId`, already normalised to a safe path segment), never
+ * "main" by assumption: a box whose agent was renamed can still have a stale
+ * `agents/main/` beside the real one.
  */
-export function openclawAgentDbPath(env: Record<string, string | undefined> = process.env): string {
+export function openclawAgentDbPath(agentId: string, env: Record<string, string | undefined> = process.env): string {
   const override = env.CLAWKEEP_MEMORY_AGENT_DB?.trim();
   if (override) return override;
   const stateDir = env.OPENCLAW_STATE_DIR?.trim() || path.join(os.homedir(), ".openclaw");
-  return path.join(stateDir, "agents", "main", "agent", "openclaw-agent.sqlite");
+  return path.join(stateDir, "agents", agentId, "agent", "openclaw-agent.sqlite");
 }
 
 /** mtime slack for a scratch file created in the same second the pass started. */
@@ -169,7 +172,7 @@ const SCRATCH_CLOCK_SLACK_MS = 2_000;
  * `<db>.memory-reindex-<uuid>` touched since the pass began. An older one is a
  * previous pass's leftover and says nothing about this pass.
  */
-function currentScratchIndex(dbPath: string, sinceMs: number): string | null {
+function currentScratchIndex(dbPath: string, sinceMs: number, preexisting?: ReadonlySet<string>): string | null {
   const dir = path.dirname(dbPath);
   const prefix = `${path.basename(dbPath)}.memory-reindex-`;
   let best: { file: string; mtimeMs: number } | null = null;
@@ -183,11 +186,57 @@ function currentScratchIndex(dbPath: string, sinceMs: number): string | null {
     if (!name.startsWith(prefix) || !/^[0-9a-f-]{8,64}$/i.test(name.slice(prefix.length))) continue;
     try {
       const stat = statSync(path.join(dir, name));
-      if (!stat.isFile() || stat.mtimeMs < sinceMs - SCRATCH_CLOCK_SLACK_MS) continue;
+      if (!stat.isFile()) continue;
+      // With the names that were there before the pass, a new one is this
+      // pass's whatever its mtime says (TASK-2431: a clock that jumps back at
+      // boot must not hide it); without them, the mtime against the start.
+      if (preexisting ? preexisting.has(name) : stat.mtimeMs < sinceMs - SCRATCH_CLOCK_SLACK_MS) continue;
       if (!best || stat.mtimeMs > best.mtimeMs) best = { file: path.join(dir, name), mtimeMs: stat.mtimeMs };
     } catch { /* gone between the listing and the stat */ }
   }
   return best?.file ?? null;
+}
+
+/**
+ * The scratch indexes beside `dbPath` right now: taken when a pass starts, so
+ * the readers below can tell the scratch copy THIS pass makes by its name
+ * rather than by comparing its mtime with the wall clock.
+ */
+export function scratchIndexNames(dbPath: string): Set<string> {
+  const prefix = `${path.basename(dbPath)}.memory-reindex-`;
+  try {
+    return new Set(readdirSync(path.dirname(dbPath)).filter((name) => name.startsWith(prefix)));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * A mark that changes whenever something commits to the index the pass is
+ * writing (TASK-2431): the size and mtime of the database file and of its
+ * write-ahead log. A pass that replaces chunks without changing how many
+ * there are (an incremental pass over edited notes) moves no count, but it
+ * moves this; an index nobody writes keeps the same mark. Null when there is
+ * no such file yet. Never throws, never opens the database.
+ */
+export function indexWriteMark(
+  dbPath: string,
+  sinceMs: number,
+  { rebuild = false, preexisting }: { rebuild?: boolean; preexisting?: ReadonlySet<string> } = {},
+): string | null {
+  const scratch = currentScratchIndex(dbPath, sinceMs, preexisting);
+  if (!scratch && rebuild) return null;
+  const target = scratch ?? dbPath;
+  const part = (file: string): string => {
+    try {
+      const stat = statSync(/* turbopackIgnore: true */ file);
+      return `${stat.size}@${stat.mtimeMs}`;
+    } catch {
+      return "-";
+    }
+  };
+  const main = part(target);
+  return main === "-" ? null : `${target}|${main}|${part(`${target}-wal`)}`;
 }
 
 /**
@@ -200,8 +249,12 @@ function currentScratchIndex(dbPath: string, sinceMs: number): string | null {
  * live index's figure — the one about to be replaced — would read as progress
  * that then fell back to zero.
  */
-export function countIndexChunks(dbPath: string, sinceMs: number, { rebuild = false } = {}): number | null {
-  const scratch = currentScratchIndex(dbPath, sinceMs);
+export function countIndexChunks(
+  dbPath: string,
+  sinceMs: number,
+  { rebuild = false, preexisting }: { rebuild?: boolean; preexisting?: ReadonlySet<string> } = {},
+): number | null {
+  const scratch = currentScratchIndex(dbPath, sinceMs, preexisting);
   if (!scratch && rebuild) return null;
   const target = scratch ?? dbPath;
   try {

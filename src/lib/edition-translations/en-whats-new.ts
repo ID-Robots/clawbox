@@ -1,10 +1,14 @@
 /**
- * English copy for the desktop's "What's new in 4.3" card (TASK-1059, TASK-1195).
+ * English copy for the desktop's "What's new in 4.4" card (TASK-1059, TASK-1195).
  *
- * The highlights are taken from RELEASE-NOTES-4.3.0.md. They name only what
+ * The highlights are taken from RELEASE-NOTES-4.4.0.md. They name only what
  * the release shipped. When the release notes change, change this too. Each
  * has a full body (the /updating screen's panel) and a short summary (one
  * slide of the desktop card).
+ *
+ * The 4.3 highlights below them are no longer on the card. They stay because
+ * the /updating screen's showcase still carries the live demos made for them,
+ * keyed by their title keys, and its tests run those demos on this copy.
  *
  * WHERE THE EDITIONS DIFFER: the plan section's edition-switch line. An
  * OpenClaw box can be switched to Hermes, and a Hermes box can be switched
@@ -12,10 +16,40 @@
  * picks between them. The catalogue never branches on the edition.
  */
 export const whatsNewEn: Record<string, string> = {
-  "whatsNew.title": "What's new in 4.3",
+  "whatsNew.title": "What's new in 4.4",
   "whatsNew.subtitle": "This box now runs ClawBox {version}.",
-  "whatsNew.highlightsLabel": "Highlights of ClawBox 4.3",
+  "whatsNew.highlightsLabel": "Highlights of ClawBox 4.4",
 
+  "whatsNew.vaultTitle": "ClawBox Vault, passwords built in",
+  "whatsNew.vaultBody":
+    "A password manager built into ClawBox, opened by the owner from its desktop icon. Once you choose a vault PIN, the box's browser offers to save your logins and fills them in, and the assistant can sign in to a site for you without ever seeing the password.",
+  "whatsNew.orgModeTitle": "Organisation mode, for a company's staff",
+  "whatsNew.orgModeBody":
+    "A switch in Settings → System → Users gives other users only Chat, Files and their own settings. Each member of staff chats with a limited assistant that has a memory of their own, and keeps files in a home folder of their own beside a Shared folder. The owner gives staff chosen tools, sets upload, storage and chat limits, and reads an audit log.",
+  "whatsNew.externalEngineTitle": "A ClawBox Workstation as your AI engine",
+  "whatsNew.externalEngineBody":
+    "Settings → Local AI → External engine runs the chat on an OpenAI-compatible AI engine on your network, such as a ClawBox Workstation built from NVIDIA DGX Sparks, instead of the model on the box. On a Workstation of several Sparks, once the others are listed in its settings, the owner sees each Spark and the shared engine under Settings → System → Cluster.",
+  "whatsNew.weeklyUpdateTitle": "A weekly update check, on Telegram too",
+  "whatsNew.weeklyUpdateBody":
+    "Every Monday morning the box looks for a newer ClawBox and tells you once per version: on Telegram, with an Update button, when the bot can reach you, otherwise on the desktop. You can send /update to the bot in a private chat at any time, and the update still waits for you to confirm it on the desktop or, where one is set up, in the approvals bot.",
+  "whatsNew.officeFilesTitle": "Word, Excel and PowerPoint files in the chat",
+  "whatsNew.officeFilesBody":
+    "The chat takes Word, Excel, PowerPoint and OpenDocument attachments (.docx, .xlsx, .pptx, .odt, .ods), and the box reads their text for the assistant. A password-protected file is turned away with a note that says why.",
+
+  // The card's slides: one highlight each, so each gets a one- or two-line
+  // summary. The bodies above stay whole for the /updating screen's panel.
+  "whatsNew.vaultSummary":
+    "A password manager in ClawBox: the box's browser saves and fills your logins, and the assistant signs in without seeing the password.",
+  "whatsNew.orgModeSummary":
+    "Each member of staff gets a limited assistant with their own memory and files. The owner sets tools and limits and reads an audit log.",
+  "whatsNew.externalEngineSummary":
+    "Run the chat on an AI engine on your network, such as a ClawBox Workstation, instead of the model on the box.",
+  "whatsNew.weeklyUpdateSummary":
+    "The box tells you when a new ClawBox is out, on Telegram too, and you can send /update to the bot in a private chat.",
+  "whatsNew.officeFilesSummary":
+    "Attach a Word, Excel, PowerPoint or OpenDocument file, and the box reads its text for the assistant.",
+
+  // 4.3's highlights, kept for the /updating showcase's demos (see above).
   "whatsNew.screenshotTitle": "Screenshots, built in",
   "whatsNew.screenshotBody":
     "The new Screenshot app captures the whole screen, an area or one window, and lets you mark the picture up before it is saved to the Screenshots folder in Files. Print Screen, Ctrl+Shift+S or the Screenshot button beside the clock takes one in a single step.",
@@ -82,7 +116,7 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.previousScreenshot": "Previous screenshot",
   "whatsNew.nextScreenshot": "Next screenshot",
 
-  "whatsNew.readMore": "Read what's new in 4.3",
+  "whatsNew.readMore": "Read what's new in 4.4",
 
   // The plan section: only the lines the box's plan does not cover yet.
   "whatsNew.planTitle": "Unlock with a ClawBox AI plan",
@@ -93,5 +127,5 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.seePlans": "See plans",
 
   "whatsNew.gotIt": "Got it",
-  "whatsNew.dismiss": "Dismiss What's new in 4.3",
+  "whatsNew.dismiss": "Dismiss What's new in 4.4",
 };

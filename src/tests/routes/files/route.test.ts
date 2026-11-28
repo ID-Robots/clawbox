@@ -492,6 +492,40 @@ describe("POST /setup-api/files", () => {
       expect(body.name).toBe("");
     });
 
+    it("refuses an octet-stream part with no filename and writes nothing", async () => {
+      // busboy treats such a part as a file with `filename` undefined.
+      const boundary = "----TestBoundary" + Date.now();
+      const req = new NextRequest(new URL("http://localhost/setup-api/files"), {
+        method: "POST",
+        headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
+        body: Buffer.from(
+          `--${boundary}\r\n`
+            + `Content-Disposition: form-data; name="file"\r\n`
+            + "Content-Type: application/octet-stream\r\n\r\n"
+            + "no name\r\n"
+            + `--${boundary}--\r\n`,
+        ),
+      });
+
+      const res = await filesPost(req);
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("invalid_destination");
+      expect(fs.readdirSync(TEST_ROOT)).toEqual([]);
+    });
+
+    it("refuses a filename that names the folder itself ('.' or '..')", async () => {
+      fs.mkdirSync(path.join(TEST_ROOT, "uploads"));
+      for (const fileName of [".", ".."]) {
+        const res = await filesPost(createMultipartRequest("/setup-api/files?dir=uploads", [
+          { fieldName: "file", fileName, content: "data" },
+        ]));
+        expect(res.status).toBe(400);
+        expect((await res.json()).code).toBe("invalid_destination");
+      }
+      expect(fs.readdirSync(TEST_ROOT)).toEqual(["uploads"]);
+      expect(fs.readdirSync(path.join(TEST_ROOT, "uploads"))).toEqual([]);
+    });
+
     it("creates directory if it doesn't exist", async () => {
       const req = createMultipartRequest("/setup-api/files?dir=newparent", [
         { fieldName: "file", fileName: "test.txt", content: "test" },

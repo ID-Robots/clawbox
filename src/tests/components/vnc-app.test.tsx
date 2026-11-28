@@ -398,6 +398,37 @@ describe("VNCApp", () => {
     expect(await findByRole("dialog")).toBeInTheDocument();
   });
 
+  it("copies what the remote desktop copied without a toast, and offers the toast only when the browser refuses", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => ({
+      ok: true,
+      json: async () => (String(input).includes("/setup-api/vnc/clipboard") ? { text: "copied in Chromium" } : { available: true, wsPort: 6080 }),
+    })));
+    const writeText = vi.fn<(text: string) => Promise<void>>(async () => {});
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const exec = document.execCommand;
+    document.execCommand = vi.fn(() => false) as unknown as typeof document.execCommand;
+    try {
+      const { queryByText, findByText } = render(<VNCApp />);
+      await waitFor(() => expect(mockRfbInstances).toHaveLength(1));
+      const rfb = mockRfbInstances[0];
+      rfb.emit("connect");
+
+      rfb.emit("clipboard");
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith("copied in Chromium"));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(queryByText("copied in Chromium")).toBeNull();
+      expect(queryByText("copied")).toBeNull();
+
+      writeText.mockRejectedValueOnce(new Error("denied"));
+      rfb.emit("clipboard");
+      expect(await findByText("vnc.copyToast.fromRemote")).toBeInTheDocument();
+      expect(queryByText("copied in Chromium")).toBeInTheDocument();
+    } finally {
+      document.execCommand = exec;
+      delete (navigator as { clipboard?: unknown }).clipboard;
+    }
+  });
+
   it("prevents local wheel default so VNC scrolling is not hijacked by page zoom", async () => {
     const { queryByText } = render(
       <div data-chrome-window-content="true">

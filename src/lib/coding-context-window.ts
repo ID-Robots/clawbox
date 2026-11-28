@@ -2,7 +2,7 @@
  * A run that outgrew its model's context window, and what the runner does
  * about it (TASK-2203).
  *
- * The field failure: a ClawBox AI run on `deepseek-v4-pro[1m]` climbed to
+ * The field failure: a ClawBox AI run on a `[1m]` model id climbed to
  * 1,016,260 tokens without one compaction, and its next request was refused
  * with DeepSeek's own wording — "This model's maximum context length is
  * 1048576 tokens. However, you requested 1049351 tokens (1017351 in the

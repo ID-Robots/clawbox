@@ -195,8 +195,37 @@ sys.exit(64)
   chmodSync(stub, 0o755);
   // The journal: what the gateway printed when the case gives it one, nothing
   // otherwise — the web server's account is not always in a journal-reading group.
+  // Answered from the arguments as systemd 249 (the boxes') answers them:
+  // `--since` filters; beside it `-n N` is the window's FIRST N entries unless
+  // `--reverse` asks for the newest N, newest first.
+  const jctlModel = path.join(binDir, "journalctl.py");
+  writeFileSync(jctlModel, `
+import json, os, sys
+args = sys.argv[1:]
+def value(name):
+    return args[args.index(name) + 1] if name in args else None
+path = os.environ.get("OC_JOURNAL")
+if not path or not os.path.isfile(path):
+    sys.exit(0)
+since = value("--since")
+since_us = float(since[1:]) * 1e6 if since else float("-inf")
+entries = [line for line in open(path).read().splitlines()
+           if line and int(json.loads(line)["__REALTIME_TIMESTAMP"]) >= since_us]
+reverse = "--reverse" in args
+n = value("-n")
+if n is not None:
+    n = int(n)
+    if reverse or since is None:
+        entries = entries[-n:] if n > 0 else []
+    else:
+        entries = entries[:n]
+if reverse:
+    entries.reverse()
+if entries:
+    print("\\n".join(entries))
+`);
   const jctl = path.join(binDir, "journalctl");
-  writeFileSync(jctl, `#!/usr/bin/env bash\n[ -n "\${OC_JOURNAL:-}" ] && [ -f "$OC_JOURNAL" ] && cat "$OC_JOURNAL"\nexit 0\n`);
+  writeFileSync(jctl, `#!/usr/bin/env bash\nexec python3 "${jctlModel}" "$@"\n`);
   chmodSync(jctl, 0o755);
 }
 
@@ -212,12 +241,12 @@ function env(extra: Record<string, string>): NodeJS.ProcessEnv {
   };
 }
 
-function guard(restarts: number, extra: Record<string, string> = {}) {
+function guard(restarts: number, extra: Record<string, string> = {}, args: string[] = []) {
   const r = spawnSync("python3", [
     "-I", HELPER, "start-guard",
     "--state-dir", stateDir, "--config", path.join(stateDir, "openclaw.json"), "--data-dir", dataDir,
     "--openclaw-bin", path.join(binDir, "openclaw"), "--restarts", String(restarts),
-    "--budget-seconds", "300", "--log-dir", logDir,
+    "--budget-seconds", "300", "--log-dir", logDir, ...args,
   ], { encoding: "utf-8", env: env(extra), timeout: 60_000 });
   return { status: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
@@ -395,6 +424,24 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py start-guard", () => {
     expect(guardFile().notice).toMatchObject({ outcome: "repaired" });
   });
 
+  it("proves a start from the NEWEST `gateway ready` of a window longer than the journal read", () => {
+    // The read is capped at 20000 entries, and on systemd up to 253 `--since T
+    // -n N` is the window's FIRST N: on a chatty gateway the newest `gateway
+    // ready` fell past the cut and the proof of a good start stood still.
+    const startS = Math.floor(Date.now() / 1000) - 3600;
+    const at = (i: number) => startS + i / 10;
+    const entry = (i: number, msg: string) =>
+      JSON.stringify({ __REALTIME_TIMESTAMP: String(Math.round(at(i) * 1e6)), SYSLOG_IDENTIFIER: "openclaw", MESSAGE: msg });
+    const entries = [entry(0, "[gateway] ready")];
+    for (let i = 1; i <= 20_003; i++) entries.push(entry(i, `[ws] client heartbeat ${i}`));
+    entries.push(entry(20_004, "[gateway] ready"));
+    writeFileSync(journal, `${entries.join("\n")}\n`);
+
+    expect(guard(0, { OC_JOURNAL: journal }).status).toBe(0);
+
+    expect(guardFile().provenAt).toBeCloseTo(at(20_004), 3);
+  });
+
   it("acts on the gateway's words only, never this pre-start's own", () => {
     // The pre-start's lines share the unit's journal under its own name.
     const extra = { OC_JOURNAL: journal, OC_GATEWAY_FAILS_WITH: "Plugin \"discord\": configured plugin payload verification failed" };
@@ -474,6 +521,33 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py start-guard", () => {
     expect(g.starts).toHaveLength(2);
     expect(g.provenAt).toBeGreaterThan(g.starts[0].at);
     expect(g.episode).toBeUndefined();
+  });
+
+  it("records the updater's run outside the unit as such, and still reads what the last start proved", () => {
+    makeDb(agentDb("main"), [good("s1")]);
+    expect(guard(0).status).toBe(0);
+    expect(gateway()).toBe(0);
+    expect(guard(0, {}, ["--outside-unit"]).status).toBe(0);
+
+    const g = guardFile();
+    expect(g.starts).toHaveLength(2);
+    expect(g.starts[0]).not.toHaveProperty("outsideUnit");
+    expect(g.starts[1]).toMatchObject({ restarts: 0, outsideUnit: true });
+    expect(g.provenAt).toBeGreaterThan(g.starts[0].at);
+  });
+
+  it("never acts on a loop from a run outside the unit, whatever restart count it is given", () => {
+    // Three failed starts of the unit, each an automatic restart of the last...
+    for (let restarts = 0; restarts < 3; restarts++) {
+      expect(guard(restarts).status).toBe(0);
+      expect(gateway()).not.toBe(0);
+    }
+    // ...then a run with the count a fourth unit start would take for a loop.
+    expect(guard(3, {}, ["--outside-unit"]).status).toBe(0);
+
+    expect(doctorCalls()).toEqual([]);
+    expect(guardFile().episode).toBeUndefined();
+    expect(guardFile().starts.at(-1)).toMatchObject({ restarts: 3, outsideUnit: true });
   });
 });
 

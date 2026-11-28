@@ -1,0 +1,8 @@
+name: clawbox_staff_guard
+version: 1.0.0
+description: "On an organisation ClawBox, holds a member of staff's Hermes profile to the staff tool allow-list and its file tools to that member's own folder."
+author: ID-Robots
+kind: standalone
+# `hermes plugins doctor` compares this against what register() adds.
+provides_hooks:
+  - pre_tool_call

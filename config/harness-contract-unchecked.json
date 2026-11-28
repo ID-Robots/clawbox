@@ -1,6 +1,11 @@
 {
+ "install-x64.sh": {
+  "config set --batch-json: the paths are in a JSON payload built at runtime": 1
+ },
  "install.sh": {
   "config get: the key is computed at runtime": 2,
+  "config set --batch-json: the paths are in a JSON payload built at runtime": 1,
+  "config set: no key on the line": 1,
   "config set: the key is computed at runtime": 4
  },
  "scripts/ensure-local-embeddings.sh": {
@@ -64,6 +69,10 @@
  "src/lib/openclaw-config.ts": {
   "config set --batch-json: the paths are in a JSON payload built at runtime": 1,
   "spawnOpenclawConfigSet: argv is computed at runtime": 1
+ },
+ "src/lib/org-staff-agents.ts": {
+  "runOpenclawConfigSetBatch: the operations are built at runtime": 1,
+  "runOpenclawConfigUnset: the key is computed at runtime": 1
  },
  "src/lib/prime-radiant/plugin-wiring.ts": {
   "runOpenclawConfigSetBatch: the operations are built at runtime": 1

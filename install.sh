@@ -79,6 +79,8 @@ git_retryable_failure() {
     *"Authentication failed"*|*"terminal prompts disabled"*) return 0 ;;
     *"Could not resolve host"*|*"Connection timed out"*|*"Connection reset"*) return 0 ;;
     *"early EOF"*|*"RPC failed"*|*"unable to access"*) return 0 ;;
+    # git_with_retry's low-speed abort on a stalled transfer.
+    *"Operation too slow"*) return 0 ;;
   esac
   return 1
 }
@@ -130,9 +132,18 @@ use_tree_owner_for_git() {
 
   # ...and make the drop possible. Earlier root steps leave root-owned objects
   # in .git — FETCH_HEAD above all — which is precisely what makes an
-  # unprivileged fetch fail; step_fix_git_perms and scripts/force-update.sh both
-  # open by repairing it. Best-effort: git says what it could not open.
-  chown -R "$owner":"$(stat -c %G "$dir" 2>/dev/null || echo "$owner")" "$dir/.git" 2>/dev/null || true
+  # unprivileged fetch fail, so a leftover there hands the WHOLE checkout back
+  # (hand_over_checkout's rule, inline: this also runs from the bootstrap block,
+  # before the constants, for whichever account owns the checkout). Never .git
+  # by name: a link at the checkout's name would carry that chown anywhere,
+  # while chown -R follows no link given as its operand. A healthy checkout is
+  # left alone. scripts/force-update.sh keeps its .git chown by name: an
+  # operator runs it by hand with their own sudo password (no grant covers it),
+  # so it crosses no boundary they do not already hold. Best-effort: git says
+  # what it could not open.
+  if [ -n "$(find "$dir/.git" ! -user "$owner" -print -quit 2>/dev/null)" ]; then
+    chown -R "$owner":"$(stat -c %G "$dir" 2>/dev/null || echo "$owner")" "$dir" 2>/dev/null || true
+  fi
 }
 
 git_with_retry() {
@@ -155,6 +166,19 @@ git_with_retry() {
   case "$delay" in
     ''|*[!0-9]*) echo "  CLAWBOX_GIT_RETRY_DELAY is not a number, using 3" >&2; delay=3 ;;
   esac
+  # A transfer that STALLS is a failure to retry, not a wait (TASK-2517). Git
+  # has no overall timeout, and a fetch whose connection went quiet — a WiFi
+  # roam, a captive network, a NAT that dropped the flow — sat there until the
+  # updater's step budget ran out, with every retry below unused. git's own
+  # low-speed abort ends an HTTP transfer that moves under `lowSpeedLimit`
+  # bytes/s for `lowSpeedTime` seconds ("Operation too slow"), which arrives
+  # as "RPC failed" or "unable to access" and is retried like any other
+  # network failure. A slow link that still moves is never cut: the bound is on
+  # silence, not on length. As -c options on THIS call, so they reach git
+  # through the owner's runner (which does not pass a VAR=… prefix on) and
+  # override nothing in the checkout's own config beyond this command.
+  local low_time="${CLAWBOX_GIT_LOW_SPEED_TIME:-60}"
+  case "$low_time" in ''|*[!0-9]*) low_time=60 ;; esac
   # The subcommand, not "$1": every caller here leads with -c/-C, so naming the
   # first argument produced "git -C attempt 1/3 failed" in the journal.
   verb="$(printf '%s\n' "$@" | grep -m1 -E '^(fetch|clone|pull|push|ls-remote)$' || true)"
@@ -162,7 +186,7 @@ git_with_retry() {
     # Output is CAPTURED so the classification below has the text to read, then
     # re-emitted on stderr — where git puts it — so a caller that captures this
     # function's stdout cannot mistake git's progress for a result.
-    if out="$(GIT_TERMINAL_PROMPT=0 ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git "$@" 2>&1)"; then
+    if out="$(GIT_TERMINAL_PROMPT=0 ${GIT_RUNNER[@]+"${GIT_RUNNER[@]}"} git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime="$low_time" "$@" 2>&1)"; then
       [ -z "$out" ] || printf '%s\n' "$out" >&2
       return 0
     else
@@ -1321,7 +1345,7 @@ OPENCLAW_RETRY=/usr/bin/env
 if [ -n "${SRC_DIR:-}" ] && [ -x "$SRC_DIR/scripts/openclaw-maintenance-retry.sh" ]; then
   OPENCLAW_RETRY="$SRC_DIR/scripts/openclaw-maintenance-retry.sh"
 fi
-OPENCLAW_VERSION="2026.10.9"
+OPENCLAW_VERSION="2026.11.5"
 
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
@@ -1342,8 +1366,8 @@ OPENCLAW_VERSION="2026.10.9"
 # Bump the default in a PR, ship it through beta -> main, and the fleet
 # follows on its next update.
 #
-# Current pin: upstream tag v0.22.5 == "Hermes Agent v0.22.5".
-HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-bf0203a794a07aac3ff764972ab9087baa4e4f4e}"
+# Current pin: upstream tag v0.23.3 == "Hermes Agent v0.23.3".
+HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-caafe5389ae585ef77387a962aee05b1bcf17029}"
 
 # WHO OWNS THE GATEWAY SERVICE, said to the core rather than left for it to
 # guess. ClawBox supervises the gateway itself, as the SYSTEM unit
@@ -1396,20 +1420,40 @@ GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
 
-# Is the OpenClaw on this box generation 2 (>= 2026.8)? The INSTALLED binary
-# answers when it can — it is the process that parses whatever we write — and
-# the pinned target only fills in before the first install. Used to route the
+# Is the OpenClaw on this box generation 2 (>= 2026.8)? The INSTALLED core
+# answers when there is one — it is what parses whatever we write — and the
+# pinned target only fills in before the first install. Used to route the
 # steps that speak different config dialects per generation.
 # The generation rule itself, callable with any version string, so the
-# installed-binary probe below and the freshly-pinned TARGET gate in
+# installed-core read below and the freshly-pinned TARGET gate in
 # step_openclaw_install cannot drift apart.
 openclaw_version_is_v2() {
   [ -n "$1" ] && [ "$(printf '%s\n' 2026.8 "$1" | sort -V | head -1)" = "2026.8" ]
 }
+# The installed core is asked through its package.json, read as data, not by
+# running `openclaw --version` as root. It is the file the gateway's pre-start
+# (scripts/gateway-pre-start.sh) and the web server
+# (src/lib/openclaw-core-generation.ts) read for the same question, so when it
+# is readable and its version is a date, all three agree on the generation.
+# The launcher still decides whether there is an installed core at all. An
+# unusable manifest is an empty answer and takes the pin, then OPENCLAW_VERSION.
+# The manifest read is quiet and never fails on its own. The answer is the exit
+# status, 1 before OpenClaw 2, so call it as a condition (`if`, `&&`): a bare
+# call under `set -e` ends its step on an older core. The program comes from a
+# heredoc, so a `while read` caller's input is left alone.
 openclaw_is_v2() {
   local v=""
   if [ -x "$NPM_PREFIX/bin/openclaw" ]; then
-    v=$("$NPM_PREFIX/bin/openclaw" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)
+    v=$(python3 -I - "$NPM_PREFIX/lib/node_modules/openclaw/package.json" 2>/dev/null <<'PY' || true
+import json, sys
+try:
+    v = json.load(open(sys.argv[1])).get("version")
+except Exception:
+    v = None
+print(v if isinstance(v, str) else "")
+PY
+)
+    v=$(printf '%s\n' "$v" | grep -oE '^20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)
   fi
   if [ -z "$v" ] && [ -f "$SRC_DIR/config/openclaw-target.txt" ]; then
     v=$(head -1 "$SRC_DIR/config/openclaw-target.txt" | awk '{print $1}')
@@ -1435,6 +1479,9 @@ EXPECTED_ACTIVE_SERVICES=(
   clawbox-heartbeat.timer
   clawbox-ap-watchdog.timer
   clawbox-codex-auth-sync.timer
+  # ClawBox Vault, the built-in password manager (vault/). Every edition: it is
+  # ClawBox's own service, the same under OpenClaw and Hermes. Loopback only.
+  clawbox-vault.service
 )
 EXPECTED_INSTALLED_SERVICES=(
   clawbox-wifi-failover.service
@@ -1464,6 +1511,8 @@ EXPECTED_INSTALLED_SERVICES=(
 # registered in one of the two lists above.
 EDITION_SCOPED_UNITS=(
   clawbox-gateway.service                 # openclaw + dual (removed on hermes)
+  clawbox-gateway-watchdog.service        # openclaw + dual (removed on hermes)
+  clawbox-gateway-watchdog.timer          # openclaw + dual (removed on hermes)
   clawbox-hermes-dashboard.service        # hermes + dual
   clawbox-hermes-dashboard-proxy.service  # hermes + dual
 )
@@ -1486,6 +1535,13 @@ if ! has_openclaw_harness; then
     [ "$_s" = "clawbox-gateway.service" ] || _active_svcs+=("$_s")
   done
   EXPECTED_ACTIVE_SERVICES=("${_active_svcs[@]}")
+fi
+# The gateway's liveness watchdog (TASK-2490) goes wherever the gateway does,
+# and nowhere else: on Hermes it would probe a masked unit every minute for
+# nothing. The timer must be up; the service is its oneshot.
+if has_openclaw_harness; then
+  EXPECTED_ACTIVE_SERVICES+=(clawbox-gateway-watchdog.timer)
+  EXPECTED_INSTALLED_SERVICES+=(clawbox-gateway-watchdog.service)
 fi
 
 # Units belonging to a harness THIS edition does not run.
@@ -1523,6 +1579,8 @@ if ! has_openclaw_harness; then
   # `enabled but inactive` case. A masked gateway matches neither, so a
   # correctly provisioned Hermes box reports nothing twice.
   FOREIGN_EDITION_UNITS+=(clawbox-gateway.service)
+  # And its liveness watchdog (TASK-2490), which goes wherever it goes.
+  FOREIGN_EDITION_UNITS+=(clawbox-gateway-watchdog.timer clawbox-gateway-watchdog.service)
 fi
 # The same registry for the clawbox USER's manager. `hermes gateway install`
 # (no --system) writes hermes-gateway.service under ~/.config/systemd/user —
@@ -1580,6 +1638,39 @@ unset _persisted_iface
 # Run a command as the clawbox user
 as_clawbox() { sudo -u "$CLAWBOX_USER" "$@"; }
 
+# Append stdin to a file in the checkout as the service account, whose file it
+# is. The bytes travel on stdin, so no value reaches sudo's command line or its
+# log, and a file this creates is the account's own, 0600.
+append_as_clawbox() {
+  as_clawbox sh -c 'umask 077 && cat >> "$1"' sh "$1"
+}
+
+# Before the service account writes .env or data/network.env, hand it back
+# anything an earlier root run left root-owned in its checkout, or its write
+# fails where root's succeeded. Owners are only read here; any leftover hands
+# back the whole checkout with the command step_git_pull's sync runs after every
+# update (chown -R defaults to -P: no link inside is followed, and a link given
+# as the operand is changed itself). Never a chown by name below the checkout:
+# each directory on that path is the account's, so a link swapped in at data/
+# would hand over the file it points at, /etc/clawbox/network.env included.
+# Anything under scripts/ it does not own counts too: its find must enter every
+# directory there, and its chmod fails with EPERM on a script it does not own
+# even when the bit is already set. So does anything under each DIR given,
+# relative to the checkout (node_modules, data/llamacpp): a tree the account
+# writes into next.
+hand_over_checkout() {
+  [ -d "$PROJECT_DIR" ] && [ ! -L "$PROJECT_DIR" ] || return 0
+  local entry stray tree trees=("$PROJECT_DIR/scripts")
+  for tree in "$@"; do trees+=("$PROJECT_DIR/$tree"); done
+  stray="$(find "${trees[@]}" ! -user "$CLAWBOX_USER" -print -quit 2>/dev/null || true)"
+  for entry in "$PROJECT_DIR" "$PROJECT_DIR/data" "$PROJECT_DIR/.env" "$IFACE_ENV" ${stray:+"$stray"}; do
+    if { [ -e "$entry" ] || [ -L "$entry" ]; } && [ "$(stat -c %U "$entry" 2>/dev/null)" != "$CLAWBOX_USER" ]; then
+      chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR" || true
+      return 0
+    fi
+  done
+}
+
 # Run a command as the clawbox user with login environment
 # Explicit PATH ensures bun/node are found even inside systemd services
 as_clawbox_login() {
@@ -1589,6 +1680,57 @@ as_clawbox_login() {
   local cuda_prefix=""
   [ -x /usr/local/cuda/bin/nvcc ] && cuda_prefix="/usr/local/cuda/bin:"
   su - "$CLAWBOX_USER" -c "export PATH=\"${cuda_prefix}$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $*"
+}
+
+# Give the clawbox user back what earlier root runs left root-owned on the way
+# to a path in its home, so the user can then write there itself. Root's
+# `mkdir -p` of a nested directory made every missing parent root-owned and
+# handed over only the leaf (~/.config from ~/.config/autostart, ~/.cache from
+# ~/.cache/node-gyp), and a write AS the user fails in such a directory where
+# root's own write succeeded.
+#
+# PATH is one of this file's own paths under the home. The walk takes one entry
+# at a time from the home down and never follows a link. Each entry is examined
+# with one lstat (`stat` without -L) and, when the user does not own it, changed
+# with `chown -h` by its name in the directory the walk is in. The walk goes
+# deeper only by entering the directory it examined and checking that it is the
+# same inode, and it stops there when it is not. It also stops, quietly, at the
+# first entry that is missing (the user creates that itself), a link, or neither
+# a directory nor a regular file with one name: a second hard link is the same
+# file somewhere else, which would change hands with it. With -R, a last entry
+# that is a directory is handed over with everything below it by `chown -R` of
+# its name, run in the directory the walk is in; chown -R follows no link, its
+# operand included.
+hand_over_home_path() {
+  local tree=""
+  if [ "${1:-}" = -R ]; then tree=1; shift; fi
+  local rest="${1#"$CLAWBOX_HOME"/}"
+  [ "$rest" != "$1" ] || return 0
+  (
+    cd -P -- "$CLAWBOX_HOME" 2>/dev/null || exit 0
+    while [ -n "$rest" ]; do
+      part="${rest%%/*}"
+      if [ "$part" = "$rest" ]; then rest=""; else rest="${rest#*/}"; fi
+      [ -n "$part" ] || continue
+      info="$(stat -c '%F|%h|%d:%i|%U' -- "$part" 2>/dev/null)" || exit 0
+      case "$info" in
+        "directory|"* | "regular file|1|"* | "regular empty file|1|"*) ;;
+        *) exit 0 ;;
+      esac
+      if [ -n "$tree" ] && [ -z "$rest" ] && [ "${info%%|*}" = directory ]; then
+        chown -R -- "$CLAWBOX_USER:$CLAWBOX_USER" "$part" 2>/dev/null || true
+        exit 0
+      fi
+      if [ "${info##*|}" != "$CLAWBOX_USER" ]; then
+        chown -h -- "$CLAWBOX_USER:$CLAWBOX_USER" "$part" 2>/dev/null || exit 0
+      fi
+      [ -n "$rest" ] || exit 0
+      case "$info" in "directory|"*) ;; *) exit 0 ;; esac
+      cd -P -- "$part" 2>/dev/null || exit 0
+      ino="${info#*|*|}"
+      [ "$(stat -c '%d:%i' . 2>/dev/null)" = "${ino%%|*}" ] || exit 0
+    done
+  )
 }
 
 # The marker the third-party cua-driver-rs installer writes above its PATH
@@ -1622,8 +1764,8 @@ dedupe_vendor_bashrc_path_blocks() {
   local BASHRC="$1"
   [ -f "$BASHRC" ] || return 0
   # A symlinked ~/.bashrc — a dotfiles checkout — would be read THROUGH the
-  # link as root and then replaced by the `mv` below with a regular file,
-  # silently breaking the owner's link. Not ours to convert.
+  # link and then replaced by the `mv` below with a regular file, silently
+  # breaking the owner's link. Not ours to convert.
   if [ -L "$BASHRC" ]; then
     return 0
   fi
@@ -1641,8 +1783,13 @@ dedupe_vendor_bashrc_path_blocks() {
   local snapshot=""
   snapshot=$(stat -c '%s %y %i' "$BASHRC" 2>/dev/null) || snapshot=""
 
+  # Every read, write, rename and removal from here on is the clawbox user's:
+  # the file, its directory and the temp are that user's, and root writing or
+  # renaming there would follow whatever link the user planted. Each wrapped
+  # call is guarded, since this runs under errexit and a failed `sudo` must
+  # warn like every other failure here.
   local tmp=""
-  tmp=$(mktemp "$BASHRC.clawbox.XXXXXX" 2>/dev/null) || {
+  tmp=$(as_clawbox mktemp -- "$BASHRC.clawbox.XXXXXX" 2>/dev/null) || {
     echo "  Warning: could not collapse duplicate PATH blocks in .bashrc (mktemp failed)"
     return 0
   }
@@ -1650,12 +1797,14 @@ dedupe_vendor_bashrc_path_blocks() {
   # A blank line belongs to the block that FOLLOWS it (the vendor writes
   # blank/comment/export), so blanks are buffered and one is dropped with each
   # block that goes. Our own fence lines are dropped on the way in and written
-  # back out, which is what makes a second run a no-op.
-  if awk \
+  # back out, which is what makes a second run a no-op. awk writes the temp
+  # itself (`> OUT`): a shell redirect here would be opened by root.
+  if as_clawbox awk \
+      -v OUT="$tmp" \
       -v MARKER="$CUA_BASHRC_MARKER" \
       -v FOPEN="$CUA_BASHRC_FENCE_OPEN" \
       -v FCLOSE="$CUA_BASHRC_FENCE_CLOSE" '
-      function flush(  i) { for (i = 0; i < blanks; i++) print ""; blanks = 0 }
+      function flush(  i) { for (i = 0; i < blanks; i++) print "" > OUT; blanks = 0 }
       BEGIN { kept = 0; blanks = 0 }
       $0 == FOPEN || $0 == FCLOSE { next }
       /^$/ { blanks++; next }
@@ -1666,20 +1815,20 @@ dedupe_vendor_bashrc_path_blocks() {
           if (kept) { if (blanks > 0) blanks--; next }
           kept = 1
           flush()
-          print FOPEN
-          print first
-          print second
-          print FCLOSE
+          print FOPEN > OUT
+          print first > OUT
+          print second > OUT
+          print FCLOSE > OUT
           next
         }
         flush()
-        print first
-        if (got > 0) { if (second == "") blanks++; else print second }
+        print first > OUT
+        if (got > 0) { if (second == "") blanks++; else print second > OUT }
         next
       }
-      { flush(); print }
+      { flush(); print > OUT }
       END { flush() }
-    ' "$BASHRC" > "$tmp"; then
+    ' "$BASHRC"; then
     # Judge the OUTCOME, never the attempt. The premise of this whole function
     # is that the writer is a third party ClawBox does not own and cannot pin,
     # so the shape it appends WILL change — one extra line between the marker
@@ -1688,42 +1837,41 @@ dedupe_vendor_bashrc_path_blocks() {
     # byte-identical and log a success on every update, for ever, with the
     # bound silently gone. An empty result means the rewrite lost the file.
     local collapsed=0
-    collapsed=$(grep -cF "$CUA_BASHRC_MARKER" "$tmp" 2>/dev/null) || collapsed=0
-    if [ "$collapsed" -eq 1 ] 2>/dev/null && [ -s "$tmp" ]; then
-      # Ownership and mode FIRST, so the divergence check below is the last
-      # thing between the look and the rename. There is no atomic
-      # compare-and-rename, so the window cannot be closed — only made as
-      # narrow as one `stat` and one `rename`.
-      chown --reference="$BASHRC" "$tmp" 2>/dev/null \
-        || chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp" 2>/dev/null || true
-      chmod --reference="$BASHRC" "$tmp" 2>/dev/null || chmod 0644 "$tmp" 2>/dev/null || true
+    collapsed=$(as_clawbox grep -cF -- "$CUA_BASHRC_MARKER" "$tmp" 2>/dev/null) || collapsed=0
+    if [ "$collapsed" -eq 1 ] 2>/dev/null && as_clawbox test -s "$tmp"; then
+      # The mode FIRST, so the divergence check below is the last thing
+      # between the look and the rename. There is no atomic compare-and-rename,
+      # so the window cannot be closed — only made as narrow as one `stat` and
+      # one `rename`. No chown: the temp is already the user's, as the file is.
+      as_clawbox chmod --reference="$BASHRC" -- "$tmp" 2>/dev/null \
+        || as_clawbox chmod 0644 -- "$tmp" 2>/dev/null || true
       local now=""
       now=$(stat -c '%s %y %i' "$BASHRC" 2>/dev/null) || now=""
       if [ -z "$snapshot" ] || [ "$now" != "$snapshot" ]; then
         # Somebody wrote to .bashrc while it was being collapsed. The rewrite
         # describes a file that no longer exists; the next update collapses it.
-        rm -f "$tmp"
+        as_clawbox rm -f -- "$tmp" 2>/dev/null || true
         echo "  Warning: .bashrc changed while it was being collapsed — left untouched"
         return 0
       fi
       # Guarded: this runs under `set -euo pipefail` from a step the dispatcher
       # calls plainly, so a .bashrc that cannot be replaced must warn, not end
       # the update at this line.
-      if mv -f "$tmp" "$BASHRC"; then
+      if as_clawbox mv -f -T -- "$tmp" "$BASHRC"; then
         echo "  Collapsed $copies duplicate cua-driver-rs PATH blocks in .bashrc to one"
         return 0
       fi
     else
       # The live file is left exactly as it is: a copy of itself is not an
       # improvement, and this line is the only signal anyone gets.
-      rm -f "$tmp"
+      as_clawbox rm -f -- "$tmp" 2>/dev/null || true
       echo "  Warning: .bashrc carries $copies cua-driver-rs PATH blocks and the collapse"
       echo "           left $collapsed — the vendor's block shape has changed; file untouched"
       return 0
     fi
   fi
 
-  rm -f "$tmp"
+  as_clawbox rm -f -- "$tmp" 2>/dev/null || true
   echo "  Warning: could not collapse duplicate PATH blocks in .bashrc (rewrite failed)"
   return 0
 }
@@ -1732,21 +1880,33 @@ ensure_clawbox_bashrc_path() {
   # Make ~/.npm-global/bin and ~/.local/bin available in the clawbox user's
   # interactive shells (e.g. the in-UI terminal) so CLIs like openclaw, claude,
   # codex, gemini, hf, and clawkeep resolve without a full path.
-  local BASHRC="$CLAWBOX_HOME/.bashrc"
+  # Appended AS the clawbox user (`tee -a`, the stanza on stdin): root's own
+  # `>>` would follow a link planted at ~/.bashrc. A root-owned file left by an
+  # earlier root run is handed back first, which is the owner the old chown
+  # after the append gave it.
+  # The user's append can still fail where root's did not. It is said on the
+  # updater's warning line and the function goes on: dispatched under errexit
+  # a bare failure here ended the step, and run with errexit off it passed
+  # with no word.
+  local BASHRC="$CLAWBOX_HOME/.bashrc" append_rc=0
   if ! grep -q 'npm-global/bin' "$BASHRC" 2>/dev/null; then
-    cat >> "$BASHRC" <<'PATHEOF'
+    hand_over_home_path "$BASHRC"
+    as_clawbox tee -a -- "$BASHRC" >/dev/null <<'PATHEOF' || append_rc=$?
 
 # npm global binaries (openclaw, gemini) and user-local binaries (claude, codex, hf, clawkeep)
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 PATHEOF
-    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
   elif ! grep -q '\.local/bin' "$BASHRC" 2>/dev/null; then
-    cat >> "$BASHRC" <<'PATHEOF'
+    hand_over_home_path "$BASHRC"
+    as_clawbox tee -a -- "$BASHRC" >/dev/null <<'PATHEOF' || append_rc=$?
 
 # user-local binaries (claude, hf, clawkeep)
 export PATH="$HOME/.local/bin:$PATH"
 PATHEOF
-    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
+  fi
+  if [ "$append_rc" -ne 0 ]; then
+    echo "  Warning: could not add the PATH lines to $BASHRC" >&2
+    echo "CLAWBOX-WARN[bashrc-path-not-added]: the clawbox user's ~/.bashrc could not be given the PATH lines for openclaw, claude and codex, so the Terminal finds them only by their full path; the next update tries again"
   fi
   # Third-party appends to the same file, bounded here because their writer is
   # not ours to fix (TASK-758).
@@ -1773,6 +1933,13 @@ PATHEOF
 # Node runtime required"). Every outbound HTTPS call the box makes — ClawBox's
 # own included — runs on this one Node, so a box on 24.16.0–24.22.0 takes the
 # apt transaction below on its next update like a box on 22 did.
+#
+# 2026.11.3 lowered its own `engines.node` back to `>=24.16.0 <25 || >=26.1.0`
+# and calls 24.22.1+/26.12.1+ "strongly recommended for security" (its
+# node-version.mjs prints that warning below them). ClawBox KEEPS the security
+# floor: the reason above is ClawBox's as much as the core's, and every Node
+# this range accepts the core accepts too. The harness-contract check allows a
+# range stricter than the core's, never a looser one.
 OPENCLAW_NODE_ENGINE=">=24.22.1 <25, or >=26.12.1"
 
 # The table itself, over a VERSION STRING rather than over whatever `node` is on
@@ -1899,7 +2066,13 @@ ensure_env_setting() {
   local key="$2"
   local value="$3"
   if ! grep -q "^${key}=" "$env_file" 2>/dev/null; then
-    printf '%s=%s\n' "$key" "$value" >> "$env_file"
+    hand_over_checkout
+    # A hand-edited .env can end without a newline: the key must not be glued
+    # onto its last line, which would corrupt that key and leave this one unset.
+    if [ -s "$env_file" ] && [ -n "$(tail -c 1 "$env_file")" ]; then
+      printf '\n' | append_as_clawbox "$env_file"
+    fi
+    printf '%s=%s\n' "$key" "$value" | append_as_clawbox "$env_file"
     echo "  Added ${key} to ${env_file}"
   fi
 }
@@ -1923,21 +2096,24 @@ migrate_env_setting() {
   if [ "$current_value" != "$old_value" ]; then
     return 0
   fi
-  local tmp
-  tmp=$(mktemp "${env_file}.XXXXXX") || return 1
-  # Rewrite in place via a temp file rather than sed -i so an unusual character
-  # in either value cannot be read as sed syntax.
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-      "${key}="*) printf '%s=%s\n' "$key" "$new_value" >> "$tmp" ;;
-      *) printf '%s\n' "$line" >> "$tmp" ;;
-    esac
-  done < "$env_file"
-  # mktemp created the temp file as root with 0600; carry the real file's mode
-  # and owner across so .env stays readable by the clawbox service user.
-  chmod --reference="$env_file" "$tmp" 2>/dev/null || true
-  chown --reference="$env_file" "$tmp" 2>/dev/null || true
-  mv "$tmp" "$env_file"
+  hand_over_checkout
+  # The service account rewrites its own file: a temp beside it, every line
+  # copied but the setting's, the real file's mode carried across, then an
+  # atomic rename. The name and the new value travel on stdin, off sudo's
+  # command line. A temp file rather than sed -i, so an unusual character in
+  # either value cannot be read as sed syntax.
+  printf '%s\0%s\0' "$key" "$new_value" | as_clawbox bash -c '
+    IFS= read -r -d "" setting && IFS= read -r -d "" value || exit 1
+    tmp=$(mktemp "$1.XXXXXX") || exit 1
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "$setting="*) printf "%s=%s\n" "$setting" "$value" ;;
+        *) printf "%s\n" "$line" ;;
+      esac
+    done < "$1" > "$tmp" || { rm -f -- "$tmp"; exit 1; }
+    chmod --reference="$1" -- "$tmp" 2>/dev/null
+    mv -T -- "$tmp" "$1" || { rm -f -- "$tmp"; exit 1; }
+  ' migrate_env_setting "$env_file" || return 1
   echo "  Migrated ${key} from ${old_value} to ${new_value}"
 }
 
@@ -1999,8 +2175,12 @@ ensure_llamacpp_model_cached() {
   require_safe_hf_ref "LLAMACPP_HF_FILE" "$HF_FILE" || return 1
   MODEL_PATH="$MODEL_DIR/$HF_FILE"
 
-  mkdir -p "$MODEL_DIR"
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/llamacpp"
+  # Whatever under data/llamacpp is not the clawbox user's is handed back with
+  # the checkout whole (hand_over_checkout says why never a path below it),
+  # once, first: the directory, the download and the prune below are all that
+  # user's work.
+  hand_over_checkout data/llamacpp
+  as_clawbox mkdir -p -- "$MODEL_DIR"
 
   if [ -f "$MODEL_PATH" ]; then
     echo "  Gemma 4 model already cached for offline use"
@@ -2019,7 +2199,6 @@ ensure_llamacpp_model_cached() {
     return 1
   fi
 
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/llamacpp"
   echo "  Gemma 4 model cached for offline startup"
   prune_superseded_llamacpp_model "$MODEL_DIR" "$HF_FILE"
 }
@@ -2035,8 +2214,12 @@ prune_superseded_llamacpp_model() {
   [ "$active_file" = "$stale" ] && return 0
   [ -f "$model_dir/$stale" ] || return 0
 
-  rm -f "$model_dir/$stale"
-  echo "  Removed superseded GGUF ${stale}"
+  # As the clawbox user: both callers hand data/llamacpp over first.
+  if as_clawbox rm -f -- "$model_dir/$stale"; then
+    echo "  Removed superseded GGUF ${stale}"
+  else
+    echo "  Warning: could not remove the superseded GGUF ${stale}" >&2
+  fi
 }
 
 has_playwright_chromium() {
@@ -2074,32 +2257,217 @@ ensure_playwright_chromium() {
   echo "  Playwright Chromium runtime ready"
 }
 
+# ── Node headers for the node-pty build ──────────────────────────────────────
+
+# Where a distribution can put Node's development headers, searched in this
+# order. A directory is used only on the terms choose_node_headers sets.
+NODE_SYSTEM_HEADER_DIRS="/usr/include/nodejs /usr/include/node"
+
+# What choose_node_headers decided, for ensure_node_pty and the preflight.
+NODE_HEADERS_NODEDIR=""
+NODE_HEADERS_FALLBACK=""
+NODE_HEADERS_FALLBACK_DESC=""
+NODE_HEADERS_CHOICE=""
+# Why the last node-pty rebuild failed, in one line, for do_rebuild's failure
+# sentence: that sentence is what the update screen shows. Empty otherwise.
+NODE_PTY_FAILURE=""
+# node-gyp's devdir for this rebuild (node_gyp_devdir), set by ensure_node_pty.
+# Empty: the default, the clawbox user's ~/.cache/node-gyp.
+NODE_GYP_DEVDIR=""
+
+# The Node version a header directory belongs to ("24.22.2"), read from its
+# node_version.h. Prints nothing and returns non-zero when it cannot say.
+node_header_version() {
+  [ -f "$1/node_version.h" ] || return 1
+  awk '$1 == "#define" && $2 == "NODE_MAJOR_VERSION" { ma = $3 }
+       $1 == "#define" && $2 == "NODE_MINOR_VERSION" { mi = $3 }
+       $1 == "#define" && $2 == "NODE_PATCH_VERSION" { pa = $3 }
+       END {
+         if (ma ~ /^[0-9]+$/ && mi ~ /^[0-9]+$/ && pa ~ /^[0-9]+$/) print ma "." mi "." pa
+         else exit 1
+       }' "$1/node_version.h"
+}
+
+# Which Node headers node-gyp builds node-pty against (TASK-2244).
+#
+# Two facts, both measured on a nano-lab board running NodeSource's Node
+# 24.22.2, whose nodejs package ships its headers in /usr/include/node:
+#
+#   - node-gyp's nodedir is a PREFIX: it compiles with -I<nodedir>/include/node.
+#     The `npm_config_nodedir=/usr/include/node` this replaced, exported
+#     whenever node_api.h was there, sent the compiler to
+#     /usr/include/node/include/node, and every rebuild stopped at
+#     `napi.h:13:10: fatal error: node_api.h: No such file or directory`, with
+#     headers that matched the running Node exactly. `/usr` builds, and so does
+#     no nodedir at all, when node-gyp fetches the headers itself.
+#   - headers for another Node (Ubuntu's libnode-dev, a Node 22 left behind by
+#     the move to 24) are not this Node's headers, whatever their layout.
+#
+# So a system directory is used only when it is <prefix>/include/node AND its
+# node_version.h names exactly the running Node; npm_config_nodedir is then the
+# prefix. Otherwise nodedir stays unset and node-gyp fetches the matching
+# headers into <devdir>/<version>/ (node_gyp_devdir; ~/.cache/node-gyp unless
+# the clawbox user's environment says otherwise), and a mismatched system directory
+# is only kept as the fallback for a box that cannot fetch (ensure_node_pty).
+#
+# $1 is the running Node's `process.versions.node`. Sets NODE_HEADERS_NODEDIR
+# (the prefix; "" lets node-gyp fetch), NODE_HEADERS_FALLBACK and
+# NODE_HEADERS_FALLBACK_DESC (a mismatched prefix, or ""), and
+# NODE_HEADERS_CHOICE, the preflight's account of the choice.
+choose_node_headers() {
+  local want="$1" dir real ver prefix ignored=""
+  NODE_HEADERS_NODEDIR=""
+  NODE_HEADERS_FALLBACK=""
+  NODE_HEADERS_FALLBACK_DESC=""
+  for dir in $NODE_SYSTEM_HEADER_DIRS; do
+    [ -f "$dir/node_api.h" ] || continue
+    real="$(readlink -f "$dir" 2>/dev/null)" || real=""
+    ver="$(node_header_version "$dir")" || ver=""
+    case "$real" in
+      ?*/include/node) prefix="${real%/include/node}" ;;
+      *)
+        ignored="$ignored; $dir is not laid out as <prefix>/include/node, which node-gyp needs"
+        continue
+        ;;
+    esac
+    if [ -n "$want" ] && [ "$ver" = "$want" ]; then
+      NODE_HEADERS_NODEDIR="$prefix"
+      NODE_HEADERS_CHOICE="$dir (Node $ver, matches the running Node) — node-gyp nodedir=$prefix"
+      return 0
+    fi
+    ignored="$ignored; $dir holds Node ${ver:-of unknown version}, not the running ${want:-Node}"
+    if [ -z "$NODE_HEADERS_FALLBACK" ]; then
+      NODE_HEADERS_FALLBACK="$prefix"
+      NODE_HEADERS_FALLBACK_DESC="$dir (Node ${ver:-of unknown version})"
+    fi
+  done
+  # Where node-gyp really fetches to, under the user's home spelled `~/`.
+  local devdir="${NODE_GYP_DEVDIR:-$CLAWBOX_HOME/.cache/node-gyp}"
+  case "$devdir" in
+    "$CLAWBOX_HOME"/*) devdir="~/${devdir#"$CLAWBOX_HOME"/}" ;;
+  esac
+  NODE_HEADERS_CHOICE="auto — node-gyp fetches v${want:-?} into $devdir/${want:-<version>}/"
+  if [ -n "$ignored" ]; then
+    NODE_HEADERS_CHOICE="$NODE_HEADERS_CHOICE (ignored: ${ignored#; })"
+  fi
+}
+
+# node-gyp's devdir, where it keeps the headers it fetches, worked out the way
+# node-gyp works it out (bin/node-gyp.js) where the rebuild runs: the clawbox
+# user's login, in $PROJECT_DIR. Its devdir option, highest first:
+# npm_package_config_node_gyp_devdir, then npm's own config, which npm hands it
+# as npm_config_devdir from the environment or from any .npmrc — asked of npm,
+# which reads them all and says "undefined" when none sets it. A leading ~ is
+# that user's home. Without the option: env-paths' cache directory,
+# ${XDG_CACHE_HOME:-~/.cache}/node-gyp. Only ever read: a path the clawbox
+# user's own environment names is no path for root to create or chown.
+#
+# Three of node-gyp's rules that are easy to miss: it reads the package config
+# under any case of its name; a package config that is SET but empty still
+# wins, and clears the devdir (node-gyp then takes its default); and a
+# relative devdir is relative to the directory node-gyp runs in, node-pty's
+# own, where npm runs its install script. (npm's own config already takes
+# npm_config_devdir under any case.)
+node_gyp_devdir() {
+  local dir script
+  script="$(cat <<'EOS'
+if d="$(env | awk -F= 'tolower($1) == "npm_package_config_node_gyp_devdir" { sub(/^[^=]*=/, ""); print; f = 1; exit } END { exit !f }')"; then :
+else
+  d="$(npm config get devdir 2>/dev/null)" || d=""
+  [ "$d" != undefined ] || d=""
+fi
+case "$d" in "~"*) d="$HOME${d#"~"}" ;; esac
+d="${d:-${XDG_CACHE_HOME:-$HOME/.cache}/node-gyp}"
+case "$d" in /*) ;; *) d="$PWD/node_modules/node-pty/$d" ;; esac
+printf "%s\n" "$d"
+EOS
+)"
+  # The last line: a login shell may print before the command runs.
+  dir="$(as_clawbox_login "cd $PROJECT_DIR || exit 1; $script" 2>/dev/null | tail -n 1)" || dir=""
+  printf '%s\n' "${dir:-$CLAWBOX_HOME/.cache/node-gyp}"
+}
+
+# Does node-gyp hold the headers for Node $1 in its devdir (NODE_GYP_DEVDIR)?
+# Yes after a fetch that worked; no after one that could not.
+node_gyp_has_headers() {
+  [ -n "$1" ] && [ -f "${NODE_GYP_DEVDIR:-$CLAWBOX_HOME/.cache/node-gyp}/$1/include/node/node_version.h" ]
+}
+
+# One `npm rebuild node-pty`, as the clawbox user, against the headers under
+# the prefix $1 ("" = whatever node-gyp fetches). The output streams, because
+# this step's journal IS the update log, and is also kept in $2, when there is
+# one, for the failure report. Returns npm's status.
+#
+# Through `tee` even with no file to keep it in. journald files a line under
+# the unit of the process that WROTE it, and `su -` puts the build in the
+# clawbox user's session scope: written straight from there, the compiler's
+# error was in the journal but not in `journalctl -u
+# clawbox-root-update@rebuild_reboot`, the log the update points at, which is
+# why the 4.3 field report had none of it. `tee` is this script's own process.
+run_node_pty_rebuild() {
+  local nodedir="$1" log="${2:-}" cmd rc
+  cmd="cd $PROJECT_DIR && export npm_config_python=/usr/bin/python3 && export npm_config_build_from_source=true && "
+  if [ -n "$nodedir" ]; then
+    cmd+="export npm_config_nodedir=\"$nodedir\" && "
+  else
+    cmd+="unset npm_config_nodedir && "
+  fi
+  cmd+="npm rebuild node-pty --foreground-scripts"
+  # PIPESTATUS, not the pipeline's status: a `tee` that could not write the
+  # file must not fail a build that worked.
+  if as_clawbox_login "$cmd" 2>&1 | tee "${log:-/dev/null}"; then
+    return 0
+  else
+    rc=${PIPESTATUS[0]}
+  fi
+  return "$rc"
+}
+
+# The line that says why a node-pty build failed, from its output in $1: the
+# compiler's own error first (`napi.h:13:10: fatal error: node_api.h: …`), then
+# node-gyp's first stack line (a header download that failed says so there),
+# then the first line node-gyp or npm called an error. One line of at most 200
+# characters; nothing when there is no output to read.
+node_pty_failure_summary() {
+  if [ -z "${1:-}" ] || [ ! -s "$1" ]; then return 0; fi
+  awk '
+    { sub(/\r$/, "") }
+    cc == "" && / (fatal )?error: / { cc = $0 }
+    st == "" && /^gyp ERR! stack / { st = $0 }
+    gy == "" && /^gyp ERR! / { gy = $0 }
+    np == "" && /^npm (error|ERR!) / { np = $0 }
+    END {
+      s = cc
+      if (s == "") s = st
+      if (s == "") s = gy
+      if (s == "") s = np
+      if (s != "") print s
+    }
+  ' "$1" | sed -e 's/^[[:space:]]*//' | tr -d '\000-\010\013-\037' | cut -c1-200
+}
+
 print_native_build_preflight() {
-  local node_version node_abi npm_version python_version make_version gpp_version node_header_dir
+  local node_version node_abi npm_version python_version make_version gpp_version
 
   node_version=$(as_clawbox_login "node -p 'process.version'" 2>/dev/null || echo "missing")
   node_abi=$(as_clawbox_login "node -p 'process.versions.modules'" 2>/dev/null || echo "unknown")
   npm_version=$(as_clawbox_login "npm --version" 2>/dev/null || echo "missing")
   python_version=$(/usr/bin/python3 --version 2>/dev/null || echo "python3 missing")
 
+  # `awk 'NR == 1'`, never `head -1`: head exits after one line, the tool takes
+  # SIGPIPE writing the rest, and under `pipefail` the assignment is a 141 —
+  # measured 153 in 300 here. step_build calls ensure_node_pty bare, so that
+  # 141 ended a fresh install at this preflight, before any build was tried.
   if command -v make >/dev/null 2>&1; then
-    make_version=$(make --version | head -1)
+    make_version=$(make --version 2>/dev/null | awk 'NR == 1')
   else
     make_version="make missing"
   fi
 
   if command -v g++ >/dev/null 2>&1; then
-    gpp_version=$(g++ --version | head -1)
+    gpp_version=$(g++ --version 2>/dev/null | awk 'NR == 1')
   else
     gpp_version="g++ missing"
-  fi
-
-  if [ -d /usr/include/nodejs ] && [ -f /usr/include/nodejs/node_api.h ]; then
-    node_header_dir="/usr/include/nodejs"
-  elif [ -d /usr/include/node ] && [ -f /usr/include/node/node_api.h ]; then
-    node_header_dir="/usr/include/node"
-  else
-    node_header_dir="auto (node-gyp will fetch into ~/.cache/node-gyp/<version>/)"
   fi
 
   echo "  Native build preflight:"
@@ -2108,7 +2476,9 @@ print_native_build_preflight() {
   echo "    Python: $python_version"
   echo "    make: $make_version"
   echo "    g++: $gpp_version"
-  echo "    Node headers: $node_header_dir"
+  # What choose_node_headers picked and why, so a failed build's log says
+  # which headers it compiled against.
+  echo "    Node headers: ${NODE_HEADERS_CHOICE:-not chosen}"
 }
 
 ensure_node_pty() {
@@ -2117,55 +2487,133 @@ ensure_node_pty() {
     echo "  node-pty is already loadable"
     return 0
   fi
+  NODE_PTY_FAILURE=""
 
   echo "  node-pty is missing or built for the wrong Node ABI; preparing native build prerequisites..."
+  local want
+  want="$(as_clawbox_login "node -p 'process.versions.node'" 2>/dev/null)" || want=""
+  # Before the choice: its account names the directory node-gyp fetches into,
+  # and both "did the fetch work?" checks below look there.
+  NODE_GYP_DEVDIR="$(node_gyp_devdir)"
+  choose_node_headers "$want"
   print_native_build_preflight
   wait_for_apt
   apt-get install -y -qq python3 python3-pip python-is-python3 build-essential pkg-config
 
-  mkdir -p "$CLAWBOX_HOME/.npm" "$CLAWBOX_HOME/.cache/node-gyp"
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" \
-    "$CLAWBOX_HOME/.npm" \
-    "$CLAWBOX_HOME/.cache/node-gyp" \
-    "$PROJECT_DIR/node_modules" 2>/dev/null || true
+  # The DEFAULT devdir, made the clawbox user's whatever NODE_GYP_DEVDIR says:
+  # a devdir the user's own environment names is theirs to have made. Created
+  # BY that user, after what earlier root runs left root-owned is handed back:
+  # ~/.cache and everything in ~/.cache/node-gyp, walked to from the home;
+  # node_modules with the checkout whole; ~/.npm, whose parent is the home.
+  # Warned about rather than fatal, because step_build calls this under errexit
+  # and a build that would finish must not end here.
+  hand_over_home_path -R "$CLAWBOX_HOME/.cache/node-gyp"
+  hand_over_checkout node_modules
+  as_clawbox mkdir -p -- "$CLAWBOX_HOME/.npm" "$CLAWBOX_HOME/.cache/node-gyp" \
+    || echo "  Warning: could not create ~/.npm and ~/.cache/node-gyp as $CLAWBOX_USER"
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
 
-  # Only point node-gyp at system headers if they actually contain node_api.h
-  # for the running Node ABI. Ubuntu's libnode-dev / nodejs packages can leave
-  # a /usr/include/node directory that's missing node_api.h or holds headers
-  # for a Node version different from the one installed via NodeSource — both
-  # break the node-addon-api include chain. When neither path is usable, leave
-  # npm_config_nodedir unset so node-gyp auto-fetches matching headers into
-  # ~/.cache/node-gyp/<version>/.
-  local rebuild_cmd="
-    cd $PROJECT_DIR &&
-    export npm_config_python=/usr/bin/python3 &&
-    export npm_config_build_from_source=true &&
-    if [ -d /usr/include/nodejs ] && [ -f /usr/include/nodejs/node_api.h ]; then
-      export npm_config_nodedir=/usr/include/nodejs
-    elif [ -d /usr/include/node ] && [ -f /usr/include/node/node_api.h ]; then
-      export npm_config_nodedir=/usr/include/node
-    fi &&
-    npm rebuild node-pty --foreground-scripts
-  "
+  # Each attempt's output is kept as well as streamed. A failure then ends with
+  # the last 80 lines of the attempt that failed, and the compiler's own error
+  # in the line the update screen shows; "check the node-gyp output above" was
+  # all a field report had to go on (TASK-2244).
+  local log_dir log="" nodedir="$NODE_HEADERS_NODEDIR" rc=0 why="" first_why="" fetch_retry=0
+  log_dir="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-node-pty-XXXXXX" 2>/dev/null)" || log_dir=""
+  if [ -n "$log_dir" ]; then log="$log_dir/rebuild.log"; fi
 
   echo "  Rebuilding native modules (node-pty)..."
-  if ! as_clawbox_login "$rebuild_cmd"; then
-    echo "  Initial node-pty rebuild failed; clearing stale build output and retrying once..."
-    as_clawbox_login "cd $PROJECT_DIR && rm -rf node_modules/node-pty/build node_modules/node-pty/bin"
-    as_clawbox_login "$rebuild_cmd"
+  if ! run_node_pty_rebuild "$nodedir" "$log"; then
+    why="$(node_pty_failure_summary "$log")" || why=""
+    first_why="$why"
+    # `|| true`: step_build calls this bare, and a clean-up that failed must
+    # not end the install before the retry and the report below.
+    as_clawbox_login "cd $PROJECT_DIR && rm -rf node_modules/node-pty/build node_modules/node-pty/bin" || true
+    # The retry takes the OTHER source of headers, when there is one: matching
+    # system headers that failed give way to the ones node-gyp fetches, and a
+    # fetch that never arrived (no network) to the system directory the
+    # version check passed over. A build against those may still load, since
+    # node-pty is a Node-API module; one that does not is reported below.
+    if [ -n "$nodedir" ]; then
+      nodedir=""
+      fetch_retry=1
+      echo "  Initial node-pty rebuild failed${why:+ ($why)}; clearing stale build output and retrying once with the headers node-gyp fetches for Node v$want..."
+    elif [ -n "$NODE_HEADERS_FALLBACK" ] && ! node_gyp_has_headers "$want"; then
+      nodedir="$NODE_HEADERS_FALLBACK"
+      echo "  node-gyp could not fetch the headers for Node v$want (no network?)${why:+ ($why)}; falling back to the system headers in $NODE_HEADERS_FALLBACK_DESC, which do NOT match the running Node, and retrying once..."
+    else
+      echo "  Initial node-pty rebuild failed${why:+ ($why)}; clearing stale build output and retrying once..."
+    fi
+    run_node_pty_rebuild "$nodedir" "$log" || rc=$?
   fi
 
-  if ! as_clawbox_login "$verify_cmd" &>/dev/null; then
-    echo "Error: node-pty is still not loadable after rebuild. Check the node-gyp output above." >&2
-    # `return`, not `exit`: do_rebuild stops clawbox-setup before it calls this
-    # and has a restore path to run before anything may leave the function. A
-    # bare `exit` from here jumped over it and left the box exactly as TASK-709
-    # describes. Callers that want the old behaviour get it for free — a
-    # non-zero return from a bare call still ends the script under `set -e`.
-    return 1
+  local verify_out
+  if verify_out="$(as_clawbox_login "$verify_cmd" 2>&1)"; then
+    if [ -n "$log_dir" ]; then rm -rf "$log_dir"; fi
+    echo "  node-pty rebuilt and verified"
+    return 0
   fi
 
-  echo "  node-pty rebuilt and verified"
+  # Why: the failed attempt's own error, or, after a build that said it
+  # worked, what node said when it could not load the result.
+  why=""
+  if [ "$rc" -ne 0 ]; then why="$(node_pty_failure_summary "$log")" || why=""; fi
+  # A retry that could not even fetch its headers says nothing about the
+  # build: the first attempt's compiler error is still the reason.
+  if [ "$rc" -ne 0 ] && [ "$fetch_retry" -eq 1 ] && [ -n "$first_why" ] && ! node_gyp_has_headers "$want"; then
+    why="$first_why (the retry could not fetch the headers for Node v$want)"
+  fi
+  if [ -z "$why" ]; then
+    # awk to the end, no `exit`: under pipefail an awk that stops early can
+    # SIGPIPE printf into a 141, and a bare call (step_build) would end on it
+    # before the error line below.
+    why="$(printf '%s\n' "$verify_out" | awk 'w == "" && /^[A-Za-z]*Error[: ]/ { w = $0 } END { if (w != "") print w }' | cut -c1-200)" || why=""
+  fi
+  NODE_PTY_FAILURE="$why"
+  local where="Its build output is above."
+  if [ -n "$log" ] && [ -s "$log" ]; then
+    echo "  node-pty rebuild — the last 80 lines of its last attempt (Node v${want:-?}, headers: ${nodedir:-fetched by node-gyp}):" >&2
+    # Prefixed, so no line of it can pass for this script's own `Error:` line.
+    tail -n 80 "$log" | sed -e 's/^/    | /' >&2
+    where="The last 80 lines of its last attempt are above."
+  fi
+  if [ -n "$log_dir" ]; then rm -rf "$log_dir"; fi
+  echo "Error: node-pty is still not loadable after rebuild${why:+: $why}. $where" >&2
+  # `return`, not `exit`: do_rebuild stops clawbox-setup before it calls this
+  # and has a restore path to run before anything may leave the function. A
+  # bare `exit` from here jumped over it and left the box exactly as TASK-709
+  # describes. Callers that want the old behaviour get it for free — a
+  # non-zero return from a bare call still ends the script under `set -e`.
+  return 1
+}
+
+# node-pty on the box a failed rebuild has put back (TASK-2244).
+#
+# The rollback restores .next, never node_modules: `bun install` has run by
+# then, and can leave node-pty as a package that was never built. The restored
+# dashboard then serves fine and the web terminal is dead, which is what a box
+# rolled back from the 4.3 update was left with. So the restored box gets its
+# own ensure_node_pty.
+#
+# QUIET, on purpose: its output goes to a file and the step's journal gets one
+# line. The update screen shows the newest `Error:` line among the LAST 40
+# lines of this step's journal (readRootStepFailure in src/lib/updater.ts); a
+# rebuild streamed here would push out the sentence saying why the update
+# failed, and an `Error:` line of its own would replace it.
+ensure_node_pty_after_rollback() {
+  if as_clawbox_login "cd $PROJECT_DIR && node -e \"require('node-pty')\"" &>/dev/null; then
+    return 0
+  fi
+  local log_dir log=/dev/null
+  log_dir="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-node-pty-XXXXXX" 2>/dev/null)" || log_dir=""
+  if [ -n "$log_dir" ]; then log="$log_dir/after-rollback.log"; fi
+  echo "  node-pty does not load on the restored box; rebuilding it for the web terminal..."
+  if ensure_node_pty >"$log" 2>&1; then
+    if [ -n "$log_dir" ]; then rm -rf "$log_dir"; fi
+    echo "  node-pty rebuilt and verified on the restored box"
+    return 0
+  fi
+  echo "  Warning: node-pty still does not load after the rollback, so the web terminal stays unavailable${NODE_PTY_FAILURE:+: $NODE_PTY_FAILURE}${log_dir:+ (full output: $log)}" >&2
+  return 1
 }
 
 # ── Memory for the build ─────────────────────────────────────────────────────
@@ -2235,12 +2683,13 @@ uptime_s() {
 # startup runs on, the Telegram provider starts AFTER the signal and keeps a
 # retained consumer, and shutdown then waits out the unit's whole
 # TimeoutStopSec (330 s) and writes a `gateway.stop_shutdown_timeout` stability
-# bundle. An update on a box under 12 GB stops the gateway about 30 s after
+# bundle. An update on a box under 12 GB stopped the gateway about 30 s after
 # gateway_setup restarted it, so every such update paid five and a half
-# minutes. On the box's journal every stop that landed between the core's
-# SIGTERM handler (about 16 s into a start; a stop before it ends the process
-# at once) and its `ready` hit that deadline, and every stop after `ready`
-# settled in a second.
+# minutes; gateway_setup now starts it only when openclaw_install's full path
+# left it stopped, and this wait still covers that start. On the box's journal
+# every stop that landed between the core's SIGTERM handler (about 16 s into a
+# start; a stop before it ends the process at once) and its `ready` hit that
+# deadline, and every stop after `ready` settled in a second.
 #
 # The core's own word for "startup done" is /startupz 200 (docs/gateway/
 # health.md). It comes just BEFORE the channel providers start (a second on a
@@ -2600,8 +3049,10 @@ free_memory_for_build() {
     fi
     # `|| true`: this sits between the engine pauses and the resume, and errexit
     # is live in do_rebuild. A cosmetic cleanup that cannot be done (EACCES on
-    # the parent) must not kill the shell with every engine stopped.
-    rm -f "$PROJECT_DIR/data/llamacpp/server.pid" || true
+    # the parent) must not kill the shell with every engine stopped. Removed by
+    # the clawbox user, whose llama-server wrote it into data/llamacpp: a
+    # pidfile left behind costs llamacpp_pid_if_running only a cmdline check.
+    as_clawbox rm -f -- "$PROJECT_DIR/data/llamacpp/server.pid" 2>/dev/null || true
   fi
 
   # Page cache last, once the engines have released their mappings. It is
@@ -2637,6 +3088,11 @@ case "$BUILD_GATEWAY_ROOM_MB" in ''|*[!0-9]*) BUILD_GATEWAY_ROOM_MB=6144 ;; esac
 # When pause_gateway_if_build_needs_room stopped the gateway, in epoch seconds;
 # empty otherwise. Only ever read by report_gateway_build_pause.
 GATEWAY_PAUSED_FOR_BUILD_AT=""
+# The systemd stamp of that same stop (InactiveEnterTimestampMonotonic), read
+# right after it; empty otherwise. Only ever read by hand_paused_gateway_to_update:
+# after the build the live stamp may be that of a start and stop someone else
+# made meanwhile, which the fallback must never take for the pause's.
+GATEWAY_PAUSED_STAMP=""
 
 # On a rebuild nothing reboots after, stop the assistant for `next build` only
 # if the build will not fit beside it (TASK-1197).
@@ -2683,6 +3139,7 @@ pause_gateway_if_build_needs_room() {
   # that never happened.
   if ! systemctl is-active --quiet clawbox-gateway.service 2>/dev/null; then
     GATEWAY_PAUSED_FOR_BUILD_AT=$(date +%s 2>/dev/null || echo "")
+    GATEWAY_PAUSED_STAMP=$(systemctl show clawbox-gateway.service -p InactiveEnterTimestampMonotonic --value 2>/dev/null || true)
   fi
   return 0
 }
@@ -2692,10 +3149,122 @@ pause_gateway_if_build_needs_room() {
 report_gateway_build_pause() {
   local at="$GATEWAY_PAUSED_FOR_BUILD_AT" now
   GATEWAY_PAUSED_FOR_BUILD_AT=""
+  GATEWAY_PAUSED_STAMP=""
   case "$at" in ''|*[!0-9]*) return 0 ;; esac
   now=$(date +%s 2>/dev/null || echo "")
   case "$now" in ''|*[!0-9]*) return 0 ;; esac
   echo "  clawbox-gateway.service was paused for $((now - at)) s for the build"
+  return 0
+}
+
+# The in-app update's restart arm hands a gateway it paused for `next build` to
+# the update's second half instead of starting it here (TASK-2517).
+#
+# WHY. That second half stops the gateway before its fixups (post_update runs
+# quiesced) and gateway_verify is what starts it on the updated pre-start, so a
+# start here was a start the update undid a minute later — and it was not free.
+# Measured on an 8 GB OpenClaw board (beta, an update with nothing new): the
+# resume held the stopped dashboard 20 s for the gateway's pre-start, then
+# post_update waited 42 s for that same start to finish only to stop it, and
+# gateway_verify started it a third time. The assistant is down for that whole
+# stretch either way: the start in the middle served nothing.
+#
+# The other engines paused for the build are still started by
+# resume_paused_engines; only the gateway, and only on this arm. The failure arm
+# resumes everything as before (nothing follows it), and so do the reboot arm's
+# boot and every other caller of do_rebuild.
+#
+# THE ONE NEW RISK, AND ITS NET. Before this, a gateway paused for the build ran
+# again whatever happened to the rest of the update. Now it waits for a second
+# half that, in one failure — a verified build whose web server never comes up,
+# so no continuation runs — would never come. So a transient timer
+# (GATEWAY_HANDBACK_UNIT) starts it GATEWAY_HANDBACK_S seconds later unless
+# something else has touched it since the pause: it acts only while the
+# gateway is still inactive (or failed) with the very InactiveEnterTimestamp the
+# pause left, and while no root update step, no gateway quiesce and no OpenClaw
+# process runs. Every START moves that stamp (gateway_verify's, an operator's),
+# a quiesce holds the unit's start condition off, and the waits below cover the
+# work that runs beside a gateway already stopped, so the net can only ever
+# start a gateway nobody has started or worked on since the build stopped it. Anything this cannot arm is the old
+# behaviour: the gateway is started here.
+GATEWAY_HANDBACK_UNIT="clawbox-gateway-handback"
+GATEWAY_HANDBACK_S="${CLAWBOX_GATEWAY_HANDBACK_S:-900}"
+case "$GATEWAY_HANDBACK_S" in ''|*[!0-9]*) GATEWAY_HANDBACK_S=900 ;; esac
+# How often the net looks again while a root update step runs: it never starts
+# the gateway under one, and it does not give up because of one either.
+GATEWAY_HANDBACK_RECHECK_S="${CLAWBOX_GATEWAY_HANDBACK_RECHECK_S:-60}"
+case "$GATEWAY_HANDBACK_RECHECK_S" in ''|*[!0-9]*) GATEWAY_HANDBACK_RECHECK_S=60 ;; esac
+# config/clawbox-gateway-maintenance.sh's guard: present while the updater holds
+# the gateway quiesced.
+GATEWAY_MAINTENANCE_GUARD="${CLAWBOX_GATEWAY_MAINTENANCE_GUARD:-/run/clawbox-gateway-maintenance}"
+# What the timer runs, as root, with the stamp the pause left as $1 and the
+# recheck interval as $2: while a root update step runs it waits and looks
+# again rather than ending, so a deadline that falls inside a long step (a
+# continuation whose process died in post_update) still starts the gateway
+# once the step is over. It waits the same way while the updater's maintenance
+# guard ($3, /run/clawbox-gateway-maintenance: a quiesce in progress) is up, and
+# while any OpenClaw process runs: a `systemctl stop` of a gateway that is
+# already stopped moves no stamp, so a doctor --fix or an offline auth edit the
+# web server runs beside the stopped gateway would otherwise not be seen — and
+# with the gateway down, a process naming openclaw is someone working on it.
+# (`[o]penclaw`, so the pattern never matches this script's own command line.)
+# Inline in
+# this root-owned file (the mirror's copy), never a script of the tree's. ONE
+# line: systemd writes a transient unit's command into a unit file under
+# /run/systemd/transient, and a newline in it splits the ExecStart= there
+# ("Missing '=', ignoring line"), as the first board run of this showed. No
+# `${` and no `%` either: systemd expands both in a command line.
+# shellcheck disable=SC2016  # expanded by the timer's own shell
+GATEWAY_HANDBACK_SCRIPT='while :; do state=$(systemctl show clawbox-gateway.service -p ActiveState --value 2>/dev/null); case "$state" in inactive|failed) ;; *) exit 0 ;; esac; [ -n "$1" ] && [ "$(systemctl show clawbox-gateway.service -p InactiveEnterTimestampMonotonic --value 2>/dev/null)" = "$1" ] || exit 0; if systemctl list-units --no-legend --plain --state=active,activating,deactivating "clawbox-root-update@*" 2>/dev/null | grep -q . || [ -e "$3" ] || pgrep -f "[o]penclaw" >/dev/null 2>&1; then sleep "$2" || sleep 60; continue; fi; echo "clawbox-gateway.service was paused for an update build and nothing has started it since: starting it"; exec systemctl start --no-block clawbox-gateway.service; done'
+
+disarm_gateway_handback() {
+  # The service too: it may be inside its recheck loop.
+  systemctl stop "$GATEWAY_HANDBACK_UNIT.timer" "$GATEWAY_HANDBACK_UNIT.service" 2>/dev/null || true
+  systemctl reset-failed "$GATEWAY_HANDBACK_UNIT.timer" "$GATEWAY_HANDBACK_UNIT.service" 2>/dev/null || true
+  return 0
+}
+
+# Returns non-zero when the net could not be armed, so the caller starts the
+# gateway itself.
+#
+# The deadline is ON THE BOOT's clock (`--on-boot`, now + GATEWAY_HANDBACK_S),
+# never `--on-active`: systemd re-reads a transient timer at every
+# daemon-reload and counts an OnActiveSec= again from the reload, so on a board
+# each update step's daemon-reload pushed the deadline another 15 min out and
+# the timer never fired; an OnBootSec= deadline is the same after a reload, and
+# needs no wall clock. RemainAfterElapse=no unloads it once it has fired.
+#
+# $1 is the stamp the pause left (GATEWAY_PAUSED_STAMP), never one read now: a
+# gateway started and stopped again during the build carries a newer stamp,
+# and the timer then leaves it alone.
+arm_gateway_handback() {
+  local stamp="${1:-}" up
+  case "$stamp" in ''|0|*[!0-9]*) return 1 ;; esac
+  up="$(awk '{print int($1)}' /proc/uptime 2>/dev/null)" || up=""
+  case "$up" in ''|*[!0-9]*) return 1 ;; esac
+  disarm_gateway_handback
+  systemd-run --quiet --collect --unit="$GATEWAY_HANDBACK_UNIT" \
+    --on-boot="$((up + GATEWAY_HANDBACK_S))s" --timer-property=AccuracySec=10s \
+    --timer-property=RemainAfterElapse=no \
+    /bin/sh -c "$GATEWAY_HANDBACK_SCRIPT" sh "$stamp" "$GATEWAY_HANDBACK_RECHECK_S" "$GATEWAY_MAINTENANCE_GUARD" >/dev/null 2>&1
+}
+
+hand_paused_gateway_to_update() {
+  local unit found=0
+  local -a kept=()
+  [ "${#PAUSED_ENGINE_UNITS[@]}" -gt 0 ] || return 0
+  for unit in "${PAUSED_ENGINE_UNITS[@]}"; do
+    if [ "$unit" = clawbox-gateway.service ]; then found=1; else kept+=("$unit"); fi
+  done
+  [ "$found" = 1 ] || return 0
+  if ! arm_gateway_handback "${GATEWAY_PAUSED_STAMP:-}"; then
+    echo "  Could not arm the gateway's fallback start; starting clawbox-gateway.service again here as before"
+    return 0
+  fi
+  PAUSED_ENGINE_UNITS=(${kept[@]+"${kept[@]}"})
+  GATEWAY_PAUSED_FOR_BUILD_AT=""
+  GATEWAY_PAUSED_STAMP=""
+  echo "  Leaving clawbox-gateway.service stopped for the update's second half: post_update stops it before its fixups and gateway_verify starts it on the updated pre-start, so a start here would only be stopped again (if nothing has started it $((GATEWAY_HANDBACK_S / 60)) min from now, $GATEWAY_HANDBACK_UNIT.timer does)"
   return 0
 }
 
@@ -2744,7 +3313,10 @@ verify_build_present() {
     echo "  WARNING: scripts/verify-build-identity.sh is missing — the build's identity was not checked" >&2
     return 0
   fi
-  if ! bash "$project_dir/scripts/verify-build-identity.sh" --project-dir "$project_dir" --quiet; then
+  # As the service account: the script is a file in its checkout, and root runs
+  # nothing from the tree. It only reads the checkout and the build.
+  if ! runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      bash "$project_dir/scripts/verify-build-identity.sh" --project-dir "$project_dir" --quiet; then
     echo "Error: the build on disk does not match the checked-out commit" >&2
     return 1
   fi
@@ -2978,6 +3550,16 @@ set_previous_build_aside() {
   # to compensate for it.
   case "$need"  in ''|*[!0-9]*) need="" ;; esac
   case "$avail" in ''|*[!0-9]*) avail="" ;; esac
+  # The framework cache is not a second copy: carry_build_cache MOVES it into the
+  # new build. Counted twice, its few hundred MB (the Turbopack cache on a board,
+  # TASK-2517) could tip a box with room for two builds into the arm below that
+  # deletes the only one it has. An unreadable size subtracts nothing.
+  local cache_kb=""
+  if [ -n "$need" ] && [ -d "$build_dir/cache" ] && [ ! -L "$build_dir/cache" ]; then
+    cache_kb="$(du -sk "$build_dir/cache" 2>/dev/null | awk '{print $1}')"
+    case "$cache_kb" in ''|*[!0-9]*) cache_kb="" ;; esac
+    if [ -n "$cache_kb" ] && [ "$cache_kb" -lt "$need" ]; then need=$((need - cache_kb)); fi
+  fi
   if [ -n "$need" ] && [ -n "$avail" ] && [ "$avail" -lt "$((need * 2))" ]; then
     echo "  Only ${avail}K free for a ${need}K build — clearing the old one instead of keeping it" >&2
     rm -rf "$build_dir"
@@ -3174,6 +3756,357 @@ restore_previous_build() {
   done
 }
 
+# "a, b, c and 2 more": the first three lines of $2, each without its first $1
+# characters (a status code or an index tag in front of the path).
+first_paths() {
+  local skip="$1" line out="" n=0
+  while IFS= read -r line; do
+    n=$((n + 1))
+    if [ "$n" -le 3 ]; then out="${out:+$out, }${line:$skip}"; fi
+  done <<< "$2"
+  if [ "$n" -gt 3 ]; then out="$out and $((n - 3)) more"; fi
+  printf '%s\n' "$out"
+}
+
+# May this build leave Next's type check to CI? Prints why or why not; yes only
+# for a tree CI has already checked.
+#
+# Next's own check is 77 s of a 113 s `bun run build` on an 8 GB board, with a
+# ~1 GB heap of its own (measured on a beta update). Every pull request merged
+# into beta or main passed the required whole-program tsc (`test`) and
+# `bun run build` (`e2e`) checks against its own base; the merged tip itself is
+# re-checked only by push runs that nothing waits for, so a tip that combines
+# two pull requests can hold code no check type-checked before it landed.
+# So the answer is yes when the checkout is ON beta or main (attached, not
+# detached), HEAD is exactly origin's fetched tip of that branch, and nothing in
+# the tree differs from it. Anything else keeps the check: another branch, a
+# detached HEAD even at the tip, a commit ahead or behind, an edit or a new
+# file, a git that cannot answer, test mode. Nothing has checked THAT tree.
+# Both sync paths (sync_repo_to_update_target, and syncCheckoutToUpstream in
+# updater.ts) leave a box attached to its branch at the tip with a clean tree,
+# and the rebuild step then changes only the executable bits of scripts/*.sh
+# (step_directories_permissions, before it builds), which the status probe
+# below does not count.
+#
+# Every condition is evaluated and every failure named, so the log says exactly
+# why a box type-checked. A command that fails fails its condition, so an empty
+# answer from a failed git is never read as "clean" or "equal".
+#
+# This runs as root inside the dispatched rebuild steps, which run no other git
+# in the tree, so it adds none either: every git call and the read of the pin go
+# through the tree's owner (as_clawbox), and `--no-optional-locks` keeps the
+# status probe from rewriting .git/index. The branch is resolve_update_branch's
+# order — CLAWBOX_BRANCH, the pin, the branch HEAD is on — without calling it,
+# since its git runs as root. Its last rule, recovering the branch of a detached
+# HEAD from the tree's build stamp, is not needed: a detached HEAD keeps the
+# check whichever branch it came from.
+build_type_check_proven_by_ci() {
+  local -a tree_git=(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
+  local -a failed=()
+  local branch="" pin="" candidate attached="" head="" tip="" changes="" line odd="" nl=$'\n' reason=""
+  if is_test_mode; then failed+=("a test-mode run"); fi
+
+  # Empty on a detached HEAD.
+  if ! attached="$("${tree_git[@]}" symbolic-ref --short -q HEAD 2>/dev/null)"; then attached=""; fi
+
+  # A name outside is_safe_git_ref's characters is no name, as there (that
+  # function's own grammar check runs git as root; one it would refuse here
+  # only makes the answer no).
+  pin="$(as_clawbox head -n 1 -- "$PROJECT_DIR/.update-branch" 2>/dev/null || true)"
+  pin="${pin//[[:space:]]/}"
+  for candidate in "${CLAWBOX_BRANCH:-}" "$pin" "$attached"; do
+    case "$candidate" in
+      ""|-*|/*|*[!A-Za-z0-9._/-]*) continue ;;
+    esac
+    branch="$candidate"
+    break
+  done
+  if [ -z "$branch" ]; then
+    failed+=("no update branch could be resolved")
+  elif [ "$branch" != "beta" ] && [ "$branch" != "main" ]; then
+    failed+=("the box follows $branch, not beta or main")
+  fi
+
+  if [ -z "$attached" ]; then
+    failed+=("HEAD is not on a branch")
+  elif [ "$attached" != "$branch" ]; then
+    failed+=("HEAD is on $attached, not ${branch:-the update branch}")
+  fi
+
+  # Equality, not ancestry: a commit ahead of origin is one CI never saw.
+  if ! head="$("${tree_git[@]}" rev-parse --verify -q HEAD 2>/dev/null)" || [ -z "$head" ]; then
+    failed+=("git could not read HEAD")
+  elif [ -z "$branch" ]; then
+    failed+=("there is no origin branch to compare HEAD with")
+  elif ! tip="$("${tree_git[@]}" rev-parse --verify -q "refs/remotes/origin/$branch" 2>/dev/null)" || [ -z "$tip" ]; then
+    failed+=("origin/$branch is not in this checkout")
+  elif [ "$head" != "$tip" ]; then
+    failed+=("HEAD ${head:0:12} is not origin/$branch's tip ${tip:0:12}")
+  fi
+
+  # Tracked changes and new files: a new .ts file under src/ is in the program
+  # as much as an edited one, and a new page under src/app/ is a route Next
+  # compiles. An executable bit is not a change here (core.fileMode=false):
+  # step_rebuild_reboot, the step every in-app update dispatches, makes every
+  # scripts/*.sh executable before it builds, some are tracked without the bit,
+  # and the bit changes nothing Next compiles or checks; an edit, a new or
+  # deleted file and a file swapped for a symlink or back still count. What
+  # could keep a change out of `git status` is switched off or checked here:
+  # `--untracked-files=normal` overrides status.showUntrackedFiles,
+  # core.excludesFile=/dev/null drops the owner's global ignore file, a new file
+  # only .git/info/exclude hides is found by listing new files against the
+  # tree's .gitignore files alone, and a tracked file whose index entry tells
+  # git not to look (skip-worktree, assume-unchanged) fails the condition.
+  # Still applied: the .gitignore files themselves (an untracked one can hide a
+  # directory, itself included) and the rest of .git/config. The tree's owner
+  # can edit next.config.ts as well, so this guards against accidents; it is
+  # not a boundary.
+  if ! changes="$("${tree_git[@]}" -c core.excludesFile=/dev/null -c core.fileMode=false --no-optional-locks status --porcelain --untracked-files=normal 2>/dev/null)"; then
+    failed+=("git status could not answer")
+  elif [ -n "$changes" ]; then
+    failed+=("the tree has changes: $(first_paths 3 "$changes")")
+  elif ! changes="$("${tree_git[@]}" ls-files --others --exclude-per-directory=.gitignore 2>/dev/null)"; then
+    failed+=("git could not list new files")
+  elif [ -n "$changes" ]; then
+    failed+=("new files hidden from git status: $(first_paths 0 "$changes")")
+  fi
+
+  # Every tracked entry is a plain `H`: `S` is skip-worktree, a lower-case tag
+  # assume-unchanged, and git reports no edit to either. Decided by one match
+  # over the whole list: a loop over a here-string this size reads it from a
+  # temp file, and with /tmp full the loop would never run and the answer would
+  # read as clean. The loop after the match only names the paths.
+  if ! changes="$("${tree_git[@]}" ls-files -v 2>/dev/null)"; then
+    failed+=("git could not list the tracked files")
+  elif [ -z "$changes" ]; then
+    # A checkout always tracks files: an empty list is a doubt, never "all H".
+    failed+=("git listed no tracked files")
+  else
+    case "$nl$changes" in
+      *"$nl"[!H]*)
+        while IFS= read -r line; do
+          case "$line" in
+            ""|"H "*) ;;
+            *) odd="${odd:+$odd$nl}$line" ;;
+          esac
+        done <<< "$changes" || true
+        failed+=("git does not check these tracked files for changes${odd:+: $(first_paths 2 "$odd")}")
+        ;;
+    esac
+  fi
+
+  if [ "${#failed[@]}" -gt 0 ]; then
+    for line in "${failed[@]}"; do reason="${reason:+$reason; }$line"; done
+    printf '%s\n' "$reason"
+    return 1
+  fi
+  printf '%s\n' "${head:0:12} is origin/$branch's tip on branch $branch; CI type-checks every pull request before it lands on $branch"
+}
+
+# Why one build stamp could not stand for a rebuild of this checkout, or
+# nothing when it can. `build_stamp_refusal <build-info.json> <node version>
+# <env files there now, comma-separated> <HEAD, 40 hex>`;
+# non-zero only when node itself could not run. Read with node as the tree's
+# owner, as scripts/verify-build-identity.sh reads the same file: a Jetson has
+# node, not necessarily jq, and the file is the tree's.
+build_stamp_refusal() {
+  as_clawbox node -e '
+    const fs = require("fs");
+    let s;
+    try { s = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch { process.stdout.write("cannot be read"); process.exit(0); }
+    const why = [];
+    // contentDirty (write-build-info.mjs) leaves out the executable bits the
+    // rebuild step itself sets; a stamp from before it has only `dirty`.
+    if (typeof s.contentDirty === "boolean") {
+      if (s.contentDirty) why.push("was built from a tree with changed files (contentDirty=true)");
+    } else if (s.dirty !== false) {
+      why.push(`was built from a tree with changes (dirty=${s.dirty})`);
+    }
+    if (s.untracked !== 0) why.push(`was built with ${s.untracked} untracked file(s) in the tree`);
+    // The env files Next loaded for the build (write-build-info.mjs): one
+    // deleted since is invisible to the mtime check in the caller. A stamp from
+    // before the list cannot say, so it is not kept.
+    // The identity of the stamp itself, beside the build it sits with: commit
+    // and build id. verify-build-identity.sh checks the flat paths only, and
+    // the served stamp of the nested postbuild layout is under the resolved entry.
+    const head = process.argv[4] || "";
+    if (!head || s.commit !== head) why.push(`names commit ${String(s.commit || "(none)").slice(0, 12)}, and HEAD is ${head.slice(0, 12) || "(unread)"}`);
+    let besideId = "";
+    try { besideId = fs.readFileSync(require("path").join(require("path").dirname(process.argv[1]), "BUILD_ID"), "utf8").trim(); } catch {}
+    if (!besideId || s.buildId !== besideId) why.push(`describes build ${s.buildId || "(none)"}, and ${besideId ? `${besideId} is` : "no BUILD_ID is"} beside it`);
+    const envNow = (process.argv[3] || "").split(",").filter(Boolean).sort().join(",");
+    if (!Array.isArray(s.envFiles)) why.push("records no env-file list (a build from before it)");
+    else if ([...s.envFiles].sort().join(",") !== envNow) why.push(`was built with env files [${s.envFiles.join(", ")}], and [${envNow.split(",").filter(Boolean).join(", ")}] are there now`);
+    const want = process.argv[2] || "";
+    if (!want || s.node !== want) why.push(`was built on Node ${s.node || "(unrecorded)"}, and this build would run on ${want || "(no answer)"}`);
+    process.stdout.write(why.join("; "));
+  ' "$1" "${2:-}" "${3:-}" "${4:-}" 2>/dev/null
+}
+
+# The note that tells the update's second half the rebuild step KEPT the build
+# it found (TASK-2517). The web server that resumes the update after the
+# restart demands a changed BUILD_ID as its evidence that the rebuild happened
+# (src/lib/updater.ts) — a power cycle can erase a unit's failure, never the
+# build on disk — and a build kept on purpose does not change it. So the step
+# says so: "<BUILD_ID of the serving build> <boot id> <seconds since boot>",
+# which the updater accepts only for the build that is serving and only when it
+# was written in the boot, and after the moment, at which it dispatched this run
+# (rebuildKeptBuild) — so no older run's note can stand for this one, and a run
+# whose step never reached this point has none.
+#
+# ON DISK, in root's /var/lib/clawbox, never /run: the reboot arm ends this step
+# with a reboot, and the second half then resumes in the NEXT boot — a note on
+# tmpfs would be gone and the kept build read as a rebuild that never happened.
+# The boot id it carries is the dispatching boot's, not the reading one's, so
+# the note still binds to this run across that reboot. A plain data file root
+# writes and runs nothing from, through a fresh mktemp file renamed over the
+# place, readable by all; cleared at the top of every rebuild step. Non-zero,
+# leaving no note, when it cannot be written: the caller then rebuilds as it
+# always did.
+REBUILD_KEPT_NOTE="${CLAWBOX_REBUILD_KEPT_BUILD:-/var/lib/clawbox/rebuild-kept-build}"
+forget_rebuild_kept_build() {
+  rm -f "$REBUILD_KEPT_NOTE" 2>/dev/null || true
+  return 0
+}
+record_rebuild_kept_build() {
+  local entry id boot up tmp=""
+  forget_rebuild_kept_build
+  # The BUILD_ID of the tree the server runs from, read as the updater reads it
+  # (readBuildId): beside the real standalone entry, through its link if any.
+  entry="$(readlink -f "$PROJECT_DIR/.next/standalone/server.js" 2>/dev/null)" || entry=""
+  [ -n "$entry" ] || return 1
+  # Read as the tree's owner: the entry is a link the tree may point anywhere,
+  # and root reads nothing through it that the account could not read itself.
+  id="$(as_clawbox head -n 1 -- "$(dirname "$entry")/.next/BUILD_ID" 2>/dev/null | tr -d '[:space:]')" || id=""
+  case "$id" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
+  boot="$(tr -d '[:space:]' < "${CLAWBOX_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}" 2>/dev/null)" || boot=""
+  case "$boot" in ''|*[!0-9a-f-]*) return 1 ;; esac
+  up="$(awk '{print $1}' /proc/uptime 2>/dev/null)" || up=""
+  case "$up" in ''|*[!0-9.]*) return 1 ;; esac
+  if mkdir -p "$(dirname "$REBUILD_KEPT_NOTE")" 2>/dev/null \
+    && tmp="$(mktemp "$(dirname "$REBUILD_KEPT_NOTE")/.rebuild-kept-build.XXXXXX" 2>/dev/null)" \
+    && printf '%s %s %s\n' "$id" "$boot" "$up" > "$tmp" && chmod 0644 "$tmp" && mv -fT "$tmp" "$REBUILD_KEPT_NOTE" 2>/dev/null; then
+    return 0
+  fi
+  [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+  return 1
+}
+
+# Is the build on disk already the build of this checkout? Prints why or why
+# not; 0 only when every condition below holds (TASK-2517).
+#
+# WHY. An update whose target is the commit the box already serves — "Update
+# now" with nothing new, the setup wizard's update step on a box flashed at the
+# target, an update started again after one of its late steps failed — stopped
+# the dashboard, ran bun install and the whole `next build`, and restarted it
+# onto an equivalent build. step_rebuild_reboot asks this first and leaves out
+# the rebuild when the answer is yes (bun install, the engine pause, next build,
+# postbuild); everything else the step does — the redeploy before it, the
+# polkit refresh and the service restart that resumes the update after it —
+# runs as before.
+#
+# WHAT IS COMPARED. The update's sync has just put the tree on origin/<branch>
+# (reset --hard + clean -fd), so the question is whether the build on disk was
+# made from exactly this tree, with the inputs a build reads besides the tree
+# unchanged:
+#   - the served build is whole (its standalone entry and BUILD_ID) and BOTH its
+#     stamps name HEAD with the build id beside them — the check
+#     verify_build_present runs after every build (scripts/verify-build-identity.sh,
+#     as the tree's owner, because it is a file of the tree);
+#   - neither stamp says the tree it was built from had changes or new files;
+#   - nothing is parked (.next-old, .next-claim.*, .next-discard.*): that is a
+#     rebuild that did not finish, and do_rebuild is what settles it;
+#   - the tree is clean now (the status probe build_type_check_proven_by_ci
+#     runs, with the same executable-bit rule);
+#   - the build would run on the Node.js that built it (the stamp's `node`
+#     against `node --version` in the build's own login environment);
+#   - node-pty loads, the probe ensure_node_pty starts with: do_rebuild is also
+#     what repairs it;
+#   - no env file Next loads at build time is newer than the build: next.config.ts
+#     bakes GATEWAY_URL and PORTAL_EMBED_ORIGINS into the rewrites and headers
+#     it compiles.
+# A condition that cannot be answered is a no, and every failed one is named, so
+# the log says why a box rebuilt. CLAWBOX_FORCE_REBUILD=1 always rebuilds.
+build_is_current_for_checkout() {
+  local build_dir="$PROJECT_DIR/.next"
+  local -a tree_git=(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
+  local -a failed=()
+  local changes="" node_now="" refusal="" stamp served_entry="" served_stamp="" env_now="" head_full="" parked env_file line reason="" head="" whole=1
+  if [ "${CLAWBOX_FORCE_REBUILD:-0}" = "1" ]; then failed+=("CLAWBOX_FORCE_REBUILD=1"); fi
+  # `-f`, not build_entry_present: that one also accepts a dangling link, for
+  # a parked build whose nested entry is elsewhere. A build kept as the one to
+  # serve needs an entry that resolves to a file (verify_build_present's test).
+  if [ ! -f "$build_dir/standalone/server.js" ] || [ ! -f "$build_dir/BUILD_ID" ]; then
+    failed+=("there is no complete build in .next")
+    whole=0
+  fi
+  for parked in "$PROJECT_DIR"/.next-old "$PROJECT_DIR"/.next-claim.* "$PROJECT_DIR"/.next-discard.*; do
+    if [ -e "$parked" ] || [ -L "$parked" ]; then
+      failed+=("a rebuild did not finish (${parked##*/} is there)")
+      whole=0
+      break
+    fi
+  done
+  # The identity first and on its own: the stamps below are only worth reading
+  # for a whole build that names this commit at all.
+  if [ "$whole" = 1 ]; then
+    if [ ! -f "$PROJECT_DIR/scripts/verify-build-identity.sh" ]; then
+      failed+=("scripts/verify-build-identity.sh is missing, so the build's commit cannot be checked")
+    elif ! runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+        bash "$PROJECT_DIR/scripts/verify-build-identity.sh" --project-dir "$PROJECT_DIR" --quiet >/dev/null 2>&1; then
+      if head="$("${tree_git[@]}" rev-parse --short=12 HEAD 2>/dev/null)" && [ -n "$head" ]; then
+        failed+=("the build on disk is not a build of $head")
+      else
+        failed+=("the build on disk is not a build of the checked-out commit")
+      fi
+    else
+      node_now="$(as_clawbox_login "node --version" 2>/dev/null | tail -n 1)" || node_now=""
+      node_now="${node_now//[[:space:]]/}"
+      # The one thing do_rebuild repairs besides the build: a node-pty that no
+      # longer loads (ensure_node_pty). A box whose terminal module is broken
+      # takes the full rebuild, which repairs it as every update always did.
+      if ! as_clawbox_login "cd $PROJECT_DIR && node -e \"require('node-pty')\"" >/dev/null 2>&1; then
+        failed+=("node-pty does not load (the rebuild repairs it)")
+      fi
+      # The served stamp is beside the entry production-server.js loads, which
+      # for postbuild's nested layout is a link (as record_rebuild_kept_build
+      # resolves it); an entry that does not resolve keeps the flat path.
+      served_entry="$(readlink -f "$build_dir/standalone/server.js" 2>/dev/null)" || served_entry=""
+      served_stamp="$build_dir/standalone/.next/build-info.json"
+      [ -n "$served_entry" ] && served_stamp="$(dirname "$served_entry")/.next/build-info.json"
+      head_full="$("${tree_git[@]}" rev-parse HEAD 2>/dev/null)" || head_full=""
+      env_now=""
+      for env_file in .env .env.local .env.production .env.production.local; do
+        [ -e "$PROJECT_DIR/$env_file" ] && env_now="${env_now:+$env_now,}$env_file"
+      done
+      for stamp in "$build_dir/build-info.json" "$served_stamp"; do
+        if ! refusal="$(build_stamp_refusal "$stamp" "$node_now" "$env_now" "$head_full")"; then
+          failed+=("${stamp#"$PROJECT_DIR"/} could not be read (node did not run)")
+        elif [ -n "$refusal" ]; then
+          failed+=("${stamp#"$PROJECT_DIR"/} $refusal")
+        fi
+      done
+    fi
+  fi
+  if ! changes="$("${tree_git[@]}" -c core.excludesFile=/dev/null -c core.fileMode=false --no-optional-locks status --porcelain --untracked-files=normal 2>/dev/null)"; then
+    failed+=("git status could not answer")
+  elif [ -n "$changes" ]; then
+    failed+=("the tree has changes: $(first_paths 3 "$changes")")
+  fi
+  for env_file in .env .env.local .env.production .env.production.local; do
+    if [ -f "$build_dir/BUILD_ID" ] && [ -e "$PROJECT_DIR/$env_file" ] && [ "$PROJECT_DIR/$env_file" -nt "$build_dir/BUILD_ID" ]; then
+      failed+=("$env_file changed after the build")
+    fi
+  done
+  if [ "${#failed[@]}" -gt 0 ]; then
+    for line in "${failed[@]}"; do reason="${reason:+$reason; }$line"; done
+    printf '%s\n' "$reason"
+    return 1
+  fi
+  head="$("${tree_git[@]}" rev-parse --short=12 HEAD 2>/dev/null)" || head=""
+  printf '%s\n' "the build on disk is ${head:-this commit}'s, from a clean tree on Node $node_now, and no env file changed since"
+}
+
 # `bun run build`, with ONE retry and only for the mid-build file-trace race.
 #
 # WHAT RACES. Next writes a `.nft.json` beside every server entry and then
@@ -3228,7 +4161,21 @@ restore_previous_build() {
 # so a failing pipeline or a false `[ … ] &&` test outside a condition would
 # kill the script on the first attempt in one caller and not the other.
 run_next_build() {
-  local log log_dir rc attempt
+  local log log_dir rc attempt type_check="" why=""
+  # Asked once, per build, before the first attempt: a retry builds the way the
+  # first attempt did. Inside the command string, because `su -` clears the
+  # environment; never exported, so nothing else this script runs inherits it.
+  # Said both ways, =0 as well as =1: a value on the command is the last word
+  # over an export in the account's login dotfiles, which `su -` sources first,
+  # and over a line in the tree's .env, which Next loads (and a bun release may
+  # load) into the build's environment without replacing a value already there.
+  if why="$(build_type_check_proven_by_ci)"; then
+    type_check="CLAWBOX_BUILD_SKIP_TYPECHECK=1 "
+    echo "  Building without the on-box type check: $why"
+  else
+    type_check="CLAWBOX_BUILD_SKIP_TYPECHECK=0 "
+    echo "  Building with the type check ($why)"
+  fi
   # A PRIVATE directory from `mktemp -d`, never a predictable path. This script
   # runs as root: `: > "$TMPDIR/<fixed name>"` follows a symlink a local user
   # planted there, so root truncates and then `tee`s a build log into whatever
@@ -3246,7 +4193,7 @@ run_next_build() {
   rc=0
   for attempt in 1 2; do
     if [ -n "$log" ]; then
-      if as_clawbox_login "cd $PROJECT_DIR && $BUN run build" 2>&1 | tee "$log"; then
+      if as_clawbox_login "cd $PROJECT_DIR && ${type_check}$BUN run build" 2>&1 | tee "$log"; then
         rc=0
       else
         # The BUILD's status, full stop. `pipefail` makes the pipeline non-zero
@@ -3259,7 +4206,7 @@ run_next_build() {
         break
       fi
     else
-      if as_clawbox_login "cd $PROJECT_DIR && $BUN run build"; then
+      if as_clawbox_login "cd $PROJECT_DIR && ${type_check}$BUN run build"; then
         rc=0
       else
         rc=$?
@@ -3319,8 +4266,15 @@ oom_killer_in_kernel_log() {
 do_rebuild() {
   local build_dir="$PROJECT_DIR/.next"
   local kept_dir="$PROJECT_DIR/.next-old"
-  local rc=0 built=0 reboot_follows=0 failed_at="the rebuild"
-  if [ "${1:-}" = "--reboot-follows" ]; then reboot_follows=1; fi
+  local rc=0 built=0 reboot_follows=0 gateway_to_update=0 failed_at="the rebuild" failed_why="" pty_failed=0
+  # `--gateway-to-update` is step_rebuild_reboot's restart arm: a gateway paused
+  # for the build is the update's second half's to start (hand_paused_gateway_to_update).
+  case "${1:-}" in
+    --reboot-follows) reboot_follows=1 ;;
+    --gateway-to-update) gateway_to_update=1 ;;
+  esac
+  # A fallback start an earlier update armed must not fire into this build.
+  disarm_gateway_handback
 
   # Check before stopping the dashboard: zram alone did not prevent TASK-789.
   ensure_build_swap || return $?
@@ -3366,7 +4320,11 @@ do_rebuild() {
     failed_at="bun install"
   elif ! ensure_node_pty; then
     rc=1
+    pty_failed=1
     failed_at="the node-pty rebuild"
+    # The compiler's own error, so the update screen names the cause instead
+    # of pointing at output it does not show (TASK-2244).
+    failed_why="${NODE_PTY_FAILURE:-}"
   # A CONDITION, like its two neighbours above, and for a reason the neighbours
   # did not have: errexit is live in this function (both callers invoke it
   # bare), and set_previous_build_aside's `rm -rf` and `mv` can legitimately
@@ -3412,6 +4370,8 @@ do_rebuild() {
       echo "Error: rebuild failed (exit $rc) — $failed_at was killed by the kernel's OOM killer: the device ran out of memory during the build." >&2
     elif [ "$sig" -ne 0 ]; then
       echo "Error: rebuild failed (exit $rc) — $failed_at was killed by signal $sig (no OOM kill in the kernel log; a stop, a timeout or an operator looks the same)." >&2
+    elif [ -n "$failed_why" ]; then
+      echo "Error: rebuild failed (exit $rc) — $failed_at did not succeed: $failed_why" >&2
     else
       echo "Error: rebuild failed (exit $rc) — $failed_at did not succeed." >&2
     fi
@@ -3427,6 +4387,13 @@ do_rebuild() {
     # before it.
     resume_paused_engines
     report_gateway_build_pause
+    # A web terminal that works on the box this leaves (TASK-2244): after the
+    # dashboard and the engines, because it can take minutes and neither waits
+    # on it. Not when node-pty was what failed: both header sources were tried
+    # moments ago, and the same attempt again can only fail the same way.
+    if [ "$pty_failed" -eq 0 ]; then
+      ensure_node_pty_after_rollback || true
+    fi
     return "$rc"
   fi
 
@@ -3444,6 +4411,9 @@ do_rebuild() {
     echo "  Leaving the paused engines to the reboot that follows this step"
     forget_paused_engines
   else
+    if [ "$gateway_to_update" = "1" ]; then
+      hand_paused_gateway_to_update
+    fi
     resume_paused_engines
     report_gateway_build_pause
   fi
@@ -3533,7 +4503,234 @@ ensure_pipx() {
   as_clawbox_login "command -v pipx" &>/dev/null
 }
 
+# dpkg_installed PACKAGE — true when dpkg has PACKAGE installed, whatever apt was
+# asked to want (install, hold or deinstall); never an apt-get exit code.
+# ClawBox Vault's storage (vault/src/server/pass.ts): `pass` keeps each login as
+# a GnuPG-encrypted file in a git-tracked folder, so the vault needs pass and
+# gnupg (and git, which the base package line carries). Asked by step_apt_update,
+# which every full install and every in-app update runs, and again by
+# ensure_vault_service for a box that reached post_update by another road.
+#
+# Never fatal to its caller: without them the vault still runs and says what is
+# missing in its own window. Which ones are missing is read back from dpkg,
+# never from apt-get's exit code. Returns 1 when one is still missing.
+ensure_vault_packages() {
+  local pkg="" missing=""
+  for pkg in pass gnupg; do
+    dpkg_installed "$pkg" || missing="$missing $pkg"
+  done
+  [ -n "$missing" ] || return 0
+  if ! wait_for_apt; then
+    echo "  Warning: ClawBox Vault packages not installed:$missing (apt is busy or dpkg could not be recovered)" >&2
+    return 1
+  fi
+  # shellcheck disable=SC2086  # a list of package names, split on purpose
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $missing || true
+  missing=""
+  for pkg in pass gnupg; do
+    dpkg_installed "$pkg" || missing="$missing $pkg"
+  done
+  [ -z "$missing" ] && return 0
+  echo "  Warning: ClawBox Vault packages not installed:$missing" >&2
+  return 1
+}
+
+# ClawBox Vault after an update. The in-app updater needs nothing from here:
+# its apt_update step installs the packages and its rebuild step starts every
+# enabled clawbox-* unit (restart_services_after_update). This is for the box
+# that reaches post_update by another road — a hand-run force-update.sh, a
+# heal, an update that stopped after the rebuild — where neither of those ran:
+# the unit step_systemd_services has just installed and enabled would otherwise
+# stay down until the next boot. On that road nothing restarts a vault that IS
+# running either, so it would keep serving the previous build (from a vault/
+# folder the checkout may have replaced under it) until the next boot: such a
+# vault is restarted. One the updater has already restarted onto this build is
+# left alone. Idempotent; a failure is a warning.
+ensure_vault_service() {
+  local rc=0 old_pid
+  ensure_vault_packages || rc=1
+  [ "$(systemctl is-enabled clawbox-vault.service 2>/dev/null || true)" = enabled ] || return "$rc"
+  if ! systemctl is-active --quiet clawbox-vault.service 2>/dev/null; then
+    echo "  Starting clawbox-vault.service: enabled and not running"
+    if ! systemctl start --no-block clawbox-vault.service; then
+      echo "  Warning: could not start clawbox-vault.service" >&2
+      rc=1
+    elif ! vault_came_up 0; then
+      echo "  Warning: clawbox-vault.service did not stay up after its start (journalctl -u clawbox-vault.service)" >&2
+      rc=1
+    fi
+  elif vault_runs_previous_build; then
+    echo "  Restarting clawbox-vault.service: it is still running the previous build"
+    old_pid="$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)"
+    if ! systemctl restart --no-block clawbox-vault.service; then
+      echo "  Warning: could not restart clawbox-vault.service" >&2
+      rc=1
+    elif ! vault_came_up "${old_pid:-0}"; then
+      echo "  Warning: clawbox-vault.service did not stay up after its restart (journalctl -u clawbox-vault.service)" >&2
+      rc=1
+    fi
+  fi
+  return "$rc"
+}
+
+# vault_came_up OLD_PID — after a --no-block start or restart: within
+# VAULT_UP_WAIT_S (30) seconds of wall clock the unit is active on a MainPID
+# other than OLD_PID (0 for a start), and is still active on that same pid
+# VAULT_UP_STEADY_S (3) seconds later, so a launcher that exits at once is
+# reported here instead of only in the journal. It only watches: the unit's
+# own Restart=on-failure retries are left to systemd either way. The deadline
+# is $SECONDS as a delta, asked first, as in restore_previous_build: a count of
+# sleeps would stretch by however long each systemctl query took. The queries
+# themselves are not cut short (nothing in the installer is, for being slow).
+# Each look is ONE systemctl call (vault_active_pid): a stop that begins between
+# an is-active and a show leaves the unit `deactivating` on the very same
+# MainPID, which two calls would take for a vault that is up.
+vault_came_up() {
+  local old=${1:-0} limit=${VAULT_UP_WAIT_S:-30} steady=${VAULT_UP_STEADY_S:-3} pid started=$SECONDS
+  while [ $((SECONDS - started)) -lt "$limit" ]; do
+    pid="$(vault_active_pid)"
+    case "$pid" in
+      '' | 0 | *[!0-9]* | "$old") ;;
+      *)
+        sleep "$steady"
+        [ "$(vault_active_pid)" = "$pid" ] && return 0
+        ;;
+    esac
+    sleep 1
+  done
+  return 1
+}
+
+# vault_active_pid — the vault's MainPID when it is `active` right now, else
+# nothing. ActiveState, SubState and MainPID come from ONE `systemctl show`, so
+# the state and the pid are the same observation. show prints the properties in
+# systemd's own order, not the one asked for: each line is matched by name.
+vault_active_pid() {
+  local line state="" pid=""
+  while IFS= read -r line; do
+    case "$line" in
+      ActiveState=*) state="${line#ActiveState=}" ;;
+      MainPID=*) pid="${line#MainPID=}" ;;
+    esac
+  done < <(systemctl show clawbox-vault.service -p ActiveState,SubState,MainPID 2>/dev/null || true)
+  if [ "$state" = active ]; then
+    printf '%s\n' "$pid"
+  fi
+}
+
+# Whether the running vault started before the build on disk: its working
+# directory is no longer the checkout's vault/ (replaced, so "(deleted)"), or a
+# file it runs from changed after it started. Unknown (no pid, no start time)
+# is "no": a restart nobody can justify is not made.
+vault_runs_previous_build() {
+  local pid cwd started dir="$PROJECT_DIR/vault"
+  pid="$(systemctl show clawbox-vault.service -p MainPID --value 2>/dev/null || true)"
+  case "$pid" in '' | 0 | *[!0-9]*) return 1 ;; esac
+  cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
+  [ -n "$cwd" ] || return 1
+  [ "$cwd" = "$(readlink -f "$dir" 2>/dev/null || echo "$dir")" ] || return 0
+  started="$(date -d "$(ps -o lstart= -p "$pid" 2>/dev/null)" +%s 2>/dev/null || true)"
+  case "$started" in '' | *[!0-9]*) return 1 ;; esac
+  # ps has whole seconds: a file of the vault's own start second is not "newer".
+  [ -n "$(find "$dir/src" "$dir/extension" "$dir/package.json" "$PROJECT_DIR/scripts/start-vault.sh" \
+    -type f -newermt "@$((started + 1))" -print -quit 2>/dev/null)" ]
+}
+
+dpkg_installed() {
+  case "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null || true)" in
+    *' ok installed') return 0 ;;
+  esac
+  return 1
+}
+
+# Ubuntu's logrotate and its daily timer, for step_apt_update. Jetson images can
+# ship without the package, and then rsyslog's /var/log/syslog, kern.log,
+# auth.log and ufw.log are never rotated (one board's syslog held 61 days in
+# 179 MB) although the rsyslog and ufw packages' own weekly policy sits in
+# /etc/logrotate.d. ClawBox adds no policy of its own and never forces a
+# rotation: the package's first run only records state, and its weekly rules
+# take it from there.
+#
+# Never fails the step. Its own apt line, because under errexit a mirror that
+# cannot serve logrotate would fail the base install with it; a box left without
+# it retries on its next update. The package's postinst enables and starts the
+# timer on a first install, so the timer line is a safety net for a box where it
+# was disabled or stopped since; a masked timer stays masked. The closing line
+# is read back from systemd, never taken from an exit code above it.
+ensure_logrotate() {
+  if ! dpkg_installed logrotate; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq logrotate || true
+    if ! dpkg_installed logrotate; then
+      echo "  Warning: logrotate not installed - /var/log text logs keep growing until an update installs it" >&2
+      return 0
+    fi
+  fi
+  if ! { systemctl is-enabled --quiet logrotate.timer && systemctl is-active --quiet logrotate.timer; }; then
+    # The verdict is the read-back below: enable can succeed and the start fail.
+    systemctl enable --now logrotate.timer || true
+  fi
+  if systemctl is-enabled --quiet logrotate.timer && systemctl is-active --quiet logrotate.timer; then
+    echo "  logrotate: installed, daily timer enabled"
+  else
+    echo "  Warning: logrotate.timer could not be enabled and started - /var/log text logs are not rotated" >&2
+  fi
+}
+
+# refresh_root_update_log_limit [UNIT_DIR] — makes the NEXT root step start
+# under the root update unit's journald rate limit (the LogRateLimit* lines of
+# config/clawbox-root-update@.service). The update screen's raw log is these
+# units' journals (src/lib/update-raw-log.ts), and journald fixes a unit's
+# limit when the unit starts: step_systemd_services re-copies the unit inside
+# rebuild_reboot, which is too late for rebuild_reboot itself, so the first
+# update from a build whose installed unit lacks the limit would rebuild under
+# journald's default and lose lines.
+#
+# A bridge, never a second copy of the setting: while the INSTALLED unit lacks
+# the lines, they are installed as a drop-in (logging only — never ExecStart —
+# so it is safe before the root-owned copies the unit names are current); once
+# the installed unit carries them itself, the drop-in is removed. So
+# step_apt_update, first in every update and before its rebuild, bridges an
+# older unit, and step_systemd_services, right after copying the new unit,
+# takes the bridge down — a box left on an older build later has that build's
+# unit and nothing of this one's. daemon-reload only when something changed.
+# Never fails the step it runs in. TASK-2428.
+refresh_root_update_log_limit() {
+  local unit_dir="${1:-/etc/systemd/system}"
+  local unit="$SRC_DIR/config/clawbox-root-update@.service"
+  local installed="$unit_dir/clawbox-root-update@.service"
+  local dir="$unit_dir/clawbox-root-update@.service.d"
+  local conf="$dir/50-log-rate-limit.conf" lines have want
+  lines="$(grep -E '^LogRateLimit(IntervalSec|Burst)=' "$unit" 2>/dev/null)" || true
+  have="$(grep -E '^LogRateLimit(IntervalSec|Burst)=' "$installed" 2>/dev/null)" || true
+  if [ -z "$lines" ] || [ "$have" = "$lines" ]; then
+    # Nothing to bridge: the unit as installed already has this limit (or this
+    # build sets none).
+    [ -e "$conf" ] || return 0
+    if rm -f "$conf"; then
+      rmdir "$dir" 2>/dev/null || true
+      echo "  Root update steps: the installed unit carries its journald limit; bridge drop-in removed"
+      systemctl daemon-reload || echo "  Warning: systemctl daemon-reload after removing the root update unit's log-limit drop-in failed (non-fatal)" >&2
+    else
+      echo "  Warning: could not remove $conf (non-fatal)" >&2
+    fi
+    return 0
+  fi
+  want="$(printf '# Installed by install.sh (refresh_root_update_log_limit) until the unit itself carries these lines.\n[Service]\n%s' "$lines")"
+  [ -f "$conf" ] && [ "$(cat "$conf" 2>/dev/null)" = "$want" ] && return 0
+  if mkdir -p "$dir" && printf '%s\n' "$want" > "$conf.tmp" && mv -f "$conf.tmp" "$conf"; then
+    echo "  Root update steps: journald limit bridged with a drop-in until the new unit is installed ($(printf '%s' "$lines" | tr '\n' ' '))"
+    systemctl daemon-reload || echo "  Warning: systemctl daemon-reload after the root update unit's log limit failed (non-fatal)" >&2
+  else
+    rm -f "$conf.tmp" 2>/dev/null || true
+    echo "  Warning: could not install the root update unit's log limit at $conf (non-fatal)" >&2
+  fi
+  return 0
+}
+
 step_apt_update() {
+  # First, before anything that can fail: every later root step of the update
+  # (rebuild_reboot included) keeps all its lines.
+  refresh_root_update_log_limit
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   # poppler-utils is `pdftotext`, and it is the ONLY reason Memory Shard can
@@ -3548,15 +4745,31 @@ step_apt_update() {
   # filters those formats need (and pulls in libreoffice-common, which owns the
   # /usr/bin/libreoffice launcher) — the full `libreoffice` metapackage would add
   # Calc, Impress, Base and a Java runtime for nothing the box ever converts.
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables ufw iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer
+  #
+  # acl is `setfacl`: on an organisation box the Files app serves a member of
+  # staff their own home, which the web server (the owner's account) reaches
+  # through the ACL config/clawbox-user-helper.sh `home_access` lays on it
+  # (TASK-2377). Ubuntu images carry it already; naming it keeps it true.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables ufw iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer acl
+  # Never part of the line above: see ensure_logrotate.
+  ensure_logrotate
   # Document libraries for the agent: Word (python-docx), Excel (openpyxl) and
   # PDF writing (reportlab). "Make me an offer / a quote / a spreadsheet" is an
   # everyday chat request, and without these the agent spent the first minutes
   # of each one pip-installing them. Distro packages, so they need no network
   # index and update with the OS. Separate and non-fatal: a mirror that lacks
-  # one of them must not fail the base install above.
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-docx python3-openpyxl python3-reportlab \
-    || echo "  Warning: document libraries (python3-docx/openpyxl/reportlab) not installed" >&2
+  # one of them must not fail the base install above. Which ones are missing is
+  # read back from dpkg, never from apt-get's exit code.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-docx python3-openpyxl python3-reportlab || true
+  local doc_lib="" doc_missing=""
+  for doc_lib in python3-docx python3-openpyxl python3-reportlab; do
+    dpkg_installed "$doc_lib" || doc_missing="$doc_missing $doc_lib"
+  done
+  [ -z "$doc_missing" ] || echo "  Warning: document libraries not installed:$doc_missing" >&2
+  # ClawBox Vault's storage, pass and gnupg (git is in the base line above).
+  # Separate and non-fatal, like the document libraries: a mirror without one
+  # of them must not fail the base install. See ensure_vault_packages.
+  ensure_vault_packages || true
   # Node.js for production server and OpenClaw. The floor is the pinned core's
   # `engines.node` ($OPENCLAW_NODE_ENGINE): 2026.9.3 refuses Node 22 outright,
   # so an older ClawBox image — every one of which shipped Node 22 — takes the
@@ -3632,10 +4845,12 @@ step_network_setup() {
     fi
   fi
   echo "  WiFi interface: $WIFI_IFACE"
-  # Persist for scripts and services
-  mkdir -p "$PROJECT_DIR/data"
-  printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" > "$IFACE_ENV"
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data" "$IFACE_ENV"
+  # Persist for scripts and services, as the service account: data/ and this
+  # file are its own. umask 022, not 077: a fresh file is 0644, as it was when
+  # root wrote it.
+  hand_over_checkout
+  as_clawbox mkdir -p "$PROJECT_DIR/data"
+  printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" | as_clawbox sh -c 'umask 022 && cat > "$1"' sh "$IFACE_ENV"
   # Also write to root-owned path for clawbox-root-update@ service
   mkdir -p /etc/clawbox
   printf 'NETWORK_INTERFACE=%s\n' "$WIFI_IFACE" > /etc/clawbox/network.env
@@ -4144,12 +5359,10 @@ persist_update_branch_pin() {
 
   local pin_file="$PROJECT_DIR/.update-branch"
 
-  # $PROJECT_DIR belongs to $CLAWBOX_USER and this function runs as root, so
-  # every path under it is writable by an account the writer outranks. A symlink
-  # left at the pin path would redirect the write, the chown and the chmod onto
-  # whatever it points at, and `[ -f ]` follows one. Refuse instead. The write
-  # goes through a temp file whose name mktemp chooses (see below), and `mv`
-  # replaces the pin's directory entry rather than following it.
+  # $PROJECT_DIR belongs to $CLAWBOX_USER, so the pin is that account's file
+  # and that account writes it and sets its mode; root only reads it. A symlink
+  # left at the pin path is refused, as before: `[ -f ]` follows one, and the
+  # read below would read through it.
   if [ -L "$pin_file" ]; then
     echo "  WARN: not pinning update branch — $pin_file is a symlink" >&2
     return 0
@@ -4180,44 +5393,26 @@ persist_update_branch_pin() {
     else
       echo "  Pinning update branch to '$branch' ($pin_source)"
     fi
-    # Stage the write in a directory of our own rather than beside the pin.
+    # The account writes the pin: a temp file beside it, named by mktemp (which
+    # makes it 0600 whatever the umask, so the mode is set explicitly), then a
+    # rename over the pin's directory entry, told the target is no directory.
+    # The branch travels on stdin. A failed write removes its temp: the pin and
+    # its temps are gitignored, and the tree stays clean either way.
     #
-    # A temp file placed directly in $PROJECT_DIR can be swapped for a symlink
-    # before the printf/chown/chmod land, because $PROJECT_DIR is writable by
-    # $CLAWBOX_USER. With a fixed name that needs no timing at all; the staging
-    # directory means an attacker must instead win a race on the directory
-    # entry between the mkdir and the write. The final step is a rename, which
-    # replaces the pin's directory entry and never follows a symlink left at it.
-    #
-    # It does NOT close that race, and 0700 is not what stops it: unlinking an
-    # entry is governed by the parent's write bit, which $CLAWBOX_USER has, so
-    # $stage can still be rmdir'd and replaced between the two lines below.
-    # Closing it needs descriptor-bound openat/renameat with no-follow
-    # semantics, which POSIX shell cannot express.
-    #
-    # That residual is accepted deliberately, and the reason is three lines
-    # further down: sync_repo_to_update_target runs `git reset --hard` as root
-    # inside this same app-writable tree and then `chown -R` over all of it.
-    # Whoever can win the race below already has a far larger version of the
-    # same primitive in the same step. Hardening the pin write past this point
-    # while that stands would be motion, not progress — if this class is worth
-    # closing it has to be closed for the tree, not for one file in it.
-    local stage="$PROJECT_DIR/.update-branch.stage" tmp_pin
-    rm -rf "$stage"
-    if ! (umask 077 && mkdir "$stage"); then
-      echo "  WARN: could not stage the update-branch pin write" >&2
+    # First, anything an earlier root run left root-owned there — the checkout
+    # someone cloned as root, or a pin root wrote — is handed back with the
+    # checkout whole, so the account's write lands wherever root's did. The
+    # hand-over's scan takes any starting point, the pin file included.
+    hand_over_checkout .update-branch
+    if printf '%s\n' "$branch" | as_clawbox sh -c '
+      umask 022
+      t=$(mktemp "$1.XXXXXX") || exit 1
+      if cat > "$t" && chmod 644 "$t" && mv -f -T "$t" "$1"; then exit 0; fi
+      rm -f "$t"
+      exit 1
+    ' sh "$pin_file"; then
       return 0
     fi
-    tmp_pin="$stage/pin"
-    if printf '%s\n' "$branch" > "$tmp_pin" \
-      && chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp_pin" \
-      && chmod 644 "$tmp_pin" \
-      && mv -f "$tmp_pin" "$pin_file"; then
-      rm -rf "$stage"
-      return 0
-    fi
-    # Never leave the device's working tree holding staging litter.
-    rm -rf "$stage"
     echo "  WARN: failed to write the update-branch pin" >&2
     return 0
   fi
@@ -4232,13 +5427,15 @@ persist_update_branch_pin() {
   # it unconditionally is what makes a pin left behind by a hand-written
   # `sudo sh -c 'echo beta > .update-branch'` heal on the next run. 0644, not
   # 0600: this is a build record, not a secret, and root reads it during the
-  # bootstrap re-exec before it drops to $CLAWBOX_USER.
+  # bootstrap re-exec before it drops to $CLAWBOX_USER. The owner comes back
+  # with the checkout whole (hand_over_checkout), and the account sets the
+  # mode of its own file; neither ends the step.
   [ -n "$existing" ] || return 0
   if [ -n "$branch" ]; then
     echo "  Update branch already pinned to '$branch'"
   fi
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$pin_file"
-  chmod 644 "$pin_file"
+  hand_over_checkout .update-branch
+  as_clawbox chmod 644 -- "$pin_file" 2>/dev/null || echo "  WARN: could not reset the update-branch pin's mode" >&2
 }
 
 sync_repo_to_update_target() {
@@ -4416,8 +5613,10 @@ step_bootstrap_updater() {
   # place it is an untracked file in the project root, which the drift engine
   # reads as "the code on disk matches no commit" — it raised the About-screen
   # drift banner on a healthy box and stamped `dirty: true` on clean builds.
-  # It is gitignored now, so `git clean -fd` will not take it: drop it here.
-  rm -f "$PROJECT_DIR/.deployed-sha"
+  # It is gitignored now, so `git clean -fd` will not take it: drop it here,
+  # as the clawbox user whose checkout it is in. A file nothing reads is no
+  # reason to stop an update, so a removal that fails is let go.
+  as_clawbox rm -f -- "$PROJECT_DIR/.deployed-sha" 2>/dev/null || true
   sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
   handover_legacy_updater
 }
@@ -4452,7 +5651,8 @@ step_git_pull() {
   resolve_update_branch
   [ "${UPDATE_TARGET_UNRESOLVED:-0}" -eq 1 ] && refuse_unresolved_update_target
   echo "  Repository exists, hard-syncing to '$UPDATE_TARGET_LOCAL'..."
-  rm -f "$PROJECT_DIR/.deployed-sha"
+  # step_bootstrap_updater says why; never fatal.
+  as_clawbox rm -f -- "$PROJECT_DIR/.deployed-sha" 2>/dev/null || true
   sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
 }
 
@@ -5354,11 +6554,33 @@ ensure_embed_model_cached() {
   require_safe_hf_ref "EMBED_HF_REPO" "$HF_REPO" || return 1
   require_safe_hf_ref "EMBED_HF_FILE" "$HF_FILE" || return 1
   MODEL_PATH="$MODEL_DIR/$HF_FILE"
-  mkdir -p "$MODEL_DIR"
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/embed"
+  # The cache is the clawbox user's, in its checkout: whatever under data/embed
+  # is not that user's is handed back with the checkout whole (hand_over_checkout
+  # says why never a path below it), then that user makes the directory, which
+  # the disk check below needs, and everything after is its own work.
+  hand_over_checkout data/embed
+  as_clawbox mkdir -p -- "$MODEL_DIR"
   if [ -f "$MODEL_PATH" ]; then
     echo "  Memory-search model already cached (${HF_FILE})"
     return 0
+  fi
+  # The shipped file is the one whose size and sha256 the catalog knows
+  # (LOCAL_EMBEDDING_MODELS in src/lib/embed-runtime-ids.ts;
+  # local-embedding-models.test.ts pins these literals to it). A file .env
+  # names instead is fetched as before, unverified.
+  local KNOWN_BYTES="" KNOWN_SHA="" free_kb got
+  if [ "$HF_REPO" = "Qwen/Qwen3-Embedding-0.6B-GGUF" ] && [ "$HF_FILE" = "Qwen3-Embedding-0.6B-Q8_0.gguf" ]; then
+    KNOWN_BYTES=639150592
+    KNOWN_SHA=06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439
+  fi
+  # Disk first (TASK-2411): the file plus half a gigabyte, so a full disk is
+  # never what the download leaves behind. The Hub CLI resumes a partial file.
+  if [ -n "$KNOWN_BYTES" ]; then
+    free_kb="$(df -Pk "$MODEL_DIR" 2>/dev/null | awk 'NR == 2 {print $4}')"
+    if [ -n "$free_kb" ] && [ "$free_kb" -lt $(( (KNOWN_BYTES + 536870912) / 1024 )) ]; then
+      echo "Error: not enough disk space for the memory-search model: it needs $(( (KNOWN_BYTES + 536870912) / 1000000 )) MB free, $(( free_kb * 1024 / 1000000 )) MB free" >&2
+      return 1
+    fi
   fi
   echo "  Downloading the memory-search model (${HF_FILE}, ~639 MB)..."
   if ! as_clawbox_login "hf download \"$HF_REPO\" \"$HF_FILE\" --local-dir \"$MODEL_DIR\""; then
@@ -5369,7 +6591,23 @@ ensure_embed_model_cached() {
     echo "Error: download completed but ${MODEL_PATH} was not found" >&2
     return 1
   fi
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data/embed"
+  # Verified before anything uses it: a mismatch is deleted, so the next
+  # attempt starts clean instead of "already cached" over a bad file. Read and
+  # removed by the clawbox user whose download it is: the name is its to
+  # change, and root would read or remove whatever it points at.
+  if [ -n "$KNOWN_SHA" ]; then
+    # A file the account cannot read is "unreadable" below, not an errexit.
+    got="$(as_clawbox sha256sum -- "$MODEL_PATH" 2>/dev/null | awk '{print $1}')" || got=""
+    if [ "$got" != "$KNOWN_SHA" ]; then
+      if as_clawbox rm -f -- "$MODEL_PATH"; then
+        echo "Error: the memory-search model did not verify (sha256 ${got:-unreadable}, expected ${KNOWN_SHA}); deleted it" >&2
+      else
+        echo "Error: the memory-search model did not verify (sha256 ${got:-unreadable}, expected ${KNOWN_SHA}); could not delete it" >&2
+      fi
+      return 1
+    fi
+    echo "  Memory-search model verified (sha256)"
+  fi
   echo "  Memory-search model cached for offline use"
 }
 
@@ -5413,6 +6651,97 @@ step_embed_model() {
 # in ALL_SERVICES on hermes, and step_gateway_setup early-returns.
 #
 # Idempotent, and never fatal when the unit was never installed (fresh flash).
+# The OpenClaw gateway's liveness watchdog (TASK-2490): a root oneshot run once
+# a minute by clawbox-gateway-watchdog.timer, which restarts a gateway whose
+# process is alive but has stopped answering HTTP — the outage `Restart=always`
+# cannot see, because nothing exits. scripts/gateway-watchdog.sh says when it
+# acts and when it stands down.
+#
+# It belongs exactly where the gateway does, so it has two halves and every
+# caller is idempotent:
+#
+#   install_gateway_watchdog  step_systemd_services (fresh install and every
+#                             in-app update, through post_update) and
+#                             step_gateway_setup (the edition choice and the
+#                             harness swap TO OpenClaw run that step, not this
+#                             one's caller)
+#   remove_gateway_watchdog   step_edition_gateway_state's Hermes branch (the
+#                             swap and choice TO Hermes, and every Hermes
+#                             update), and step_systemd_services on any box
+#                             without an OpenClaw harness
+#
+# Both check their own steps and return non-zero on a failure, rather than
+# leaning on errexit: every caller runs them in a condition context.
+GATEWAY_WATCHDOG_UNITS=(clawbox-gateway-watchdog.service clawbox-gateway-watchdog.timer)
+
+install_gateway_watchdog() {
+  local unit failed=0
+  # The unit ExecStarts the ROOT-OWNED copy, and that copy sources the guard
+  # from beside itself: both land before the unit that points at them.
+  # install_root_libexec does the same on the systemd_services path; repeating
+  # it here is what makes gateway_setup alone enough.
+  if ! { install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR" \
+         && [ -f "$SRC_DIR/scripts/gateway-unit-guard.sh" ] \
+         && [ -f "$SRC_DIR/scripts/gateway-watchdog.sh" ] \
+         && install_root_file "$SRC_DIR/scripts/gateway-unit-guard.sh" "$ROOT_LIBEXEC_DIR/gateway-unit-guard.sh" 0644 \
+         && install_root_file "$SRC_DIR/scripts/gateway-watchdog.sh" "$ROOT_LIBEXEC_DIR/gateway-watchdog.sh"; }; then
+    echo "  Warning: could not install the gateway watchdog's root-owned script; leaving its units as they were" >&2
+    return 1
+  fi
+  for unit in "${GATEWAY_WATCHDOG_UNITS[@]}"; do
+    if [ ! -f "$SRC_DIR/config/$unit" ] \
+       || ! install -o root -g root -m 0644 "$SRC_DIR/config/$unit" "/etc/systemd/system/$unit"; then
+      echo "  Warning: could not install $unit" >&2
+      failed=1
+    fi
+  done
+  [ "$failed" -eq 0 ] || return 1
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  if ! systemctl enable --now clawbox-gateway-watchdog.timer >/dev/null 2>&1; then
+    echo "  Warning: could not enable clawbox-gateway-watchdog.timer" >&2
+    return 1
+  fi
+  echo "  Gateway liveness watchdog installed (clawbox-gateway-watchdog.timer)"
+}
+
+remove_gateway_watchdog() {
+  local unit present=0
+  for unit in "${GATEWAY_WATCHDOG_UNITS[@]}"; do
+    if [ -e "/etc/systemd/system/$unit" ] || [ -L "/etc/systemd/system/$unit" ]; then
+      present=1
+    fi
+  done
+  [ -e "$ROOT_LIBEXEC_DIR/gateway-watchdog.sh" ] && present=1
+  # Nothing to do is the common case — every Hermes update after the first —
+  # and it says nothing.
+  [ "$present" -eq 1 ] || return 0
+  systemctl disable --now clawbox-gateway-watchdog.timer >/dev/null 2>&1 || true
+  systemctl stop clawbox-gateway-watchdog.service >/dev/null 2>&1 || true
+  for unit in "${GATEWAY_WATCHDOG_UNITS[@]}"; do
+    rm -f "/etc/systemd/system/$unit"
+  done
+  # The guard stays: the NetworkManager waiter sources it on every edition.
+  rm -f "$ROOT_LIBEXEC_DIR/gateway-watchdog.sh" /run/clawbox/gateway-watchdog.state \
+    /run/clawbox/gateway-watchdog.restarts
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  systemctl reset-failed clawbox-gateway-watchdog.service clawbox-gateway-watchdog.timer >/dev/null 2>&1 || true
+  # Every piece is checked, not just the timer: a unit or a script left behind is
+  # a partial removal, and saying "removed" over it would leave nothing that
+  # points at the repair.
+  local left=()
+  for unit in "${GATEWAY_WATCHDOG_UNITS[@]}"; do
+    if [ -e "/etc/systemd/system/$unit" ] || [ -L "/etc/systemd/system/$unit" ]; then
+      left+=("/etc/systemd/system/$unit")
+    fi
+  done
+  [ -e "$ROOT_LIBEXEC_DIR/gateway-watchdog.sh" ] && left+=("$ROOT_LIBEXEC_DIR/gateway-watchdog.sh")
+  if [ "${#left[@]}" -gt 0 ]; then
+    echo "  Warning: the gateway watchdog was only partly removed; still present: ${left[*]}" >&2
+    return 1
+  fi
+  echo "  Gateway liveness watchdog removed (this edition runs no OpenClaw gateway)"
+}
+
 step_edition_gateway_state() {
   local unit="clawbox-gateway.service"
   if is_hermes_edition; then
@@ -5429,6 +6758,10 @@ step_edition_gateway_state() {
       active|activating|reloading) systemctl stop "$unit" >/dev/null 2>&1 || true ;;
     esac
     echo "  [hermes edition] clawbox-gateway.service stopped, disabled and masked"
+    # Its liveness watchdog goes with it (TASK-2490). It would only stand down
+    # on the masked unit every minute, but a Hermes box carries nothing of the
+    # OpenClaw gateway's.
+    remove_gateway_watchdog || echo "  Warning: the gateway watchdog is still installed on this Hermes box" >&2
   else
     # Re-installing a previously-Hermes box as openclaw/dual: the mask is a
     # symlink to /dev/null at the exact path step_systemd_services cp's the unit
@@ -5892,7 +7225,9 @@ harness_swap_openclaw_runnable() {
     HARNESS_SWAP_PROBE_SAID="its command is missing"
     return 1
   fi
-  if said="$("$OPENCLAW_BIN" --version 2>&1 >/dev/null)"; then
+  # As the service account, like the Hermes probe above: the launcher is a file
+  # in its npm prefix, and root runs nothing from there.
+  if said="$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" "$OPENCLAW_BIN" --version 2>&1 >/dev/null)"; then
     return 0
   fi
   harness_swap_print_probe "$said"
@@ -6067,7 +7402,9 @@ step_harness_swap() {
   local name
   name="$(harness_swap_label "$target")"
   if [ "$recorded" = "$target" ]; then
-    rm -f "$req"
+    # The route wrote the request into data/, the clawbox user's, so that user
+    # removes it; one left behind is answered here again.
+    as_clawbox rm -f -- "$req" 2>/dev/null || echo "  Warning: could not remove $req" >&2
     echo "  Already the $name edition — nothing to do"
     return 0
   fi
@@ -6079,7 +7416,7 @@ step_harness_swap() {
   echo "[harness-swap] phase=done"
   # Only now: a request left on disk is how a failed swap stays tellable from
   # a finished one, and deleting it after a failure is the route's to do.
-  rm -f "$req"
+  as_clawbox rm -f -- "$req" 2>/dev/null || echo "  Warning: could not remove $req" >&2
   echo "  This box is now the $name edition"
 }
 
@@ -6247,9 +7584,11 @@ edition_select_provision_openclaw() {
 #                     factory OpenClaw box has none of it. The shared
 #                     ~/.cache/ms-playwright stays.
 #
-# As the clawbox user first — the files are the owner's — and as root only for
-# what that leaves behind (a root-owned __pycache__ from a root probe). `rm`
-# removes a planted link as a link and never follows one inside the tree.
+# As the clawbox user only — the files are the owner's, under entries of its
+# home it controls. What its first removal leaves behind (a root-owned
+# __pycache__ from a root probe) is handed back to it, walked to from the home,
+# and it removes that itself. `rm` removes a planted link as a link and never
+# follows one inside the tree.
 # NON-FATAL: behaviour follows the lock, so a box that keeps both on disk
 # still runs exactly one agent; the miss is reported, never hidden.
 edition_select_remove_other() {
@@ -6264,7 +7603,8 @@ edition_select_remove_other() {
     [ -e "$p" ] || [ -L "$p" ] || continue
     runuser -u "$CLAWBOX_USER" -- rm -rf --one-file-system -- "$p" >/dev/null 2>&1 || true
     if [ -e "$p" ] || [ -L "$p" ]; then
-      rm -rf --one-file-system -- "$p" >/dev/null 2>&1 || true
+      hand_over_home_path -R "$p"
+      runuser -u "$CLAWBOX_USER" -- rm -rf --one-file-system -- "$p" >/dev/null 2>&1 || true
     fi
     if [ -e "$p" ] || [ -L "$p" ]; then
       echo "  Warning: could not remove $p — it stays on disk, unused" >&2
@@ -6331,7 +7671,9 @@ step_edition_select() {
         return 1
       fi
       if [ "$pending" != "$target" ]; then
-        rm -f "$req"
+        # The route wrote the request into data/, the clawbox user's, so that
+        # user removes it; one left behind is answered here again.
+        as_clawbox rm -f -- "$req" 2>/dev/null || echo "  Warning: could not remove $req" >&2
         echo "  Already set up with $name — nothing to do"
         return 0
       fi
@@ -6373,7 +7715,7 @@ step_edition_select() {
   fi
 
   echo "[edition-select] phase=done"
-  rm -f "$req"
+  as_clawbox rm -f -- "$req" 2>/dev/null || echo "  Warning: could not remove $req" >&2
   echo "  This box is now set up with $name"
   edition_select_restart_web "$name"
 }
@@ -6531,8 +7873,8 @@ promote_staged_openclaw_core() {
   local live="$NPM_PREFIX/lib/node_modules/openclaw"
   local previous="$NPM_PREFIX/lib/node_modules/.openclaw-previous"
   local entry name
-  # This is called as `promote … || return 1`, which switches errexit OFF for
-  # its whole body: every step below that can fail is checked by hand.
+  # This is called as `promote … || …`, which switches errexit OFF for its
+  # whole body: every step below that can fail is checked by hand.
   # THE FLUSH IS THE POINT. npm's writes sit in the page cache until the kernel
   # gets round to them (ext4's delayed allocation, seconds to tens of seconds):
   # on 2026-09-16 npm exited 0 at 21:31:02, the box stopped at ~21:31:07-35,
@@ -6708,15 +8050,16 @@ remove_shadowing_system_openclaw() {
 }
 
 # ── step_openclaw_install's fast path ───────────────────────────────────────
-# The full path stops the gateway, runs `doctor --fix`, force-reinstalls every
-# external plugin and starts the gateway again: one to three minutes, with chat
+# The full path stops the gateway, runs `doctor --fix`, reinstalls the external
+# plugins doctor left behind and starts the gateway again: one to three minutes, with chat
 # down throughout — and on most updates it changes nothing, because the pin
 # did not move. The fast path returns BEFORE the stop, and only on positive
 # evidence that the full path has nothing to do:
 #   1. the core answers the target (the caller's own check, made first);
 #   2. the plugins ClawBox manages are at the version the full path would
-#      install, and the core's plugin list reports nothing broken, orphaned or
-#      waiting for consent;
+#      install, or on a correction release at the base it leaves them at, and
+#      the core's plugin list reports nothing broken, orphaned or waiting for
+#      consent;
 #   3. the marker says the full path last FINISHED for this very target, and on
 #      OpenClaw 2 doctor's own record agrees: its last run for this core
 #      completed and no database is behind (or ahead of) the core's schema;
@@ -6825,7 +8168,11 @@ print("ok")
   # The core's own inventory, read by the same rules the refresh below uses
   # (`origin: bundled` ships with the core; ids normalised the same way). A
   # ClawBox plugin from the @openclaw scope must be at the target, as the
-  # refresh would pin it; clawbox-email-directives must match the copy in the
+  # refresh would pin it, or on a correction release (X.Y.Z-N) at its base
+  # X.Y.Z, the cohort doctor moves version-bound plugins to (OpenClaw
+  # 2026.11.5, docs/install/updating.md), which the refresh then leaves
+  # (gateway-pre-start.sh compares codex by base version too);
+  # clawbox-email-directives must match the copy in the
   # checkout it is installed from. Plugins the owner installed are not
   # version-checked — the core did not move, so the refresh has nothing to
   # line them up with — but any plugin that lost its payload, reports an error
@@ -6837,7 +8184,7 @@ print("ok")
   # root-only file and echo its fields into a journal that account can read.
   verdict="$(as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null \
     | as_clawbox -H python3 -c '
-import json, os, stat, sys
+import json, os, re, stat, sys
 
 target, repairs_path, email_pkg = sys.argv[1:4]
 MANAGED = {"codex", "deepseek", "discord", "whatsapp", "clawbox-email-directives"}
@@ -6885,6 +8232,10 @@ def payload_root(plugin):
         parent = os.path.dirname(source)
         return os.path.dirname(parent) if os.path.basename(parent) == "dist" else parent
     return ""
+
+
+def release(version):
+    return re.sub(r"[-+][0-9]+$", "", version)
 
 
 def check_diagnostics(node):
@@ -6949,14 +8300,16 @@ for plugin in plugins:
     name = pkg.get("name") if isinstance(pkg.get("name"), str) else ""
     if name.startswith("@openclaw/"):
         want = target
+        accepted = (target, release(target))
     elif key == "clawbox-email-directives":
         shipped = manifest(email_pkg)
         if shipped is None or not isinstance(shipped.get("version"), str):
             doubt("the checkout copy of clawbox-email-directives (%s) could not be read" % email_pkg)
         want = shipped["version"]
+        accepted = (want,)
     else:
         doubt("plugin %s comes from %s, not a package ClawBox pins" % (pid, name or "an unnamed package"))
-    if pkg.get("version") != want:
+    if pkg.get("version") not in accepted:
         doubt("plugin %s is at %s, the refresh would install %s" % (pid, pkg.get("version") or "no version", want))
 print("ok")
 ' "$target" "${PROJECT_DIR:-}/data/plugin-repair.json" \
@@ -6991,6 +8344,51 @@ openclaw_refresh_marker_write() {
     echo "  WARN: could not record the finished OpenClaw refresh in $marker; the next run takes the full path again" >&2
   fi
   return 0
+}
+
+# The core's own words about a failed plugin CLI call, as ONE line to append to
+# a sentence: escape sequences and control characters out, whitespace
+# collapsed, 160 characters, with a leading space; empty output is answered with
+# the exit code alone. Taken from scripts/gateway-pre-start.sh's helper of the
+# same name, where its reasons are written down (that script is not sourced
+# here), less its reading of 124/137: the pre-start lays a `timeout` on its
+# calls, and this file lays none, so here every exit is the CLI's own (a 137 is
+# a SIGKILL from anywhere, the kernel's OOM killer among them).
+clawbox_plugin_cli_cause() {
+  local cmd="$1" rc="$2" out="$3" script
+  script="$(cat <<'CAUSEPY'
+import os, re, sys
+
+text = sys.stdin.read()
+# ANSI first, so a colour code cannot survive as stray letters in the message.
+text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text)
+text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
+lines = [" ".join(line.split()) for line in text.splitlines()]
+lines = [line for line in lines if line]
+
+# The LAST line that reads like a refusal, because a CLI prints progress first
+# and its verdict last; the last line of any kind when none of them do.
+picked = ""
+for line in lines:
+    if re.search(r"error|failed|cannot|not found|denied|refus|permission", line, re.I):
+        picked = line
+if not picked and lines:
+    picked = lines[-1]
+
+head = os.environ["CLAWBOX_CAUSE_CMD"] + " exited " + os.environ["CLAWBOX_CAUSE_RC"]
+if not picked:
+    print(f" {head} and said nothing.")
+else:
+    if len(picked) > 160:
+        picked = picked[:159].rstrip() + "\u2026"
+    print(f" {head}: {picked}")
+CAUSEPY
+)"
+  # Never fatal and never noisy: a reason that could not be enriched is still a
+  # reason, and this runs on the path where something has already gone wrong.
+  printf '%s' "$out" \
+    | CLAWBOX_CAUSE_CMD="$cmd" CLAWBOX_CAUSE_RC="$rc" python3 -c "$script" 2>/dev/null \
+    || true
 }
 
 # The updater's half of the fast path. It runs the update's `openclaw_install`
@@ -7062,6 +8460,7 @@ step_openclaw_install() {
   local CORE_NEEDS_INSTALL=1
   local _oc_gateway_stopped=0
   local _oc_core_why="no OpenClaw core is installed at $OPENCLAW_BIN"
+  local _oc_step_started=$SECONDS
 
   # Keep this guard inside the OpenClaw step too, not only in apt_update:
   # update retries can start from this step, and EVERY Node 22 — not just the
@@ -7073,12 +8472,18 @@ step_openclaw_install() {
   # A core an earlier swap parked is a core, not an absence.
   recover_parked_openclaw_core
 
+  # A core an earlier update already moved past the pin of the served build's
+  # commit, on the fast path too: see keep_checkout_with_installed_core. Asked
+  # again after this run's own promote, below.
+  keep_checkout_with_installed_core
+
   if [ -x "$OPENCLAW_BIN" ]; then
     local INSTALLED INSTALLED_VER
     # `openclaw --version` prints "OpenClaw X.Y.Z (hash)"; extract field 2 so
     # we can compare exactly against the bare npm version. Literal "=" on the
-    # full string would always miss because of the prefix/hash.
-    INSTALLED=$("$OPENCLAW_BIN" --version 2>/dev/null || echo "none")
+    # full string would always miss because of the prefix/hash. Asked as the
+    # service account: the launcher is a file in its npm prefix.
+    INSTALLED=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" "$OPENCLAW_BIN" --version 2>/dev/null || echo "none")
     INSTALLED_VER=$(echo "$INSTALLED" | awk '{print $2}')
     echo "  Installed: $INSTALLED, Target: $TARGET"
     if [ "$INSTALLED_VER" = "$TARGET" ]; then
@@ -7122,9 +8527,14 @@ step_openclaw_install() {
     # swap is two renames. The stage sits inside $NPM_PREFIX so those renames
     # never cross a filesystem.
     local _oc_stage="$NPM_PREFIX/.openclaw-stage"
-    rm -rf "$_oc_stage"
-    mkdir -p "$_oc_stage"
-    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$_oc_stage"
+    # The clawbox user empties, makes and removes the stage, which sits in its
+    # prefix, after a stage an earlier root run left is handed back from inside
+    # the prefix, walked to from the home (the prefix is an entry in that
+    # user's home). A removal on a failure path below never ends the step, so
+    # what follows it still runs.
+    hand_over_home_path -R "$_oc_stage"
+    as_clawbox rm -rf -- "$_oc_stage"
+    as_clawbox mkdir -p -- "$_oc_stage"
     as_clawbox -H npm install -g "openclaw@$TARGET" --prefix "$_oc_stage"
     if [ ! -x "$_oc_stage/bin/openclaw" ]; then
       echo "Error: OpenClaw installation failed — npm left no openclaw launcher in $_oc_stage (the core already on the box is untouched)"
@@ -7141,9 +8551,9 @@ step_openclaw_install() {
     #
     # Asked of the STAGED launcher, before anything is swapped: a core that
     # refuses this Node never reaches the live prefix, and the one already there
-    # keeps serving.
+    # keeps serving. Asked as the service account, whose npm filled the stage.
     local _oc_version_out _oc_engines
-    if ! _oc_version_out="$("$_oc_stage/bin/openclaw" --version 2>&1)"; then
+    if ! _oc_version_out="$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" "$_oc_stage/bin/openclaw" --version 2>&1)"; then
       printf '%s\n' "$_oc_version_out" >&2
       # python3, not node: this arm exists because the Node on this box is the
       # problem, and asking it to read the file that says so is how a diagnosis
@@ -7162,8 +8572,8 @@ step_openclaw_install() {
       # core refuses to run would only produce a restart loop, and `set -e` makes
       # this return abort the run either way. Said out loud so the operator knows
       # the box is parked rather than guessing.
-      echo "       The gateway is left stopped. Fix the Node, then Retry this step." >&2
-      rm -rf "$_oc_stage"
+      echo "       The gateway is left stopped. Fix the Node, then run the update again." >&2
+      as_clawbox rm -rf -- "$_oc_stage" 2>/dev/null || true
       return 1
     fi
     # …and it answers. An empty answer is what a launcher with no bytes in it
@@ -7171,7 +8581,7 @@ step_openclaw_install() {
     # the target was.
     if [ -z "$(printf '%s' "$_oc_version_out" | tr -d '[:space:]')" ]; then
       echo "Error: the staged openclaw answers nothing to --version — leaving the core on the box as it is" >&2
-      rm -rf "$_oc_stage"
+      as_clawbox rm -rf -- "$_oc_stage" 2>/dev/null || true
       return 1
     fi
     # …and it is the core that was asked for. A pinned VERSION must come back
@@ -7181,7 +8591,7 @@ step_openclaw_install() {
       [0-9]*)
         if [ "$(printf '%s\n' "$_oc_version_out" | awk 'NR==1 {print $2}')" != "$TARGET" ]; then
           echo "Error: the staged openclaw answers '${_oc_version_out:-<nothing>}' to --version, not $TARGET — leaving the core on the box as it is" >&2
-          rm -rf "$_oc_stage"
+          as_clawbox rm -rf -- "$_oc_stage" 2>/dev/null || true
           return 1
         fi
         ;;
@@ -7193,14 +8603,19 @@ step_openclaw_install() {
     # and gets its gateway back, which the composite step's own restore would
     # not reach after this return.
     if ! openclaw_migration_disk_preflight "$_oc_stage/lib/node_modules/openclaw/package.json"; then
-      rm -rf "$_oc_stage"
+      as_clawbox rm -rf -- "$_oc_stage" 2>/dev/null || true
       if has_openclaw_harness && [ "$_oc_gateway_stopped" -eq 1 ]; then
         systemctl start clawbox-gateway.service 2>/dev/null || true
       fi
       echo "Error: ${OPENCLAW_MIGRATION_REFUSAL:-OpenClaw $TARGET cannot take over the databases on this box (too old for them, or not enough free disk for their migration); the core on the box is untouched}" >&2
       return 1
     fi
-    promote_staged_openclaw_core "$_oc_stage" || return 1
+    # Asked again whatever the promote answered: it can fail after the new tree
+    # went live.
+    local _oc_promote_rc=0
+    promote_staged_openclaw_core "$_oc_stage" || _oc_promote_rc=$?
+    keep_checkout_with_installed_core
+    [ "$_oc_promote_rc" -eq 0 ] || return 1
     echo "  OpenClaw installed: $_oc_version_out"
   fi
 
@@ -7230,70 +8645,366 @@ step_openclaw_install() {
       echo "Error: ${OPENCLAW_MIGRATION_REFUSAL:-OpenClaw $TARGET cannot take over the databases on this box (too old for them, or not enough free disk for their migration)}; leaving the gateway stopped" >&2
       return 1
     fi
+    # One more pass for exactly one failure: doctor converged a stale configured
+    # plugin in this same run (ClawBox refreshes the plugins only after this
+    # block), the plugin's migration obligation changed under it, and doctor
+    # exited 1 with "Plugin migration obligations changed during <phase>.", which
+    # the pinned core leaves "for a later repair"
+    # (docs/gateway/doctor/state-and-sessions.md); on a box the next pass
+    # finished it. One error class builds that sentence for every phase (input
+    # publication, settlement, session archive publication, session source
+    # retirement, config include publication), always advising doctor --fix
+    # again. Nothing else is retried: exit 2 ran no migration, and the other
+    # exit-1 states "cannot" be resolved by "repeating the same repair
+    # invocation" (docs/cli/doctor/running.md). The verdict is the last pass's.
     local _oc_doctor_out
-    local _oc_doctor_rc=0
-    _oc_doctor_out="$(as_clawbox -H env \
-      OPENCLAW_STATE_DIR="$CLAWBOX_HOME/.openclaw" \
-      OPENCLAW_CONFIG_PATH="$CLAWBOX_HOME/.openclaw/openclaw.json" \
-      OPENCLAW_SERVICE_REPAIR_POLICY="$OPENCLAW_SERVICE_REPAIR_POLICY" \
-      "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)" || _oc_doctor_rc=$?
-    printf '%s\n' "$_oc_doctor_out"
+    local _oc_doctor_rc _oc_doctor_pass _oc_doctor_why _oc_doctor_blocker _oc_doctor_conflict
+    # openclaw_migration_complete's phrases, read here only for the gate and the
+    # Error line. Not through that function: its `printf | grep -q` can miss a
+    # phrase early in long output under pipefail (SIGPIPE), and changing what it
+    # answers would change the verdict of exit-0 runs, which this retry must not.
+    local _oc_doctor_blockers='requires stopped-writer maintenance|Legacy session store requires migration|startup migrations did not complete|Skipped historical transcript directive migration'
+    for _oc_doctor_pass in 1 2; do
+      _oc_doctor_rc=0
+      _oc_doctor_out="$(as_clawbox -H env \
+        OPENCLAW_STATE_DIR="$CLAWBOX_HOME/.openclaw" \
+        OPENCLAW_CONFIG_PATH="$CLAWBOX_HOME/.openclaw/openclaw.json" \
+        OPENCLAW_SERVICE_REPAIR_POLICY="$OPENCLAW_SERVICE_REPAIR_POLICY" \
+        "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)" || _oc_doctor_rc=$?
+      printf '%s\n' "$_oc_doctor_out"
+      echo "  openclaw doctor --fix pass $_oc_doctor_pass ended with exit $_oc_doctor_rc, $((SECONDS - _oc_step_started))s into the step"
+      _oc_doctor_blocker="$(grep -a -m 1 -oiE "$_oc_doctor_blockers" <<<"$_oc_doctor_out" || true)"
+      _oc_doctor_blocker="${_oc_doctor_blocker%%$'\n'*}"
+      # The conflict sentence as doctor printed it, up to its phase.
+      _oc_doctor_conflict="$(LC_ALL=C grep -a -m 1 -oE 'Plugin migration obligations changed during [a-z][a-z -]*[a-z]' <<<"$_oc_doctor_out" || true)"
+      _oc_doctor_conflict="${_oc_doctor_conflict%%$'\n'*}"
+      # Exit 1 is already incomplete to openclaw_migration_complete (rc first),
+      # so the verdict function runs once, after the last pass, as before.
+      if [ "$_oc_doctor_pass" -ne 1 ] || [ "$_oc_doctor_rc" -ne 1 ] \
+        || [ -n "$_oc_doctor_blocker" ] \
+        || [ -z "$_oc_doctor_conflict" ]; then
+        break
+      fi
+      echo "  Running openclaw doctor --fix again (pass 2 of 2) after: $_oc_doctor_conflict; $((SECONDS - _oc_step_started))s into the step"
+    done
+    # Once more, whatever doctor answered: a dashboard write that straddled the
+    # drop after the promote can have put the record back (see
+    # keep_checkout_with_installed_core).
+    keep_checkout_with_installed_core
     if ! openclaw_migration_complete "$_oc_doctor_rc" "$_oc_doctor_out"; then
       openclaw_record_migration_verdict incomplete "$_oc_live_pkg"
-      echo "Error: OpenClaw migration did not complete; leaving the gateway stopped. Resolve the reported blocker and Retry before rebuilding." >&2
+      # A recognised doctor line, or the exit code; never doctor's free last
+      # line: this sentence is copied into the update status the UI and MCP serve.
+      case "$_oc_doctor_out" in
+        *'Doctor could not complete maintenance'*) _oc_doctor_why='Doctor could not complete maintenance' ;;
+        *) _oc_doctor_why="doctor exited $_oc_doctor_rc" ;;
+      esac
+      echo "Error: OpenClaw migration did not complete; leaving the gateway stopped. Doctor: ${_oc_doctor_blocker:-${_oc_doctor_conflict:-$_oc_doctor_why}}" >&2
       return 1
     fi
     # Complete: the gateway's pre-start retires the copies once every database
     # has passed a compaction's integrity check — compacted by the pre-start
     # itself only when the owner turned nightly maintenance on, otherwise by
-    # the owner's own "Run now"; until then the copies stay.
+    # the owner's own "Run now"; until then the copies stay. The core's own
+    # standalone `doctor --fix` retires its sealed standalone Doctor captures
+    # once they are over 30 days old, and never an incomplete capture or an
+    # update capture (pinned docs, docs/cli/update/repair-and-recovery.md
+    # "Original state captures"), so the pre-start's clean-up is the EARLY path
+    # for the first and the only one for the other two. The run above is one
+    # only on this full path (the fast path skips it while the pin holds); on
+    # the appliance, the updater's gateway check runs another (its
+    # runOpenclawDoctorFix) whenever it takes its full repair, which it does
+    # among other cases when the verdict recorded here, or by that check's own
+    # last completed run, is more than 30 days old or names another core.
     openclaw_record_migration_verdict complete "$_oc_live_pkg"
 
   fi
 
-  # Force-reinstall every externally-installed plugin so they're bumped
-  # alongside the core. Without this, a core 5.12→5.22 bump leaves
-  # @openclaw/codex stuck at whatever was first installed by
-  # gateway-pre-start.sh's peer-dep heal — and the in-UI updater silently
-  # reports "Up to date" because it only checks the core package. The new
-  # protocol bits introduced by the core (e.g. 5.22's deferred history
-  # replay) sit unused until the plugins also move.
+  # The plugin refresh after doctor: the external plugins the core update left
+  # behind, and only those. Bundled plugins (origin: bundled) ship with the core.
   #
-  # Runs even when the core was already at target, because plugins drift
-  # independently. Bundled plugins (origin: bundled) come with the core
-  # npm install and don't need a separate refresh — only external/global
-  # plugins do. Failures are non-fatal: a missing-from-npm plugin
-  # shouldn't roll back the whole update; gateway-pre-start.sh will retry
-  # on next boot. Gateway restart happens later in step_gateway_setup.
-  # Emit "<id>\t<npm-package>" per external plugin. The npm package is
-  # derived from rootDir (.../node_modules/@scope/name -> @scope/name) so we
-  # can pin @openclaw/* plugins to $TARGET. Reinstalling by bare id resolves
-  # @latest, which is exactly how @openclaw/codex drifted ahead of the
-  # pinned core and crashed every Codex chat.
-  local INSTALLED_PLUGINS
-  INSTALLED_PLUGINS=$(as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null \
-    | python3 -c '
-import json, sys
+  # Why it exists: a core bump (5.12 -> 5.22) once left @openclaw/codex at the
+  # old release while the updater said "Up to date", and a reinstall by bare id
+  # once resolved @latest and crashed every Codex chat. So an @openclaw plugin is
+  # reinstalled pinned to $TARGET (its package derived from a node_modules/
+  # rootDir), the pin is rebuilt for an orphaned codex/discord/whatsapp, and
+  # the refresh runs on every full path, because plugins drift independently
+  # of the core.
+  #
+  # What it leaves: the pinned core's `doctor --fix`, run above, already
+  # "updates drifted active official npm plugins ... to the installed OpenClaw
+  # release" and "leaves third-party plugins unchanged" (OpenClaw 2026.11.5,
+  # docs/cli/doctor/checks.md). Reinstalling every plugin again, one CLI cold
+  # start each with the gateway stopped, took 35 installs and about 18 minutes
+  # on a box crossing a pin, 28 of them plugins doctor had just moved. So the
+  # reader below sorts every plugin first, as the clawbox account (each path it
+  # opens is that account's to write, as in the fast-path check):
+  #   own      a safe id with a directory under scripts/openclaw-plugins/ in the
+  #            checkout: ClawBox's own, which the gateway's pre-start copies from
+  #            there (a bare id here was a ClawHub lookup that always failed);
+  #   current  an @openclaw payload at $TARGET's release, a trailing -N/+N
+  #            stripped on both sides (a correction release runs the plugins of
+  #            its base cohort, docs/install/updating.md), that the core reports
+  #            healthy (no error, no missing dependency, no error or consent
+  #            diagnostic, no repair on record) and whose entry files are there
+  #            and not empty: its package.json says nothing of the code beside
+  #            it, and `plugins list` loads none of it (docs/cli/plugins/list.md).
+  #            The entries are the runtime ones when declared, else the source
+  #            ones by their built peers (docs/plugins/sdk-entrypoints/
+  #            package-entries.md). The five ids ClawBox manages must be at
+  #            $TARGET itself or a correction's base, the two versions the fast
+  #            path accepts for them: a republished -N left in place would hold
+  #            every later update on this path;
+  #   foreign  a payload from another package: the owner's, left as installed,
+  #            as OpenClaw's own update leaves it. One the core reports in error
+  #            raises ONE card naming it: the fast path refuses any plugin in
+  #            error, so every update takes this path until the owner fixes it.
+  #            Never an id ClawBox manages: the fast path refuses those from
+  #            another package, so leaving one would hold every later update on
+  #            this path;
+  #   refresh  everything else, as before: an official plugin below the release
+  #            (a disabled one too: doctor moves active ones only), any doubt,
+  #            any orphan. A problem the core ties to no plugin, or a repair
+  #            record that cannot be read, is doubt about every one.
+  # Its helpers are copies of the fast-path check's, held to them by
+  # install-openclaw-fast-path.test.ts. Every value it prints is one word: ids,
+  # names and versions are the clawbox account's to write, and a newline in one
+  # must not print a line the updater reads off this step's journal.
+  #
+  # A list that cannot be read (the CLI failed, or answered something that is not
+  # an object with a plugins array) refreshes nothing, says so on a CLAWBOX-WARN
+  # line and records no finished refresh, so the next update runs this again;
+  # the step goes on to the gateway restore below. Unguarded under errexit and
+  # pipefail, a failed list used to end the step here, after a completed
+  # migration, with the gateway stopped.
+  #
+  # No clock on any of it, the plugin list or a reinstall (the owner's rule for
+  # this file, held by install-no-time-limits.test.ts): a slow reinstall takes
+  # longer, as every reinstall always could, and runs to its end; only one
+  # truly hung waits on the root unit's own limit. A reinstall that fails is
+  # reported as not updated and the step goes on. The marker is written all the
+  # same, so the entry-file check below runs again only on a full path: when
+  # the pin moves, or when the fast path refuses for another reason.
+  #
+  # A failed reinstall is non-fatal and keeps its cause: one WARN line under the
+  # plugin, and ONE card naming them all. The gateway's pre-start reinstalls
+  # only codex and deepseek by version; for any other plugin the retry that
+  # really happens is the next update that moves OpenClaw (the fast path checks
+  # only the plugins ClawBox manages), and the lines say that and no more.
+  local INSTALLED_PLUGINS="" _oc_list_out="" _oc_list_rc=0 _oc_list_read=0 _oc_list_why=""
+  local _oc_plan="" _oc_said="" _oc_kind="" _oc_a="" _oc_b=""
+  local _oc_install_out="" _oc_install_log="" _oc_install_rc=0 _oc_retry="" _oc_missed="" _oc_missed_n=0
+  local _oc_broken="" _oc_broken_n=0
+  _oc_list_out="$(as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json \
+    2>/dev/null)" || _oc_list_rc=$?
+  if [ "$_oc_list_rc" -eq 0 ]; then
+    _oc_plan="$(printf '%s' "$_oc_list_out" | as_clawbox -H python3 -c '
+import json, os, re, stat, sys
+
+target, repairs_path, own_dir = sys.argv[1:4]
+MANAGED = {"codex", "deepseek", "discord", "whatsapp", "clawbox-email-directives"}
+PROBLEMS = ("requires capability consent", "payload verification failed", "plugin not installed")
+
+
+def canonical(name):
+    for prefix in ("@openclaw/", "openclaw-"):
+        if name.startswith(prefix):
+            name = name[len(prefix):]
+            break
+    return name[:-len("-provider")] if name.endswith("-provider") else name
+
+
+# Without blocking, and only a regular file: a FIFO in data/ or a payload
+# would otherwise hold the root step until the updater gave up on it.
+def read_json(path):
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK), encoding="utf-8") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise ValueError("not a regular file")
+        return json.load(fh)
+
+
+def manifest(path):
+    try:
+        data = read_json(path)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def payload_root(plugin):
+    root = plugin.get("rootDir")
+    if isinstance(root, str) and root:
+        return root
+    source = plugin.get("source")
+    if isinstance(source, str) and source:
+        parent = os.path.dirname(source)
+        return os.path.dirname(parent) if os.path.basename(parent) == "dist" else parent
+    return ""
+
+
+# One printable word, or nothing.
+def word(value):
+    return value if isinstance(value, str) and re.fullmatch(r"[\x21-\x7e]+", value) else ""
+
+
+def release(version):
+    return re.sub(r"[-+][0-9]+$", "", version)
+
+
+def filled(path):
+    try:
+        info = os.stat(path)
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISREG(info.st_mode) and info.st_size > 0
+
+
+# The files the core loads from an installed package: the declared runtime
+# entries, else the source entries, a TypeScript one by the first of its built
+# peers that exists, under dist/ (flattened, then keeping src/) and then beside
+# it, each location in the order of listBuiltRuntimeEntryCandidates in the
+# pinned core, the extension read in any case. The path is normalised first,
+# so the order is the same for a plain relative entry and can differ for one
+# through "..". Every one must be there, not empty.
+def entries_present(root, pkg):
+    meta = pkg.get("openclaw") if isinstance(pkg.get("openclaw"), dict) else {}
+    runtime = meta.get("runtimeExtensions")
+    entries = runtime or meta.get("extensions")
+    if not isinstance(entries, list) or not entries:
+        return False
+    for entry in entries:
+        rel = os.path.normpath(entry) if isinstance(entry, str) and entry else ".."
+        if rel.startswith("..") or os.path.isabs(rel):
+            return False
+        stem, ext = os.path.splitext(rel)
+        ext = ext.lower()
+        candidates = [rel]
+        if not runtime and ext in (".ts", ".tsx", ".mts", ".cts"):
+            peers = {".mts": (".mjs", ".js", ".cjs"), ".cts": (".cjs", ".js", ".mjs")}.get(ext, (".js", ".mjs", ".cjs"))
+            flat = stem[len("src/"):] if stem.startswith("src/") else stem
+            candidates = [base + peer for base in ("dist/" + flat, "dist/" + stem, stem) for peer in peers]
+        # The first that exists is the one the core loads: a later candidate
+        # cannot vouch for an empty one before it.
+        chosen = next((c for c in candidates if os.path.exists(os.path.join(root, c))), None)
+        if chosen is None or not filled(os.path.join(root, chosen)):
+            return False
+    return True
+
+
+# Every id the core reports a problem for, normalised; "" for one it ties to
+# no plugin.
+def problems(node, owner, found):
+    if isinstance(node, dict):
+        entries = node.get("diagnostics")
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            message = str(entry.get("message") or "").lower()
+            if str(entry.get("level") or "").lower() == "error" or any(p in message for p in PROBLEMS):
+                found.add(canonical(str(entry.get("pluginId") or owner)))
+        for value in node.values():
+            problems(value, owner, found)
+    elif isinstance(node, list):
+        for value in node:
+            problems(value, owner, found)
+
+
 try:
-    d = json.load(sys.stdin)
+    data = json.load(sys.stdin)
 except Exception:
+    print("unreadable\tnot JSON")
     sys.exit(0)
-for p in d.get("plugins", []):
-    pid = p.get("id")
-    if not pid or p.get("origin") == "bundled":
+plugins = data.get("plugins") if isinstance(data, dict) else None
+if not isinstance(plugins, list):
+    print("unreadable\tno plugins array")
+    sys.exit(0)
+
+flagged = set()
+problems({key: value for key, value in data.items() if key != "plugins"}, "", flagged)
+for plugin in plugins:
+    if isinstance(plugin, dict):
+        problems(plugin, str(plugin.get("id") or ""), flagged)
+doubt = "the core reports a problem it ties to no plugin" if "" in flagged else ""
+try:
+    repairs = read_json(repairs_path)
+except FileNotFoundError:
+    repairs = {}
+except Exception:
+    repairs = None
+if isinstance(repairs, dict):
+    flagged.update(canonical(str(key)) for key in repairs)
+else:
+    doubt = "the plugin repairs on record could not be read"
+if doubt:
+    print("doubt\t" + doubt)
+
+for plugin in plugins:
+    if not isinstance(plugin, dict):
         continue
-    root = p.get("rootDir") or p.get("source") or ""
-    pkg = ""
-    if "node_modules/" in root:
-        tail = root.split("node_modules/", 1)[1].split("/")
+    pid = plugin.get("id")
+    if not isinstance(pid, str) or not pid or plugin.get("origin") == "bundled":
+        continue
+    if not word(pid):
+        print("foreign\t" + ascii(pid))
+        continue
+    if re.fullmatch(r"[a-z0-9][a-z0-9._-]*", pid) and os.path.isdir(os.path.join(own_dir, pid)):
+        print("own\t" + pid)
+        continue
+    key = canonical(pid)
+    root = payload_root(plugin)
+    pkg = manifest(os.path.join(root, "package.json")) if root else None
+    name = word(pkg.get("name")) if pkg else ""
+    version = word(pkg.get("version")) if pkg else ""
+    deps = plugin.get("dependencyStatus")
+    broken = key in flagged or bool(plugin.get("error")) or str(plugin.get("status") or "").lower() == "error"
+    healthy = not doubt and not broken and not (isinstance(deps, dict) and deps.get("requiredInstalled") is False)
+    # The ids ClawBox manages are held to what the fast path checks them
+    # against: the target itself, or a correction release base.
+    if key in MANAGED:
+        at_release = version in (target, release(target))
+    else:
+        at_release = release(version) == release(target)
+    if name.startswith("@openclaw/") and version and at_release and healthy and entries_present(root, pkg):
+        print("current\t%s@%s" % (name, version))
+        continue
+    if name and not name.startswith("@openclaw/") and key not in MANAGED:
+        print(("broken\t" if broken else "foreign\t") + pid)
+        continue
+    raw = plugin.get("rootDir") or plugin.get("source") or ""
+    package = ""
+    if isinstance(raw, str) and "node_modules/" in raw:
+        tail = raw.split("node_modules/", 1)[1].split("/")
         if tail and tail[0].startswith("@") and len(tail) >= 2:
-            pkg = tail[0] + "/" + tail[1]
+            package = tail[0] + "/" + tail[1]
         elif tail:
-            pkg = tail[0]
-    print(pid + "\t" + pkg)
-' 2>/dev/null)
-  if [ -n "$INSTALLED_PLUGINS" ]; then
+            package = tail[0]
+    print("refresh\t%s\t%s" % (pid, word(package)))
+print("ok")
+' "$TARGET" "${PROJECT_DIR:-}/data/plugin-repair.json" \
+      "${PROJECT_DIR:-}/scripts/openclaw-plugins" 2>/dev/null || true)"
+  fi
+  while IFS=$'\t' read -r _oc_kind _oc_a _oc_b; do
+    case "$_oc_kind" in
+      ok) _oc_list_read=1 ;;
+      unreadable) _oc_list_why="$_oc_a" ;;
+      refresh) INSTALLED_PLUGINS+="$_oc_a"$'\t'"$_oc_b"$'\n' ;;
+      own) _oc_said+="    - $_oc_a (ClawBox's own plugin: the gateway start installs it from the checkout)"$'\n' ;;
+      current) _oc_said+="    - $_oc_a (already at $TARGET)"$'\n' ;;
+      foreign) _oc_said+="    - $_oc_a (not an OpenClaw or ClawBox plugin: left as installed, as OpenClaw's own update does)"$'\n' ;;
+      broken)
+        _oc_said+="    - $_oc_a (not an OpenClaw or ClawBox plugin: left as installed; the core reports an error for it)"$'\n'
+        _oc_broken="${_oc_broken:+$_oc_broken, }$_oc_a"
+        _oc_broken_n=$((_oc_broken_n + 1))
+        ;;
+      doubt) _oc_said+="    ($_oc_a, so every official plugin is reinstalled)"$'\n' ;;
+    esac
+  done <<< "$_oc_plan"
+  if [ "$_oc_list_read" -ne 1 ]; then
+    [ "$_oc_list_rc" -ne 0 ] || _oc_list_why="${_oc_list_why:-its answer could not be parsed}"
+    echo "CLAWBOX-WARN[openclaw-plugin-refresh-skipped]: the OpenClaw plugin list could not be read (exit $_oc_list_rc${_oc_list_why:+, $_oc_list_why}); plugins were not refreshed in this update"
+  elif [ -n "$INSTALLED_PLUGINS$_oc_said" ]; then
     echo "  Refreshing OpenClaw plugins to match core $TARGET:"
+    printf '%s' "$_oc_said"
     while IFS=$'\t' read -r plugin pkg; do
       [ -z "$plugin" ] && continue
       # Pin @openclaw/* plugins to the core target; others reinstall by id
@@ -7357,18 +9068,50 @@ for p in d.get("plugins", []):
           echo "      (not a ClawBox-managed plugin: refreshed without accepting new capabilities)"
           ;;
       esac
-      if ! as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins install "$spec" --force "${CAP_ARGS[@]}" >/dev/null 2>&1; then
-        echo "      WARN: refresh failed (non-fatal; gateway-pre-start will retry on next boot)"
+      # Through a file, never `$(…)`: a child of the CLI that outlives it keeps
+      # a substitution's pipe open, and bash would wait for that child after the
+      # CLI itself had answered (measured, and avoided the same way, in
+      # clawbox_run_openclaw_capture in gateway-pre-start.sh). Root's shell
+      # makes, reads and removes the file; with no temp directory the call
+      # still runs, only unquoted. The row above is printed before the call, so
+      # the line under it says how the call ended.
+      _oc_install_rc=0
+      _oc_install_out=""
+      _oc_install_log="$(mktemp 2>/dev/null)" || _oc_install_log=/dev/null
+      as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins install "$spec" --force "${CAP_ARGS[@]}" </dev/null >"$_oc_install_log" 2>&1 || _oc_install_rc=$?
+      if [ "$_oc_install_log" != /dev/null ]; then
+        _oc_install_out="$(cat "$_oc_install_log" 2>/dev/null || true)"
+        rm -f "$_oc_install_log" 2>/dev/null || true
+      fi
+      if [ "$_oc_install_rc" -eq 0 ]; then
+        echo "      updated"
+      else
+        case "$PLUGIN_KEY" in
+          codex|deepseek) _oc_retry="gateway-pre-start retries it" ;;
+          *) _oc_retry="the next update that moves OpenClaw retries it" ;;
+        esac
+        echo "      WARN: not updated (non-fatal; $_oc_retry).$(clawbox_plugin_cli_cause "The OpenClaw plugin install" "$_oc_install_rc" "$_oc_install_out")"
+        _oc_missed="${_oc_missed:+$_oc_missed, }$plugin"
+        _oc_missed_n=$((_oc_missed_n + 1))
       fi
     done <<< "$INSTALLED_PLUGINS"
+    if [ "$_oc_missed_n" -gt 0 ]; then
+      echo "CLAWBOX-WARN[openclaw-plugin-refresh]: $_oc_missed_n plugin(s) were not updated to OpenClaw $TARGET: $_oc_missed. The next update that moves OpenClaw tries them again."
+    fi
+    if [ "$_oc_broken_n" -gt 0 ]; then
+      echo "CLAWBOX-WARN[openclaw-owner-plugin-error]: $_oc_broken_n plugin(s) that ClawBox did not install report an error in OpenClaw: $_oc_broken. ClawBox leaves them as installed; until they are fixed or removed, every update stops the assistant to refresh OpenClaw in full."
+    fi
   else
     echo "  No external plugins to refresh"
   fi
   # The full path has finished: the core is at the target and, on OpenClaw 2,
-  # doctor's migration completed (an incomplete one returned above). A refresh
-  # that only WARNed does not hold the record back — the fast path asks the
-  # plugin list itself every time.
-  openclaw_refresh_marker_write "$TARGET"
+  # doctor's migration completed (an incomplete one returned above). A reinstall
+  # that failed does not hold the record back — the fast path asks the plugin
+  # list itself every time — but a list that could not be read does: nothing
+  # was refreshed, so the next update takes the full path again.
+  if [ "$_oc_list_read" -eq 1 ]; then
+    openclaw_refresh_marker_write "$TARGET"
+  fi
   # Standalone installs restore only after plugin refresh. The composite setup
   # step owns restoration after its remaining patch/config/voice operations.
   # `_oc_gateway_stopped` is set whether or not a gateway was running, so the
@@ -7391,6 +9134,33 @@ step_clawkeep_install() {
   # and ~/.local/bin/clawkeepd; without a forced reinstall, an existing
   # install with the same version string ("0.1.0") would skip the upgrade
   # and leave stale code on disk after a `git pull`.
+  #
+  # One forced install per update, though, not two (UPD-04: 9 s in
+  # rebuild_reboot, then 8 s more in post_update with the gateway down).
+  # A verified forced install records the git tree id of clawkeep/ in a
+  # root-owned file on /run (tmpfs: gone at every boot, so the reboot arm's
+  # post_update forces). post_update alone passes --reuse-this-update, and
+  # skips only when that record names the tree HEAD has NOW, with no local
+  # change, clawkeepd is there and the CLI still answers. The skip spends
+  # the record. git runs as the tree's owner and its answer is only compared.
+  local record="${CLAWBOX_CLAWKEEP_INSTALLED_RECORD:-/run/clawbox/clawkeep-installed}"
+  local tree="" kept="" dirty="" tmp=""
+  local -a tree_git=(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR")
+  if [ "${1:-}" = "--reuse-this-update" ] && [ -f "$record" ] && [ ! -L "$record" ] \
+    && IFS= read -r kept < "$record" \
+    && tree="$("${tree_git[@]}" rev-parse -q --verify HEAD:clawkeep 2>/dev/null)" \
+    && [ -n "$tree" ] && [ "$tree" = "$kept" ] \
+    && dirty="$("${tree_git[@]}" status --porcelain --untracked-files=all -- clawkeep 2>/dev/null)" && [ -z "$dirty" ] \
+    && [ -x "$CLAWBOX_HOME/.local/bin/clawkeepd" ] \
+    && as_clawbox_login 'clawkeep --help' >/dev/null 2>&1; then
+    rm -f "$record" 2>/dev/null || true
+    echo "  ClawKeep CLI: the same code (clawkeep tree ${tree:0:12}) was installed earlier in this boot and still answers; not reinstalled"
+    return 0
+  fi
+  # Every forced run drops the record first: a failed, partial, pip --user or
+  # skipped install must never leave an older one for post_update to trust.
+  rm -f "$record" 2>/dev/null || true
+
   if [ ! -d "$PROJECT_DIR/clawkeep" ]; then
     echo "  ClawKeep source missing; skipping"
     return 0
@@ -7429,6 +9199,19 @@ step_clawkeep_install() {
     return 1
   fi
   echo "  ClawKeep CLI installed: $(as_clawbox_login 'clawkeep --help' 2>&1 | head -n1 || echo 'verify failed')"
+  # The record, for this update's post_update. Root writes it in root's
+  # /run/clawbox through a fresh mktemp file renamed into place, so it never
+  # writes through a link. A tree with local changes is never recorded.
+  if tree="$("${tree_git[@]}" rev-parse -q --verify HEAD:clawkeep 2>/dev/null)" && [ -n "$tree" ] \
+    && dirty="$("${tree_git[@]}" status --porcelain --untracked-files=all -- clawkeep 2>/dev/null)" && [ -z "$dirty" ] \
+    && mkdir -p "$(dirname "$record")" \
+    && tmp="$(mktemp "$(dirname "$record")/.clawkeep-installed.XXXXXX" 2>/dev/null)" \
+    && printf '%s\n' "$tree" > "$tmp" && mv -f "$tmp" "$record"; then
+    return 0
+  fi
+  [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+  echo "  ClawKeep CLI install not recorded (local changes under clawkeep/, or git or /run/clawbox could not answer); a later post_update reinstalls it"
+  return 0
 }
 
 # Legacy path, used only when pipx could not be provisioned. Still the
@@ -7457,8 +9240,12 @@ step_clawkeep_install_pip_user_fallback() {
   # otherwise be re-picked up by the next build and produce another
   # UNKNOWN wheel even with the modern toolchain in place. Also remove
   # the broken UNKNOWN dist-info that the bad install registered in
-  # site-packages so pip's --force-reinstall has a clean slate.
-  rm -rf "$PROJECT_DIR/clawkeep/build" \
+  # site-packages so pip's --force-reinstall has a clean slate. The build
+  # output is in the clawbox user's checkout, so that user removes it, after
+  # anything an earlier root build left there is handed back; root only
+  # expands the glob into names.
+  hand_over_checkout clawkeep
+  as_clawbox rm -rf -- "$PROJECT_DIR/clawkeep/build" \
          "$PROJECT_DIR/clawkeep/dist" \
          "$PROJECT_DIR/clawkeep"/*.egg-info 2>/dev/null || true
   as_clawbox_login "rm -rf \"$CLAWBOX_HOME\"/.local/lib/python3.*/site-packages/UNKNOWN-0.0.0.dist-info" \
@@ -7499,8 +9286,28 @@ step_clawkeep_install_pip_user_fallback() {
   echo "  ClawKeep CLI installed: $(as_clawbox_login 'clawkeep --help' 2>&1 | head -n1 || echo 'verify failed')"
 }
 
+# OpenClaw 2026.10.9 holds a reasoning model's answer until the model is done
+# and then hands the chat all of it at once (TASK-2228): ClawBox AI streams its
+# reasoning first, so no answer streamed. The script back-ports the upstream
+# fix (2026.10.10) onto that core's transport, as the user who owns the core,
+# and says what it did. From the 2026.11.3 pin the core streams these answers
+# itself and the script reports "not needed" and writes nothing; it stays for a
+# box that still runs (or is taken back to) 2026.10.9. Never fatal: an answer
+# that arrives in one piece is no reason to fail an install or an update.
+openclaw_reasoning_stream_patch() {
+  local script="$PROJECT_DIR/scripts/openclaw-reasoning-stream-patch.mjs"
+  if [ ! -f "$script" ]; then
+    echo "  WARNING: reasoning stream patch not applied: $script not found; answers of reasoning models reach the chat in one piece"
+    return 0
+  fi
+  as_clawbox node "$script" "${GATEWAY_DIST%/dist}" \
+    || echo "  WARNING: reasoning stream patch not applied; answers of reasoning models reach the chat in one piece"
+  return 0
+}
+
 step_openclaw_patch() {
   is_hermes_edition && return 0
+  openclaw_reasoning_stream_patch
   # OpenClaw 2 rewrote the connect handler this step used to sed: the scope
   # regex now matches sites where the injected identifiers do not exist (a
   # broken bundle), and the device-identity bypass it papered over is retired
@@ -7591,19 +9398,65 @@ step_openclaw_patch() {
 # devices half-updated: rebuild_reboot never reached the rebuild, while the
 # updater still reported success (see fix in src/lib/updater.ts). Each retry
 # reloads the config fresh, so a transient conflict resolves itself.
+# OC_CONFIG_LABEL names the change in the messages when $1 is an option.
 oc_config_set() {
-  local attempt
+  local attempt label="${OC_CONFIG_LABEL:-$1}"
   for attempt in 1 2 3; do
     if as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set "$@"; then
       return 0
     fi
     if [ "$attempt" -lt 3 ]; then
-      echo "  config set $1 failed (attempt $attempt/3) — retrying..."
+      echo "  config set $label failed (attempt $attempt/3) — retrying..."
       sleep 2
     fi
   done
-  echo "  ERROR: config set $1 failed after 3 attempts" >&2
+  echo "  ERROR: config set $label failed after 3 attempts" >&2
   return 1
+}
+
+# oc_config_set for a value that must stay off every argument list, because
+# sudo records its command line. Reads a `config set --batch-file` batch (a
+# JSON array of {"path", "value"}) on stdin, writes it as the service user to a
+# 0600 file in a private directory, applies it with oc_config_set's retries and
+# messages, and removes the directory on every exit, a stopping signal
+# included. Every step on that directory runs as the service user, its removal
+# too. $1 names the change. The body is a subshell, so its traps are its own
+# and the caller's stay as they were.
+oc_config_set_batch() (
+  local label="$1" dir rc=0
+  if ! dir=$(as_clawbox mktemp -d); then
+    echo "  ERROR: config set $label failed: no private directory for its batch file" >&2
+    exit 1
+  fi
+  trap 'as_clawbox rm -rf -- "$dir" || echo "  WARN: could not remove $dir" >&2' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if as_clawbox sh -c 'umask 077 && cat > "$1"' sh "$dir/batch.json"; then
+    OC_CONFIG_LABEL="$label" oc_config_set --batch-file "$dir/batch.json" || rc=$?
+  else
+    echo "  ERROR: config set $label failed: its batch file could not be written" >&2
+    rc=1
+  fi
+  exit "$rc"
+)
+
+# True only when the installed core's own `config set --help` answers and does
+# not list --batch-file, which arrived in OpenClaw 2026.3.22. Asked on every
+# run, never remembered: OPENCLAW_PIN_VERSION can put an older core here. No
+# answer, an error or a help that is not `config set`'s is no verdict, and the
+# caller writes as it would.
+openclaw_config_set_lacks_batch_file() {
+  local help
+  help=$(as_clawbox "$OPENCLAW_BIN" config set --help) || return 1
+  case "$help" in
+    *"Usage: openclaw config set"*) ;;
+    *) return 1 ;;
+  esac
+  case "$help" in
+    *--batch-file*) return 1 ;;
+  esac
+  return 0
 }
 
 step_openclaw_config() {
@@ -7646,9 +9499,18 @@ step_openclaw_config() {
   if [ -z "$CLAWBOX_AI_KEY" ] && [ -f "$CLAWBOX_AI_ENV" ]; then
     CLAWBOX_AI_KEY=$(grep '^CLAWBOX_AI_API_KEY=' "$CLAWBOX_AI_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)
   fi
+  # The provider block below holds the key, and a core without a file form
+  # for `config set` could only take it on a command line. Such a core gets no
+  # ClawBox AI fallback from the installer, and the rest of the step goes on.
+  if [ -n "$CLAWBOX_AI_KEY" ] && openclaw_config_set_lacks_batch_file; then
+    local CORE_VERSION
+    # Read as the service user, and only its version-shaped part is kept: the
+    # answer is text for the line below and nothing else.
+    CORE_VERSION=$(as_clawbox "$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1 || true)
+    echo "  WARN: ClawBox AI fallback not configured: OpenClaw ${CORE_VERSION:-on this box} has no 'config set --batch-file' (2026.3.22 and newer have it) to take its key off the command line" >&2
+    CLAWBOX_AI_KEY=""
+  fi
   if [ -n "$CLAWBOX_AI_KEY" ]; then
-    local CLAWBOX_AI_PROVIDER_JSON
-    CLAWBOX_AI_PROVIDER_JSON=$(node -e 'const key=process.argv[1]; process.stdout.write(JSON.stringify({baseUrl:"https://api.deepseek.com",api:"openai-completions",apiKey:key,models:[{id:"deepseek-chat",name:"ClawBox AI",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:65536,maxTokens:8192}]}));' "$CLAWBOX_AI_KEY")
     if openclaw_is_v2; then
       # OpenClaw 2 keeps credentials in its sqlite auth store, and recreating
       # the legacy auth-profiles.json poisons it (the gateway refuses with
@@ -7662,7 +9524,11 @@ step_openclaw_config() {
       CLAWBOX_AI_KEY="$CLAWBOX_AI_KEY" AUTH_PROFILES="$AUTH_PROFILES" node -e 'const fs=require("fs"); const p=process.env.AUTH_PROFILES; let data={version:1,profiles:{}}; try{data=JSON.parse(fs.readFileSync(p,"utf8"));}catch{} data.profiles["deepseek:default"]={type:"api_key",provider:"deepseek",key:process.env.CLAWBOX_AI_KEY}; fs.writeFileSync(p, JSON.stringify(data,null,2), { mode: 0o600 });'
     fi
     oc_config_set auth.profiles.deepseek:default '{"provider":"deepseek","mode":"api_key"}' --json
-    oc_config_set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
+    # The provider block holds the key, so the key travels on stdin and the
+    # block reaches the CLI as a batch file, never as an argument.
+    printf '%s' "$CLAWBOX_AI_KEY" \
+      | node -e 'const key=require("fs").readFileSync(0,"utf8"); process.stdout.write(JSON.stringify([{path:"models.providers.deepseek",value:{baseUrl:"https://api.deepseek.com",api:"openai-completions",apiKey:key,models:[{id:"deepseek-chat",name:"ClawBox AI",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:65536,maxTokens:8192}]}}]));' \
+      | oc_config_set_batch models.providers.deepseek
     # `fallbacks`, a LIST: the core has no singular `fallback` key and refused
     # this write with "Unrecognized key" on every core since the line was added,
     # which ended the step here under errexit (the harness-contract CI job now
@@ -7705,21 +9571,37 @@ step_openclaw_config() {
 
   # Register Telegram channel (if token exists)
   if [ -f "$CLAWBOX_CONFIG" ]; then
-    local TG_TOKEN
-    TG_TOKEN=$(node -e "try{const c=JSON.parse(require('fs').readFileSync('$CLAWBOX_CONFIG','utf8'));if(c.telegram_bot_token)process.stdout.write(c.telegram_bot_token)}catch{}" 2>/dev/null || true)
-    if [ -n "$TG_TOKEN" ]; then
-      # Do not set dmPolicy/allowFrom here — see src/lib/openclaw-config.ts
-      # setTelegramToken for the security rationale. `openclaw config set`
-      # may deep-merge instead of replace, which would leave legacy
-      # `dmPolicy:"open"` / `allowFrom:["*"]` values alive. Do the
-      # read-modify-write ourselves with a destructure-strip so the
-      # installer can't leave insecure values behind, matching what
-      # install-x64.sh and src/lib/openclaw-config.ts:setTelegramToken
-      # do on their paths.
-      as_clawbox env TG_TOKEN="$TG_TOKEN" CFG="$CLAWBOX_HOME/.openclaw/openclaw.json" node - <<'NODE'
+    # Do not set dmPolicy/allowFrom here — see src/lib/openclaw-config.ts
+    # setTelegramToken for the security rationale. The read-modify-write is
+    # done here, in one write, with a destructure-strip so the installer can't
+    # leave legacy `dmPolicy:"open"` / `allowFrom:["*"]` values behind,
+    # matching src/lib/openclaw-config.ts:setTelegramToken. OpenClaw's own
+    # `config patch --file|--stdin` (where null deletes a key) is the native
+    # writer for it; moving there needs a device run first, because a CLI
+    # write validates the whole config under errexit and can meet the live
+    # gateway's ConfigMutationConflictError (see oc_config_set).
+    # sudo records its command line, so only paths go on it: the script reads
+    # the token itself, as the service user, which owns data/config.json.
+    as_clawbox env CLAWBOX_CFG="$CLAWBOX_CONFIG" CFG="$CLAWBOX_HOME/.openclaw/openclaw.json" node - <<'NODE'
 const fs = require("fs");
 const path = require("path");
-const botToken = process.env.TG_TOKEN;
+// Errors are named by class only (code or name), never by message.
+const errorClass = (err) => (err && (err.code || err.name)) || "error";
+// A missing, unreadable or corrupt ClawBox config, or one without a token,
+// skips the step before OpenClaw's file is touched: throwing here would abort
+// the whole step mid-update under errexit.
+let botToken = "";
+let skipped = "ClawBox holds no saved bot token";
+try {
+  const saved = JSON.parse(fs.readFileSync(process.env.CLAWBOX_CFG, "utf8"));
+  if (saved && typeof saved.telegram_bot_token === "string") botToken = saved.telegram_bot_token;
+} catch (err) {
+  skipped = `could not read ClawBox's config (${errorClass(err)})`;
+}
+if (!botToken) {
+  process.stderr.write(`  Telegram registration skipped: ${skipped}\n`);
+  process.exit(0);
+}
 const cfgPath = process.env.CFG;
 let cfg = {};
 try {
@@ -7729,9 +9611,20 @@ try {
   // corrupt JSON, transient IO) must abort, otherwise we'd silently
   // overwrite a real-but-unreadable config with only the Telegram channel,
   // wiping auth profiles, gateway settings, AI provider config, etc.
-  if (!err || err.code !== "ENOENT") throw err;
+  if (!err || err.code !== "ENOENT") {
+    process.stderr.write(`  ERROR: Telegram registration stopped: could not read ${cfgPath} (${errorClass(err)})\n`);
+    process.exit(1);
+  }
 }
-if (!cfg.channels) cfg.channels = {};
+const original = JSON.stringify(cfg);
+// null, an array, or a value that is not an object at all holds no channel
+// this block could add to: say so and write nothing.
+const plainObject = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+if (plainObject(cfg) && !cfg.channels) cfg.channels = {};
+if (!plainObject(cfg) || !plainObject(cfg.channels)) {
+  process.stderr.write("  Telegram registration skipped: openclaw.json holds no channels object\n");
+  process.exit(0);
+}
 const { dmPolicy: _dm, allowFrom: _af, ...rest } = cfg.channels.telegram || {};
 // OpenClaw's OWN value wins. This block exists to re-register the channel on a
 // fresh ~/.openclaw (a factory reset, a new image) out of the only copy that
@@ -7767,6 +9660,25 @@ const openclawHasBot =
   holdsBot(rest) ||
   (!!rest.accounts && typeof rest.accounts === "object" && Object.values(rest.accounts).some(holdsBot));
 cfg.channels.telegram = openclawHasBot ? { ...rest, enabled: true } : { ...rest, enabled: true, botToken };
+// Every update re-runs this step while the gateway is live. A rewrite that
+// changes nothing still replaces the inode, bumps the mtime and drops the
+// trailing newline OpenClaw writes, so an unchanged config is left as it is
+// once it is 0600 (the repair explained below). A file this user cannot
+// chmod takes the rewrite path as before.
+const secured = () => {
+  try {
+    fs.chmodSync(cfgPath, 0o600);
+    return (fs.statSync(cfgPath).mode & 0o777) === 0o600;
+  } catch {
+    return false;
+  }
+};
+if (JSON.stringify(cfg) === original && secured()) {
+  // The rewrite path removes a temp a crashed run left; it may hold a whole config.
+  fs.rmSync(`${cfgPath}.tmp`, { force: true });
+  process.stderr.write("  Telegram channel already registered; openclaw.json unchanged\n");
+  process.exit(0);
+}
 fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
 // `rename` replaces the INODE, so the temp file's mode is the one that
 // survives. openclaw.json holds channels.telegram.botToken and the gateway's
@@ -7793,7 +9705,6 @@ process.stderr.write(
     : "  Telegram channel registered from ClawBox's saved token\n",
 );
 NODE
-    fi
   fi
 
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.openclaw" 2>/dev/null || true
@@ -7985,10 +9896,13 @@ tts_write_local_provider_definition() {
   # nothing mid-restage. $3 is the copy ROOT EXECUTES for the timeout probe
   # below, which must be the root-owned one: this runs as root inside
   # step_openclaw_tts, `openclaw_tts` is on WEB_ROOT_STEPS, and the dispatcher's
-  # verify is long past by the time the step gets here — so `bash` on the tree
-  # copy is a foothold's payload with seconds to spare. Defaults to $2 for
-  # callers that are not inside a root step. TASK-733.
-  local TTS_HOME="$1" TTS_SCRIPT="$2" TTS_PROBE="${3:-$2}"
+  # verify is long past by the time the step gets here — so the probe runs the
+  # copy root holds, and with no $3 it refuses and runs nothing.
+  local TTS_HOME="$1" TTS_SCRIPT="$2" TTS_PROBE="${3:-}"
+  if [ -z "$TTS_PROBE" ]; then
+    echo "  ERROR: no root-held copy of clawbox-tts.sh was given to probe for the provider timeout" >&2
+    return 1
+  fi
   local TTS_TIMEOUT_MS
   TTS_TIMEOUT_MS=$(bash "$TTS_PROBE" --provider-timeout-ms 2>/dev/null || echo "")
   # Decimal digits, and more than zero: a 0 would let OpenClaw kill the
@@ -8046,6 +9960,20 @@ tts_ensure_ffmpeg() {
   return 0
 }
 
+# install-voice.sh writes these AS the clawbox user: the workspace copy of the
+# voice scripts, the user units, the completion stamps and the CUDA exports in
+# ~/.bashrc. Whatever an earlier root run left root-owned on the way (its
+# `mkdir -p` of ~/.config/systemd/user made ~/.config/systemd root's) is handed
+# back first, through the walk that follows no link, or the user's write fails
+# where root's succeeded. The three trees are handed over whole, the owner the
+# script's own `chown -R` of each used to give them on every run. Always 0.
+hand_over_voice_paths() {
+  hand_over_home_path -R "$CLAWBOX_HOME/.openclaw/workspace"
+  hand_over_home_path -R "$CLAWBOX_HOME/.config/systemd/user"
+  hand_over_home_path -R "$CLAWBOX_HOME/.cache/clawbox"
+  hand_over_home_path "$CLAWBOX_HOME/.bashrc"
+}
+
 step_openclaw_tts() {
   # WHAT install-voice.sh is asked for. `--scripts-only` (the default, and what
   # step_openclaw_setup and step_post_update run) deploys the voice scripts and
@@ -8086,6 +10014,8 @@ step_openclaw_tts() {
   # fallback of the time and nothing else, so every box we shipped ran on that
   # fallback while this step printed "Kokoro GPU" (TASK-420). That fallback is
   # gone; Kokoro is the only on-device engine, and now an opt-in one.
+  # The script writes in the clawbox user's home as that user: leftovers first.
+  hand_over_voice_paths
   local VOICE_RC=0
   CLAWBOX_TTS_STATUS_FILE="$TTS_STATUS_FILE" \
     bash "$SRC_DIR/scripts/install-voice.sh" "$VOICE_MODE" || VOICE_RC=$?
@@ -8799,6 +10729,8 @@ step_voice_kokoro_install() {
 # marker the flash host reads must not go red over an owner's click.
 step_voice_whisper_install() {
   local STT_RC=0
+  # The script writes in the clawbox user's home as that user: leftovers first.
+  hand_over_voice_paths
   bash "$SRC_DIR/scripts/install-voice.sh" --whisper || STT_RC=$?
   case "$STT_RC" in
     0)  echo "  On-device speech-to-text installed (faster-whisper)" ;;
@@ -8824,9 +10756,12 @@ step_captive_portal_dns() {
 }
 
 step_directories_permissions() {
-  mkdir -p "$PROJECT_DIR/data"
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/data"
-  find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +
+  # The service account makes and writes everything below in its own checkout.
+  # Its find starts from /: GNU find fails when it cannot return to a starting
+  # directory the account may not enter (a step run by hand from /root).
+  hand_over_checkout
+  as_clawbox mkdir -p "$PROJECT_DIR/data"
+  (cd / && as_clawbox find "$PROJECT_DIR/scripts" -name "*.sh" -exec chmod +x {} +)
   # Create .env with defaults if it doesn't already exist
   local ENV_FILE="$PROJECT_DIR/.env"
   # Google Gemini CLI public OAuth credentials (split to pass GitHub push protection)
@@ -8835,22 +10770,20 @@ step_directories_permissions() {
   local G_SEC; G_SEC="GOCSPX-4uHgMPm"
   G_SEC="${G_SEC}-1o7Sk-geV6Cu5clXFsxl"
   if [ ! -f "$ENV_FILE" ]; then
-    cp "$PROJECT_DIR/.env.example" "$ENV_FILE"
-    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
+    as_clawbox sh -c 'umask 077 && cp "$1" "$2" && chmod 600 "$2"' sh "$PROJECT_DIR/.env.example" "$ENV_FILE"
     echo "  Created $ENV_FILE from .env.example"
   fi
   # Ensure Google OAuth credentials are present (added in v2.2.0)
   if ! grep -q '^GOOGLE_OAUTH_CLIENT_ID=' "$ENV_FILE" 2>/dev/null; then
-    printf '\nGOOGLE_OAUTH_CLIENT_ID=%s\n' "$G_CID" >> "$ENV_FILE"
+    printf '\nGOOGLE_OAUTH_CLIENT_ID=%s\n' "$G_CID" | append_as_clawbox "$ENV_FILE"
     echo "  Added GOOGLE_OAUTH_CLIENT_ID to $ENV_FILE"
   fi
   if ! grep -q '^GOOGLE_OAUTH_CLIENT_SECRET=' "$ENV_FILE" 2>/dev/null; then
-    printf 'GOOGLE_OAUTH_CLIENT_SECRET=%s\n' "$G_SEC" >> "$ENV_FILE"
+    printf 'GOOGLE_OAUTH_CLIENT_SECRET=%s\n' "$G_SEC" | append_as_clawbox "$ENV_FILE"
     echo "  Added GOOGLE_OAUTH_CLIENT_SECRET to $ENV_FILE"
   fi
   if [ -n "${CLAWBOX_AI_API_KEY:-}" ] && ! grep -q '^CLAWBOX_AI_API_KEY=' "$ENV_FILE" 2>/dev/null; then
-    printf 'CLAWBOX_AI_API_KEY=%s\n' "$CLAWBOX_AI_API_KEY" >> "$ENV_FILE"
+    printf 'CLAWBOX_AI_API_KEY=%s\n' "$CLAWBOX_AI_API_KEY" | append_as_clawbox "$ENV_FILE"
     echo "  Added CLAWBOX_AI_API_KEY to $ENV_FILE"
   fi
   # Propagate test mode into the project .env so clawbox-setup.service
@@ -8874,6 +10807,13 @@ step_directories_permissions() {
   # ~5x faster on this hardware, "on" is the only way this model gets
   # weekday arithmetic right. Restart clawbox-llamacpp after changing it.
   ensure_env_setting "$ENV_FILE" "LLAMACPP_REASONING" "off"
+  # How llama-server holds the model: mmap keeps its CPU-side tensors in the
+  # page cache, where newer llama.cpp's own default (auto) pins ~2 GB of them
+  # in host memory on this board. scripts/start-llamacpp.sh passes it as
+  # LLAMA_ARG_LOAD_MODE. Never seed LLAMA_ARG_* itself here:
+  # clawbox-embed.service loads this same file. Jetson only — install-x64.sh
+  # does not seed it, as no PC or DGX Spark has been measured with it.
+  ensure_env_setting "$ENV_FILE" "LLAMACPP_LOAD_MODE" "mmap"
   # 32k window, q8_0 KV cache, 8k answers (src/lib/llamacpp.ts says why).
   # Only the exact values this file used to write are moved, so a device keeps
   # any size an operator chose. Keep in step with src/lib/llamacpp.ts —
@@ -9076,6 +11016,7 @@ step_system_config() {
   # start_services ever ran. A hardening step must never brick a flash.
   step_firewall || echo "  Warning: firewall step failed (non-fatal)"
   step_persistent_journal
+  step_bluetooth_no_debug || echo "  Warning: bluetooth debug step failed (non-fatal)"
   step_uefi_boot_order || echo "  Warning: UEFI boot order step failed (non-fatal)"
 }
 
@@ -9109,7 +11050,8 @@ step_uefi_boot_order() {
   fi
   if ! command -v efibootmgr >/dev/null 2>&1; then
     wait_for_apt
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq efibootmgr \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq efibootmgr || true
+    command -v efibootmgr >/dev/null 2>&1 \
       || { echo "  Warning: could not install efibootmgr; UEFI boot order guard not installed" >&2; return 1; }
   fi
   install -D -m 0755 "$dir/clawbox-nvme-boot-order.sh" /usr/local/sbin/clawbox-nvme-boot-order
@@ -9180,6 +11122,152 @@ step_persistent_journal() {
   # monotonic ~10 s. `journalctl -b` timestamps before that handoff are bogus and
   # `--list-boots` shows one "boot" spanning the gap. This is a hardware/BSP
   # property of the Orin Nano dev kit, not something install.sh can correct.
+}
+
+step_bluetooth_no_debug() {
+  # Start bluetoothd without -d on a Jetson.
+  #
+  # The -d is NVIDIA's, not ClawBox's: L4T's drop-in nv-bluetooth-service.conf
+  # replaces bluetooth.service's ExecStart with `bluetoothd -d --noplugin=…`, and
+  # while Bluetooth was busy its debug lines filled 74 % of a box's retained
+  # journal (55,866 lines in one hour). ClawBox itself uses no Bluetooth.
+  #
+  # The fix is a drop-in of ClawBox's own, named to sort after NVIDIA's (drop-ins
+  # apply in lexicographic order across directories), holding the vendor's own
+  # ExecStart minus every `-d` token. It is DERIVED from the vendor file on every
+  # run, never copied once: a BSP that changes its arguments is followed, and one
+  # that stops passing -d gets this file removed. Any shape this step does not
+  # expect (no vendor file, an operator's own drop-in, quoting, `--debug`, a
+  # bundled short option) changes nothing except removing a stale file of
+  # ClawBox's own, so the vendor's line stays in force.
+  #
+  # Nothing is restarted: an owner may have paired a keyboard or headset with
+  # the box's desktop, and a restart would drop it. The drop-in applies at the
+  # next start of bluetooth.service, which is the next boot.
+  #
+  # Both callers (`|| echo` and optional_step) run this with errexit off, so every
+  # write and reload checks its own result. Returns 1 only when a write or a
+  # daemon-reload it attempted failed.
+  local vendor="${CLAWBOX_BLUETOOTH_VENDOR_DROPIN:-/usr/lib/systemd/system/bluetooth.service.d/nv-bluetooth-service.conf}"
+  local dest_dir="${CLAWBOX_BLUETOOTH_DROPIN_DIR:-/etc/systemd/system/bluetooth.service.d}"
+  local dest="$dest_dir/zz-clawbox-bluetoothd-no-debug.conf"
+  local mark="# ClawBox: bluetoothd without -d"
+  local why="" out="" p="" line="" exec_start="" tok="" derived="" first="" tmp=""
+  local has_d=0 odd=0 dest_state="absent"
+  local -a paths=() toks=()
+
+  if [ -L "$vendor" ] || [ ! -f "$vendor" ]; then
+    why="No L4T bluetooth drop-in at $vendor"
+  else
+    # An operator's own drop-in (`systemctl edit bluetooth`, anything under /run)
+    # means someone configured this unit by hand: it is left as they configured
+    # it, which takes removing a drop-in of ClawBox's own too. Ours sorts after
+    # `override.conf`, so its `ExecStart=` reset would silently replace theirs.
+    # Compared by file, not by text: systemd may spell the vendor's path
+    # /lib/systemd/…
+    if ! out="$(systemctl show bluetooth.service -p DropInPaths --value 2>/dev/null)"; then
+      echo "  Could not read bluetooth.service's drop-ins; bluetoothd left as it is"
+      return 0
+    fi
+    read -r -a paths <<< "$out"
+    for p in "${paths[@]}"; do
+      if [ "$p" -ef "$vendor" ] || [ "$p" = "$dest" ] || [ "$p" -ef "$dest" ]; then
+        continue
+      fi
+      why="bluetooth.service has a drop-in ClawBox did not write ($p)"
+      break
+    done
+
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        ExecStart=?*) exec_start="${line#ExecStart=}" ;;
+      esac
+    done < "$vendor"
+    read -r -a toks <<< "$exec_start"
+    # The first word is the program (it may carry a systemd prefix like `-`).
+    for tok in "${toks[@]:1}"; do
+      case "$tok" in
+        -d) has_d=1 ;;
+        --debug | --debug=*) odd=1 ;;
+        --*) ;;
+        -*d*) odd=1 ;;
+      esac
+    done
+    case "$exec_start" in
+      *\"* | *\'* | *\\* | *\;*) odd=1 ;;
+    esac
+    if [ -n "$why" ]; then
+      :
+    elif [ "$odd" = 1 ]; then
+      why="The L4T bluetooth ExecStart= is not a shape this step edits"
+    elif [ "$has_d" = 0 ]; then
+      why="The L4T bluetooth drop-in starts bluetoothd without -d"
+    fi
+  fi
+
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    dest_state="foreign"
+    # A last line without a newline still lands in $first.
+    { IFS= read -r first < "$dest"; } 2>/dev/null || :
+    case "$first" in
+      "$mark"*) dest_state="ours" ;;
+    esac
+  fi
+
+  if [ -n "$why" ]; then
+    if [ "$dest_state" != "ours" ]; then
+      echo "  $why; nothing to change"
+      return 0
+    fi
+    if ! rm -f -- "$dest"; then
+      echo "  Warning: $why, but $dest could not be removed" >&2
+      return 1
+    fi
+    if ! systemctl daemon-reload; then
+      echo "  Warning: removed $dest, but systemctl daemon-reload failed" >&2
+      return 1
+    fi
+    echo "  $why; removed $dest, which leaves bluetooth.service as configured without it from its next start"
+    return 0
+  fi
+
+  if [ "$dest_state" = "foreign" ]; then
+    echo "  $dest was not written by ClawBox; left as it is"
+    return 0
+  fi
+
+  derived="${toks[0]}"
+  for tok in "${toks[@]:1}"; do
+    [ "$tok" = "-d" ] || derived="$derived $tok"
+  done
+  # The temp file lives outside $dest_dir: systemd reads every *.conf there.
+  if ! tmp="$(mktemp)"; then
+    echo "  Warning: could not create a temporary file for $dest" >&2
+    return 1
+  fi
+  if ! printf '%s\n' \
+    "$mark, derived from $vendor by install.sh; to restore the vendor's debug output, delete this file and run systemctl daemon-reload (it applies from the next start of bluetooth.service); to keep it restored, add a drop-in of your own (systemctl edit bluetooth), and every later update leaves the unit as you configured it" \
+    "[Service]" "ExecStart=" "ExecStart=$derived" > "$tmp"; then
+    rm -f -- "$tmp"
+    echo "  Warning: could not write the bluetooth drop-in to $tmp" >&2
+    return 1
+  fi
+  if [ "$dest_state" = "ours" ] && cmp -s -- "$tmp" "$dest"; then
+    rm -f -- "$tmp"
+    echo "  bluetoothd's no-debug drop-in is already in place ($dest)"
+    return 0
+  fi
+  if ! mkdir -p -m 0755 -- "$dest_dir" || ! install_root_file "$tmp" "$dest" 0644; then
+    rm -f -- "$tmp"
+    echo "  Warning: could not write $dest; bluetoothd's configuration is unchanged" >&2
+    return 1
+  fi
+  rm -f -- "$tmp"
+  if ! systemctl daemon-reload; then
+    echo "  Warning: wrote $dest, but systemctl daemon-reload failed" >&2
+    return 1
+  fi
+  echo "  Wrote $dest (ExecStart=$derived); bluetoothd runs without -d from the next start of bluetooth.service, the next boot, and is not restarted now"
 }
 
 # ── Root-owned entrypoints ───────────────────────────────────────────────────
@@ -9436,11 +11524,27 @@ install_root_libexec() {
     echo "  Error: WiFi helper publication failed; preserving dependent entrypoints" >&2
     failed=1
   fi
+  # The same rule for the gateway's shared guard (TASK-2490): the NetworkManager
+  # waiter and the liveness watchdog both source gateway-unit-guard.sh from
+  # beside themselves, so it lands first and neither is replaced without it.
+  # A tree without the guard (one that predates it) publishes neither consumer
+  # and is not a failure, like any script the loop below does not find; a copy
+  # that does not land is.
+  local gateway_guard_ready=0
+  if [ -f "$SRC_DIR/scripts/gateway-unit-guard.sh" ]; then
+    if install_root_file "$SRC_DIR/scripts/gateway-unit-guard.sh" "$ROOT_LIBEXEC_DIR/gateway-unit-guard.sh" 0644; then
+      gateway_guard_ready=1
+    else
+      echo "  Error: gateway guard publication failed; preserving the waiter and watchdog already installed" >&2
+      failed=1
+    fi
+  fi
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
-             clawbox-resource-limits.sh gateway-restart-when-online.sh \
+             clawbox-resource-limits.sh gateway-restart-when-online.sh gateway-watchdog.sh \
              wifi-failover.sh start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
     case "$src" in
       wifi-failover.sh|start-ap.sh|stop-ap.sh) [ "$wifi_helper_ready" -eq 1 ] || continue ;;
+      gateway-restart-when-online.sh|gateway-watchdog.sh) [ "$gateway_guard_ready" -eq 1 ] || continue ;;
     esac
     if [ -f "$SRC_DIR/scripts/$src" ]; then
       install_root_file "$SRC_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src" || {
@@ -9808,6 +11912,9 @@ step_systemd_services() {
     fi
     cp "$src" /etc/systemd/system/
   done
+  # The unit just copied carries the journald limit itself: the drop-in
+  # step_apt_update bridged an older unit with comes down (see there).
+  refresh_root_update_log_limit
   systemctl daemon-reload
   # Enable all services except templates and on-demand units.
   #
@@ -9835,6 +11942,7 @@ step_systemd_services() {
     # Timer-driven one-shot (no [Install]); enabled via its .timer below.
     [[ "$svc" == "clawbox-ap-watchdog.service" ]] && continue
     [[ "$svc" == "clawbox-codex-auth-sync.service" ]] && continue
+    [[ "$svc" == "clawbox-gateway-watchdog.service" ]] && continue
     systemctl enable "$svc"
   done
   # Start the heartbeat timer immediately so the portal sees the device
@@ -9843,11 +11951,30 @@ step_systemd_services() {
   # Start the AP watchdog immediately so a dropped setup hotspot self-heals
   # without waiting for a reboot.
   systemctl enable --now clawbox-ap-watchdog.timer
+  # The gateway's liveness watchdog, on the editions that run the gateway, and
+  # taken off the ones that do not (TASK-2490). Both halves are idempotent: this
+  # is how every in-app update installs or refreshes it.
+  if has_openclaw_harness; then
+    install_gateway_watchdog || echo "  Warning: the gateway liveness watchdog was not installed" >&2
+  else
+    remove_gateway_watchdog || echo "  Warning: the gateway liveness watchdog could not be removed" >&2
+  fi
   # The sync unit runs under ProtectSystem=strict and can only write paths named
   # in ReadWritePaths. ~/.codex doesn't exist until the first ChatGPT login, so
   # create it up front — otherwise the very first mirror write (the one that
   # makes Codex work at all) hits a read-only namespace.
-  install -d -o clawbox -g clawbox -m 700 "$CLAWBOX_HOME/.codex"
+  # Made and set private BY the clawbox user: root's `install -d` applied its
+  # owner and mode to whatever a ~/.codex link pointed at. A root-owned one is
+  # handed back first, the owner `install -o` gave it.
+  # The user's mkdir or chmod can still fail where root's did not. It is said
+  # on the updater's warning line and the step goes on, as the user-gateway
+  # mask does: a bare failure under errexit ended the step, and with errexit
+  # off it passed with no word.
+  hand_over_home_path "$CLAWBOX_HOME/.codex"
+  if ! as_clawbox mkdir -p -- "$CLAWBOX_HOME/.codex" || ! as_clawbox chmod 700 -- "$CLAWBOX_HOME/.codex"; then
+    echo "  Warning: could not prepare ~/.codex" >&2
+    echo "CLAWBOX-WARN[codex-dir-not-ready]: ~/.codex could not be made private for the clawbox user, so the Codex sign-in mirror cannot write there; 'sudo bash $PROJECT_DIR/install.sh --step systemd_services' tries again"
+  fi
   # Start the Codex credential mirror sync immediately so a box updating into
   # this release strips any refresh_token 3.1.11 planted in its mirrors without
   # waiting for a reboot — that token is what burns the OAuth family.
@@ -10013,12 +12140,20 @@ step_nm_dispatcher() {
   # it is meant to end. A new waiter still takes an old dispatcher's bare
   # `<reason>`, so the pairing a failed dispatcher copy leaves behind is safe.
   local WAITER_SRC="$SRC_DIR/scripts/gateway-restart-when-online.sh"
+  local GUARD_SRC="$SRC_DIR/scripts/gateway-unit-guard.sh"
   if [ -f "$WAITER_SRC" ]; then
     # install_root_file returns 1 on both its failure paths and leaves the
     # PREVIOUS copy in place, so an unreported failure is not "no waiter" but a
     # STALE one — worse, and invisible until a network event logs the
     # dispatcher's own "missing or not executable" line.
+    #
+    # The waiter sources gateway-unit-guard.sh from beside itself (shared with
+    # the liveness watchdog, TASK-2490), so the guard lands FIRST and a new
+    # waiter is never published without it: a waiter that cannot read its guard
+    # stands down on every network event.
     if install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR" \
+       && [ -f "$GUARD_SRC" ] \
+       && install_root_file "$GUARD_SRC" "$ROOT_LIBEXEC_DIR/gateway-unit-guard.sh" 0644 \
        && install_root_file "$WAITER_SRC" "$ROOT_LIBEXEC_DIR/gateway-restart-when-online.sh"; then
       echo "  Deferred gateway-restart helper installed"
     else
@@ -10124,6 +12259,9 @@ step_post_update() {
   # Without this call the persistent journal would be fresh-install-only, and
   # every already-shipped box would keep losing its whole log on each reboot.
   optional_step persistent_journal step_persistent_journal
+  # Without this call the bluetoothd fix would be fresh-install-only, and every
+  # box already in the field would keep NVIDIA's -d.
+  optional_step bluetooth_no_debug step_bluetooth_no_debug
   # Without this call the NVMe-first boot order guard would be factory-only, and
   # every box flashed before it would keep a BootOrder the firmware can push the
   # SSD to the bottom of. TASK-1636.
@@ -10141,6 +12279,10 @@ step_post_update() {
   # Without this call the marker would be fresh-install-only, and every box
   # already in the field would keep GNOME's first-run assistant resident.
   optional_step gnome_initial_setup_done step_gnome_initial_setup_done
+  # Without this call the hidden autostart entries would be fresh-install-only,
+  # and every box already in the field would keep Ubuntu's background apps
+  # resident in its desktop session.
+  optional_step desktop_background_apps step_desktop_background_apps
   # Reinstall the unit files from config/ + daemon-reload. Without this, unit
   # changes only ever reached FRESH installs: the in-app update runs
   # bootstrap_updater -> ... -> post_update and never re-copies
@@ -10151,6 +12293,9 @@ step_post_update() {
   # sudoers change the same way. The step is idempotent — cp, daemon-reload,
   # enable — and is exactly what fresh installs already run.
   optional_step systemd_services step_systemd_services
+  # After the units are in place: ClawBox Vault's packages and its unit, for a
+  # box that got here without the updater's apt and rebuild steps.
+  optional_step vault_service ensure_vault_service
   optional_step hermes_dashboard_proxy_refresh step_hermes_dashboard_proxy_refresh
   optional_step nm_dispatcher step_nm_dispatcher
   # The polkit narrowing, again. step_rebuild_reboot removes the old grant right
@@ -10162,8 +12307,12 @@ step_post_update() {
   # Refresh the device-side ClawKeep CLI from the repo. The Python package
   # has the same version string ("0.1.0") across releases, so a plain
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
-  # we have to force-reinstall.
-  optional_step clawkeep_install step_clawkeep_install
+  # we have to force-reinstall. Unless step_rebuild_reboot already did, in
+  # this boot, from the same clean clawkeep/ tree and the CLI still answers
+  # (UPD-04): it is the one forced install of the update. This step cannot
+  # simply drop the call: it fetches and resets the tree before it runs, so
+  # the code may have moved since; the tree id comparison catches that.
+  optional_step clawkeep_install step_clawkeep_install --reuse-this-update
   # The coding harness. WITHOUT this call TASK-378 would be fresh-install-only:
   # step_post_update never ran step_ai_tools_install, which is exactly why no
   # already-shipped box has `claude` on it today. Idempotent — a present
@@ -10175,6 +12324,14 @@ step_post_update() {
   # good. Idempotent: a box already on the pin does one `codex --version` and
   # stops.
   optional_step codex_cli step_codex_cli
+  # The AppArmor profile Codex's read-only sandbox (bwrap) needs on a box that
+  # restricts user namespaces (Ubuntu 23.10+). Without this call it would be
+  # fresh-install-only, like the CLI above, and a team's planner or reviewer on
+  # an already-installed box would keep failing with "bwrap: loopback: Failed
+  # RTM_NEWADDR". A no-op wherever it is not needed (no bwrap, restriction off,
+  # no apparmor_parser, another profile on bwrap), and byte-identical after the
+  # first run. Read from $SRC_DIR, the root-owned mirror.
+  optional_step bwrap_userns_profile ensure_bwrap_userns_profile
   # On-device TTS: refreshes the voice scripts and the units of the engines
   # that are PRESENT, and seeds the tts-local-cli provider behind an installed
   # Kokoro. It installs NOTHING — the update used to spend a quarter of an
@@ -10503,10 +12660,14 @@ step_gateway_legacy_state_recovery() {
     return 0
   fi
 
-  local ts qdir moved=0
+  # The quarantine directory, its removal and every move are the clawbox
+  # user's: the directory is in that user's home and the files in its
+  # ~/.openclaw, where root's `mv` would follow a planted link. So the
+  # directory is now that user's, not root's; the files keep their owners.
+  local ts qdir moved=0 unmoved=0
   ts=$(date +%Y%m%d-%H%M%S)
   qdir="$CLAWBOX_HOME/openclaw-legacy-quarantine-$ts"
-  mkdir -p "$qdir"
+  as_clawbox mkdir -p -- "$qdir"
 
   echo "  Quarantining known legacy OpenClaw migration blockers in $qdir"
   # Not under the maintenance guard (this step stands down while it is held),
@@ -10516,7 +12677,7 @@ step_gateway_legacy_state_recovery() {
   # a database moved out from under a live writer.
   if ! stop_gateway_unit; then
     echo "  Warning: could not stop the gateway; leaving its state files where they are" >&2
-    rmdir "$qdir" 2>/dev/null || true
+    as_clawbox rmdir -- "$qdir" 2>/dev/null || true
     return 1
   fi
   for f in \
@@ -10525,11 +12686,20 @@ step_gateway_legacy_state_recovery() {
     "$CLAWBOX_HOME/.openclaw/agents/carl_pir/agent/openclaw-agent.sqlite"*
   do
     if [ -e "$f" ]; then
-      mv -v "$f" "$qdir/" && moved=1
+      # A root-owned directory on the way to the file would refuse the user's
+      # move where root's succeeded: handed back first, one by one, never
+      # recursively.
+      hand_over_home_path "${f%/*}"
+      if as_clawbox mv -v -- "$f" "$qdir/"; then
+        moved=1
+      else
+        unmoved=1
+        echo "  Warning: could not move $f into $qdir" >&2
+      fi
     fi
   done
 
-  if [ "$moved" -eq 0 ]; then
+  if [ "$moved" -eq 0 ] && [ "$unmoved" -eq 0 ]; then
     echo "  No known legacy migration blocker files found to quarantine"
   fi
 
@@ -10694,8 +12864,20 @@ except Exception:
     # already have made one.
     return "$SMOKE_FINDINGS"
   fi
+  # The token reaches curl on its stdin, as a line of curl's own config
+  # format, never as an argument: every local account can read a running
+  # process's arguments. Inside the quotes curl turns \\ \" \n \r back into
+  # the bytes they stand for, so it requests the very URL the argument named,
+  # and the value is left no quote to close early and no line break to start
+  # a second option. printf is a builtin: the value is on no exec'd argv.
+  local tg_url_token="$TG_TOKEN"
+  tg_url_token=${tg_url_token//\\/\\\\}
+  tg_url_token=${tg_url_token//\"/\\\"}
+  tg_url_token=${tg_url_token//$'\n'/\\n}
+  tg_url_token=${tg_url_token//$'\r'/\\r}
   local getme
-  getme=$(curl -s -m 8 "https://api.telegram.org/bot${TG_TOKEN}/getMe" 2>/dev/null \
+  getme=$(printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$tg_url_token" 2>/dev/null \
+    | curl -s -m 8 -K - 2>/dev/null \
     | python3 -c 'import json,sys
 try: print("yes" if json.load(sys.stdin).get("ok") else "no")
 except Exception: print("no")' 2>/dev/null || echo "no")
@@ -10710,7 +12892,8 @@ except Exception: print("no")' 2>/dev/null || echo "no")
   #    devices skip it. Confirms the bot can actually deliver a message.
   if [ -n "${CLAWBOX_SMOKE_TELEGRAM_CHAT_ID:-}" ]; then
     local msg_id
-    msg_id=$(curl -s -m 10 "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+    msg_id=$(printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$tg_url_token" 2>/dev/null \
+      | curl -s -m 10 -K - \
       --data-urlencode "chat_id=${CLAWBOX_SMOKE_TELEGRAM_CHAT_ID}" \
       --data-urlencode "text=ClawBox post-update smoke" 2>/dev/null \
       | python3 -c 'import json,sys
@@ -10791,7 +12974,11 @@ step_polkit_rules() {
 
 step_start_services() {
   local svc
-  local -a svcs=(clawbox-ap clawbox-setup clawbox-performance)
+  # clawbox-vault: the built-in password manager, on every edition. An in-app
+  # update needs no line of its own for it: step_rebuild_reboot installs and
+  # enables the unit, and restart_services_after_update then starts or restarts
+  # every enabled clawbox-* unit on the new build.
+  local -a svcs=(clawbox-ap clawbox-setup clawbox-performance clawbox-vault)
   # The OpenClaw gateway only exists on editions that run it. On the Hermes SKU
   # it is never installed (and is masked by step_edition_gateway_state), and
   # `systemctl restart` on a missing unit exits 5 — which, under the
@@ -11087,7 +13274,69 @@ ensure_local_embeddings() {
   # verdict, not just the bytes: assignment in if-condition position, so a
   # non-zero exit discards output that describes nothing anyone should vouch
   # for, and errexit stays suppressed.
-  local EMBED_JSON EMBED_STATE
+  local EMBED_JSON EMBED_STATE MEMORY_AGENT
+  # About the box's DEFAULT agent, which is not always called `main`: asked
+  # about `main` on a box whose agent was renamed, the core refuses (or reads
+  # a stale `agents/main/` left behind) and this said it could not read an
+  # embedder. The same rule as src/lib/openclaw-default-agent.ts, over the
+  # openclaw.json this block reads (the web server's own on a stock box):
+  # `agents.defaults.systemAgent.agentId` when it is a
+  # configured agent, else the one entry marked `default: true` (not under
+  # explicit ownership), else the sole agent; with several and none named,
+  # `main` if it is one of them, else the first. `main` with no roster, no
+  # readable config or no python3.
+  # `-I` on both parsers here: this runs as root, and a full install reaches it
+  # from inside the clawbox-writable project directory, where a plain
+  # `python3 -` would put the cwd first on sys.path and import a planted
+  # `json.py`/`re.py` as root. Isolated mode drops the cwd, PYTHONPATH and the
+  # user site; the snippets import nothing but the standard library.
+  MEMORY_AGENT="$(python3 -I - "$CLAWBOX_HOME/.openclaw/openclaw.json" <<'PY' 2>/dev/null || true
+import json, re, sys
+def norm(value):
+    s = value.strip() if isinstance(value, str) else ""
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", s, re.I | re.A):
+        return s.lower()
+    return re.sub(r"[^a-z0-9_-]+", "-", s.lower()).lstrip("-").rstrip("-")[:64] or "main"
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        cfg = json.load(fh)
+except Exception:
+    cfg = None
+agents = cfg.get("agents") if isinstance(cfg, dict) else None
+roster = None
+if isinstance(agents, dict) and "entries" in agents:
+    entries = agents["entries"]
+    # In the order JavaScript walks the object, as the core and the web
+    # server do: integer-like keys first, ascending, then the rest as written.
+    keys = list(entries) if isinstance(entries, dict) else []
+    first = sorted((k for k in keys if re.fullmatch(r"0|[1-9][0-9]*", k) and int(k) < 4294967295), key=int)
+    keys = first + [k for k in keys if k not in first]
+    roster = [(norm(k), entries[k]) for k in keys if isinstance(entries[k], dict)] if isinstance(entries, dict) else []
+elif isinstance(agents, dict) and "list" in agents:
+    listed = agents["list"]
+    roster = [(norm(v.get("id") if isinstance(v, dict) else None), v) for v in listed if isinstance(v, (dict, list))] if isinstance(listed, list) else []
+if roster is None:
+    print("main")
+    raise SystemExit(0)
+ids = list(dict.fromkeys(i for i, _ in roster))
+defaults = agents.get("defaults") if isinstance(agents.get("defaults"), dict) else {}
+system = defaults.get("systemAgent") if isinstance(defaults.get("systemAgent"), dict) else {}
+named = system.get("agentId")
+named = norm(named) if isinstance(named, str) and named.strip() else ""
+marked = [i for i, e in roster if isinstance(e, dict) and e.get("default") is True]
+if named and named in ids:
+    print(named)
+elif agents.get("ownership") != "explicit" and len(marked) == 1:
+    print(marked[0])
+elif len(ids) == 1:
+    print(ids[0])
+elif not ids:
+    print("main")
+else:
+    print("main" if "main" in ids else ids[0])
+PY
+)"
+  case "$MEMORY_AGENT" in ''|*[!a-z0-9_-]*) MEMORY_AGENT=main ;; esac
   # `</dev/null`, and no clock. The CLI is what decides how long this takes —
   # `--deep` walks the whole index, so the 60 s cap this used to carry reported
   # "could not read an embedder" about a healthy one on a box whose index was
@@ -11095,7 +13344,7 @@ ensure_local_embeddings() {
   # invent. What IS closed off is the one way a non-interactive CLI hangs
   # without doing anything: a prompt on stdin, which it would otherwise inherit
   # from the root step and wait on for ever.
-  if ! EMBED_JSON="$(as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null </dev/null)"; then
+  if ! EMBED_JSON="$(as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" memory status --agent "$MEMORY_AGENT" --deep --json 2>/dev/null </dev/null)"; then
     EMBED_JSON=""
   fi
   # `command -v` first, and a state of its own: without the interpreter the
@@ -11104,7 +13353,7 @@ ensure_local_embeddings() {
   if ! command -v python3 >/dev/null 2>&1; then
     EMBED_STATE="noparser"
   else
-    EMBED_STATE="$(python3 - "$EMBED_JSON" "$CLAWBOX_HOME/.openclaw/openclaw.json" <<'PY' 2>/dev/null || true
+    EMBED_STATE="$(python3 -I - "$EMBED_JSON" "$CLAWBOX_HOME/.openclaw/openclaw.json" "$MEMORY_AGENT" <<'PY' 2>/dev/null || true
 import json, sys
 from urllib.parse import urlparse
 try:
@@ -11114,7 +13363,7 @@ except Exception:
 rows = doc if isinstance(doc, list) else [doc]
 row = {}
 for entry in rows:
-    if isinstance(entry, dict) and entry.get("agentId") == "main":
+    if isinstance(entry, dict) and entry.get("agentId") == sys.argv[3]:
         row = entry
         break
 if not row and rows and isinstance(rows[0], dict):
@@ -11410,9 +13659,13 @@ LLAMACPP_BUILD_LOCK="/run/lock/clawbox-llamacpp-build.lock"
 LLAMACPP_REPO_URL="https://github.com/ggml-org/llama.cpp.git"
 
 # The commit an installed llama-server says it was built from — the short hash
-# in its own `--version` ("version: 6970 (db7d8b24b)") — or nothing when it
-# cannot say: it does not start, or it was built outside a git checkout and
-# answers "unknown".
+# in its own `--version`, in either form llama.cpp prints:
+#   version: <build> (<hash>)                         (older builds)
+#   version: <semver> (build <build>, commit <hash>)  (newer builds)
+# — or nothing when it cannot say: it does not start, or it was built outside
+# a git checkout and answers "unknown". Reading only the older form would
+# rebuild a box on every update once the pin moves to a newer build, and then
+# refuse the build it made.
 #
 # $1 = the binary, $2 = a directory to load its libraries from instead of the
 # tree its RUNPATH names (a staged build that is not in place yet).
@@ -11427,7 +13680,10 @@ llamacpp_binary_commit() {
   else
     out="$(as_clawbox "$bin" --version 2>&1)" || return 0
   fi
-  printf '%s\n' "$out" | sed -n 's/^version: [0-9][0-9]* (\([0-9a-f]\{7,40\}\)).*$/\1/p' | head -n 1
+  printf '%s\n' "$out" | sed -n \
+    -e 's/^version: [0-9][0-9]* (\([0-9a-f]\{7,40\}\)).*$/\1/p' \
+    -e 's/^version: [^ ][^ ]* (build [0-9][0-9]*, commit \([0-9a-f]\{7,40\}\)).*$/\1/p' \
+    | head -n 1
 }
 
 # Does the short hash a binary reports ($1) name the pinned commit ($2, the
@@ -11708,10 +13964,17 @@ step_llamacpp_runtime() {
   # Pinned, not tip-of-master. An unpinned --depth 1 clone gave every device
   # whatever upstream happened to be that day — the two boxes here ended up on
   # d2f8305 and db7d8b2, so "the same install" produced different inference
-  # binaries. This commit is the one proven on this hardware; move it
-  # deliberately, with a rebuild to prove the new one — and moving it now
-  # moves every box, on its next update.
-  local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-db7d8b24b5197ca39435cf47b3c1ba039b53605b}"
+  # binaries. Move it deliberately, with a rebuild to prove the new one — and
+  # moving it now moves every box, on its next update.
+  #
+  # 5f490d7 (b12233) was measured on an 8 GB Orin Nano against db7d8b2: faster
+  # (decode 33.5 vs 30.1 tok/s, prefill 1144 vs 987) with lowest MemAvailable
+  # 2251 vs 2403 MB, but only with the model memory-mapped. Its default load
+  # mode (auto) pins the model's CPU-side tensors in host memory on this board
+  # and left 390 MB free, so the pin moves only together with
+  # LLAMACPP_LOAD_MODE=mmap (seeded in step_directories_permissions, passed by
+  # scripts/start-llamacpp.sh).
+  local LLAMACPP_COMMIT="${LLAMACPP_COMMIT:-5f490d7bfe78844e6390c869454c149fd7e003a8}"
 
   # On Jetson, nvcc ships at /usr/local/cuda/bin but isn't on systemd's PATH,
   # so `command -v nvcc` fails and we silently fall back to a CPU-only build.
@@ -11850,8 +14113,14 @@ step_chpasswd() {
   local INPUT_FILE="$PROJECT_DIR/data/.chpasswd-input"
   # -f follows symlinks; -L rejects the link itself. A symlink here would be a
   # way to make root read a file the clawbox user could not otherwise feed in.
+  # The file is removed by that user, whose data/ it sits in: root's `rm` there
+  # would act on whatever the name was changed to point at. The symlink's
+  # removal never changes the refusal's 64. After the read, a record the user
+  # could not remove ends the step before chpasswd, as root's failed `rm` did
+  # under errexit: the plaintext must not outlive a password change, and the
+  # routes scrub it only when the step fails.
   if [ -L "$INPUT_FILE" ]; then
-    rm -f "$INPUT_FILE"
+    as_clawbox rm -f -- "$INPUT_FILE" 2>/dev/null || true
     echo "Error: password input file is a symlink; refusing" >&2
     exit 64
   fi
@@ -11868,7 +14137,10 @@ step_chpasswd() {
   # no NUL can reach it either.
   local record user
   record="$(cat "$INPUT_FILE")"
-  rm -f "$INPUT_FILE"
+  if ! as_clawbox rm -f -- "$INPUT_FILE" 2>/dev/null; then
+    echo "Error: could not remove $INPUT_FILE; the password was not changed" >&2
+    exit 1
+  fi
 
   case "$record" in
     *$'\n'*)
@@ -11925,8 +14197,10 @@ clawbox_user_name_ok() {
 # file and a second record. Prints the record; exits on refusal.
 read_user_step_input() {
   local input_file="$1" record
+  # Removed as the clawbox user, whose data/ it is (step_chpasswd says why).
+  # Silent on stdout: the caller captures the record from it.
   if [ -L "$input_file" ]; then
-    rm -f "$input_file"
+    as_clawbox rm -f -- "$input_file" >/dev/null 2>&1 || true
     echo "Error: user input file is a symlink; refusing" >&2
     exit 64
   fi
@@ -11935,7 +14209,7 @@ read_user_step_input() {
     exit 1
   fi
   record="$(cat "$input_file")"
-  rm -f "$input_file"
+  as_clawbox rm -f -- "$input_file" >/dev/null 2>&1 || echo "  Warning: could not remove $input_file" >&2
   case "$record" in
     *$'\n'*)
       echo "Error: user input must be exactly one record" >&2
@@ -12168,6 +14442,79 @@ step_recover() {
   echo "Recovery complete"
 }
 
+# Whether step_gateway_setup restarts the gateway it has just configured:
+# prints `restart` or `leave`, and always returns 0.
+#
+# `leave` only inside the in-app update's OWN gateway_setup step (the updater
+# dispatching `--step gateway_setup` while it holds the box, asked the way
+# step_performance_mode asks it) and only for a gateway systemd calls `active`
+# or `reloading`. Every appliance update stops that gateway again before its
+# last step (the build pause on a box under 12 GB, post_update's quiesce on
+# every box), and gateway_verify starts it on the updated core, patches, unit
+# and pre-start, so a restart here was a whole gateway start thrown away a
+# minute later: 35-65 s of chat down on an 8 GB board, every update. Should
+# nothing stop it (post_update's quiesce failing at or before its stop),
+# gateway_verify finds the run record_gateway_left_running noted still serving
+# and starts it then. What the restart used to be for still holds:
+#  - openclaw_install's full path stops the gateway and leaves it stopped:
+#    `inactive`, so `restart`, as before;
+#  - openclaw_patch rewrote core files beside the running process (the fast
+#    path): it keeps the modules it loaded until the update stops it, and the
+#    patch replaces each file whole, a temp file and then a rename;
+#  - a changed unit or drop-in: daemon-reload has loaded it, and it applies at
+#    gateway_verify's start; nothing in between needs it.
+# post_update's own call, a harness swap or edition choice (both refused while
+# an update runs), a hand-run step and a full install all get `restart`.
+# `activating` is a start in progress OR a unit waiting in auto-restart after a
+# crash, so it gets reset-failed and the restart, like every other state. The
+# state is read as a WORD and asked once more when systemd answers nothing
+# (restart_services_after_update's rule); still nothing is `restart`. The lock
+# is a HINT (update_owns_the_box): the most a false one buys is a running
+# gateway not restarted by a hand-run `--step gateway_setup`.
+gateway_setup_restart_wanted() {
+  local state
+  if [ "${CLAWBOX_DISPATCHED_STEP:-}" != gateway_setup ] || ! update_owns_the_box; then
+    echo restart
+    return 0
+  fi
+  state="$(systemctl is-active clawbox-gateway.service 2>/dev/null || true)"
+  [ -n "$state" ] || state="$(systemctl is-active clawbox-gateway.service 2>/dev/null || true)"
+  case "$state" in
+    active|reloading) echo leave ;;
+    *) echo restart ;;
+  esac
+  return 0
+}
+
+# The note step_gateway_setup leaves with a gateway it does not restart: which
+# run of clawbox-gateway.service that is, by systemd's own id for the run
+# (InvocationID, new at every start and never reused). gateway_verify, as the
+# web server's account, reads it at its decision and starts that run again if
+# it is still the one serving (src/lib/updater.ts, gatewaySetupRunStillServing).
+# A plain data file root writes and runs nothing from, in root's /run/clawbox:
+# it outlives the web server's restart inside the update and is gone after a
+# boot. Written through a fresh mktemp file renamed over the place (never
+# through a link there, and never into a directory there), readable by all.
+# Returns 1, leaving the place as it was, when systemd names no run or the
+# note cannot be written: the step then restarts the gateway as it always did.
+record_gateway_left_running() {
+  local note="${CLAWBOX_GATEWAY_LEFT_RUNNING:-/run/clawbox/gateway-left-running}" run tmp=""
+  run="$(systemctl show clawbox-gateway.service -p InvocationID --value 2>/dev/null || true)"
+  case "$run" in
+    *[!0-9a-f]*|'') ;;
+    *)
+      if [ "${#run}" -eq 32 ] && mkdir -p "$(dirname "$note")" 2>/dev/null \
+        && tmp="$(mktemp "$(dirname "$note")/.gateway-left-running.XXXXXX" 2>/dev/null)" \
+        && printf '%s\n' "$run" > "$tmp" && chmod 0644 "$tmp" && mv -fT "$tmp" "$note" 2>/dev/null; then
+        return 0
+      fi
+      ;;
+  esac
+  [ -z "$tmp" ] || rm -f "$tmp" 2>/dev/null || true
+  echo "  Could not note which clawbox-gateway.service run this step leaves for the update's final check; restarting it here instead"
+  return 1
+}
+
 step_gateway_setup() {
   # DO NOT DELETE THIS GUARD AS "REDUNDANT" NOW THAT THE UPDATER FILTERS STEPS.
   #
@@ -12221,11 +14568,20 @@ step_gateway_setup() {
           XDG_RUNTIME_DIR="/run/user/$CLAWBOX_UID" \
           systemctl --user stop openclaw-gateway.service 2>/dev/null || true
       fi
-      mkdir -p "$USER_SYSTEMD_DIR"
-      chown "$CLAWBOX_USER:$CLAWBOX_USER" "$USER_SYSTEMD_DIR"
-      rm -f "$USER_GATEWAY_UNIT"
-      ln -s /dev/null "$USER_GATEWAY_UNIT"
-      chown -h "$CLAWBOX_USER:$CLAWBOX_USER" "$USER_GATEWAY_UNIT" 2>/dev/null || true
+      # The mask is written BY the clawbox user, in its own directory: root's
+      # `rm` and `ln` there would act through a link planted on the way. The
+      # directory exists (the unit is in it); a root-owned one, or a root-owned
+      # ~/.config or ~/.config/systemd above it, is handed back first, the owner
+      # the old chown gave the directory.
+      # The user's write can fail where root's did not. A mask that did not
+      # land is said on the updater's warning line and the step goes on, so
+      # the system gateway below is still configured and restarted: the
+      # updater stops a whole update on this step's failure.
+      hand_over_home_path "$USER_SYSTEMD_DIR"
+      if ! as_clawbox rm -f -- "$USER_GATEWAY_UNIT" || ! as_clawbox ln -s -- /dev/null "$USER_GATEWAY_UNIT"; then
+        echo "  Warning: could not mask the user-level openclaw-gateway.service" >&2
+        echo "CLAWBOX-WARN[user-gateway-not-masked]: the user-level openclaw-gateway.service could not be masked, so it can start beside the system gateway at the next login; 'sudo bash $PROJECT_DIR/install.sh --step gateway_setup' tries again"
+      fi
     fi
   fi
 
@@ -12247,6 +14603,16 @@ CONF
 
   systemctl daemon-reload
   systemctl enable clawbox-gateway.service
+  # The watchdog with the gateway (TASK-2490): an edition choice or a harness
+  # swap to OpenClaw reaches the gateway through this step and not through
+  # step_systemd_services. Not fatal — a box without it is a box as before.
+  # Installed before the update's leave-it-running return below, so that
+  # return never skips it.
+  install_gateway_watchdog || echo "  Warning: the gateway liveness watchdog was not installed" >&2
+  if [ "$(gateway_setup_restart_wanted)" = leave ] && record_gateway_left_running; then
+    echo "  Leaving the running clawbox-gateway.service as it is: this update stops it before its final check, which starts it on the updated core and pre-start (gateway_verify)"
+    return 0
+  fi
   # Clear any tripped start-limit (breaker) state so the restart isn't refused
   # on a box whose gateway had been crash-looping (issue #284 breaker).
   systemctl reset-failed clawbox-gateway.service 2>/dev/null || true
@@ -12492,9 +14858,25 @@ install_claude_ds_wrapper() {
     return 1
   fi
 
-  install -d -o "$CLAWBOX_USER" -g "$CLAWBOX_USER" -m 755 "$CLAWBOX_HOME/.local/bin"
-  install -o "$CLAWBOX_USER" -g "$CLAWBOX_USER" -m 755 "$src" "$dest"
-  echo "  claude-ds installed at $dest"
+  # Written BY the clawbox user, into its own ~/.local/bin: root's `install`
+  # there would follow a planted link. Root opens the source and hands it over
+  # on stdin, so the copy does not depend on the user being able to read it;
+  # the user writes a temp beside the target and renames it over, which also
+  # replaces a link at the target instead of writing through it (an older box
+  # can have one pointing back into the checkout).
+  hand_over_home_path "$CLAWBOX_HOME/.local/bin"
+  local tmp=""
+  if as_clawbox mkdir -p -- "$CLAWBOX_HOME/.local/bin" \
+    && tmp=$(as_clawbox mktemp -- "$dest.XXXXXX") \
+    && as_clawbox tee -- "$tmp" >/dev/null < "$src" \
+    && as_clawbox chmod 755 -- "$tmp" \
+    && as_clawbox mv -f -T -- "$tmp" "$dest"; then
+    echo "  claude-ds installed at $dest"
+    return 0
+  fi
+  [ -z "$tmp" ] || as_clawbox rm -f -- "$tmp" 2>/dev/null || true
+  echo "  WARN: could not install claude-ds at $dest"
+  return 1
 }
 
 # The ClawBox coding harness: Claude Code plus the claude-ds wrapper that
@@ -12845,6 +15227,118 @@ ensure_codex_cli() {
   return "$rc"
 }
 
+# ── bubblewrap under Ubuntu's user-namespace restriction ─────────────────────
+#
+# Ubuntu 23.10+ ships kernel.apparmor_restrict_unprivileged_userns=1, which
+# refuses /usr/bin/bwrap the user namespace it needs. Codex's read-only sandbox
+# (a team's planner or reviewer, src/lib/coding-codex.ts) IS `bwrap
+# --unshare-net`, so on such a box every command of a read-only run failed with
+# "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted".
+# config/apparmor/bwrap-userns-restrict is upstream AppArmor's own profile for
+# exactly this: bwrap may build the namespace, and everything it starts is
+# stacked with a child profile that denies every capability. The system-wide
+# restriction stays on, and no other profile or sysctl is touched.
+#
+# Loaded only where it is needed AND safe:
+#   - /usr/bin/bwrap is installed;
+#   - the restriction is on (/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+#     reads 1) — everywhere else bwrap already works;
+#   - apparmor_parser exists to load it;
+#   - no OTHER profile under /etc/apparmor.d already attaches to bwrap — a
+#     second one on the same binary would be ambiguous, and the owner's or the
+#     distro's comes first. A file of that name that is not ClawBox's is left
+#     alone for the same reason.
+# Read from $SRC_DIR, the root-owned mirror on a dispatched step: root loads
+# AppArmor policy only from a copy the clawbox user cannot write. Idempotent,
+# and a failure is a warning — the caller never fails the install over it.
+#
+# Write `$2` to `$1`, load it with `$3`, and put the box back as it was when
+# the kernel refuses it: a file left behind would read as "already installed"
+# on every later run and never be retried.
+bwrap_userns_profile_install() {
+  local dest="$1" profile="$2" parser="$3" prev=""
+  if [ -f "$dest" ]; then
+    prev="$(mktemp)" || prev=""
+    if [ -z "$prev" ] || ! cat "$dest" > "$prev"; then
+      echo "  WARN: could not set the current $dest aside; leaving it as it is" >&2
+      [ -z "$prev" ] || rm -f "$prev"
+      return 1
+    fi
+  fi
+  if install -o root -g root -m 0644 "$profile" "$dest" && "$parser" -r "$dest"; then
+    echo "  AppArmor profile for bubblewrap installed and loaded: $dest"
+    [ -z "$prev" ] || rm -f "$prev"
+    return 0
+  fi
+  echo "  WARN: could not install or load $dest; putting back what was there" >&2
+  if [ -n "$prev" ]; then
+    install -o root -g root -m 0644 "$prev" "$dest" || true
+    rm -f "$prev"
+  else
+    rm -f "$dest"
+  fi
+  return 1
+}
+
+ensure_bwrap_userns_profile() {
+  local bwrap_bin=/usr/bin/bwrap
+  local restrict_flag=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+  local profile_dir=/etc/apparmor.d
+  local name=bwrap-userns-restrict
+  local src="$SRC_DIR/config/apparmor/$name"
+  local dest="$profile_dir/$name"
+  # A header line that ATTACHES a profile to a bwrap path, as opposed to a rule
+  # inside some other profile that merely mentions it (`/usr/bin/bwrap ix,`).
+  local attach_re='^[[:space:]]*(profile[[:space:]]+("[^"]*"|[^[:space:]]+)[[:space:]]+)?"?/[^[:space:]]*bwrap[^[:space:]]*"?[[:space:]]*(flags[[:space:]]*=[[:space:]]*\([^)]*\))?[[:space:]]*(\{.*)?$'
+  local parser other first_line=""
+
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping the bubblewrap AppArmor profile"
+    return 0
+  fi
+  if [ ! -x "$bwrap_bin" ]; then
+    echo "  bubblewrap AppArmor profile: not needed ($bwrap_bin is not installed)"
+    return 0
+  fi
+  if [ "$(cat "$restrict_flag" 2>/dev/null || true)" != "1" ]; then
+    echo "  bubblewrap AppArmor profile: not needed (unprivileged user namespaces are not restricted here)"
+    return 0
+  fi
+  parser="$(command -v apparmor_parser 2>/dev/null || true)"
+  if [ -z "$parser" ]; then
+    echo "  bubblewrap AppArmor profile: skipped (apparmor_parser is not installed)"
+    return 0
+  fi
+  # `|| true`: no match is grep's exit 1, and this runs under pipefail.
+  other="$(grep -rIlE --exclude="$name" "$attach_re" "$profile_dir" 2>/dev/null | head -n 1 || true)"
+  if [ -n "$other" ]; then
+    echo "  bubblewrap AppArmor profile: skipped ($other already has a profile for bwrap)"
+    return 0
+  fi
+  if [ ! -r "$src" ]; then
+    echo "  WARN: $src is missing; not installing the bubblewrap AppArmor profile" >&2
+    return 1
+  fi
+
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    if [ -f "$dest" ] && [ ! -L "$dest" ] && cmp -s "$src" "$dest"; then
+      echo "  AppArmor profile for bubblewrap already installed: $dest"
+      return 0
+    fi
+    if [ -f "$dest" ] && [ ! -L "$dest" ]; then
+      IFS= read -r first_line < "$dest" || true
+    fi
+    case "$first_line" in
+      "# ClawBox: "*) ;;
+      *)
+        echo "  bubblewrap AppArmor profile: skipped ($dest exists and is not ClawBox's)"
+        return 0
+        ;;
+    esac
+  fi
+  bwrap_userns_profile_install "$dest" "$src" "$parser"
+}
+
 # Dispatchable on its own and called from step_post_update — the same shape
 # step_coding_harness has, and for the same reason: an in-app update has to
 # deliver this without also reinstalling the Gemini CLI on every box that
@@ -12874,6 +15368,11 @@ step_ai_tools_install() {
   # Swallowed here for the same reason as the CLI above — this step must not
   # abort over an optional tool — and reported honestly inside the function.
   ensure_codex_cli || true
+
+  # The AppArmor profile Codex's read-only sandbox (bwrap) needs on a box that
+  # restricts user namespaces. Gated inside, and a warning at worst, like the
+  # CLIs around it.
+  ensure_bwrap_userns_profile || true
 
   # Google Gemini CLI (optional)
   if as_clawbox_login "command -v gemini" &>/dev/null; then
@@ -12919,14 +15418,18 @@ step_vnc_install() {
   # to it; without it the paste modal 503s).
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils autocutsel xclip
 
-  chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"
+  # The scripts are the clawbox user's files, so it sets their mode, after
+  # anything an earlier root run left root-owned in scripts/ is handed back;
+  # root's chmod would follow a link at the name. Git ships them 0755: on a
+  # healthy box nothing changes, and a failure warns instead of ending the step.
   # ensure-vnc-on-first-boot.sh runs as ROOT from clawbox-firstboot-vnc.service
   # below, so the unit names the root-owned libexec copy. The `chown root:root`
   # of the tree file that used to sit here protected nothing: `chown -R clawbox`
   # undid it after every git reset, and the directory is clawbox-writable so a
   # rename replaced the file regardless. Security scan #21.
-  chmod +x "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh"
+  hand_over_checkout
+  as_clawbox chmod +x -- "$PROJECT_DIR/scripts/start-vnc.sh" "$PROJECT_DIR/scripts/ensure-vnc-on-first-boot.sh" \
+    || echo "  Warning: could not make the VNC scripts executable" >&2
   if [ ! -x "$ROOT_LIBEXEC_DIR/ensure-vnc-on-first-boot.sh" ]; then
     install_root_libexec || return 1
   fi
@@ -13015,7 +15518,8 @@ WantedBy=multi-user.target
 FIRSTBOOTVNC
 
   # Browser CDP service (launched on demand, not auto-started)
-  chmod +x "$PROJECT_DIR/scripts/launch-browser.sh"
+  as_clawbox chmod +x -- "$PROJECT_DIR/scripts/launch-browser.sh" \
+    || echo "  Warning: could not make the VNC scripts executable" >&2
   cp "$SRC_DIR/config/clawbox-browser.service" /etc/systemd/system/
 
   systemctl daemon-reload
@@ -13042,10 +15546,12 @@ step_vnc_refresh() {
   #
   # apt-get may collide with unattended-upgrades or a user-triggered install,
   # so wait for the dpkg lock first. Make the install non-fatal — a transient
-  # apt failure here shouldn't block the more important unit refresh below.
+  # apt failure here shouldn't block the more important unit refresh below —
+  # and ask dpkg, not apt-get's exit code, whether autocutsel is there.
   wait_for_apt
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autocutsel; then
-    echo "  Warning: autocutsel install failed (non-fatal; continuing with unit refresh)"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autocutsel || true
+  if ! dpkg_installed autocutsel; then
+    echo "  Warning: autocutsel not installed (non-fatal; continuing with unit refresh)"
   fi
 
   # A box installed before security scan #21 has a clawbox-firstboot-vnc.service
@@ -13120,7 +15626,7 @@ VNCSVC
     install -m 644 "$unit_tmp" "$unit_path"
     systemctl daemon-reload
     systemctl restart clawbox-vnc.service clawbox-websockify.service || true
-    echo "  VNC service refreshed (CLAWBOX_VNC_MODE=virtual, autocutsel installed)"
+    echo "  VNC service refreshed (CLAWBOX_VNC_MODE=virtual)"
   else
     echo "  VNC service already up-to-date, skipping restart"
   fi
@@ -13142,11 +15648,18 @@ step_desktop_theme() {
     exit 1
   fi
 
-  chmod +x "$theme_script"
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$theme_script"
+  # The script's mode and the autostart entry are set and written BY the
+  # clawbox user: both live in that user's tree, where root's chmod, chown and
+  # `>` would follow a planted link. A root-owned leftover on the way to
+  # either — ~/.config made by this step's old root `mkdir -p` is one — is
+  # handed back first, the owner the old chowns gave them: the script with the
+  # checkout it is in, the entry walked to from the home.
+  hand_over_checkout
+  as_clawbox chmod +x -- "$theme_script"
 
-  mkdir -p "$autostart_dir"
-  cat > "$autostart_file" <<EOF
+  hand_over_home_path "$autostart_file"
+  as_clawbox mkdir -p -- "$autostart_dir"
+  as_clawbox tee -- "$autostart_file" >/dev/null <<EOF
 [Desktop Entry]
 Type=Application
 Name=ClawBox Desktop Theme
@@ -13155,8 +15668,7 @@ Terminal=false
 NoDisplay=true
 X-GNOME-Autostart-enabled=true
 EOF
-  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$autostart_dir" "$autostart_file"
-  chmod 644 "$autostart_file"
+  as_clawbox chmod 644 -- "$autostart_file"
 
   mkdir -p /etc/dconf/db/local.d
   cat > /etc/dconf/db/local.d/01-clawbox-desktop-theme <<'EOF'
@@ -13198,10 +15710,10 @@ EOF
 # field is fixed by its next in-app update.
 #
 # A box installed before this step can have a root-owned ~/.config: on a home
-# without one, step_desktop_theme's root `mkdir -p` of ~/.config/autostart
-# created it and chowned only autostart. The user write fails there, so that
-# directory alone (never its contents, never through a symlink) is handed back
-# to clawbox first.
+# without one, step_desktop_theme's old root `mkdir -p` of ~/.config/autostart
+# (it writes as clawbox now) created it and chowned only autostart. The user
+# write fails there, so that directory alone (never its contents, never through
+# a symlink) is handed back to clawbox first.
 #
 # The update runs post_update AFTER its own reboot, so by then the session has
 # already started the assistant without a marker to stop it. Writing the marker
@@ -13236,6 +15748,127 @@ step_gnome_initial_setup_done() {
   fi
 }
 
+# Ubuntu's background apps in the clawbox account's GNOME session.
+#
+# The desktop stays on (scripts/clawbox-desktop-mode.sh), and its session kept
+# four of the image's apps resident that ClawBox has no use for: gnome-software's
+# background service, update-notifier (which launches update-manager and runs
+# apt-check; ClawBox has its own updater), NVIDIA's nvpmodel_indicator (the
+# power-mode tray icon, ClawBox sets the power mode itself; on Orin it is also
+# the desktop's only over-current and throttle alert, which nothing replaces)
+# and the tracker file miner (file search on the local desktop is no longer
+# indexed). About 110 MB of PSS and 300 MB of swap between them on an 8 GB board.
+#
+# Each is switched off with the switch the session itself reads, for this
+# account only: a copy of its system autostart entry under the same name in
+# ~/.config/autostart, with Hidden=true. gnome-session 42 reads that directory
+# before /etc/xdg/autostart and keeps the first entry with a given name, so the
+# copy shadows the system one. A full copy, not two lines: a user file
+# GDesktopAppInfo cannot load (one without Type=) is dropped, and the system
+# entry then starts. The miner runs as a user unit in a systemd-managed session,
+# so that unit is masked too, with the link to /dev/null that
+# `systemctl --user mask` writes (no user bus needed). Nothing under /etc, no
+# package removed, no process ended: it takes effect at the account's next
+# login or the box's next reboot.
+#
+# Everything in the home is written AS THE USER, the paths as arguments: root
+# writing there would follow a planted link. A root-owned directory an older
+# install left on the way is handed back first. Left alone, each with one line:
+# an entry or unit this image does not ship, a file there without the ClawBox
+# first line (the owner's own; removing that line is how to bring an app back
+# for good), a link there, and a directory on the way that is a link. Called by
+# the full install and by step_post_update, so a box in the field is fixed by
+# its next update; a copy that is already right is not rewritten.
+step_desktop_background_apps() {
+  local system_entries="/etc/xdg/autostart"
+  local system_units="/usr/lib/systemd/user"
+  local config="$CLAWBOX_HOME/.config"
+  local autostart_dir="$config/autostart"
+  local unit_dir="$config/systemd/user"
+  local mask="$unit_dir/tracker-miner-fs-3.service"
+  local marker='# ClawBox: hidden by install.sh (step_desktop_background_apps). To bring it back for good, remove this line and the Hidden=true line; a deleted file is written again by the next update'
+  # A copy is ours when its first line starts with this, so rewording the undo
+  # text after it never turns the copies already in the field into the owner's.
+  local marker_prefix='# ClawBox: hidden by install.sh (step_desktop_background_apps)'
+  local name src dst state rc=0
+
+  hand_over_home_path "$autostart_dir"
+  hand_over_home_path "$unit_dir"
+
+  if [ -L "$config" ] || [ -L "$autostart_dir" ]; then
+    echo "  ~/.config/autostart is reached through a link, left as it is: no background app hidden"
+  else
+    for name in gnome-software-service update-notifier nvpmodel_indicator tracker-miner-fs-3; do
+      src="$system_entries/$name.desktop"
+      dst="$autostart_dir/$name.desktop"
+      if [ ! -f "$src" ] || [ -L "$src" ] || ! grep -qx '\[Desktop Entry\]' "$src"; then
+        echo "  $name: no system autostart entry on this image, nothing to hide"
+        continue
+      fi
+      # Root makes the copy out of the system entry and hands it over on stdin;
+      # the user only writes it. Every Hidden= line goes (GKeyFile keeps the
+      # last of a key), and Hidden=true goes right under the header, never at
+      # the end, where a later group such as [Desktop Action ...] would own it.
+      # The user reads all of stdin first, then answers one word.
+      state=$({ printf '%s\n' "$marker" && awk '
+          /^[ \t]*Hidden[ \t]*=/ { next }
+          { print }
+          !placed && $0 == "[Desktop Entry]" { print "Hidden=true"; placed = 1 }
+        ' "$src"; } | as_clawbox sh -c '
+        new=$(cat; echo .); new=${new%.}
+        if [ -L "$1" ]; then echo link; exit 0; fi
+        if [ -e "$1" ]; then
+          case "$(head -n 1 -- "$1" 2>/dev/null)" in "$2"*) ;; *) echo own; exit 0 ;; esac
+          if printf %s "$new" | cmp -s - "$1"; then echo same; exit 0; fi
+        fi
+        mkdir -p -m 700 -- "${1%/*}" && t=$(mktemp -- "$1.XXXXXX") || exit 1
+        if printf %s "$new" > "$t" && chmod 644 -- "$t" && mv -f -T -- "$t" "$1"; then echo hidden; exit 0; fi
+        rm -f -- "$t"
+        exit 1
+      ' sh "$dst" "$marker_prefix") || state=failed
+      case "$state" in
+        hidden) echo "  $name: hidden from the desktop session, from the next login" ;;
+        same) echo "  $name: already hidden" ;;
+        own) echo "  $name: ~/.config/autostart/$name.desktop is the owner's own, left as it is" ;;
+        link) echo "  $name: ~/.config/autostart/$name.desktop is a link, left as it is" ;;
+        *)
+          echo "  Warning: could not write $dst — $name keeps starting with the desktop" >&2
+          rc=1
+          ;;
+      esac
+    done
+  fi
+
+  if [ ! -e "$system_units/tracker-miner-fs-3.service" ]; then
+    echo "  tracker-miner-fs-3.service: no such user unit on this image, nothing to mask"
+  elif [ -L "$config" ] || [ -L "$config/systemd" ] || [ -L "$unit_dir" ]; then
+    echo "  ~/.config/systemd/user is reached through a link, left as it is: the file miner is not masked"
+  else
+    state=$(as_clawbox sh -c '
+      if [ -L "$1" ]; then
+        if [ "$(readlink -- "$1")" = /dev/null ]; then echo same; else echo link; fi
+      elif [ -e "$1" ]; then
+        echo own
+      elif mkdir -p -m 700 -- "${1%/*}" && ln -s /dev/null "$1"; then
+        echo masked
+      else
+        exit 1
+      fi
+    ' sh "$mask") || state=failed
+    case "$state" in
+      masked) echo "  tracker-miner-fs-3.service: masked, the file miner no longer starts from the next login" ;;
+      same) echo "  tracker-miner-fs-3.service: already masked" ;;
+      own) echo "  tracker-miner-fs-3.service: ~/.config/systemd/user/tracker-miner-fs-3.service is the owner's own, left as it is" ;;
+      link) echo "  tracker-miner-fs-3.service: ~/.config/systemd/user/tracker-miner-fs-3.service is a link, left as it is" ;;
+      *)
+        echo "  Warning: could not write $mask — the file miner keeps starting with the desktop" >&2
+        rc=1
+        ;;
+    esac
+  fi
+  return "$rc"
+}
+
 step_ffmpeg_install() {
   wait_for_apt
   apt-get install -y ffmpeg
@@ -13246,7 +15879,9 @@ step_openclaw_models() {
 }
 
 step_fix_git_perms() {
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
+  # A root-owned object in .git (FETCH_HEAD above all) hands the checkout back
+  # whole; hand_over_checkout says why never .git by its name.
+  hand_over_checkout .git
   echo "  Fixed .git ownership"
 }
 
@@ -13262,6 +15897,101 @@ served_build_commit() {
   printf '%s' "$built"
 }
 
+# Is the OpenClaw core installed now NEWER than the one commit $1 pins? An
+# update that moves the core forward migrates its databases on the way (doctor
+# --fix, step_openclaw_install), and the core it replaced is gone by then. A
+# checkout put back on such a commit runs that commit's gateway pre-start,
+# plugin pins and dashboard against a core it was never released with, until
+# the next update. Prints "<installed> <pin>" on proof only: an edition whose
+# disk carries the OpenClaw core step_openclaw_install promotes (every one but
+# Hermes, the unified image's `unselected` lock included), both versions read,
+# both plain release numbers (a dist-tag or a prerelease is not compared), the
+# installed one higher. Every other answer is no, which leaves the caller's
+# move as it was.
+openclaw_core_ahead_of_commit() {
+  local commit="${1:-}" installed pin release='^[0-9]+(\.[0-9]+)*(-[0-9]+)?$'
+  case "$commit" in ""|*[!0-9a-f]*) return 1 ;; esac
+  installs_openclaw_harness || return 1
+  installed="$(as_clawbox python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("version") or "")' \
+    "$NPM_PREFIX/lib/node_modules/openclaw/package.json" 2>/dev/null || true)"
+  pin="$(as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" show "$commit:config/openclaw-target.txt" 2>/dev/null \
+    | head -n 1 | awk '{print $1}' || true)"
+  [[ "$installed" =~ $release && "$pin" =~ $release ]] || return 1
+  [ "$installed" != "$pin" ] || return 1
+  [ "$(printf '%s\n' "$pin" "$installed" | sort -V | tail -n 1)" = "$installed" ] || return 1
+  printf '%s %s\n' "$installed" "$pin"
+}
+
+# The in-app updater's half of the same rule. Before step 1 it records the
+# commit a failed run puts the checkout back on (update_rollback_target in
+# data/config.json, src/lib/update-checkout-rollback.ts), and on the first
+# update from an older release it is THAT release's code that acts on the
+# record, which nothing in this tree can change. So the record goes once the
+# core installed now is newer than the served build's commit pins: with none,
+# the updater leaves the checkout on this tree. Written as the service
+# account, whose file it is, under a name of its own (the store renames
+# config.json.tmp into place), in the bytes and mode the store's own delete
+# leaves. The store rewrites the file without a lock, and nothing here can take
+# one the older release's store would honour, so two windows stay open: a
+# store write that lands between the re-read just ahead of the rename and the
+# rename itself is replaced (one that lands before the re-read is kept, and so
+# is the record); and a store write that read the file before the rename and
+# lands after it puts the record back. The second is why the record is asked
+# for again after doctor and before the rebuild: a pass that finds no record
+# writes nothing, so only a pass that dropped one can be straddled. Never
+# fails the step: the core is in place either way, and a record that stays
+# only brings the old move back. install.sh's own boxes only: the x64 paths
+# (install-x64.sh, the desktop integration) move their core elsewhere and keep
+# the dashboard's move.
+keep_checkout_with_installed_core() {
+  local built ahead rc=0
+  built="$(served_build_commit)"
+  ahead="$(openclaw_core_ahead_of_commit "$built")" || return 0
+  if [ -f "$PROJECT_DIR/data/config.json" ]; then
+    as_clawbox env CLAWBOX_CFG="$PROJECT_DIR/data/config.json" node - <<'NODE' || rc=$?
+  const fs = require("fs");
+  const path = require("path");
+  const file = process.env.CLAWBOX_CFG;
+  const key = "update_rollback_target";
+  // Named by class only: this file holds the box's tokens.
+  const fail = (what, err) => {
+    process.stderr.write(`  Warning: could not ${what} ${file} (${(err && (err.code || err.name)) || "error"})\n`);
+    process.exit(1);
+  };
+  let raw;
+  let config;
+  try {
+    raw = fs.readFileSync(file, "utf8");
+    config = JSON.parse(raw);
+  } catch (err) {
+    fail("read", err);
+  }
+  if (!config || typeof config !== "object" || Array.isArray(config)) fail("use", { name: "not a JSON object" });
+  if (!Object.prototype.hasOwnProperty.call(config, key)) {
+    process.stdout.write("  No checkout rollback target is recorded in data/config.json\n");
+    process.exit(0);
+  }
+  delete config[key];
+  const tmp = path.join(path.dirname(file), `.config.json.${process.pid}.rollback`);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600, flag: "wx" });
+    if (fs.readFileSync(file, "utf8") !== raw) throw Object.assign(new Error(), { name: "it changed meanwhile" });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* never written */ }
+    fail("rewrite", err);
+  }
+  process.stdout.write("  Dropped the updater's checkout rollback target from data/config.json\n");
+NODE
+  fi
+  if [ "$rc" -eq 0 ]; then
+    echo "  OpenClaw ${ahead% *} is in place, newer than the ${ahead#* } that ${built:0:7} (the served build's commit) pins: from here a failed update leaves the checkout where it is"
+  else
+    echo "  Warning: could not check or drop the updater's checkout rollback target in data/config.json; a failed update may move the checkout back behind OpenClaw ${ahead% *}" >&2
+  fi
+  return 0
+}
+
 # Put the checkout back on the commit the served build was made from, after a
 # rebuild failed and do_rebuild restored the previous build (TASK-1427).
 #
@@ -13273,11 +16003,14 @@ served_build_commit() {
 # This runs in the NEW code's own shell, so it does not depend on the running
 # build. Same rule as the dashboard's and as scripts/force-update.sh: only a
 # commit the served build's own stamp names, only when HEAD has moved off it,
-# only when git still has that commit. Never fatal — the caller is failing
-# already and this must not mask its exit code.
+# only when git still has that commit. And never a commit that pins an older
+# OpenClaw than the one installed now (openclaw_core_ahead_of_commit), the rule
+# the dashboard's rollback gets from keep_checkout_with_installed_core dropping
+# its record. Never fatal — the caller is failing already and this must not
+# mask its exit code.
 restore_checkout_to_served_build() {
   [ -d "$PROJECT_DIR/.git" ] || return 0
-  local built head
+  local built head ahead
   built="$(served_build_commit)"
   case "$built" in
     ""|*[!0-9a-f]*) echo "  Checkout left as is: the served build carries no commit stamp"; return 0 ;;
@@ -13289,6 +16022,12 @@ restore_checkout_to_served_build() {
   if [ "$head" = "$built" ]; then return 0; fi
   if ! as_clawbox git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" cat-file -e "$built^{commit}" 2>/dev/null; then
     echo "  Warning: the served build's commit ${built:0:7} is not in this checkout; the checkout stays on ${head:0:7}" >&2
+    return 0
+  fi
+  # The box then serves the old build over this checkout: drift the dashboard
+  # reports, and the next update repairs by building this checkout.
+  if ahead="$(openclaw_core_ahead_of_commit "$built")"; then
+    echo "  Checkout left on ${head:0:7}: OpenClaw ${ahead% *} is installed and ${built:0:7}, the commit the restored build was made from, pins the older ${ahead#* }. Run the update again to finish it"
     return 0
   fi
   echo "  Moving the checkout back from ${head:0:7} to ${built:0:7}, the commit the restored build was made from"
@@ -13305,6 +16044,9 @@ _REBUILD_PREV_EXIT_TRAP=""
 _rebuild_trap_cmd() { printf '%s' "${2:-}"; }
 arm_rebuild_checkout_guard() {
   local prev
+  # The dashboard's half of the guard, asked once more before the build: a
+  # store write that straddled an earlier drop can have put its record back.
+  keep_checkout_with_installed_core
   prev="$(trap -p EXIT)"
   _REBUILD_PREV_EXIT_TRAP=""
   if [ -n "$prev" ]; then _REBUILD_PREV_EXIT_TRAP="$(eval "_rebuild_trap_cmd ${prev#trap }")"; fi
@@ -13789,7 +16531,8 @@ step_rebuild_reboot() {
   step_openclaw_patch
   step_openclaw_config
   # Refresh the in-tree ClawKeep CLI before the rebuild so the next boot
-  # sees the new restore.py / scheduler logic.
+  # sees the new restore.py / scheduler logic. Always forced: this is the
+  # update's one ClawKeep install, which post_update reuses (UPD-04).
   step_clawkeep_install || echo "  Warning: clawkeep_install during rebuild failed (non-fatal)"
   # HOW THE UPDATE ENDS, decided here (update_reboot_reasons): after the redeploy
   # above, so a marker one of those steps leaves counts, and before the rebuild,
@@ -13816,15 +16559,50 @@ step_rebuild_reboot() {
   # shell; the EXIT guard then puts the checkout back on that build's commit
   # (TASK-1427). A trap, not `do_rebuild || …`: errexit must stay live inside
   # do_rebuild (see its comments).
-  arm_rebuild_checkout_guard
-  if [ -n "$reboot_reasons" ]; then
-    do_rebuild --reboot-follows
-  else
-    do_rebuild
+  #
+  # No rebuild at all when the build on disk is already this checkout's
+  # (build_is_current_for_checkout, TASK-2517): the dashboard keeps serving it
+  # until the restart or reboot below, which this update still owes — that
+  # restart is what resumes the update's second half.
+  #
+  # On the restart arm outside test mode a gateway paused for the build is left
+  # to that second half (`--gateway-to-update`), which stops it again first
+  # thing and then starts it; test mode keeps the plain rebuild.
+  #
+  # The note that tells the second half so (record_rebuild_kept_build) is
+  # cleared first, whatever this run decides: it may only ever describe this
+  # run. A build that is current but cannot be noted is rebuilt as before —
+  # without the note the second half would read the unchanged build as a
+  # rebuild that never happened.
+  local current_why="" build_kept=0
+  forget_rebuild_kept_build
+  # And a gateway fallback an earlier update armed: do_rebuild cancels it too,
+  # but a kept build never reaches do_rebuild.
+  disarm_gateway_handback
+  if current_why="$(build_is_current_for_checkout)"; then
+    if record_rebuild_kept_build; then
+      build_kept=1
+    else
+      current_why="the build on disk is this checkout's, but the note that tells the update's second half so could not be written"
+    fi
   fi
-  disarm_rebuild_checkout_guard
-  # Reached only with a new build verified on disk: do_rebuild returns non-zero
-  # on every other outcome and errexit ends this step there. The server that
+  if [ "$build_kept" = 1 ]; then
+    echo "No rebuild needed: $current_why"
+  else
+    echo "Rebuilding: $current_why"
+    arm_rebuild_checkout_guard
+    if [ -n "$reboot_reasons" ]; then
+      do_rebuild --reboot-follows
+    elif ! is_test_mode; then
+      do_rebuild --gateway-to-update
+    else
+      do_rebuild
+    fi
+    disarm_rebuild_checkout_guard
+  fi
+  # Reached only with a build of this checkout verified on disk — a new one, or
+  # the one build_is_current_for_checkout just proved current: do_rebuild
+  # returns non-zero on every other outcome and errexit ends this step there. The server that
   # comes up next — the restart below, or the boot after the reboot — is that
   # build, so the old build's polkit grant can go now (step_polkit_rules asks
   # the build itself before it removes anything). Never fatal HERE: the
@@ -14350,8 +17128,9 @@ if [ "${1:-}" = "--step" ]; then
   # Which step this shell was dispatched for, readable by the step itself. A
   # step that must behave differently inside an in-app update than in a full
   # install (step_performance_mode, which must not pin the clocks under the
-  # update's own heaviest work) asks this together with the update lock, rather
-  # than guessing from its surroundings.
+  # update's own heaviest work; step_gateway_setup, which leaves a running
+  # gateway to the update's last step) asks this together with the update lock,
+  # rather than guessing from its surroundings.
   CLAWBOX_DISPATCHED_STEP="$local_step"
   "step_${local_step}"
   exit 0
@@ -14447,8 +17226,11 @@ step_clawkeep_install
 log "Setting up directories, permissions and DNS..."
 step_setup_config
 
-# Clean up default NVIDIA desktop shortcuts
-rm -f "$CLAWBOX_HOME/Desktop"/*.desktop 2>/dev/null || true
+# Clean up default NVIDIA desktop shortcuts. Removed BY the clawbox user, from
+# its own ~/Desktop (handed back first if root left it root-owned): root's `rm`
+# there would act through a planted link. The glob is root's to expand.
+hand_over_home_path "$CLAWBOX_HOME/Desktop"
+as_clawbox rm -f -- "$CLAWBOX_HOME/Desktop"/*.desktop 2>/dev/null || true
 
 # Bake the edition lock BEFORE any unit is installed. Ordering is load-bearing
 # in both directions: on hermes the lock masks clawbox-gateway (so the unit
@@ -14513,10 +17295,12 @@ step_vnc_install
 
 log "Applying ClawBox desktop theme..."
 # Under the same heading, so the step count stays what it is. Non-fatal: GNOME's
-# first-run assistant costs memory, not function. BEFORE step_desktop_theme: on
-# a home with no ~/.config, that step's root `mkdir -p` of ~/.config/autostart
-# leaves ~/.config itself root-owned, and the marker is written as clawbox.
+# first-run assistant costs memory, not function, and so do Ubuntu's background
+# apps. Before step_desktop_theme, as it has always run; all three write
+# ~/.config as clawbox now, and each hands a root-owned one left by an older
+# install back to clawbox on its own.
 step_gnome_initial_setup_done || echo "  Warning: gnome_initial_setup_done step failed (non-fatal)"
+step_desktop_background_apps || echo "  Warning: desktop_background_apps step failed (non-fatal)"
 step_desktop_theme
 
 # Belt-and-suspenders PATH stanza — covers update runs that early-return out

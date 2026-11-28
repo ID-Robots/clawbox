@@ -87,6 +87,30 @@ describe("nonOwnerVerdict — what stays the owner's", () => {
     expect(verdict(url, method)).toBe("deny");
   });
 
+  it("the owner's cluster (TASK-2670): refuses every method, however the path is spelled — and an organisation box's member too", () => {
+    for (const method of ["GET", "HEAD", "POST", "PUT", "DELETE"]) {
+      for (const url of [
+        "/setup-api/system/cluster",
+        "/setup-api/system/cluster?availability=1",
+        "/setup-api/system/cluster/",
+        "/setup-api/system//cluster",
+        "/setup-api/System/Cluster",
+        "/setup-api/system/%63luster",
+      ]) {
+        expect(verdict(url, method), `${method} ${url}`).toBe("deny");
+      }
+    }
+    const u = new URL("/setup-api/system/cluster", "http://clawbox.local");
+    expect(
+      nonOwnerVerdict({ pathname: u.pathname, method: "GET", searchParams: u.searchParams, intent: "fetch", username: "alice", orgMode: true }),
+    ).toBe("deny");
+  });
+
+  it("leaves the rest of System to every user: the device's own figures are not the cluster", () => {
+    expect(verdict("/setup-api/system/stats")).toBe("allow");
+    expect(verdict("/setup-api/system/info")).toBe("allow");
+  });
+
   it.each([
     // The model the whole box chats on — a user's first desktop load moved it.
     ["POST", "/setup-api/chat/model"],
@@ -212,8 +236,10 @@ describe("nonOwnerVerdict — what stays the owner's", () => {
 });
 
 describe("the desktop apps that stay the owner's", () => {
-  it("are the harnesses' own consoles alone — every other built-in app is every signed-in user's", () => {
-    expect(OWNER_ONLY_APP_IDS).toEqual(["openclaw", "hermes"]);
+  it("are the harnesses' own consoles, System Update and ClawBox Vault — every other built-in app is every signed-in user's", () => {
+    // System Update: updating the box is the owner's on every box (TASK-2435).
+    // ClawBox Vault: the owner's passwords (TASK-2524).
+    expect(OWNER_ONLY_APP_IDS).toEqual(["openclaw", "hermes", "system_update", "vault"]);
     const ids = apps.map((a) => a.id);
     for (const id of OWNER_ONLY_APP_IDS) expect(ids, id).toContain(id);
     // Their standalone pages are the owner's too.
@@ -221,6 +247,39 @@ describe("the desktop apps that stay the owner's", () => {
     for (const id of ids.filter((x) => !OWNER_ONLY_APP_IDS.includes(x))) {
       expect(verdict(`/app/${id}`, "GET", "navigation"), id).toBe("allow");
     }
+  });
+
+  it("keeps ClawBox Vault's own page and API the owner's, though every other /apps/<id> is every user's", () => {
+    // The page: a person is sent home with the notice, code is answered 403.
+    for (const page of ["/apps/clawbox-vault", "/apps/clawbox-vault/", "/apps/CLAWBOX-VAULT/", "/apps//clawbox-vault/"]) {
+      expect(verdict(page, "GET", "navigation"), page).toBe("redirect-home");
+      expect(verdict(page, "GET", "fetch"), page).toBe("deny");
+      expect(verdict(page, "POST", "navigation"), page).toBe("deny");
+    }
+    // Its files and its API, however they are asked for and whatever the owner shares.
+    for (const path of [
+      "/apps/clawbox-vault/app.js",
+      "/apps/clawbox-vault/api/health",
+      "/apps/clawbox-vault/api/ui/status",
+      "/apps/clawbox-vault/api/ui/unlock",
+      "/apps/clawbox-vault/api/ui/reveal",
+      "/apps/clawbox-vault/api/agent/entries",
+      "/apps/clawbox-vault/api/pair/auto",
+      "/apps/clawbox-vault/%61pi/ui/entries",
+    ]) {
+      for (const method of ["GET", "POST", "DELETE"]) {
+        for (const intent of ["navigation", "fetch", "unknown"] as const) {
+          expect(verdict(path, method, intent), `${method} ${path} ${intent}`).toBe("deny");
+          expect(verdict(path, method, intent, "alice", true), `${method} ${path} ${intent} shared`).toBe("deny");
+        }
+      }
+    }
+    // An organisation box's member of staff as well.
+    expect(nonOwnerVerdict({ pathname: "/apps/clawbox-vault/", method: "GET", searchParams: new URLSearchParams(), intent: "navigation", username: "alice", orgMode: true })).toBe("redirect-home");
+    expect(nonOwnerVerdict({ pathname: "/apps/clawbox-vault/api/ui/status", method: "GET", searchParams: new URLSearchParams(), intent: "fetch", username: "alice", orgMode: true })).toBe("deny");
+    // A neighbour that only starts the same way is somebody's own app, as before.
+    expect(verdict("/apps/clawbox-vault-notes/", "GET", "navigation")).toBe("allow");
+    expect(verdict("/apps/my-app/", "GET", "navigation")).toBe("allow");
   });
 });
 
@@ -295,9 +354,9 @@ describe("nonOwnerVerdict — the owner shares OpenClaw with every user", () => 
     }
   });
 
-  it("hides only Hermes from a non-owner's desktop while OpenClaw is shared", () => {
+  it("hides Hermes (and System Update, and ClawBox Vault) from a non-owner's desktop while OpenClaw is shared", () => {
     expect(ownerOnlyAppIds(false)).toEqual(OWNER_ONLY_APP_IDS);
-    expect(ownerOnlyAppIds(true)).toEqual(["hermes"]);
+    expect(ownerOnlyAppIds(true)).toEqual(["hermes", "system_update", "vault"]);
   });
 
   it("shares only on a literal true", () => {

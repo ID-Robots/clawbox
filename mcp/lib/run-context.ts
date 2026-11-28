@@ -94,6 +94,16 @@ export function runBrowserAllowed(): boolean {
 }
 
 /**
+ * Does the model this run is on read pictures itself? The runner sets
+ * CLAWBOX_RUN_SEES_IMAGES=1 for an `anthropic` run (every Claude model does);
+ * absent — the plan's own model, a Codex run, the assistant — is no, and the
+ * written description stays the only look.
+ */
+export function runSeesImages(): boolean {
+  return Boolean(runContext()) && (process.env.CLAWBOX_RUN_SEES_IMAGES ?? "").trim() === "1";
+}
+
+/**
  * A single run — of no coding team — as the runner names it: the run context
  * above plus CLAWBOX_RUN_ID, and none of the team variables. `assistant_message`
  * registers from it (mcp/tools/coding-agent.ts); a team's run has

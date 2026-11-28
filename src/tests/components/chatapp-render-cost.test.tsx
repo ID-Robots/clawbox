@@ -163,18 +163,28 @@ describe("the full-page chat's transcript", () => {
   it("updates a streaming reply live, parses only the reply, and follows its newest line", async () => {
     const { ws, composer } = await mountChat();
     const rowParses = parsesOf(DISK) + parsesOf(MEMORY);
-    const scrolls = () => vi.mocked(Element.prototype.scrollIntoView).mock.calls.length;
+    // A transcript with a browser's geometry: as tall as its text, its
+    // position clamped to it (use-stick-to-bottom.ts scrolls it, TASK-2222).
+    const transcript = screen.getByTestId("chatapp-transcript");
+    const height = () => 1000 + (transcript.textContent ?? "").length * 4;
+    let top = 0;
+    Object.defineProperty(transcript, "scrollHeight", { configurable: true, get: height });
+    Object.defineProperty(transcript, "clientHeight", { configurable: true, get: () => 300 });
+    Object.defineProperty(transcript, "scrollTop", {
+      configurable: true,
+      get: () => top,
+      set: (v: number) => { top = Math.max(0, Math.min(v, height() - 300)); },
+    });
 
     for (const chunk of ["Checking", "Checking the disk", "Checking the disk now"]) {
-      const before = scrolls();
       await act(async () => {
         ws.pushChat("delta", { role: "assistant", content: chunk });
         await Promise.resolve();
       });
       // Live: the bubble shows each chunk as it lands…
       await waitFor(() => expect(document.body.textContent).toContain(chunk));
-      // …and the transcript scrolls to it.
-      await waitFor(() => expect(scrolls()).toBeGreaterThan(before));
+      // …and the transcript follows it to its newest line.
+      await waitFor(() => expect(transcript.scrollTop).toBe(height() - 300));
     }
     // Typing while it streams parses neither the reply nor the conversation.
     const parsedWhileStreaming = parses();

@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
-import fs from "fs/promises";
-import path from "@/lib/runtime-path";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { get, setMany, getAll } from "@/lib/config-store";
+import { getKnown } from "@/lib/config-store";
+import { HAS_CONTROL_CHAR, readHotspotEnvKnown, readHotspotSettings, writeHotspotSettings } from "@/lib/hotspot-env";
 import { parseNmcliTerseLine, RESTART_AP_TIMEOUT_MS } from "@/lib/network";
 import { startRootStep } from "@/lib/root-step-runner";
 
@@ -11,14 +10,11 @@ const execFileAsync = promisify(execFile);
 
 export const dynamic = "force-dynamic";
 
-const HOTSPOT_ENV_PATH = path.join(
-  process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
-  "data",
-  "hotspot.env"
-);
-
 let getCache: { body: unknown; at: number } | null = null;
 const GET_TTL_MS = 3_000;
+// Bumped by every save: a GET that started before one must not cache what it
+// read for the next 3 s.
+let saveGeneration = 0;
 
 /**
  * What the save did to the access point, as one word.
@@ -26,9 +22,13 @@ const GET_TTL_MS = 3_000;
  *  * `restarted` — the AP was bounced, so this connection has just dropped.
  *  * `deferred`  — deliberately not bounced (the radio is a client right now);
  *                  the saved settings apply at the next AP start.
- *  * `stopped`   — the owner turned the hotspot off and it went down.
+ *  * `stopped`   — the owner turned the hotspot off and no ClawBox-Setup AP is
+ *                  up: stop-ap.sh succeeded and the read-back shows none (or
+ *                  cannot read, as GET then shows none), or stop-ap.sh failed
+ *                  and the read-back did read none.
  *  * `failed`    — the toggle threw; the settings are saved, the radio is not
- *                  in the state the owner asked for, and `warning` says so.
+ *                  (or may not be) in the state the owner asked for, and
+ *                  `warning` says so.
  */
 type HotspotApAction = "restarted" | "deferred" | "stopped" | "failed";
 
@@ -36,31 +36,39 @@ export async function GET() {
   if (getCache && Date.now() - getCache.at < GET_TTL_MS) {
     return NextResponse.json(getCache.body);
   }
-  const config = await getAll();
-  const ssid = (config.hotspot_ssid as string) || "ClawBox-Setup";
-  const hasPassword = !!config.hotspot_password;
-  const enabled = config.hotspot_enabled !== false;
+  const generation = saveGeneration;
+  // `enabled` is the switch as the AP scripts read it (src/lib/hotspot-env.ts);
+  // `active` is whether the AP that switch controls is up, whatever the switch
+  // says. Settings shows both, so a switch that reads off over a live AP says
+  // so instead of looking fine.
+  const { ssid, hasPassword, enabled } = await readHotspotSettings();
 
   const iface = process.env.NETWORK_INTERFACE || "wlP1p1s0";
   let active = false;
   let blockedBy: string | null = null;
+  let rows: string[][] = [];
   try {
     const { stdout } = await execFileAsync("nmcli", [
       "-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active",
     ], { timeout: 3_000 });
-    const rows = stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine);
-    const apRow = rows.find(r => r[0] === "ClawBox-Setup" && r[2] === iface);
-    active = !!apRow;
-    if (enabled && !active) {
-      const wifiRow = rows.find(r => r[1] === "802-11-wireless" && r[2] === iface && r[0] !== "ClawBox-Setup");
-      if (wifiRow) blockedBy = wifiRow[0];
-    }
+    rows = stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine);
+    // The AP stop-ap.sh owns (wifi_ap_uuid: the ClawBox-Setup profile, in AP
+    // mode, on this interface) and nothing else. Settings offers "Stop it now"
+    // when this is true over a switch that is off; an access point some other
+    // profile raised is not one that stop can take down, so it is not this
+    // hotspot.
+    active = rows.some(isSetupApRow(iface));
   } catch (err) {
     console.warn("[hotspot] nmcli unavailable:", err);
   }
+  if (active) active = !(await radioIsClient(iface));
+  if (enabled && !active) {
+    const wifiRow = rows.find(r => r[1] === "802-11-wireless" && r[2] === iface && r[0] !== "ClawBox-Setup");
+    if (wifiRow) blockedBy = wifiRow[0];
+  }
 
   const body = { ssid, hasPassword, enabled, active, blockedBy };
-  getCache = { body, at: Date.now() };
+  if (generation === saveGeneration) getCache = { body, at: Date.now() };
   return NextResponse.json(body);
 }
 
@@ -103,39 +111,62 @@ export async function POST(request: Request) {
       );
     }
 
+    // data/hotspot.env is one KEY=value per line: a newline in either value
+    // would start a line of its own (the disable flag, say).
+    if (HAS_CONTROL_CHAR.test(ssid) || (typeof password === "string" && HAS_CONTROL_CHAR.test(password))) {
+      return NextResponse.json(
+        { error: "Hotspot name and password cannot contain control characters" },
+        { status: 400 }
+      );
+    }
+
     // Preserve the stored WPA key when a request omits `password`. The Settings
     // toggle and SSID-rename actions POST only {ssid, enabled} (the GET handler
     // returns hasPassword, not the value, so the client can't resend it) — with
     // the old `password || undefined`, setMany would DELETE the key and the AP
     // would come back up OPEN. Only clear it if the caller explicitly asks.
-    const storedPassword = await get("hotspot_password");
-    const existingPassword = typeof storedPassword === "string" && storedPassword.length >= 8
+    // A STRICT read: config-store's forgiving `get` answers "nothing stored"
+    // for a config.json it cannot read, and the save would then write an env
+    // file without the key, so an open AP at the next start.
+    const stored = await getKnown("hotspot_password");
+    if (!stored.known) {
+      return NextResponse.json(
+        { error: "The hotspot settings could not be read, so nothing was changed." },
+        { status: 500 }
+      );
+    }
+    const storedPassword = stored.value;
+    let existingPassword = typeof storedPassword === "string" && storedPassword.length >= 8
       ? storedPassword
       : undefined;
+    // Config may never have held the key: a box whose key only data/hotspot.env
+    // carries (what the AP scripts use, and what GET counts in hasPassword).
+    // Keep that one too, or this save would write the env file without it,
+    // and read it as strictly: an env file there but unreadable is a refusal.
+    if (!existingPassword && !password) {
+      const envRead = await readHotspotEnvKnown();
+      if (!envRead.known) {
+        return NextResponse.json(
+          { error: "The hotspot settings could not be read, so nothing was changed." },
+          { status: 500 }
+        );
+      }
+      existingPassword = envRead.env?.password ?? undefined;
+    }
     const effectivePassword = password ? password : existingPassword;
 
-    const updates: Record<string, unknown> = {
-      hotspot_ssid: ssid.trim(),
-      hotspot_password: effectivePassword || undefined,
-    };
-    if (typeof enabled === "boolean") {
-      updates.hotspot_enabled = enabled;
-    }
-    await setMany(updates);
+    // A request without `enabled` (an older client) keeps the switch where the
+    // AP scripts have it, not where a stale config flag says it is.
+    const isEnabled = typeof enabled === "boolean" ? enabled : (await readHotspotSettings()).enabled;
 
-    const isEnabled = typeof enabled === "boolean" ? enabled : (await get("hotspot_enabled")) !== false;
-
-    // Write shell-sourceable env file for start-ap.sh
-    const envLines = [`HOTSPOT_SSID=${shellQuote(ssid.trim())}`];
-    if (effectivePassword) {
-      envLines.push(`HOTSPOT_PASSWORD=${shellQuote(effectivePassword)}`);
-    }
-    if (!isEnabled) {
-      envLines.push(`HOTSPOT_DISABLED=1`);
-    }
-    await fs.mkdir(path.dirname(HOTSPOT_ENV_PATH), { recursive: true });
-    await fs.writeFile(HOTSPOT_ENV_PATH, envLines.join("\n") + "\n", {
-      mode: 0o600,
+    // data/hotspot.env (what start-ap.sh, ap-watchdog.sh and wifi-failover.sh
+    // read) and config, in one call, so they cannot disagree.
+    saveGeneration++;
+    getCache = null;
+    await writeHotspotSettings({
+      ssid: ssid.trim(),
+      password: effectivePassword || undefined,
+      enabled: isEnabled,
     });
 
     // Start or stop the AP service based on enabled state.
@@ -149,13 +180,13 @@ export async function POST(request: Request) {
     // is named, and a failure carries its reason.
     let apAction: HotspotApAction = isEnabled ? "deferred" : "stopped";
     let apWarning: string | null = null;
+    const iface = process.env.NETWORK_INTERFACE || "wlP1p1s0";
     try {
       if (isEnabled) {
         // Single-radio guard: if the box is currently a WiFi *client* (it joined
         // a network back at Step 1), starting the AP would tear the radio off
         // that network and sever this very connection. Defer — the saved
         // settings apply on the next AP start (e.g. the end-of-setup reboot).
-        const iface = process.env.NETWORK_INTERFACE || "wlP1p1s0";
         if (await isWifiClient(iface)) {
           console.warn(
             "[hotspot] Box is a WiFi client; deferring AP restart to avoid severing the connection"
@@ -166,7 +197,30 @@ export async function POST(request: Request) {
         }
       } else {
         // Stop the AP — run stop-ap.sh directly since clawbox user can execute it
-        await execFileAsync("bash", ["/usr/local/libexec/clawbox/stop-ap.sh"], { timeout: 240_000 });
+        let stopErr: unknown = null;
+        try {
+          await execFileAsync("bash", ["/usr/local/libexec/clawbox/stop-ap.sh"], { timeout: 240_000 });
+        } catch (err) {
+          // It gave up waiting on another radio owner: the AP unit may be
+          // raising the AP this moment, so no read-back now says it stays down.
+          if (waitedOnRadioOwner(err)) throw err;
+          stopErr = err;
+        }
+        // stop-ap.sh says "Access point stopped." also when it found no AP of
+        // its own to stop, and fails also before it looked (the web account
+        // has no radio lock on a box whose AP unit has not run since boot).
+        // "stopped" is claimed only for what GET reads back, and after a
+        // failed stop only when nmcli could read it. A successful stop already
+        // read NetworkManager itself (it deleted the AP it owns, or found
+        // none), so an unreadable read-back after it is not a warning.
+        const ap = await readSetupAp(iface);
+        if (stopErr && ap !== "down") throw stopErr;
+        if (ap === "up") {
+          throw new Error("the ClawBox-Setup access point is still active after stop-ap.sh");
+        }
+        if (stopErr) {
+          console.warn("[hotspot] stop-ap.sh failed, but no ClawBox-Setup access point is up:", stopErr);
+        }
       }
     } catch (apErr) {
       console.warn("[hotspot] Failed to toggle AP:", apErr);
@@ -181,7 +235,9 @@ export async function POST(request: Request) {
     }
 
     // The GET handler caches for 3s, which is long enough to answer the reload
-    // that follows this save with the settings it just replaced.
+    // that follows this save with the settings it just replaced, or with a
+    // radio read while the AP was still going down or coming up.
+    saveGeneration++;
     getCache = null;
 
     // apRestarted tells the wizard whether the connection was actually dropped
@@ -203,9 +259,54 @@ export async function POST(request: Request) {
   }
 }
 
-/** Safely quote a value for shell assignment */
-function shellQuote(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`;
+/** An active-connection row (NAME, TYPE, DEVICE) that is the setup AP on `iface`. */
+function isSetupApRow(iface: string): (row: string[]) => boolean {
+  return (r) => r[0] === "ClawBox-Setup" && r[2] === iface;
+}
+
+/** Is the setup AP up on `iface`, as GET reads it? "unknown" when nmcli cannot say. */
+async function readSetupAp(iface: string): Promise<"up" | "down" | "unknown"> {
+  try {
+    const { stdout } = await execFileAsync(
+      "nmcli",
+      ["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"],
+      { timeout: 3_000 }
+    );
+    if (!stdout.split("\n").filter(Boolean).map(parseNmcliTerseLine).some(isSetupApRow(iface))) return "down";
+  } catch {
+    return "unknown";
+  }
+  return (await radioIsClient(iface)) ? "down" : "up";
+}
+
+/** wifi_lock's line when another radio owner held the lock past its wait (scripts/wifi-radio.sh). */
+const RADIO_LOCK_TIMEOUT = "[WiFi] Radio ownership timed out";
+
+/**
+ * Did stop-ap.sh end while it may have been waiting on another radio owner:
+ * wifi_lock's own timeout, or killed (this route's timeout among the causes)?
+ * start-ap.sh holds that lock for its whole run and reads the switch once.
+ */
+function waitedOnRadioOwner(err: unknown): boolean {
+  const e = err as { killed?: unknown; signal?: unknown; stderr?: unknown } | null;
+  return Boolean(e?.killed || e?.signal)
+    || (typeof e?.stderr === "string" && e.stderr.includes(RADIO_LOCK_TIMEOUT));
+}
+
+/**
+ * Does the kernel say the interface is a client (`iw dev <iface> info`:
+ * `type managed`)? A client profile can carry the name ClawBox-Setup too
+ * (start-ap.sh allows for one), and stop-ap.sh, which checks the mode, leaves
+ * it alone: it is not the setup AP. Anything else, iw failing included, does
+ * not contradict nmcli.
+ */
+async function radioIsClient(iface: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync("iw", ["dev", iface, "info"], { timeout: 3_000 });
+    return /^\s*type managed\s*$/m.test(stdout);
+  } catch {
+    return false;
+  }
 }
 
 /** Is the WiFi radio currently a client on a network (i.e. NOT hosting the setup

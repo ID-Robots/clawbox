@@ -39,9 +39,10 @@ import { isPng, placeIcon, readIconBytes, safeAppId, webappIconPath } from "./we
 import { ensureProjectFolder } from "./coding-agent";
 import { ensureRepository, freeBytes, IMPORT_FREE_RESERVE_BYTES } from "./project-import";
 import { installAppDependencies, registerOrStartServerApp } from "./app-server-start";
+import { recordAppStartFailure } from "./app-start-failure";
 import { bundleFolderHtml, deployWebapp, webappPath } from "./code-projects";
 import { getAll as configGetAll } from "./config-store";
-import { resolveClawaiToken } from "./harness/credentials";
+import { resolveClawaiEntitlementToken } from "./harness/credentials";
 import { isClawboxAiToken } from "./clawai-token";
 
 /** The largest package downloaded — the same cap the publisher packs under. */
@@ -173,7 +174,8 @@ async function downloadPackage(app: ClawboxStoreApp): Promise<{ ok: true; buffer
   const headers: Record<string, string> = { Accept: "application/gzip" };
   // The box's portal token goes to the portal and nowhere else.
   if (url.origin === new URL(base).origin) {
-    const token = await resolveClawaiToken().catch(() => null);
+    // A download, not AI content: the local-only AI lock does not stop it.
+    const token = await resolveClawaiEntitlementToken().catch(() => null);
     if (token && isClawboxAiToken(token)) headers.Authorization = `Bearer ${token}`;
   }
   let res: Response;
@@ -307,6 +309,8 @@ async function registerInstalledApp(appId: string, directory: string, manifest: 
       if (manifest.start) {
         const deps = await installAppDependencies({ directory, searchPath });
         if (!deps.ok) {
+          // Written down for the app's window, as a start that fails is (src/lib/app-start-failure.ts).
+          await recordAppStartFailure({ id: appId, name: manifest.name, command: manifest.start, port: manifest.port, directory, stage: "dependencies", exitCode: null, detail: deps.detail });
           return { registered: false, webappUrl: null, detail: `${manifest.name} is in your projects, but its server was not started: ${deps.detail}` };
         }
       }

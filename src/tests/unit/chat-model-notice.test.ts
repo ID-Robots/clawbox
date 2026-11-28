@@ -51,7 +51,7 @@ describe("chatKeepsEarlierModel", () => {
   it("never says it on ClawBox AI, whose one chat model is not a choice", () => {
     expect(chatKeepsEarlierModel(
       { provider: "clawai", model: "deepseek-v4-flash" },
-      { model: "deepseek-v4-pro", provider: "clawai" },
+      { model: "deepseek-v4-flash", provider: "clawai" },
     )).toBe(false);
   });
 
@@ -62,7 +62,7 @@ describe("chatKeepsEarlierModel", () => {
     )).toBe(false);
     expect(chatKeepsEarlierModel(
       { provider: "deepseek", model: "deepseek-v4-flash" },
-      { model: "deepseek-v4-pro", provider: "clawai" },
+      { model: "deepseek-v4-flash", provider: "clawai" },
     )).toBe(false);
   });
 

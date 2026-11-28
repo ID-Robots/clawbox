@@ -314,6 +314,23 @@ const BACKUP_RULES: ErrorRule[] = [
   },
 ];
 
+/**
+ * `update/request`'s 409 is the owner's question refused before it was asked:
+ * an update already in flight, another power question waiting, or the owner's
+ * recent "no". The route's own sentence says which, and goes to the agent as
+ * it is; the generic conflict advice (finish the setup in Settings) is untrue
+ * for every one of them. Nothing in front of the route answers 409.
+ */
+const UPDATE_REQUEST_RULES: ErrorRule[] = [
+  {
+    status: 409,
+    code: "CONFLICT",
+    message: "The device did not ask the owner about the update.",
+    next: "Do not retry. Tell the user what the device said, in your own words.",
+    withRouteDetail: true,
+  },
+];
+
 interface BackupStatusBody extends Partial<ProtectionInput> {
   supportedOnEdition?: boolean;
   paired?: boolean;
@@ -620,7 +637,7 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
     },
     { editions: ["openclaw", "hermes"], readOnly: false, destructive: true, openWorld: true },
     async ({ reason }: { confirm: true; reason: string }) => {
-      const result = await apiPost("/setup-api/update/request", { reason }, { timeoutMs: 60_000 });
+      const result = await apiPost("/setup-api/update/request", { reason }, { timeoutMs: 60_000, rules: UPDATE_REQUEST_RULES });
       const response = result && typeof result === "object" ? result as Record<string, unknown> : {};
       return text(response.pendingApproval
         ? `Asked the owner to confirm the update ${response.telegramPromptSent ? "with the Update / Cancel buttons in Telegram (approvals bot) and on the ClawBox desktop" : "on the ClawBox desktop"}. Nothing installs until they tap Update; the question expires in 2 minutes.`

@@ -43,6 +43,14 @@ vi.mock("@/lib/coding-pr", async (importOriginal) => ({
   disableAutoMerge,
 }));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
+// What follows a merge: the project folder is brought up to the merged base.
+// The real one runs git against a remote; here only what the watcher DOES with
+// its answer is the subject. Default, restored by mockReset: already there.
+const bringBaseHome = vi.hoisted(() => vi.fn(async (): Promise<unknown> => ({ ok: true, moved: false, commit: null, checkedOut: true })));
+vi.mock("@/lib/coding-run-worktree", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/coding-run-worktree")>()),
+  bringBaseHome,
+}));
 
 type Lib = typeof import("@/lib/coding-agent");
 
@@ -100,6 +108,8 @@ beforeEach(async () => {
   process.env.CLAWBOX_ROOT = root;
   readPullRequest.mockReset();
   mergePullRequest.mockReset();
+  bringBaseHome.mockReset();
+  bringBaseHome.mockResolvedValue({ ok: true, moved: false, commit: null, checkedOut: true });
   vi.resetModules();
   lib = await import("@/lib/coding-agent");
 });
@@ -178,6 +188,64 @@ describe("a pull request GitHub will not answer about", () => {
     expect(run?.pr?.phase).toBe("merged");
     expect(run?.pr?.checks).toEqual({ total: 1, passed: 1, failed: 0, pending: 0 });
     expect(isPrPending(run?.pr)).toBe(false);
+  });
+});
+
+describe("a pull request the box merged", () => {
+  const green = { state: "OPEN", mergeable: "MERGEABLE", checks: { total: 1, passed: 1, failed: 0, pending: 0 }, noChecks: false };
+  /** One poll that finds the checks green and merges, then the settle path's own work. */
+  const mergeNow = async () => {
+    readPullRequest.mockResolvedValue(green);
+    mergePullRequest.mockResolvedValue({ ok: true });
+    writeRecord(Date.now() - 5 * 60_000);
+    lib.resumePullRequestWatches();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lib.getRun(RUN_ID)?.pr?.phase).toBe("merged");
+  };
+
+  it("is brought into the project folder, and the feed says where the folder is now", async () => {
+    // run-deyse3g9 (2026-11-10): "Merged into the base branch" on GitHub, and
+    // the project folder — with the app served from it — still on the base
+    // from before the run; the next run would have forked from that.
+    bringBaseHome.mockResolvedValue({ ok: true, moved: true, commit: "a1c935b0c4f4d7f0f4a8f4d0e7d9b1c2d3e4f5a6", checkedOut: true });
+    await mergeNow();
+    expect(bringBaseHome).toHaveBeenCalledTimes(1);
+    expect(bringBaseHome).toHaveBeenCalledWith({ projectDir: home, base: "main" });
+    const feed = lib.getRun(RUN_ID)?.progress.join("\n") ?? "";
+    expect(feed).toMatch(/Merged into the base branch/);
+    expect(feed).toMatch(/The project folder is on the merged main now \(a1c935b\)/);
+  });
+
+  it("says why the folder was left, with what to do, when it could not follow", async () => {
+    bringBaseHome.mockResolvedValue({ ok: false, reason: "dirty", detail: "uncommitted changes there are in files the merge also changes" });
+    await mergeNow();
+    const run = lib.getRun(RUN_ID);
+    // Still a merge: where the folder is does not change what GitHub did.
+    expect(run?.pr?.phase).toBe("merged");
+    // Whole, inside the feed's 160-character line: what to do is said before why.
+    expect(run?.progress).toContain("The merged main is not in the project folder yet — run git pull there: uncommitted changes there are in files the merge also changes");
+  });
+
+  it("says nothing more when the folder already has the merge", async () => {
+    await mergeNow();
+    expect(bringBaseHome).toHaveBeenCalledTimes(1);
+    expect(lib.getRun(RUN_ID)?.progress.join("\n")).not.toMatch(/project folder/);
+  });
+
+  it("moves only the base when the folder is on another branch, and says the folder was left", async () => {
+    bringBaseHome.mockResolvedValue({ ok: true, moved: true, commit: "a1c935b0", checkedOut: false });
+    await mergeNow();
+    expect(lib.getRun(RUN_ID)?.progress.join("\n")).toMatch(/main in the project folder is on the merged work now; the folder is on another branch and was left as it is/);
+  });
+
+  it("is not brought home when it was NOT merged", async () => {
+    readPullRequest.mockResolvedValue({ error: "gh: To get started with GitHub CLI, please run: gh auth login" });
+    writeRecord(Date.now() - MAX_WAIT_MS - 1_000);
+    lib.resumePullRequestWatches();
+    await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS);
+    expect(lib.getRun(RUN_ID)?.pr?.phase).toBe("blocked");
+    expect(bringBaseHome).not.toHaveBeenCalled();
   });
 });
 

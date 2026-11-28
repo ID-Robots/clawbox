@@ -1,0 +1,58 @@
+# Settings for Qodo's open-source PR-Agent (.github/workflows/pr-agent.yml). It runs alongside CodeRabbit.
+# PR-Agent reads this file from the default branch (main).
+# The model is set per run in the workflow, which takes precedence over this file; the API key is the
+# ANTHROPIC_API_KEY secret of the GitHub Environment "pr-agent".
+
+[github_action_config]
+# Describe + review + improve when a PR is opened, reopened or marked ready for review.
+auto_review = true
+auto_describe = true
+auto_improve = true
+pr_actions = ["opened", "reopened", "ready_for_review"]
+# New pushes to an open PR refresh the description and the review; /improve stays manual (/improve in a comment).
+handle_push_trigger = true
+push_commands = ["/describe", "/review"]
+
+[ignore]
+glob = ["public/**", "**/package-lock.json", "**/bun.lock*", "reports/**"]
+
+[pr_description]
+extra_instructions = '''
+ClawBox, an open-source private AI assistant for NVIDIA Jetson: a Next.js app (src/**), the device installer
+(install.sh, config/**, scripts/**) and the MCP server (mcp/**). Call out changes to the installer, the update
+path, systemd units, authentication and API response shapes explicitly.
+'''
+
+[pr_reviewer]
+extra_instructions = '''
+Focus on real bugs, security, contract breaks and missing tests. No style, naming or formatting nitpicks. Say
+nothing about a file unless there is something concrete to fix.
+
+Review for:
+- Authentication and authorisation on every API route and WebSocket (src/app/**); input validation
+- The installer and update path (install.sh, config/**, scripts/**): runs as root on owners' devices; check
+  quoting, error handling, idempotency, file permissions, and that an update can never leave a device unbootable
+  or lose owner data
+- Secrets and tokens never logged, returned by an API or written world-readable
+- Command injection where shell commands are built from input
+- Missing or weak tests for changed behaviour
+'''
+
+[pr_code_suggestions]
+extra_instructions = '''
+Suggest only changes that fix a real bug, a security problem, a contract break or a missing test.
+No style, naming or formatting nitpicks. At most 10 suggestions in total.
+
+Look for:
+- Missing authentication, authorisation or input validation on API routes
+- Installer/update steps that are not idempotent, unquoted, or can break a device
+- Leaked secrets; command injection
+
+Output format: answer with the YAML object only, as plain text. Never call tools, never use XML or HTML
+tags (no <invoke>, <parameter> or similar wrappers) and never wrap the YAML in tags.
+'''
+# At most 3 suggestions per chunk x 3 chunks = 9, within the cap of 10.
+num_code_suggestions_per_chunk = 3
+max_number_of_calls = 3
+# Drop low-scored suggestions (0-10), which are mostly nitpicks.
+suggestions_score_threshold = 5

@@ -12,6 +12,7 @@
  * Pure: no fs, no network.
  */
 
+import { CHARS_PER_TOKEN, estimateTokens } from "@/lib/token-estimate";
 import { allocateClaimId, claimFactKey, claimTextKey, slugify, type ClaimIndex } from "./claims";
 import { LIMITS } from "./lint";
 import { redactText } from "./redact";
@@ -37,6 +38,88 @@ export const MAX_TEXT_CHARS_PER_FILE = 6_000;
 export const MAX_BATCH_CHARS = 240_000;
 /** Output ceiling for one call: ~50 cards of a few hundred tokens each. */
 export const WRITER_MAX_TOKENS = 48_000;
+
+/**
+ * On a model with a bounded window — the box's own engine — at most this many
+ * documents a call: a small model writes a few cards well, never fifty.
+ */
+export const BOUNDED_WRITER_BATCH = 4;
+/** The room one document's card is given in the answer on a bounded window (8 facts with quotes, a summary, details). */
+export const CARD_TOKENS = 1_500;
+/** Less of a document than this per call and its card is not worth writing: the window is too small for the writer. */
+export const MIN_TEXT_CHARS_PER_FILE = 1_000;
+/**
+ * The path label one document's text is sized beside on a bounded window; a
+ * longer label takes its excess off that document's text
+ * ({@link boundedTextChars}).
+ */
+export const WRITER_LABEL_ALLOWANCE = 300;
+/** The JSON around one document in the prompt: its number, kind and quoting, plus its path label's allowance. */
+const ITEM_OVERHEAD_CHARS = 200 + WRITER_LABEL_ALLOWANCE;
+/** The chat template around the turns, plus a margin for the estimate. */
+const FRAME_TOKENS = 320;
+
+/** The window and the longest answer of one call: flash-client's `FlashBudget`. */
+export interface WriterBudget {
+  contextTokens: number;
+  maxOutputTokens: number;
+}
+
+/** What the writer sends one bounded call: documents, their text in all, one document's text. */
+export interface WriterLimits {
+  batchFiles: number;
+  batchChars: number;
+  textChars: number;
+}
+
+/**
+ * The writer's batch on a model with a bounded window: as many documents as
+ * fit the window beside the system prompt with a card's room each (at most
+ * {@link BOUNDED_WRITER_BATCH}, and no more cards than the longest answer
+ * holds), each document's text cut to what fits one alone. Null when not even
+ * one document of {@link MIN_TEXT_CHARS_PER_FILE} fits: the window is too small
+ * to write pages with. Estimates with `token-estimate.ts`, which runs long.
+ */
+/**
+ * One document's text on a bounded window, its path label counted: what
+ * {@link writerLimits} allows, less the label's length past
+ * {@link WRITER_LABEL_ALLOWANCE}, never under {@link MIN_TEXT_CHARS_PER_FILE}.
+ */
+export function boundedTextChars(limits: WriterLimits, label: string): number {
+  return Math.max(MIN_TEXT_CHARS_PER_FILE, limits.textChars - Math.max(0, label.length - WRITER_LABEL_ALLOWANCE));
+}
+
+/**
+ * The longest start of `text` whose JSON-encoded length (what the prompt
+ * carries: quotes, backslashes, newlines and tabs each take two characters
+ * there) is at most `max`. A bounded window is sized in those characters, so
+ * a document full of escapes is cut before it can crowd out its card's room.
+ * Never cuts between the two halves of a surrogate pair.
+ */
+export function capEncodedLength(text: string, max: number): string {
+  const encoded = (t: string) => JSON.stringify(t).length - 2;
+  if (encoded(text) <= max) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (encoded(text.slice(0, mid)) <= max) lo = mid;
+    else hi = mid - 1;
+  }
+  const code = text.charCodeAt(lo - 1);
+  return text.slice(0, code >= 0xd800 && code <= 0xdbff ? lo - 1 : lo);
+}
+
+export function writerLimits(budget: WriterBudget): WriterLimits | null {
+  const system = estimateTokens(WRITER_SYSTEM_PROMPT) + estimateTokens(WRITER_ITEMS_MARKER) + FRAME_TOKENS;
+  const room = budget.contextTokens - system;
+  const card = Math.min(CARD_TOKENS, budget.maxOutputTokens);
+  const textChars = Math.min(MAX_TEXT_CHARS_PER_FILE, Math.floor((room - card) * CHARS_PER_TOKEN) - ITEM_OVERHEAD_CHARS);
+  if (!Number.isFinite(textChars) || textChars < MIN_TEXT_CHARS_PER_FILE) return null;
+  const perFile = Math.ceil((textChars + ITEM_OVERHEAD_CHARS) / CHARS_PER_TOKEN) + card;
+  const batchFiles = Math.max(1, Math.min(BOUNDED_WRITER_BATCH, Math.floor(room / perFile), Math.floor(budget.maxOutputTokens / card)));
+  return { batchFiles, batchChars: batchFiles * textChars, textChars };
+}
 
 export const MAX_TITLE_CHARS = 120;
 export const MAX_SUMMARY_CHARS = 300;

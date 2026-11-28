@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { hasPersonSession } from "@/lib/owner-session";
-import { isApprovalAction, pendingPowerApproval, resolvePowerApproval } from "@/lib/power-approval";
+import { isApprovalAction, pendingPowerApproval, PowerApprovalConflict, resolvePowerApproval } from "@/lib/power-approval";
 
 export const dynamic = "force-dynamic";
 const forbidden = () => NextResponse.json({ error: "Only the owner can confirm power requests" }, { status: 403 });
@@ -23,7 +23,10 @@ export async function POST(req: Request) {
   try {
     const applied = await resolvePowerApproval(body.id, body.action, body.approve);
     return NextResponse.json({ applied }, { status: applied ? 200 : 409 });
-  } catch {
+  } catch (err) {
+    // An update already in flight is not a failure to retry: the 409 and the
+    // sentence the update routes give it, which the desktop card shows as is.
+    if (err instanceof PowerApprovalConflict) return NextResponse.json({ error: err.message }, { status: 409 });
     return NextResponse.json({ error: "Power command failed; request it again to retry" }, { status: 500 });
   }
 }

@@ -379,7 +379,7 @@ describe("db source: the agent databases, read-only", () => {
     ]);
     // Reset, written plain, no generation suffix.
     transcriptArchive("main", "reset1.jsonl.reset.2026-10-21T09-00-00Z", [
-      { ts: IN + 5, provider: "deepseek", model: "deepseek-v4-pro", usage: { prompt_tokens: 50, completion_tokens: 5 }, responseId: "r-reset" },
+      { ts: IN + 5, provider: "deepseek", model: "deepseek-v4-flash", usage: { prompt_tokens: 50, completion_tokens: 5 }, responseId: "r-reset" },
     ]);
     // A file-era transcript the core still counts.
     transcriptArchive("main", "legacy.jsonl", [{ ts: IN + 6, usage: anthropic(1, 1), responseId: "r-legacy" }]);
@@ -396,7 +396,7 @@ describe("db source: the agent databases, read-only", () => {
 
     expect(report.models.map((m: { provider: string; model: string; sessions: number; calls: number }) => [`${m.provider}/${m.model}`, m.sessions, m.calls])).toEqual([
       ["anthropic/claude-sonnet-4-6", 3, 3],
-      ["deepseek/deepseek-v4-pro", 1, 1],
+      ["deepseek/deepseek-v4-flash", 1, 1],
     ]);
     // r-live once, r-del, r-reset, r-legacy.
     expect(report.totals).toMatchObject({ sessions: 4, calls: 4, input: 181, output: 19, cacheRead: 300, cacheWrite: 7 });

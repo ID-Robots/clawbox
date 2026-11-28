@@ -264,7 +264,8 @@ describe("a team's roles on their own providers", () => {
     await connectAnthropic();
 
     const planner = await lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "planner", taskId: null } });
-    expect(planner).toMatchObject({ provider: "anthropic", requestedModel: "claude-fable-5-1", effort: "xhigh", modelRole: "planner" });
+    // An Anthropic reader with no effort stored for it starts at `high` (ROLE_AUTO_EFFORT).
+    expect(planner).toMatchObject({ provider: "anthropic", requestedModel: "claude-fable-5-1", effort: "high", modelRole: "planner" });
     await finished(planner.id);
     const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
     // The team's own provider: nothing moved the workers.
@@ -350,10 +351,10 @@ describe("a team's roles on their own providers", () => {
     await expect(refused).rejects.toMatchObject({ kind: "not_ready", message: expect.stringMatching(/ClawBox AI is not connected/) });
     await expect(refused).rejects.toMatchObject({ message: expect.not.stringMatching(/Anthropic/) });
     const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
-    expect(worker).toMatchObject({ provider: "anthropic", requestedModel: "claude-opus-5-5", modelRole: "worker" });
+    expect(worker).toMatchObject({ provider: "anthropic", requestedModel: "claude-sonnet-5-5", modelRole: "worker" });
     await finished(worker.id);
     expect(handed(worker.id, "provider")).toBe("anthropic");
-    expect(handed(worker.id, "model")).toBe("claude-opus-5-5");
+    expect(handed(worker.id, "model")).toBe("claude-sonnet-5-5");
   });
 
   it("keeps a resumed run on the provider and model its session was opened on, whatever the role says now", async () => {
@@ -396,7 +397,7 @@ describe("a team's roles on their own providers", () => {
     await lib.setRoleModels({ worker: { model: "auto" }, planner: { provider: "anthropic", model: "claude-fable-5-1" }, reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash" } });
     const map = await lib.teamRoleModelMap();
     expect(map).toEqual((await lib.getCodingAgentStatus()).roleModelMap);
-    expect(map.planner).toMatchObject({ provider: "anthropic", model: "claude-fable-5-1", effort: "xhigh", auto: false, ready: false, relativeCost: 40 });
+    expect(map.planner).toMatchObject({ provider: "anthropic", model: "claude-fable-5-1", effort: "high", auto: false, ready: false, relativeCost: 50 });
     expect(map.planner.problems.join(" ")).toMatch(/Anthropic account is not connected/);
     expect(map.reviewer).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: false, ready: true, problems: [], relativeCost: 1 });
     expect(map.worker).toMatchObject({ provider: "clawbox-ai", model: "deepseek-v4-flash", auto: true });
@@ -490,6 +491,38 @@ describe("a run asked for its own effort", () => {
     expect(handed(low.id, "effort")).toBe("low");
   });
 
+  it("reviews a run at the effort it ran on — the automatic review pass is the run's own continuation", async () => {
+    makePlainProject("plain");
+    // The owner's setting is what a pass used to take: here it is the heaviest.
+    writeConfig({ coding_agent_effort: "ultracode" });
+    const low = await lib.startRun({ task: "build it", directory: "plain", source: "owner", effort: "low" });
+    await finished(low.id);
+    const pass = await lib.startRun({ task: "review it", resumeRunId: low.id, source: "owner", reviewOf: low.id });
+    expect(pass).toMatchObject({ effort: "low", reviewOf: low.id });
+    await finished(pass.id);
+    expect(handed(pass.id, "effort")).toBe("low");
+    // A follow-up the owner starts themselves is a new ask: it takes their setting.
+    const next = await lib.startRun({ task: "and now the README", resumeRunId: low.id, source: "owner" });
+    expect(next).toMatchObject({ effort: "ultracode" });
+    await finished(next.id);
+  });
+
+  it("asks a run for lessons only while the project's notes have room for one", async () => {
+    const dir = makePlainProject("plain");
+    fs.mkdirSync(path.join(dir, ".clawbox"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".clawbox", "run-notes.md"), "- Tests: bun run test\n");
+    const roomy = await lib.startRun({ task: "build it", directory: "plain", source: "owner" });
+    await finished(roomy.id);
+    expect(handed(roomy.id, "argv")).toMatch(/To leave a lesson for the next run/);
+    // At the cap every lesson is refused as `full`: the run is not asked for any.
+    fs.writeFileSync(path.join(dir, ".clawbox", "run-notes.md"), `- ${"x".repeat(3_960)}\n`);
+    const full = await lib.startRun({ task: "build it again", directory: "plain", source: "owner" });
+    await finished(full.id);
+    expect(handed(full.id, "argv")).not.toMatch(/To leave a lesson for the next run/);
+    // The notes themselves still reach it.
+    expect(handed(full.id, "argv")).toMatch(/<run-notes>/);
+  });
+
   it("still caps a planner and a reviewer at xhigh, and never runs a read-only run on ultracode", async () => {
     makePlainProject("plain");
     const planner = await lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, effort: "ultracode", team: { id: TEAM, role: "planner", taskId: null } });
@@ -510,7 +543,7 @@ describe("a run asked for its own effort", () => {
 
   it("refuses a level the app does not offer before the run exists", async () => {
     makePlainProject("plain");
-    await expect(lib.startRun({ task: "build it", directory: "plain", source: "owner", effort: "medium" })).rejects.toMatchObject({ kind: "invalid", message: expect.stringMatching(/low, xhigh, max, ultracode/) });
+    await expect(lib.startRun({ task: "build it", directory: "plain", source: "owner", effort: "turbo" as never })).rejects.toMatchObject({ kind: "invalid", message: expect.stringMatching(/low, medium, high, xhigh, max, ultracode/) });
     const saved = fs.existsSync(runsFile()) ? fs.readFileSync(runsFile(), "utf8") : "";
     expect(saved).not.toContain("build it");
   });

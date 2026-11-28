@@ -48,6 +48,21 @@ Two properties of the Hermes entry are load-bearing:
 To check a device: `hermes mcp list` (or `openclaw mcp status`) should name
 `clawbox`; `hermes mcp test clawbox` connects and lists its tools.
 
+### Every package it imports is declared
+
+The server runs from the checkout (`bun run mcp/clawbox-mcp.ts`), so its
+packages are whatever `bun install` put in the checkout's `node_modules`. A
+package the server imports must be named in the root `package.json`
+`dependencies`. Being there because another package depends on it is not
+enough. Up to 4.3.0, `zod` was imported by six of these files but never declared. It
+resolved only because the MCP SDK's copy happened to be hoisted to the top. On
+an install that leaves it out (bun's isolated linker, for example), the server
+dies on its first import with `Cannot find package 'zod'`. The gateway then logs
+`bundle-mcp: failed to start server "clawbox"` and retries after its 60 s
+cooldown. `src/tests/unit/mcp-server-declared-deps.test.ts` checks both halves:
+the import graph loads only declared packages, and the server starts and answers
+`tools/list` from a layout that holds only those.
+
 ### The server hangs up when it is idle
 
 OpenClaw's gateway spawns one of these processes per **session key** and holds
@@ -134,9 +149,10 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Publishing to the ClawBox Store (`app_publish`) | when the owner switched the coding agent on | same |
-| Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`, `coding_project_import`) | when the owner switched the coding agent on | same |
+| Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`, `coding_project_import`, `coding_project_create`, `coding_project_folder_add`, `coding_project_folder_remove`, `coding_project_folders`) | when the owner switched the coding agent on | same |
 | The coding team's settings (`coding_settings_get`, `coding_settings_set`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
+| ClawBox Vault (`vault_list`, `vault_match`, `vault_fill`, `vault_save`, `vault_generate`, `vault_delete`, `vault_audit`) | yes, full profile | yes, full profile |
 | Prime Radiant (`prime_radiant_*`, 37 tools) | yes | yes |
 | Memory Shard management (`memory_shard_reindex`, `_reindex_stop`, `_sources_*`, `_schedule_*`, `_provider_*`, `_enable`, `_reset`) | yes | yes |
 | Memory Shard search (`memory_shard_search`) | **no** — the index is OpenClaw's, searched in its own turn | yes |
@@ -559,6 +575,26 @@ Discord). The spoken reply is covered at its own entry point,
 before any outbound hook runs — a cloud voice there is out of reach of both
 halves.
 
+**`email_draft_card` — a draft the person sends, never the agent.** When an
+owner-granted mail MCP server can only create drafts (a Microsoft 365 server, for
+example), this tool is how a draft reaches the person. It reads one route the
+bearer may read, `GET /setup-api/email/draft-approval/status?draft=<id>`, which
+says whether approval cards are on and whether the mailbox has that draft. It
+answers with the line to end the reply with, `EMAIL_DRAFT:<id>`, under the same
+"ClawBox chat yes, Telegram/WhatsApp/Discord/Slack/email no" rule as `EMAIL:`.
+The chat turns that line into a card with Send, Keep as draft and "Tell me what
+to change". The card reads the draft from the mail send backend, never from the
+reply. Its Send goes through a route that answers to a signed-in person's session
+cookie and refuses this server's bearer. No tool here names that route, and
+`src/tests/unit/mcp-email-draft-card-tool.test.ts` fails if one ever does. So
+the tool is `readOnly` in the literal sense. The whole design, the one-time
+token and the backend's contract are in `docs/email-draft-approval.md`. The
+channel-stripping plugins above strip an `EMAIL_DRAFT:` line too, after the
+`EMAIL:` lines and by the same rules, so a channel never shows a bare draft id
+(`src/tests/unit/email-draft-directive-parity.test.ts` holds the three copies
+of that grammar to one answer). The spoken reply and the gateway's own Control
+UI do not strip it yet.
+
 **The same two plugins now carry an INBOUND hook, and it is what lets the owner
 approve a queued email from his own Telegram conversation.** The harness is the
 single consumer of the main bot's `getUpdates` long poll, so ClawBox cannot read
@@ -686,7 +722,7 @@ coding-agent run — see below) · `describe_image` (both editions)
 
 `describe_image` is not a browser tool but lives in the same family so a
 coding-agent run gets it: a written description of a local image file
-(.png/.jpg/.jpeg/.webp), through the box's vision model — how an image-blind
+(.png/.jpg/.jpeg/.webp), through ClawBox AI's model that can see (`deepseek-v4-flash`, or its vision fallback) — how an image-blind
 run looks at a frame it saved without driving the browser at it. The fence is
 the ROUTE's (`/setup-api/vision/describe`), not this tool's: a credential
 store answers like a missing file for every caller, and the MCP bearer may
@@ -731,7 +767,7 @@ run's model cannot see images, so every screenshot is archived into the run's
 evidence folder (`data/coding-agent-artifacts/<runId>/`,
 `CLAWBOX_RUN_ARTIFACTS_DIR`) and replaced in the reply by the backend's written
 description of it (the browser route's `describe` action, produced by the
-box's vision model — `src/lib/vision-describe.ts`). `browser_view_local` opens
+box's ClawBox AI model — `src/lib/vision-describe.ts`). `browser_view_local` opens
 an HTML file from the run's working folder (`CLAWBOX_RUN_DIR`): the ONLY
 `file://` the browser route accepts, and only while that run is the active
 one, realpath-checked on both sides.
@@ -821,11 +857,12 @@ unnoticed is how a device ends up in a posture nobody chose.
 `coding_agent_run` · `coding_agent_status` · `coding_agent_stop` ·
 `coding_run_message` · `coding_run_list` · `coding_agent_resume` ·
 `coding_project_status` · `coding_project_import` · `coding_secret_list` ·
-`coding_settings_get` · `coding_settings_set`
+`coding_settings_get` · `coding_settings_set` · `coding_project_create` ·
+`coding_project_folder_add` · `coding_project_folder_remove` · `coding_project_folders`
 
 | Tool | What it does |
 |---|---|
-| `coding_agent_run` | Hand a whole task to a background Claude Code run in one folder. Answers a run id at once — or, while the box runs every run the owner allows, a QUEUED run id and its place in line (it starts by itself; only the owner cancels it). `fix_ci` with `resume_run_id`: a Fix CI continuation of a run whose pull request's checks failed. `effort`: this run's level (`low`, `xhigh`, `max`, `ultracode`) in place of the owner's setting. |
+| `coding_agent_run` | Hand a whole task to a background Claude Code run in one folder. Answers a run id at once — or, while the box runs every run the owner allows, a QUEUED run id and its place in line (it starts by itself; only the owner cancels it). `fix_ci` with `resume_run_id`: a Fix CI continuation of a run whose pull request's checks failed. `effort`: this run's level (`low`, `medium`, `high`, `xhigh`, `max`, `ultracode`) in place of the owner's setting. |
 | `coding_agent_status` | One run in full — its summary, deliverable, pull request, deployment, plan — or, with no `run_id`, the recent ids. `wait_seconds` blocks up to two minutes. |
 | `coding_run_message` | STEER a run that is still going: queue plain text for it (≤ 4,000 chars, ≤ 20 waiting). Says "Delivered" (the run has it, mid-turn after a tool call or as its next turn) or "Queued" and when — the end of the tool call under way, or its next start. |
 | `coding_run_list` | Every run at a glance (≤ 30): status, who started it, project, branch and whether that work is home, attempts and the deliverable verdict, why a paused one is paused, `detached`, unread messages, `left_running`, a queued run's `queue_position`, a failed CI (`ci_failed`, `can_fix_ci`). Filter by `status` / `project`. |
@@ -834,6 +871,7 @@ unnoticed is how a device ends up in a posture nobody chose.
 | `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs. |
 | `coding_secret_list` | Names — never values — of the owner's stored secrets and whether runs get them. |
 | `coding_project_import` | Bring an EXISTING project into the owner's project folder, only when the user asks: clone one of their GitHub repositories (`github_repo`, owner/name) or copy a folder on the box (`directory`, under the owner's home; `node_modules` left behind). Nothing is merged or overwritten; the reply ends `project_id: <id>`. The route's refusals come back typed — `exists`, `no_gh`/`not_connected` (connect GitHub in Settings), `refused` (outside the home, a credential store, the checkout), `too_big`/`no_space`. This replaced the app's Import panel on 2026-10-30; the app carries no inputs. |
+| `coding_project_create` · `coding_project_folder_add` · `coding_project_folder_remove` · `coding_project_folders` | MULTI-FOLDER projects (TASK-2757): one project name for several git repositories of the owner's project folder, kept in `coding_agent_project_folders` (`src/lib/project-folders.ts`) through `GET`/`POST /setup-api/coding-agent/project-folders` (owner cookie or the MCP bearer). `coding_agent_run` with that name as `project_id` gives the run a worktree of EACH repository side by side and, with auto-PR on, one pull request per repository that changed, each naming the others. Create, add or remove only when the user asks. |
 | `coding_settings_get` | The owner's coding-TEAM settings in one readable block, each with its valid choices beside it: effort (`effortLevels`), every role's stored provider/model/effort and what it resolves to right now (`roleModelMap`, with NOT READY and why), the review pass, auto PR and merge, the PR body mode, the dynamic team, runs at once and this box's range, history retention, media, the commit identity — and the connected providers with the models a role may be pinned to on each. Call it before `coding_settings_set`. |
 | `coding_settings_set` | Change any subset of those settings — one optional parameter per field; a role's halves as `planner_provider` / `planner_model` / `planner_effort`, `worker_*`, `reviewer_*`, where `auto` or `default` puts a half back to the role's default. Posts only the fields given to `POST /setup-api/coding-agent/settings` and answers what changed plus the final values. The description tells the assistant these are the owner's preferences and to CONFIRM before changing cost-bearing ones (effort, a model, runs at once) unless the user just asked for exactly that. A refused value comes back as BAD_ARGUMENT in the route's own sentence; a field the owner keeps (below) as CONFLICT naming the Settings page. |
 
@@ -883,7 +921,7 @@ whether they have, and a run against an unconnected account is 409 /
 do-not-retry, never something to try again.
 
 `coding_agent_run` and `coding_team_run` take an optional `effort` (2026-10-30):
-one of the levels the app offers — `low`, `xhigh`, `max`, `ultracode`
+one of the levels the app offers — `low`, `medium`, `high`, `xhigh`, `max`, `ultracode`
 (`OFFERED_EFFORT_LEVELS` in `src/lib/coding-effort.ts`, mirrored in the
 parameter's enum) — the per-request override of the owner's effort setting
 (Settings → Coding Agent). Omitted, it is NOT sent and the owner's setting
@@ -1167,10 +1205,11 @@ STRANGERS — a team's own runs share the box, a run of anyone else waits.
 
 What a team COSTS is on its answer too. By default the planner (and the lead)
 runs on the provider's best model and the workers and reviewers on its middle
-one — `claude-fable-5-1` / `claude-opus-5-5` on Anthropic, `gpt-6-astra` /
-`gpt-5.6-sol` on OpenAI, the plan's `deepseek-v4-flash` for every role on
-ClawBox AI; the planner and reviewers at no more than `xhigh` effort, workers
-at the owner's effort; the owner may pick
+one — on Anthropic `claude-fable-5-2` plans, `claude-sonnet-5-5` writes and
+`claude-opus-5-5` reviews; `gpt-6-astra` / `gpt-5.6-sol` on OpenAI; the plan's
+`deepseek-v4-flash` for every role on ClawBox AI. The planner and reviewers run
+at no more than `xhigh` effort (on Anthropic they start at `high` unless the
+owner stored a level for the role), workers at the owner's effort; the owner may pick
 the provider, the model and the effort per role
 in the Coding Agent settings (`coding_agent_role_models`,
 `src/lib/coding-role-models.ts`). The planner's
@@ -1260,7 +1299,9 @@ while the total is not known yet — never a made-up 0%. Both editions have an
 index now (OpenClaw's own, or the one ClawBox keeps where there is no OpenClaw),
 so the tool is registered on both, with one description per edition: only the
 Hermes one points at `memory_shard_search`, which is Hermes-only because on
-OpenClaw the index is OpenClaw's and it searches it as part of a turn.
+OpenClaw the index is OpenClaw's and it searches it as part of a turn. On a
+`dual` install neither points at it: the index there is OpenClaw's too, and the
+search route answers 409 `edition`.
 `memory_shard_search` also answers from the Prime Radiant wiki, a built-in
 source once the vault exists: those passages carry `source: "prime-radiant"`,
 the vault-relative page `path`, the page or claim `id`, `kind`, the page `type`
@@ -1277,7 +1318,10 @@ pass), or the size ceiling and a fallen-back provider (no pass fixes those).
 `clawkeep/memory/*` routes. Those routes ask again who is writing
 (`src/lib/memory-shard-writer.ts`): a signed-in person, or this server's bearer;
 anything else is 403 `owner_only`. The assistant starts an **incremental** pass
-on its own — it reads only new and changed files. A **full** pass (asked for, or
+on its own — it reads only new and changed files. On an OpenClaw box whose
+gateway is running that pass is declined 409 `gateway_indexes` and nothing is
+stopped: the running gateway keeps its index current by itself, and the tool
+says so. A **full** pass (asked for, or
 the one an incremental ask would really run on a missing or disowned index, or
 the first build an armed schedule would start over an empty one — saving a
 schedule that is on, or switching Memory Shard on over one), a
@@ -1292,6 +1336,23 @@ to the picker's rules (inside the Files root, never hidden, never a secret
 store) and answers how many files a pass would read from it. A pass is stopped
 with `DELETE /setup-api/clawkeep/memory/index`. The status tells the agent to
 report progress from it, not to poll it in a loop.
+
+**Which model on this box (TASK-2411).** `memory_shard_provider_get` reports
+`local_model` — the model the box's embedder runs when the index is on the box
+(`qwen3-embedding-0.6b`, the default, or `qwen3-embedding-4b`) — and
+`local_models`, one row per model with `in_use`, `downloaded`, `size_gb` and
+`runs_on_this_box`, plus `why_not` in plain words where it cannot (a Jetson
+Orin Nano, a PC without an NVIDIA GPU, or under 6 GB of free GPU memory). An
+older server sends neither and is reported as the 0.6B. `memory_shard_provider_set`
+takes an optional `local_model` with `source: "local"` (with `cloud` it is
+`BAD_ARGUMENT`). A change of model re-embeds every file exactly like a change
+of place, so it takes the same estimate-then-`confirm: true` (the answer
+carries `from_model`), and the full pass is started after it. A model this box
+cannot run is refused before anything is posted (`NOT_SUPPORTED_HERE`, the
+reason in the message) and again by the route (409 `local_model_unavailable`);
+one that is not downloaded is 409 `local_not_installed` — the download
+(2.5–4.3 GB) is the owner's, from Settings → Local AI or Memory Shard's
+settings. Switching never deletes the other model's file.
 
 ### Prime Radiant (both editions)
 
@@ -1392,13 +1453,18 @@ draws (installed, running / idle / on-demand / not-installed /
 not-on-this-edition, disk and memory, the device's own one-line detail, which is
 never a path or a command). Alongside it, which voice and which transcription
 engine the box uses now (`GET /setup-api/tts` `choice`/`activeEngine`, `GET
-/setup-api/stt` `primary`/`chain`). `engine: "whisper"` adds the downloaded
+/setup-api/stt` `primary`/`chain`; `primary: "endpoint"` is the owner's own
+OpenAI-compatible speech server on the box or the LAN, and `localOnly` says the
+local-only AI lock keeps every recording off the cloud, TASK-2501). `engine: "whisper"` adds the downloaded
 sizes and free disk (`GET /setup-api/whisper`), `engine: "embeddings"` the
 embedding service's unit state (`GET /setup-api/embed/status`). Each leg past
 the inventory is independent, so one that does not answer costs only its line.
 The inventory leaves the embeddings row out until the device has read the
 memory index once; the answer then says `not_read_yet` rather than implying
-there is no embedding model.
+there is no embedding model. When the owner has selected an external AI engine
+as Local AI (TASK-2376, the inventory's `externalEngine`), the answer carries
+`external_engine` — its model, endpoint and context window, never its key —
+and says the on-device chat model is not started while it is selected.
 
 **There is no install tool.** Since 2026-09-15 an install or update puts no
 engine or model on a box but llama.cpp and Gemma 4, so Settings → Local AI's
@@ -1446,6 +1512,31 @@ account detail first, never the advice (TASK-2141). Never a credential and
 never an email. Read-only: accounts are added, ordered and re-authenticated by
 the owner in Settings, and the route's writes refuse this bearer 403
 `owner_only`.
+
+### ClawBox Vault (both editions, full profile)
+
+The box's password manager (`vault/`, `mcp/tools/vault.ts`; the rules are in
+`docs/agents/vault.md`). **No tool returns a password.** The tools talk to the
+vault service on `127.0.0.1:4796` with the token in `~/.clawbox-vault/agent-token`.
+
+| Tool | What the agent gets |
+|---|---|
+| `vault_list(query?)` | entry names, usernames, sites, last change |
+| `vault_match(url)` | the entries that belong to a page, exact site first |
+| `vault_fill(url, name?, submit?)` | a status: `filled`, `no_form`, `no_tab`, `origin_mismatch`, `no_entry`, `locked`, `extension_offline`, `timeout` |
+| `vault_save(name, login, url, password?, note?, regenerate?, length?, symbols?)` | the entry name; without `password` the vault generates and stores one |
+| `vault_generate(name?, login?, url?, length?, symbols?, overwrite?)` | "generated and stored as …", or what would be generated |
+| `vault_delete(name, confirm)` | "deleted …"; `confirm` must be `true` |
+| `vault_audit(limit?)` | recent actions: who, what, which entry, which site, result |
+
+- The password of a fill goes from the vault to the extension in the box's
+  browser, which types it into the page. Open the login page first.
+- Until the owner has chosen a vault PIN in the ClawBox Vault app, every tool
+  answers `CONFLICT` ("not set up"): tell the user, do not retry.
+- None declares `readOnly`, so none is in a delegated run's `run-read` server,
+  and none is on the `core` surface.
+- The two card tools (`vault_cards_list`, `vault_card_fill`) are registered only
+  with `CLAWBOX_VAULT_CARDS=1`, which no install sets.
 
 ### What the agent deliberately cannot do
 

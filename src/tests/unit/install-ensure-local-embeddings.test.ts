@@ -222,6 +222,7 @@ describe("step_embed_model — driven against stubs", () => {
     hf = true,
     present = false,
     hfRc = 0,
+    shaBad = false,
     pins = {} as Record<string, string>,
   } = {}) {
     const project = path.join(tmp, "project");
@@ -246,6 +247,18 @@ describe("step_embed_model — driven against stubs", () => {
       ].join(NL),
       { mode: 0o755 },
     );
+    // sha256sum: the step verifies the shipped GGUF against the catalog's
+    // sha256 (TASK-2411). The stub file is empty, so this answers the
+    // catalog's hash for it — or a wrong one when a case asks.
+    fs.writeFileSync(
+      path.join(tmp, "bin", "sha256sum"),
+      [
+        "#!/bin/sh",
+        'if [ "${SHA_BAD:-0}" = "1" ]; then echo "0000000000000000000000000000000000000000000000000000000000000000  $1"; exit 0; fi',
+        'echo "06507c7b42688469c4e7298b0a1e16deff06caf291cf0a5b278c308249c3e439  $1"',
+      ].join(NL),
+      { mode: 0o755 },
+    );
     const script = [
       "set -euo pipefail",
       // The step's refusals go to stderr, and a script that ends in `echo RC=`
@@ -256,7 +269,10 @@ describe("step_embed_model — driven against stubs", () => {
       // on the developer's PATH must never download 640 MB inside a unit test.
       `export PATH="${tmp}/bin:$PATH"`,
       `PROJECT_DIR="${project}"`,
+      'IFACE_ENV="$PROJECT_DIR/data/network.env"',
       "CLAWBOX_USER=$(id -un)",
+      // The cache is the account's own work; here, us.
+      'as_clawbox() { "$@"; }',
       `is_test_mode() { ${testMode ? "return 0" : "return 1"}; }`,
       `has_openclaw_harness() { ${hermes ? "return 1" : "return 0"}; }`,
       // as_clawbox_login runs a command string as the clawbox user; here, us.
@@ -271,6 +287,7 @@ describe("step_embed_model — driven against stubs", () => {
         .map(([k, v]) => `${k}) printf '%s' ${shellQuote(v)} ;;`)
         .join(" ")} *) printf '%s' "$3" ;; esac; }`,
       `sed -n '/^require_safe_hf_ref() {/,/^}/p' "$1" > "${tmp}/fn.sh"`,
+      `sed -n '/^hand_over_checkout() {/,/^}/p' "$1" >> "${tmp}/fn.sh"`,
       `sed -n '/^ensure_embed_model_cached() {/,/^}/p' "$1" >> "${tmp}/fn.sh"`,
       `sed -n '/^step_embed_model() {/,/^}/p' "$1" >> "${tmp}/fn.sh"`,
       `. "${tmp}/fn.sh"`,
@@ -282,7 +299,7 @@ describe("step_embed_model — driven against stubs", () => {
       out = execFileSync("bash", ["-c", script, "bash", INSTALL_SH_PATH], {
         encoding: "utf8",
         stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, LOG: log, HF_RC: String(hfRc) },
+        env: { ...process.env, LOG: log, HF_RC: String(hfRc), SHA_BAD: shaBad ? "1" : "0" },
       });
     } catch (e: unknown) {
       const err = e as { status?: number; stdout?: string; stderr?: string };
@@ -304,6 +321,13 @@ describe("step_embed_model — driven against stubs", () => {
       expect.stringMatching(/^hf download Qwen\/Qwen3-Embedding-0\.6B-GGUF Qwen3-Embedding-0\.6B-Q8_0\.gguf --local-dir .*\/data\/embed\/models$/),
     ]);
     expect(r.cached).toBe(true);
+  });
+
+  it("deletes a download that does not verify against the catalog's sha256, and fails (TASK-2411)", () => {
+    const r = run({ shaBad: true });
+    expect(r.out).toContain("did not verify");
+    expect(r.out).toContain("RC=1");
+    expect(r.cached).toBe(false);
   });
 
   it("is a no-op when the file is already there", () => {
@@ -494,7 +518,7 @@ describe("ensure_local_embeddings never fails the update", () => {
     // the one way a non-interactive CLI hangs without doing any work — a prompt
     // on the stdin it inherits from the root step, which it would wait on for
     // ever. That is a bound on a STALL, not on slowness.
-    expect(body).toMatch(/memory status --agent main --deep --json 2>\/dev\/null <\/dev\/null/);
+    expect(body).toMatch(/memory status --agent "\$MEMORY_AGENT" --deep --json 2>\/dev\/null <\/dev\/null/);
   });
 
   it("puts no verdict on a core that never answers", () => {

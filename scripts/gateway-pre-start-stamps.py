@@ -2,13 +2,17 @@
 """Stamps for the gateway pre-start: re-use a check whose inputs have not changed.
 
 scripts/gateway-pre-start.sh runs as the BLOCKING ExecStartPre of
-clawbox-gateway.service, and three of its checks cost a CLI cold start each on
-every boot of a box whose answer has not changed in weeks — 8-12 s apiece on a
-Jetson, with the gateway (and every chat) down while they run:
+clawbox-gateway.service, and each of these checks costs a CLI cold start
+whenever it runs, on a box whose answer has not changed in weeks — 2.4-12 s
+apiece on a Jetson, with the gateway (and every chat) down while they run:
 
 ``codex-registry``
     ``openclaw plugins list --json``: does the core's registry see every
     dependency of the installed Codex plugin?
+``codex-absent``
+    the same command on a Jetson with no Codex in either managed layout: does
+    the core's registry list a Codex anywhere else? Keyed with
+    ``--plugin-index`` (below).
 ``plugin-consent``
     ``openclaw plugins inspect --all --json``: which managed plugins the core
     reports as consented.
@@ -17,17 +21,31 @@ Jetson, with the gateway (and every chat) down while they run:
     the core report the installed Claude Code to Anthropic.
 
 A provider, model or sign-in switch that needs a gateway restart changes none
-of what those checks read, and paid for all three anyway. This helper lets the
-script ask instead: "is the answer the last full check recorded still the
+of what those checks read, and paid for each of them anyway. This helper lets
+the script ask instead: "is the answer the last full check recorded still the
 answer?" — and say yes only when all of these hold:
 
-  1. the KEY matches: a hash over everything the check reads (below). The
-     `plugins` key covers the core, the pre-start script, the `plugins` section
-     of openclaw.json and the manifests of every plugin payload on disk — NOT
+  1. the KEY matches: a hash over the inputs named here. The `plugins` key
+     covers the core, the pre-start script, the `plugins` section of
+     openclaw.json and the manifests of every plugin payload on disk — NOT
      `agents`, `auth` or `models`, which are what a provider switch writes and
-     what neither plugin check reads. The
-     `claude-code` key covers the core package and every Claude Code binary
-     the script would ask;
+     what neither plugin check reads. With `--plugin-index` (`codex-absent`)
+     it also covers: the core's persisted plugin index (its install records
+     and the id, root and manifest hash of each plugin in its cached view);
+     the `.openclaw/extensions` of every agent workspace; every
+     `plugins.load.paths` entry; and the two inputs of the index's policy hash
+     outside the `plugins` section, each channel's `enabled` switch and the
+     core's bundled-discovery mode (plugin_index_key_parts says how each is
+     read). It does NOT cover, so only the age in 2 bounds a stale answer
+     over them: the index's fields outside that view (its config-path
+     activation and owner metadata, its own diagnostics); the environment the
+     unit fixes (OPENCLAW_DEV_SOURCE_ROOT, the bundled plugins root); an
+     in-place edit of a plugin file outside the roots above; and openclaw.json
+     as the core resolves it (JSON5, `$include`, env substitution) — the
+     helper reads the file as written, as plain JSON, so a `$include`d or
+     env-substituted value is not followed, and a file that does not parse is
+     a miss. The `claude-code` key covers the core package and every Claude
+     Code binary the script would ask;
   2. the record is less than a day old, so every box still runs each full
      check at least once a day it restarts;
   3. the START-GUARD's record (data/openclaw-start-guard.json, written at the
@@ -35,19 +53,29 @@ answer?" — and say yes only when all of these hold:
      after a failure (systemd's NRestarts is 0) and that the PREVIOUS start
      reached `gateway ready` after it began. A reused answer that turned out
      wrong would have kept the gateway from becoming ready, and the very next
-     start then runs the full checks. On a core without the start-guard
-     (before 2026.10) there is no such proof, and nothing is ever reused;
+     start then runs the full checks. That is NOT claimed for `codex-absent`:
+     whether a Codex left without its install-and-consent step keeps the
+     gateway from becoming ready is not settled, so a stale "no Codex" is
+     bounded only by its key and the age in 2. A run the updater makes
+     itself, with the gateway stopped and outside its unit, is recorded as
+     `outsideUnit` and is never that previous start: no gateway starts from
+     it. For the
+     same reason it may take a recorded answer but never records one. On a core
+     without the start-guard (before 2026.10) there is no such proof, and
+     nothing is ever reused;
   4. the operator did not ask for a full run (CLAWBOX_PRESTART_FULL=1 makes
      the script pass --no-reuse).
 
 Anything this helper cannot read is a miss, never a hit: a miss costs what
-every boot cost before, a wrong hit could cost a gateway that does not start.
+every boot cost before, a wrong hit could cost a gateway that does not start
+(for `codex-absent`, a skipped Codex install-and-consent step).
 
 Usage (stdout is one tab-separated line; the exit status is 0 for both):
 
   check --step NAME --kind plugins|claude --record FILE --guard FILE
         --script FILE --core-pkg FILE [--config FILE --openclaw-home DIR
-        --global-modules DIR] [--candidate PATH ...] [--no-reuse]
+        --global-modules DIR [--plugin-index FILE]] [--candidate PATH ...]
+        [--no-reuse]
       -> "hit<TAB><key><TAB><value>"  or  "miss<TAB><key or -><TAB><reason>"
   remember --step NAME --key KEY [--value VALUE] --record FILE
       -> writes the record; exit 1 when it could not
@@ -58,8 +86,10 @@ import glob
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 import time
+import urllib.parse
 
 # A full check at least once a day the gateway restarts, whatever the key says.
 MAX_AGE_S = 24 * 60 * 60
@@ -136,6 +166,23 @@ def plugin_dirs(openclaw_home, global_modules):
     return sorted(found)
 
 
+def payload_line(path):
+    """What a plugin payload is keyed by: its package and plugin manifests, its
+    lock file and its link to the core. Anything that is not a directory (a
+    plugin file `plugins.load.paths` names, or nothing at all) by its bytes."""
+    if not os.path.isdir(path):
+        return "file=%s sha=%s" % (path, file_digest(path))
+    peer = os.path.join(path, "node_modules", "openclaw")
+    return "plugin=%s pkg=%s manifest=%s lock=%s peer=%s peer-pkg=%s" % (
+        path,
+        file_digest(os.path.join(path, "package.json")),
+        file_digest(os.path.join(path, "openclaw.plugin.json")),
+        file_identity(os.path.join(path, "package-lock.json")),
+        os.path.realpath(peer) if os.path.lexists(peer) else "-",
+        "yes" if os.path.isfile(os.path.join(peer, "package.json")) else "no",
+    )
+
+
 def plugins_key_parts(args):
     parts = []
     with open(args.config, "r", encoding="utf-8") as fh:
@@ -148,15 +195,151 @@ def plugins_key_parts(args):
     # the script decides which of them to ask about on every boot.
     parts.append("plugins-config=" + canonical(config.get("plugins")))
     for path in plugin_dirs(args.openclaw_home, args.global_modules):
-        peer = os.path.join(path, "node_modules", "openclaw")
-        parts.append("plugin=%s pkg=%s manifest=%s lock=%s peer=%s peer-pkg=%s" % (
-            path,
-            file_digest(os.path.join(path, "package.json")),
-            file_digest(os.path.join(path, "openclaw.plugin.json")),
-            file_identity(os.path.join(path, "package-lock.json")),
-            os.path.realpath(peer) if os.path.lexists(peer) else "-",
-            "yes" if os.path.isfile(os.path.join(peer, "package.json")) else "no",
-        ))
+        parts.append(payload_line(path))
+    if args.plugin_index:
+        parts += plugin_index_key_parts(args, config)
+    return parts
+
+
+def section(obj, name):
+    """`obj[name]` as an object: `{}` when it is absent; a shape the core would
+    not read either raises (a miss)."""
+    value = obj.get(name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("%s is not an object" % name)
+    return value
+
+
+def discovery_root_lines(root):
+    """A plugin discovery root and what is directly in it: a root can be one
+    plugin or a directory of plugins, so both are keyed. One that cannot be
+    listed raises: what the core would find there is not known."""
+    lines = [payload_line(root)]
+    if os.path.isdir(root):
+        for name in sorted(os.listdir(root)):
+            lines.append(payload_line(os.path.join(root, name)))
+    return lines
+
+
+def workspace_roots(config, state_dir, index):
+    """Every agent workspace, placed as the pinned core places them (OpenClaw
+    2026.10.9 docs/concepts/agent-workspace.md "Default location",
+    docs/concepts/multi-agent.md). A root the core does not use costs at most a
+    miss; a root left out could cost a wrong hit, so every rule is followed."""
+    roots = set()
+
+    def add(path):
+        if isinstance(path, str) and path.strip():
+            roots.add(os.path.abspath(os.path.expanduser(path)))
+
+    agents = section(config, "agents")
+    shared = section(agents, "defaults").get("workspace")
+    add(os.path.join(state_dir, "workspace"))
+    add(shared)
+    # The workspace the core last built the index for.
+    add(index.get("workspaceDir"))
+    add(os.environ.get("OPENCLAW_WORKSPACE_DIR"))
+    profile = os.environ.get("OPENCLAW_PROFILE")
+    if profile and profile != "default":
+        add("~/.openclaw-%s/workspace" % profile)
+    for agent_id, entry in section(agents, "entries").items():
+        if not isinstance(entry, dict):
+            raise ValueError("agents.entries.%s is not an object" % agent_id)
+        own = entry.get("workspace")
+        if isinstance(own, str) and own.strip():
+            add(own)
+        elif isinstance(shared, str) and shared.strip():
+            add(os.path.join(shared, agent_id))
+        else:
+            add(os.path.join(state_dir, "workspace-" + agent_id))
+    return sorted(roots)
+
+
+def plugin_index_key_parts(args, config):
+    """What `openclaw plugins list` answers from beyond the `plugins` key, as far
+    as this key reads it: the core's persisted plugin index, the plugins it
+    discovers in agent workspaces and `plugins.load.paths`, and the two inputs
+    of the index's policy hash outside the `plugins` section, each channel's
+    `enabled` switch and the core's bundled-discovery mode. What it does not
+    read is listed in the module docstring.
+
+    OpenClaw 2026.10.9 reads its persisted plugin index first
+    (docs/cli/plugins/list.md): the `plugins.installedIndex` row of
+    `config_machine_state` in the state database, `{revision, index}`, whose
+    `index.installRecords` (an object keyed by plugin id) is the durable install
+    ledger and whose `index.plugins` (a list) is a view rebuilt from manifests
+    (docs/plugins/architecture-internals/packaging.md). It answers from that
+    index only while the index's policy hash is the one the current config
+    gives (resolveInstalledPluginIndexPolicyHash in the published package): a
+    hash over the `plugins` section, which the `plugins` key covers, over the
+    boolean `enabled` of every object entry of `channels` (any other shape
+    counts for nothing there, and here), and over the bundled-discovery mode,
+    the `plugins.bundledDiscovery` row of the same table ("compat" or
+    "allowlist"; anything else, or no row, is null). It discovers plugins in
+    `plugins.load.paths`, in every agent workspace's `.openclaw/extensions`,
+    among its bundled plugins and in the global install locations
+    (docs/plugins/manifest/package-json.md "Discovery precedence"); the last two
+    are the core and plugin_dirs, already keyed.
+
+    Read only (`mode=ro`), as scripts/openclaw-db-maintenance.py reads the same
+    database. Of the cached view only (id, root, manifest hash) per plugin: the
+    row's times, revision and refresh reason move on a rewrite that changed
+    nothing it lists. A `plugins.installedIndex` row missing, unreadable or in
+    any other shape raises, so it is a miss and never hashes as a constant. A
+    missing `plugins.bundledDiscovery` row is a stable part (null, as the core
+    reads it); a bundled-discovery value that is not JSON raises, a miss.
+    """
+    con = sqlite3.connect("file:" + urllib.parse.quote(args.plugin_index) + "?mode=ro", uri=True, timeout=2)
+    try:
+        row = con.execute(
+            "SELECT value_json FROM config_machine_state WHERE state_key = ?", ("plugins.installedIndex",)
+        ).fetchone()
+        discovery_row = con.execute(
+            "SELECT value_json FROM config_machine_state WHERE state_key = ?", ("plugins.bundledDiscovery",)
+        ).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        raise ValueError("the core's plugin index has no row")
+    value = json.loads(row[0])
+    index = value.get("index") if isinstance(value, dict) else None
+    records = index.get("installRecords") if isinstance(index, dict) else None
+    plugins = index.get("plugins") if isinstance(index, dict) else None
+    if not isinstance(records, dict) or not isinstance(plugins, list):
+        raise ValueError("the core's plugin index is not in the shape this key reads")
+    view = []
+    for plugin in plugins:
+        if not isinstance(plugin, dict) or not isinstance(plugin.get("pluginId"), str):
+            raise ValueError("an entry of the core's plugin index has no plugin id")
+        root = plugin.get("rootDir")
+        view.append([plugin["pluginId"], root if isinstance(root, str) else plugin.get("source"),
+                     plugin.get("manifestHash")])
+    # The index's policy-hash inputs outside `plugins`, taken in the shapes the
+    # core's resolveInstalledPluginIndexPolicyHash takes them.
+    discovery = json.loads(discovery_row[0]) if discovery_row is not None else None
+    if discovery not in ("compat", "allowlist"):
+        discovery = None
+    channels = config.get("channels")
+    channel_switches = {}
+    if isinstance(channels, dict):
+        for channel_id, channel in channels.items():
+            if isinstance(channel, dict) and isinstance(channel.get("enabled"), bool):
+                channel_switches[channel_id] = channel["enabled"]
+    parts = [
+        "install-records=" + canonical(records),
+        "plugin-view=" + canonical(sorted(view, key=canonical)),
+        "channels-enabled=" + canonical(channel_switches),
+        "bundled-discovery=" + canonical(discovery),
+    ]
+    for root in workspace_roots(config, args.openclaw_home, index):
+        parts += discovery_root_lines(os.path.join(root, ".openclaw", "extensions"))
+    load_paths = section(section(config, "plugins"), "load").get("paths") or []
+    if not isinstance(load_paths, list) or not all(isinstance(p, str) for p in load_paths):
+        raise ValueError("plugins.load.paths is not a list of paths")
+    for path in load_paths:
+        parts += discovery_root_lines(os.path.abspath(os.path.expanduser(path)))
     return parts
 
 
@@ -199,9 +382,12 @@ def previous_start_proven(guard_path, now):
         return "no start record to prove the last start reached gateway ready"
     starts = [s for s in (guard.get("starts") or [])
               if isinstance(s, dict) and isinstance(s.get("at"), (int, float))]
-    if len(starts) < 2:
+    # A run the updater makes outside the unit starts no gateway, so it is
+    # never the previous start; when this run is one, it is still judged.
+    earlier = [s for s in starts[:-1] if not s.get("outsideUnit")]
+    if not earlier:
         return "no earlier start on record"
-    current, previous = starts[-1], starts[-2]
+    current, previous = starts[-1], earlier[-1]
     if not (0 <= now - current["at"] <= CURRENT_START_MAX_AGE_S):
         return "this start was not recorded"
     if current.get("restarts") != 0:
@@ -282,6 +468,7 @@ def main(argv):
     check.add_argument("--config")
     check.add_argument("--openclaw-home")
     check.add_argument("--global-modules")
+    check.add_argument("--plugin-index")
     check.add_argument("--candidate", action="append")
     check.add_argument("--no-reuse", action="store_true")
     remember = sub.add_parser("remember")

@@ -117,6 +117,7 @@ jobs:
             bun-${{ runner.os }}-
 
       - name: Install
+        id: install
         run: bun install --frozen-lockfile
 
       # Explicit, and first: the sudoers allow-list is a privilege boundary, and
@@ -166,6 +167,25 @@ jobs:
       - name: MCP tool contract
         run: bun run check:mcp-tools
 
+      # ClawBox Vault (vault/, TASK-2524) is excluded from the root tsconfig
+      # like the MCP server, so this is the only thing that typechecks the
+      # password manager's service, its extension and its desktop app.
+      - name: Vault typecheck
+        run: bun run typecheck:vault
+
+      # The vault's own suite is bun's, not vitest's: it runs the real service
+      # against a real `pass` store (a throwaway key and store per test file,
+      # never the runner's own) and the real MCP server over stdio on both
+      # editions, and greps every reply, log and state file for the test
+      # passwords. That is the proof that no password reaches the assistant, so
+      # it gates a PR here rather than living only on a developer's machine.
+      # `pass` is the one tool the runner image lacks; gpg and git are on it.
+      - name: Vault tests
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq pass
+          bun run test:vault
+
       # ADVISORY, deliberately, and this is the decision the card asked for:
       # eslint reports 18 errors and 123 warnings on beta today, so a blocking
       # step would fail every PR on day one and be switched off again — the same
@@ -190,10 +210,28 @@ jobs:
       # it at all. `!cancelled()`, not `always()`: it still runs when a blocking
       # check above went red — the counts are most useful on exactly that run —
       # but not while the run is being cancelled.
+      #
+      # A FOURTH outcome: a check AHEAD of the toolchain went red, so setup-bun
+      # and Install were skipped and there is no bun (or eslint) to run. The
+      # step used to call bun anyway, die with 127 and add a "bun: command not
+      # found" error annotation to a PR whose real failure was elsewhere
+      # (TASK-2687). It now says in the summary that lint did not run, and why,
+      # and exits 0 — there is nothing advisory to report.
       - name: Lint (advisory)
         if: ${{ !cancelled() }}
         continue-on-error: true
+        env:
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
         run: |
+          if [ "$INSTALL_OUTCOME" != "success" ]; then
+            {
+              echo "### Lint (advisory — not blocking)"
+              echo
+              echo "Lint did not run: Install did not succeed (outcome: ${INSTALL_OUTCOME:-skipped}) — see the first failed step above."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "Lint skipped: Install did not succeed (outcome: ${INSTALL_OUTCOME:-skipped})."
+            exit 0
+          fi
           rc=0
           bun run lint > lint.out 2>&1 || rc=$?
           cat lint.out

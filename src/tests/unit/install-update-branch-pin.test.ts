@@ -5,6 +5,9 @@ import os from "os";
 import path from "path";
 
 import { testEnv } from "@/tests/helpers/env";
+import {
+  accountOnlyHome, CAN_LOCK_HOME, handOverOrder, shellFunctionIfPresent, unlockTree,
+} from "../helpers/account-only-home";
 
 // Starts a real process (bash / python3 / node / git): vitest's 5 s test and
 // 10 s hook defaults are not enough on a loaded CI runner. See
@@ -88,18 +91,30 @@ afterEach(() => {
  *
  * `chown` is stubbed — the test host is not root and has no `clawbox` user —
  * but every call is logged so the ownership contract is still observable.
- * `chmod` is left REAL so the resulting mode can be read off the filesystem.
+ * `as_clawbox` runs its command as this suite's user and logs it: the pin is
+ * written by the account. `chmod` is left REAL so the resulting mode can be
+ * read off the filesystem. The account is `clawbox`, not this suite's user,
+ * so to the hand-over every entry is a leftover: it hands the checkout back
+ * whole; with `user` naming the suite's user nothing is handed over.
  */
-function runPersist(env: Record<string, string> = {}): {
+function runPersist(env: Record<string, string> = {}, { user = "clawbox", prelude = "" } = {}): {
   status: number;
   stdout: string;
   chowns: string[];
+  asClawbox: string[];
 } {
+  const calls = path.join(tmp, "as-clawbox-calls");
+  fs.writeFileSync(calls, "");
   const script = [
     "set -euo pipefail",
     `PROJECT_DIR=${JSON.stringify(projectDir)}`,
-    "CLAWBOX_USER=clawbox",
+    'IFACE_ENV="$PROJECT_DIR/data/network.env"',
+    `CLAWBOX_USER=${JSON.stringify(user)}`,
     `chown() { printf '%s\\n' "$*" >> ${JSON.stringify(chownLog)}; }`,
+    // One record per call, \x1e-terminated: a `sh -c` program spans lines.
+    `as_clawbox() { printf '%s\\036' "$*" >> ${JSON.stringify(calls)}; "$@"; }`,
+    prelude,
+    shellFunctionIfPresent(INSTALL_SH, "hand_over_checkout"),
     IS_SAFE_REF_FN,
     ADOPT_FN,
     PERSIST_FN,
@@ -112,12 +127,13 @@ function runPersist(env: Record<string, string> = {}): {
     // developer's shell would rewrite what each case is asking.
     env: testEnv({ PATH: process.env.PATH ?? "", ...env }),
   });
-  const chowns = fs
-    .readFileSync(chownLog, "utf-8")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  return { status: r.status ?? -1, stdout: `${r.stdout ?? ""}${r.stderr ?? ""}`, chowns };
+  const lines = (file: string) => fs.readFileSync(file, "utf-8").split("\n").map((l) => l.trim()).filter(Boolean);
+  return {
+    status: r.status ?? -1,
+    stdout: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+    chowns: lines(chownLog),
+    asClawbox: fs.readFileSync(calls, "utf-8").split("\x1e").filter(Boolean),
+  };
 }
 
 /** Temp files left next to the pin — on a device these dirty `git status`. */
@@ -145,35 +161,37 @@ d("persist_update_branch_pin records the branch the device was built with", () =
     expect(fs.readFileSync(pinFile, "utf-8")).toBe("fix/persist-update-branch\n");
   });
 
-  it("leaves the pin owned by the app user, not root", () => {
+  it("writes the pin as the app user, so it is the app user's own, 0644", () => {
     // install.sh runs as root. The web app runs as the clawbox user and
     // rewrites this file itself via /setup-api/system/update-branch, so a
     // root-owned pin turns that POST into an EACCES — the same failure a
-    // root-owned data/ produced in the config store.
-    //
-    // Owner and mode are applied to the staged file, which is then renamed into
-    // place: the pin is never momentarily live while still root-owned, and the
-    // chown can only ever name a path inside the root-owned staging directory.
-    const r = runPersist({ CLAWBOX_BRANCH: "beta" });
+    // root-owned data/ produced in the config store. The account writes it,
+    // so it is the account's without any chown; on a checkout that is all the
+    // account's, nothing changes hands at all.
+    const r = runPersist({ CLAWBOX_BRANCH: "beta" }, { user: os.userInfo().username });
 
-    expect(r.chowns).toEqual([`clawbox:clawbox ${pinFile}.stage/pin`]);
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
+    expect(r.chowns).toEqual([]);
+    expect(r.asClawbox).toHaveLength(1);
+    expect(r.asClawbox[0]).toMatch(/^sh -c [\s\S]* sh \S+$/);
+    expect(r.asClawbox[0].endsWith(` sh ${pinFile}`)).toBe(true);
+    // mktemp makes 0600 whatever the umask; the write sets 0644 itself.
     expect(fs.statSync(pinFile).mode & 0o777).toBe(0o644);
   });
 
-  it("stages the write in its own directory and renames the result", () => {
-    // Staging narrows the exposure — a temp file sitting directly beside the
-    // pin, under a name that never changes, can be swapped for a symlink with
-    // no timing at all. It does not eliminate it: unlinking an entry is
-    // governed by the parent directory's write bit, which the app user has.
-    // See the comment on this block for why the residual is accepted rather
-    // than chased further in shell.
-    const persistFn = extractShellFunction("persist_update_branch_pin");
+  it("hands a checkout with leftovers back whole before the account writes the pin", () => {
+    // The checkout someone cloned as root: its owner is root, so the account
+    // could not write beside the pin until the checkout is handed back.
+    const r = runPersist({ CLAWBOX_BRANCH: "beta" }, {
+      prelude: `stat() { if [ "\${@: -1}" = ${JSON.stringify(projectDir)} ]; then echo root; else command stat "$@"; fi; }`,
+    });
 
-    expect(persistFn).toContain("umask 077");
-    expect(persistFn).toMatch(/mkdir "\$stage"/);
-    // The staged file must be renamed, not copied: rename replaces the pin's
-    // directory entry instead of following a symlink left at it.
-    expect(persistFn).toMatch(/mv -f "\$tmp_pin" "\$pin_file"/);
+    expect(r.status).toBe(0);
+    expect(r.chowns).toEqual([`-R clawbox:clawbox ${projectDir}`]);
+    expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
+    expect(fs.statSync(pinFile).mode & 0o777).toBe(0o644);
+    expect(strayTempFiles()).toEqual([]);
   });
 
   it("leaves no temp file behind in the working tree", () => {
@@ -184,30 +202,51 @@ d("persist_update_branch_pin records the branch the device was built with", () =
     expect(strayTempFiles()).toEqual([]);
   });
 
-  it("does not write through a symlink planted at a guessable temp path", () => {
-    // Guarding only the pin path moved the problem one path across: the file
-    // the write is staged through lives in the same app-user-writable
-    // directory, and `printf >` follows an existing link there too.
-    const decoy = path.join(tmp, "decoy");
-    fs.writeFileSync(decoy, "untouched\n");
-    fs.symlinkSync(decoy, `${pinFile}.tmp`);
+  it("leaves no temp file behind when the write fails after the temp was made", () => {
+    // A rename that fails is the last step of the write: the temp the account
+    // made beside the pin goes with the failure.
+    const bin = path.join(tmp, "bin");
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, "mv"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    const r = runPersist({ CLAWBOX_BRANCH: "beta", PATH: `${bin}:${process.env.PATH ?? ""}` });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("WARN: failed to write the update-branch pin");
+    expect(fs.existsSync(pinFile)).toBe(false);
+    expect(strayTempFiles()).toEqual([]);
+  });
+
+  it("warns, and does not fail the install, when the account cannot write at all", () => {
+    const r = runPersist({ CLAWBOX_BRANCH: "beta" }, {
+      prelude: 'as_clawbox() { [ "$1" = sh ] && return 1; "$@"; }',
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("Pinning update branch to 'beta'");
+    expect(r.stdout).toContain("WARN: failed to write the update-branch pin");
+    expect(fs.existsSync(pinFile)).toBe(false);
+    expect(strayTempFiles()).toEqual([]);
+  });
+
+  it("never enters a directory left at the pin's name", () => {
+    // The rename replaces the pin's directory entry and is told the target is
+    // not a directory: a directory there is not written into.
+    fs.mkdirSync(pinFile);
 
     const r = runPersist({ CLAWBOX_BRANCH: "beta" });
 
     expect(r.status).toBe(0);
-    expect(fs.readFileSync(decoy, "utf-8")).toBe("untouched\n");
-    expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
-    expect(r.chowns).not.toContain(`clawbox:clawbox ${pinFile}.tmp`);
+    expect(r.stdout).toContain("WARN: failed to write the update-branch pin");
+    expect(fs.readdirSync(pinFile)).toEqual([]);
+    expect(strayTempFiles()).toEqual([]);
   });
 
-  it("clears a symlink planted at the staging path instead of following it", () => {
-    // `rm -rf` on a symlink removes the link, never the thing it points at, so
-    // a pre-planted decoy neither redirects the write nor blocks it: the
-    // staging directory is created fresh and the pin lands normally. This is
-    // the case that needed no timing at all when the staging path was a fixed
-    // name, and it is the one this pins shut.
+  it("does not write through a symlink planted at a guessable temp path", () => {
+    // The temp's name is mktemp's, created exclusively beside the pin: a link
+    // planted at any fixed name next to it is neither followed nor removed.
     const decoy = path.join(tmp, "decoy");
     fs.writeFileSync(decoy, "untouched\n");
+    fs.symlinkSync(decoy, `${pinFile}.tmp`);
     fs.symlinkSync(decoy, `${pinFile}.stage`);
 
     const r = runPersist({ CLAWBOX_BRANCH: "beta" });
@@ -215,8 +254,9 @@ d("persist_update_branch_pin records the branch the device was built with", () =
     expect(r.status).toBe(0);
     expect(fs.readFileSync(decoy, "utf-8")).toBe("untouched\n");
     expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
-    expect(r.chowns).toEqual([`clawbox:clawbox ${pinFile}.stage/pin`]);
-    expect(strayTempFiles()).toEqual([]);
+    expect(fs.lstatSync(pinFile).isSymbolicLink()).toBe(false);
+    expect(r.chowns).toEqual([`-R clawbox:clawbox ${projectDir}`]);
+    expect(strayTempFiles().sort()).toEqual([".update-branch.stage", ".update-branch.tmp"]);
   });
 
   it("refuses to write through a symlink left in the pin's place", () => {
@@ -247,7 +287,10 @@ d("persist_update_branch_pin records the branch the device was built with", () =
 
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("already pinned to 'beta'");
-    expect(r.chowns).toEqual(["clawbox:clawbox " + pinFile]);
+    // Handed back with the checkout whole, never by its name; the mode is the
+    // account's to set on its own file.
+    expect(r.chowns).toEqual([`-R clawbox:clawbox ${projectDir}`]);
+    expect(r.asClawbox).toEqual([`chmod 644 -- ${pinFile}`]);
     expect(fs.statSync(pinFile).mode & 0o777).toBe(0o644);
   });
 
@@ -293,8 +336,18 @@ d("persist_update_branch_pin records the branch the device was built with", () =
 
     expect(r.status).toBe(0);
     expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
-    expect(r.chowns).toEqual([`clawbox:clawbox ${pinFile}`]);
+    expect(r.chowns).toEqual([`-R clawbox:clawbox ${projectDir}`]);
     expect(fs.statSync(pinFile).mode & 0o777).toBe(0o644);
+  });
+
+  it("warns, and does not fail the install, when the pin's mode cannot be reset", () => {
+    fs.writeFileSync(pinFile, "beta\n");
+
+    const r = runPersist({}, { prelude: 'as_clawbox() { [ "$1" = chmod ] && return 1; "$@"; }' });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("WARN: could not reset the update-branch pin's mode");
+    expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
   });
 
   it("does not invent a pin when no branch is given", () => {
@@ -329,6 +382,75 @@ d("persist_update_branch_pin records the branch the device was built with", () =
 
     // `set -euo pipefail` is active: a non-zero return here aborts the step.
     expect(r.status).toBe(0);
+  });
+});
+
+/**
+ * The checkout only `as_clawbox` can write to (src/tests/helpers/account-only-
+ * home.ts): a `mkdir`, `>` or `mv` root's own shell makes there fails with
+ * EACCES, and a root `chmod` on a checkout path is logged. The account is not
+ * the suite's user, so the hand-over fires; root's `chown` only records.
+ */
+(CAN_RUN && CAN_LOCK_HOME ? describe : describe.skip)("persist_update_branch_pin writes as the service account", () => {
+  function runLocked(env: Record<string, string>) {
+    const aux = path.join(tmp, "aux");
+    fs.mkdirSync(aux, { recursive: true });
+    const account = accountOnlyHome(projectDir, aux);
+    const script = [
+      "set -euo pipefail",
+      `PROJECT_DIR=${JSON.stringify(projectDir)}`,
+      'IFACE_ENV="$PROJECT_DIR/data/network.env"',
+      "CLAWBOX_USER=clawbox",
+      account.shell,
+      `chown() { [ -n "\${AS_SERVICE_USER:-}" ] || printf '%s\\n' "$*" >> ${JSON.stringify(chownLog)}; }`,
+      shellFunctionIfPresent(INSTALL_SH, "hand_over_checkout"),
+      account.recordHandOvers,
+      IS_SAFE_REF_FN,
+      ADOPT_FN,
+      PERSIST_FN,
+      "__ao_lock",
+      "persist_update_branch_pin",
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: testEnv({ PATH: process.env.PATH ?? "", ...env }) });
+    unlockTree(projectDir);
+    return {
+      status: r.status ?? -1,
+      out: `${r.stdout ?? ""}${r.stderr ?? ""}`,
+      rootInHome: account.rootInHome(),
+      sequence: account.sequence(),
+      chowns: fs.readFileSync(chownLog, "utf-8").split("\n").filter(Boolean),
+    };
+  }
+
+  it("writes the pin as the account, after handing the checkout back", () => {
+    const r = runLocked({ CLAWBOX_BRANCH: "fix/persist-update-branch" });
+
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toBe("  Pinning update branch to 'fix/persist-update-branch' (explicit CLAWBOX_BRANCH)\n");
+    expect(fs.readFileSync(pinFile, "utf-8")).toBe("fix/persist-update-branch\n");
+    expect(fs.statSync(pinFile).mode & 0o777).toBe(0o644);
+    expect(strayTempFiles()).toEqual([]);
+    expect(r.rootInHome).toEqual([]);
+    expect(r.chowns).toEqual([`-R clawbox:clawbox ${projectDir}`]);
+    const { handOver, firstWrite } = handOverOrder(r.sequence, "hand_over_checkout .update-branch");
+    expect(handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
+  });
+
+  it("re-asserts the mode of an existing pin as the account", () => {
+    fs.writeFileSync(pinFile, "beta\n");
+    fs.chmodSync(pinFile, 0o600);
+
+    const r = runLocked({ CLAWBOX_BRANCH: "beta" });
+
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toBe("  Update branch already pinned to 'beta'\n");
+    expect(fs.readFileSync(pinFile, "utf-8")).toBe("beta\n");
+    expect(fs.statSync(pinFile).mode & 0o777).toBe(0o644);
+    expect(r.rootInHome).toEqual([]);
+    const { handOver, firstWrite } = handOverOrder(r.sequence, "hand_over_checkout .update-branch");
+    expect(handOver, r.sequence.join(" | ")).toBeGreaterThanOrEqual(0);
+    expect(handOver).toBeLessThan(firstWrite);
   });
 });
 

@@ -80,6 +80,7 @@ vi.mock("@/lib/language-persona", () => ({
   applyDeferredLanguagePersona: vi.fn(async () => false),
   retireOnboardingRitual: vi.fn(async () => false),
 }));
+vi.mock("@/lib/clawbox-agents-sections", () => ({ ensureClawboxAgentsSections: vi.fn(async () => undefined) }));
 vi.mock("@/lib/cloudflared", () => ({
   readTunnelUrl: vi.fn(async () => "https://example.trycloudflare.com"),
   startTunnelService: vi.fn(async () => ({ bootPersisted: true, bootPersistWarning: null })),

@@ -101,6 +101,12 @@ describe("translations", () => {
         "dbMaintenance",
         // Settings → Harness → Scheduled job alerts, and the alert's own words.
         "jobAlerts",
+        // Settings → System Update → Weekly update check, and the notice's own words.
+        "updateNotice",
+        // Settings → AI providers: "Hide cloud AI providers" and the local-first page (TASK-2497).
+        "cloudProviders",
+        // Settings → System → Cluster: a Workstation's Sparks and its engine (TASK-2670).
+        "cluster",
         // The desktop's corner card for long work Settings started (background tasks).
         "backgroundTasks",
         "clawaiUsage",

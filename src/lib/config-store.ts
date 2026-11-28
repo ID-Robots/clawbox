@@ -1,5 +1,6 @@
 import path, { untraced } from "./runtime-path";
 import fs from "fs";
+import { failureLog } from "./log-once";
 
 /**
  * Where this ClawBox is installed, resolved AT CALL TIME.
@@ -48,8 +49,17 @@ function readConfig(): Record<string, unknown> {
  */
 function readConfigStrict(): Record<string, unknown> {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(CONFIG_PATH)) return {};
-  const parsed: unknown = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+  // Only ENOENT is an absent store. `existsSync` answered false for EACCES
+  // and every other stat failure as well, which read an unreadable store as
+  // an empty one — the very guess this reader exists to refuse.
+  let raw: string;
+  try {
+    raw = fs.readFileSync(CONFIG_PATH, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return {};
+    throw err;
+  }
+  const parsed: unknown = JSON.parse(raw);
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("data/config.json does not hold a JSON object");
   }
@@ -210,12 +220,44 @@ export function readFailureKind(err: unknown): string {
   return err instanceof Error ? err.name : "unknown error";
 }
 
+/**
+ * The tri-state readers' one line for an unreadable store, logged once per
+ * failure (`log-once.ts`): the desktop's pairing poll reaches `getKnown` every
+ * 3 s on a dual box. One slate for all three, because the line is the same and
+ * names no caller; any good read wipes it.
+ */
+const unreadableLog = failureLog();
+
+/** `readConfigStrict` for the tri-state readers, logging a failure once and rethrowing it. */
+function readConfigKnown(): Record<string, unknown> {
+  try {
+    const config = readConfigStrict();
+    unreadableLog.clear();
+    return config;
+  } catch (err) {
+    const kind = readFailureKind(err);
+    if (unreadableLog.isNew(kind)) console.error("[config-store] data/config.json could not be read:", kind);
+    throw err;
+  }
+}
+
 /** One key, tri-state: `known: false` when the store could not be read. */
 export async function getKnown(key: string): Promise<{ value: unknown; known: boolean }> {
   try {
-    return { value: held(readConfigStrict(), key), known: true };
-  } catch (err) {
-    console.error("[config-store] data/config.json could not be read:", readFailureKind(err));
+    return { value: held(readConfigKnown(), key), known: true };
+  } catch {
+    return { value: undefined, known: false };
+  }
+}
+
+/**
+ * `getKnown`, synchronously: for a decision made inside a synchronous step
+ * (a coding run's exit handler deciding whether to start a second process).
+ */
+export function getKnownSync(key: string): { value: unknown; known: boolean } {
+  try {
+    return { value: held(readConfigKnown(), key), known: true };
+  } catch {
     return { value: undefined, known: false };
   }
 }
@@ -232,7 +274,7 @@ export async function getKnownMany(
   keys: readonly string[],
 ): Promise<{ values: Record<string, unknown>; known: boolean }> {
   try {
-    const config = readConfigStrict();
+    const config = readConfigKnown();
     // A NULL-PROTOTYPE bag, because the keys are strings from the caller and one
     // of them can be `"__proto__"`: on an ordinary object literal
     // `values["__proto__"] = undefined` reaches Object.prototype's setter
@@ -242,8 +284,7 @@ export async function getKnownMany(
     const values: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     for (const key of keys) values[key] = held(config, key);
     return { values, known: true };
-  } catch (err) {
-    console.error("[config-store] data/config.json could not be read:", readFailureKind(err));
+  } catch {
     return { values: {}, known: false };
   }
 }

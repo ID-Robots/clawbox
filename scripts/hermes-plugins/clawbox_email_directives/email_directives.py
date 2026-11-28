@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 from typing import List, Tuple
 
-__all__ = ["strip_email_directives", "split_email_refs"]
+__all__ = ["strip_email_directives", "split_email_refs", "strip_draft_directives", "split_draft_refs"]
 
 #: The characters JavaScript's ``String.prototype.trim()`` and ``\s`` remove.
 #:
@@ -178,3 +178,97 @@ def _unwrap_quoted(value: str) -> str:
         if len(text) >= 2 and text.startswith(quote) and text.endswith(quote):
             return text[1:-1].strip(_JS_WHITESPACE)
     return text
+
+
+# ── ``EMAIL_DRAFT:<id>`` — a draft waiting for the person's Send ────────────
+#
+# THE THIRD OF THREE COPIES of the draft grammar. The original is
+# ``src/lib/chat-email-draft-refs.ts`` (``splitDraftRefs``), which the ClawBox
+# chat turns into a send-approval card; the JavaScript copy sits beside the
+# ``EMAIL:`` one in ``scripts/openclaw-plugins/clawbox-email-directives/``.
+# ``src/tests/unit/email-draft-directive-parity.test.ts`` holds the three to one
+# answer. A channel has no card, so the line is stripped there — after the
+# ``EMAIL:`` lines, in the same order the chat applies them.
+
+_DRAFT_LINE_RE = re.compile(r"^email_draft:([\s\S]*)$", re.IGNORECASE | re.ASCII)
+_DRAFT_ID_RE = re.compile(r"(?!\.+\Z)[A-Za-z0-9._~+/=:@-]{1,512}", re.ASCII)
+_MAX_DRAFT_REFS = 5
+
+#: A line of fence markers and whatever follows them on that line. A fence is
+#: closed only by its OWN marker character, in a run at least as long and alone
+#: on its line, so ``~~~`` inside a backtick fence is content and not a closer.
+#: ``_FENCE_RE`` above stays as the ``EMAIL:`` grammar's, which is pinned to its
+#: own case table. Matched with ``fullmatch``, which is what JavaScript's ``$``
+#: means here (Python's ``$`` also matches before a trailing newline).
+_DRAFT_FENCE_RE = re.compile(r"(`{3,}|~{3,})([\s\S]*)")
+
+
+def _opens_fence(trimmed: str):
+    """The fence ``trimmed`` opens, as ``(marker, length)``, or ``None``."""
+    match = _DRAFT_FENCE_RE.fullmatch(trimmed)
+    if match is None:
+        return None
+    marker = match.group(1)[0]
+    # A backtick fence's info string may not hold a backtick (CommonMark).
+    if marker == "`" and "`" in match.group(2):
+        return None
+    return (marker, len(match.group(1)))
+
+
+def _closes_fence(trimmed: str, fence) -> bool:
+    """Whether ``trimmed`` closes ``fence``."""
+    match = _DRAFT_FENCE_RE.fullmatch(trimmed)
+    if match is None:
+        return False
+    marker, length = fence
+    return match.group(1)[0] == marker and len(match.group(1)) >= length and not match.group(2).strip(_JS_WHITESPACE)
+
+
+def strip_draft_directives(raw: str) -> str:
+    """``raw`` without the ``EMAIL_DRAFT:`` lines a ClawBox chat would have carded."""
+    return split_draft_refs(raw)[0]
+
+
+def split_draft_refs(raw: str) -> Tuple[str, List[str]]:
+    """The reply without its draft directives, and the draft ids they named."""
+    if not isinstance(raw, str):
+        return ("", [])
+    if "email_draft:" not in raw.lower():
+        return (raw, [])
+    ids: List[str] = []
+    kept: List[str] = []
+    fence = None
+    lines = raw.split("\n")
+    for line in lines:
+        trimmed = line.strip(_JS_WHITESPACE)
+        if fence is not None:
+            if _closes_fence(trimmed, fence):
+                fence = None
+            kept.append(line)
+            continue
+        opened = _opens_fence(trimmed)
+        if opened is not None:
+            fence = opened
+            kept.append(line)
+            continue
+        match = _DRAFT_LINE_RE.match(_unwrap_quoted(trimmed))
+        draft_id = _parse_draft_id(match.group(1)) if match is not None else None
+        if draft_id is None:
+            kept.append(line)
+            continue
+        if draft_id in ids:
+            continue
+        if len(ids) >= _MAX_DRAFT_REFS:
+            kept.append(line)
+            continue
+        ids.append(draft_id)
+    if len(kept) == len(lines):
+        return (raw, ids)
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip(_JS_WHITESPACE)
+    return (text, ids)
+
+
+def _parse_draft_id(payload: str):
+    """A draft id, or ``None`` when the payload is not one."""
+    value = _unwrap_quoted(payload.strip(_JS_WHITESPACE))
+    return value if _DRAFT_ID_RE.fullmatch(value) else None

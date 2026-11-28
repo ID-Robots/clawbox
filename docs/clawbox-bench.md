@@ -19,7 +19,7 @@ node scripts/bench/clawbox-bench.mjs list
 Options: `--auth cdp|token` (default `cdp`: the signed-in desktop page on
 `--cdp-port`, default 18801 or `CLAWBOX_KIOSK_CDP_PORT`; `token`: the MCP
 bearer in `data/.mcp-token`, the on-device suite's credential — it cannot run
-the page areas (desktop, idle, chat, files, terminal), skips the two routes
+the page areas (desktop, idle, chat, files, terminal), skips the routes
 that answer only a signed-in person, and its latencies are not comparable
 with cdp-mode ones, since the page's `fetch` costs more than Node's), `--base-url`,
 `--url-match <text>` (which page is the desktop), `--out <file>`, `--runs <n>`,

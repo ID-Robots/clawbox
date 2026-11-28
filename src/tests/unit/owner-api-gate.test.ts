@@ -1,7 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderHook, waitFor } from "@testing-library/react";
-import { _resetSessionUserForTest, mayUseOwnerApis, useMayUseOwnerApis } from "@/lib/use-session-user";
+import {
+  SESSION_USER_TIMEOUT_MS,
+  _resetSessionUserForTest,
+  fetchSessionUser,
+  mayUseOwnerApis,
+  useMayUseOwnerApis,
+  useSettledSessionUser,
+} from "@/lib/use-session-user";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
 import { useWhatsNew } from "@/lib/use-whats-new";
@@ -32,8 +39,55 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // A test that used fake timers and failed half way must not leave them to the next.
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   _resetSessionUserForTest();
+});
+
+describe("fetchSessionUser: a lookup that stalls (TASK-2670)", () => {
+  it("gives up at its deadline, so the next ask makes a new request instead of waiting on the stalled one", async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
+        if (!String(input).includes("/setup-api/users/me")) return { ok: true, status: 200, json: async () => ({}) };
+        calls += 1;
+        // Headers at once, the body never.
+        if (calls === 1) return { ok: true, status: 200, json: () => new Promise(() => {}) };
+        return { ok: true, status: 200, json: async () => ({ username: "clawbox", isOwner: true }) };
+      }));
+      const first = fetchSessionUser();
+      await vi.advanceTimersByTimeAsync(SESSION_USER_TIMEOUT_MS + 100);
+      await expect(first).resolves.toBeNull();
+      const second = fetchSessionUser();
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(second).resolves.toMatchObject({ isOwner: true });
+      expect(calls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("useSettledSessionUser: asking again after a failed lookup (TASK-2670)", () => {
+  it("asks again when told to after a failure, and keeps a settled user without a new request", async () => {
+    stubUsersMe({ ok: false });
+    const { result, rerender } = renderHook(({ when }) => useSettledSessionUser(when), { initialProps: { when: false } });
+    await waitFor(() => expect(result.current).toBeNull());
+    // The route is back; System opens: the lookup is made again.
+    const fetchMock = stubUsersMe({ ok: true, body: { username: "clawbox", isOwner: true } });
+    rerender({ when: true });
+    await waitFor(() => expect(result.current?.isOwner).toBe(true));
+    expect(calledFor(fetchMock, "/setup-api/users/me")).toBe(true);
+    // Settled: opening System again asks nothing.
+    const again = stubUsersMe({ ok: false });
+    rerender({ when: false });
+    rerender({ when: true });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(calledFor(again, "/setup-api/users/me")).toBe(false);
+    expect(result.current?.isOwner).toBe(true);
+  });
 });
 
 describe("mayUseOwnerApis", () => {

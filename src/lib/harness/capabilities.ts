@@ -41,6 +41,26 @@ export interface HarnessFacts {
    */
   hermesHasVisionRoute: boolean;
   /**
+   * An OpenClaw box whose chat runs on ClawBox AI has NOTHING that can look at
+   * an attached picture: the vision check found neither Flash nor the vision
+   * fallback able to see (src/lib/clawbox-ai-vision.ts), so the Flash row is
+   * text-only and no `agents.defaults.imageModel` is set (TASK-2261).
+   *
+   * Worded as the exception, and false until the box says otherwise, so a box
+   * that has not answered — or a server that predates the field — keeps the
+   * attach button OpenClaw has always had.
+   */
+  openclawCannotSeePictures?: boolean;
+  /**
+   * The OpenClaw chat model is text-only (the vision check found Flash blind)
+   * and a picture is looked at through the `view_image` tool instead, with the
+   * model the check chose. The chat then SAYS so beside the attached picture:
+   * a model that answered pictures directly earlier in the same conversation
+   * otherwise answers from that history without looking — measured on a lab
+   * box, a confident description of a picture it never saw.
+   */
+  openclawPicturesViaTool?: boolean;
+  /**
    * Turns can be run through the already-running `hermes dashboard` process and
    * streamed back token by token, instead of spawning a `chat -q` per message.
    *
@@ -250,7 +270,10 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
     canResetSession: true,
     canPatchSessionDefaults: true,
     reasoningScope: "session",
-    canAttachImages: true,
+    // A picture is refused, with the composer's own sentence, only when the
+    // box positively has nothing to look at it with — never on a guess.
+    canAttachImages: facts.openclawCannotSeePictures !== true,
+    picturesViaTool: facts.openclawPicturesViaTool === true,
     canAttachDocuments: true,
     maxAttachmentsPerTurn: MAX_ATTACHMENTS.openclaw,
     // Follows the credential here too, for the same reason it does on Hermes:
@@ -323,6 +346,9 @@ export const UNKNOWN_FACTS: HarnessFacts = {
   onboardingArmed: false,
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
+  // The one fact cautious the OTHER way: OpenClaw has always offered the
+  // attach button, so it is withdrawn only on the box's positive word.
+  openclawCannotSeePictures: false,
   // Cautious in the same direction as the rest: a composer that has not heard
   // back yet waits for the whole turn rather than showing a caret that may
   // never move.

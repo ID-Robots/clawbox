@@ -68,7 +68,8 @@ export interface InterruptionDetail {
    * A run cut short on this step leaves the box without its assistant until
    * the step runs again: the two that replace the core on disk, and the one
    * that starts the gateway back up after them (`openclaw_install` stops it
-   * and LEAVES it stopped; `gateway_setup` is what restarts it).
+   * and LEAVES it stopped; `gateway_setup` is what restarts it, when
+   * openclaw_install left it stopped).
    */
   assistantAtRisk?: boolean;
 }

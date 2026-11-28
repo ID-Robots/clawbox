@@ -30,8 +30,8 @@ import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
 import { readPlanGate } from "@/lib/paid-plan-gate-server";
 
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
-import { redactCredentialShapes } from "@/lib/incident-sanitize";
 import { CONFIG_PATH, findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
+import { askOpenclawGateway, openclawGatewayRuns, startOpenclawGatewayAfterOffline, stopOpenclawGatewayForOffline } from "@/lib/openclaw-auth-ops";
 import { resolveMemoryEmbedder } from "@/lib/memory-embedder";
 import {
   IndexPassAbortedError,
@@ -42,12 +42,25 @@ import {
   type LocalIndexProgressReporter,
 } from "@/lib/memory-index-local";
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
+import { getEmbedProvisioningStatus, getEmbedProxyBaseUrl, isEmbedHealthy } from "@/lib/embed-server";
 import { memoryStatusTimeoutMs } from "@/lib/memory-status-timeout";
+import {
+  memoryIndexStallMs,
+  progressMark,
+  stallMinutes,
+  staleRunVerdict,
+  startStallWatchdog,
+  type StallWatchdog,
+} from "@/lib/memory-index-stall";
 import { processStore } from "@/lib/process-store";
+import { processStartKey } from "@/lib/process-identity";
 import { memoryReindexAdvice, type MemoryReindexAdvice } from "@/lib/memory-reindex-advice";
 import { isOpenclawMaintenanceRefusal, withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
+import { FALLBACK_AGENT_ID, openclawDefaultAgentId } from "@/lib/openclaw-default-agent";
 import {
   countIndexChunks,
+  indexWriteMark,
+  scratchIndexNames,
   createIndexProgressReader,
   openclawAgentDbPath,
   ptyHostArgs,
@@ -79,6 +92,9 @@ export type MemoryStatusErrorCode =
   | "status_unavailable";
 
 export type MemoryRunErrorCode =
+  | "stalled"
+  /** No pass is cut at a fixed age any more (TASK-2431); kept so a record an
+   *  older build wrote, and `timeout`'s own exit 124, still read. */
   | "timed_out"
   | "interrupted"
   | "migration_busy"
@@ -88,6 +104,7 @@ export type MemoryRunErrorCode =
   | "full_reindex_required";
 
 const RUN_ERROR_CODES = new Set<string>([
+  "stalled",
   "timed_out",
   "interrupted",
   "migration_busy",
@@ -149,12 +166,53 @@ interface PersistedMemoryRunState {
   progress: MemoryIndexProgress | null;
   /** Internal only. Never returned by publicMemoryRunState(). */
   childPid: number;
+  /**
+   * WHICH process `childPid` names (`processStartKey`): the boot it belongs to
+   * and when it started. Internal only, like the pid.
+   *
+   * A pass may run for as long as it needs, so nothing but this tells a run
+   * that is going from a record left by a power cut whose pid another process
+   * has since been given. Empty on a record with no child yet, and on one
+   * written before the field existed — whose pass did not outlive the web
+   * server that started it, so it reads as lost, which is what it is.
+   */
+  childStartKey: string;
+  /**
+   * Internal only: when the pass last MOVED (see memory-index-stall.ts), 0
+   * until it first does. What a process that is not supervising the pass
+   * judges a stall by — the supervising one has its own watchdog.
+   */
+  progressAtMs: number;
+  /**
+   * Internal only: the process supervising the pass, written with the very
+   * first record — before the spawn, so before any pid of the pass's own. A
+   * reader in another process takes the run for going while this is still
+   * that process, whatever `childPid` names at that moment: during the wait
+   * between two OpenClaw attempts it names the attempt that has exited, and
+   * the write that would name the next one is not ordered against that reader.
+   */
+  supervisorPid: number;
+  /**
+   * Internal only: WHICH process `supervisorPid` names (`processStartKey`),
+   * so a pid a later process has been given — after a power cut — is never
+   * taken for the supervisor. Empty where it could not be read.
+   */
+  supervisorStartKey: string;
 }
 
-export type MemoryRunState = Omit<PersistedMemoryRunState, "childPid">;
+export type MemoryRunState = Omit<
+  PersistedMemoryRunState,
+  "childPid" | "childStartKey" | "progressAtMs" | "supervisorPid" | "supervisorStartKey"
+>;
 
 export interface ClawKeepMemoryStatus {
   available: boolean;
+  /**
+   * The OpenClaw agent this reading is about: the box's default agent
+   * (`@/lib/openclaw-default-agent`), which is not always called "main". One
+   * agent's index; a box with several reports the default one.
+   */
+  agentId: string;
   provider: string;
   model: string;
   location: "local" | "cloud" | "disabled" | "unknown";
@@ -251,6 +309,13 @@ const EXEC_FAILURE_EXITS = new Set([69, 126, 127]);
 /** How long a SIGTERM gets to close SQLite cleanly before SIGKILL follows. */
 const TERMINATE_GRACE_MS = 5_000;
 /**
+ * How long a pass that was given up on (a stop, the stall watchdog) may take
+ * to end before its run is settled without it. The OpenClaw arm ends within
+ * TERMINATE_GRACE_MS; the local arm at its next check of the signal, which an
+ * extraction (60 s budget each) can hold off for up to a minute.
+ */
+const ABANDON_SETTLE_MS = 2 * 60_000;
+/**
  * The floor between two progress writes. Half the card's fast poll (3 s), so
  * every read it makes carries a figure that moved, without the pass paying an
  * atomic write per file.
@@ -271,8 +336,31 @@ const RUN_LOCK_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index.lock");
 // boot every few polls.
 const STATUS_CACHE_MS = 120_000;
 const STATUS_TIMEOUT_MS = memoryStatusTimeoutMs(process.env.CLAWKEEP_MEMORY_STATUS_TIMEOUT_MS);
-const INDEX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+// NO LIMIT ON HOW LONG A PASS MAY RUN. There was one — two hours — and a full
+// re-embed that needs longer could never finish under it: on a box with 18,114
+// files and the 4B on-box model the pass was cut at the two-hour mark, and the
+// rebuild it had not finished was never published (OpenClaw publishes only a
+// complete one) — so the index stayed the one that needed rebuilding, however
+// many times the pass was started. A pass ends when it is done, when it
+// fails, when the owner stops it, or when it has stopped MOVING for the stall
+// window (TASK-2431, `indexStallMs` below): age is never the reason.
+/**
+ * How long a pass may go without progress before it counts as stuck (see
+ * memory-index-stall.ts). Read per pass, so an environment that changes it (a
+ * test, a board check) does not need a reload.
+ */
+function indexStallMs(): number {
+  return memoryIndexStallMs(process.env.CLAWKEEP_MEMORY_INDEX_STALL_MS);
+}
 const LOCK_START_GRACE_MS = 30_000;
+
+/** The pause before the one retry of the gateway start after an OpenClaw index pass. */
+let gatewayRestartRetryPauseMs = 15_000;
+
+/** Tests only. */
+export function _setGatewayRestartRetryPauseForTests(ms: number): void {
+  gatewayRestartRetryPauseMs = ms;
+}
 const MAX_STATUS_OUTPUT_BYTES = 2 * 1024 * 1024;
 
 const EMPTY_RUN_STATE: PersistedMemoryRunState = {
@@ -286,6 +374,10 @@ const EMPTY_RUN_STATE: PersistedMemoryRunState = {
   errorCode: "",
   progress: null,
   childPid: 0,
+  childStartKey: "",
+  progressAtMs: 0,
+  supervisorPid: 0,
+  supervisorStartKey: "",
 };
 
 let writeSeq = 0;
@@ -428,6 +520,14 @@ function sanitiseRunState(value: unknown): PersistedMemoryRunState {
     // would have a screen drawing one over a finished pass.
     progress: status === "running" ? sanitiseProgress(raw.progress) : null,
     childPid: Number.isSafeInteger(raw.childPid) && Number(raw.childPid) > 0 ? Number(raw.childPid) : 0,
+    childStartKey: typeof raw.childStartKey === "string" ? raw.childStartKey.slice(0, 128) : "",
+    progressAtMs: status === "running" ? finiteNonNegative(raw.progressAtMs) : 0,
+    supervisorPid: status === "running" && Number.isSafeInteger(raw.supervisorPid) && Number(raw.supervisorPid) > 0
+      ? Number(raw.supervisorPid)
+      : 0,
+    supervisorStartKey: status === "running" && typeof raw.supervisorStartKey === "string"
+      ? raw.supervisorStartKey.slice(0, 128)
+      : "",
   };
 }
 
@@ -481,15 +581,25 @@ function publicMemoryRunState(state: PersistedMemoryRunState): MemoryRunState {
   return { status, mode, trigger, startedAtMs, finishedAtMs, durationMs, error, errorCode, progress };
 }
 
-function processIsAlive(pid: number): boolean {
-  if (!pid) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+/**
+ * Whether the process a run record names is still THAT process.
+ *
+ * The pid and the start key together, never the pid alone. A pass has no time
+ * limit, so a record's age says nothing about it any more — and the age was
+ * what used to free a record whose pid had been reused: a box that loses power
+ * mid-index comes back with "running" on disk beside a low pid, which some
+ * other process holds a few seconds into the next boot. Read by the pid alone
+ * that run would be going for ever, with the lock held and every later pass
+ * refused. A record with a pid and no key is from a build before the key, and
+ * reads as lost for the reason `childStartKey` gives.
+ */
+function recordedChildIsAlive(run: RunChild): boolean {
+  if (!run.childPid || !run.childStartKey) return false;
+  return processStartKey(run.childPid) === run.childStartKey;
 }
+
+/** The two fields of a run record that say which process is doing the work. */
+type RunChild = Pick<PersistedMemoryRunState, "childPid" | "childStartKey">;
 
 /**
  * Pids of the passes THIS process started and has not finished settling.
@@ -521,48 +631,231 @@ interface SupervisedPass {
   abandon(): void;
   /** Set by `stopMemoryIndex`, read by `finish` to say "stopped" rather than "interrupted". */
   stopRequested: boolean;
+  /**
+   * The pass's own work is over (the OpenClaw arm, while the gateway is being
+   * started again): there is nothing left to stop, and a stop taken now
+   * would record a pass that finished as a stopped one.
+   */
+  readonly workEnded: boolean;
 }
 
 function supervisedPass(): { current: SupervisedPass | null } {
   return processStore("clawkeep-memory.supervised-pass", () => ({ current: null as SupervisedPass | null }));
 }
 
-function runIsAlive(pid: number): boolean {
-  return processIsAlive(pid) || (pid > 0 && settlingPasses().has(pid));
+/**
+ * The end of the last pass this process started, through everything its
+ * `finish` does: the settled record, the freed lock and the status refresh
+ * behind it. Process-wide for the same reason as `supervisedPass`.
+ */
+function passSettling(): { current: Promise<void> | null } {
+  return processStore("clawkeep-memory.pass-settling", () => ({ current: null as Promise<void> | null }));
+}
+
+/**
+ * Resolves once the last pass this process started has settled completely,
+ * the status refresh its `finish` starts included. The run-state file reads
+ * "succeeded" before that refresh has even begun, so a caller that must know
+ * nothing the pass set off is still running (a test about to remove the
+ * directory the refresh reads) waits on this, not on the file. Never rejects;
+ * resolves at once when this process started no pass.
+ */
+export function memoryPassSettled(): Promise<void> {
+  return (passSettling().current ?? Promise.resolve()).catch(() => { /* settled either way */ });
+}
+
+function runIsAlive(run: RunChild): boolean {
+  return recordedChildIsAlive(run) || (run.childPid > 0 && settlingPasses().has(run.childPid));
 }
 
 const INTERRUPTED_MESSAGE = "Indexing was interrupted. Run it again.";
+const INTERRUPTED_FAILURE = { error: INTERRUPTED_MESSAGE, errorCode: "interrupted" as const };
+/**
+ * A pass that stopped moving (TASK-2431): nothing it reports — files, chunks,
+ * passages, documents — changed for the stall window, so it was ended rather
+ * than left holding the lock for ever. Said in plain words, and without the
+ * window's length: it is configurable, and a sentence that names thirty
+ * minutes on a box set to five would be untrue. Unlike the old two-hour
+ * "timed out", it is never the verdict on a pass that was working.
+ */
+const STALLED_FAILURE = {
+  error: "Indexing made no progress for a long time and was stopped. Run it again.",
+  errorCode: "stalled" as const,
+};
 
-async function markInterrupted(state: PersistedMemoryRunState): Promise<PersistedMemoryRunState> {
+/**
+ * Is this process the one supervising the run this record is about? Then its
+ * watchdog judges a stall, with progress the throttled record does not carry
+ * yet, and no reader here second-guesses it.
+ */
+function supervisedHere(state: PersistedMemoryRunState): boolean {
+  return supervisedPass().current?.startedAtMs === state.startedAtMs
+    || (state.childPid > 0 && settlingPasses().has(state.childPid));
+}
+
+/**
+ * What a `running` record really is (TASK-2431): process liveness plus the
+ * stall rule, never its age. `going` for a pass still in its start grace
+ * (the record is written before the spawn), for one this process supervises,
+ * for one whose supervisor is verifiably still the process that started it,
+ * and for one whose process is still THAT process (`runIsAlive`, the start
+ * key) and which moved inside the window.
+ */
+function runningRecordVerdict(state: PersistedMemoryRunState): "going" | "lost" | "stalled" {
+  const now = Date.now();
+  const age = now - state.startedAtMs;
+  if (state.childPid === 0 && age >= 0 && age < LOCK_START_GRACE_MS) return "going";
+  if (supervisedHere(state)) return "going";
+  // This process is the supervisor on record and holds no such pass: the pass
+  // is over. Its settled record never reached the disk (a full one — `finish`
+  // gives up on it after SETTLED_WRITE_ATTEMPTS and frees the lock all the
+  // same), or this is a new process that was handed the pid. Either way
+  // nothing is running, and no later pass may be refused over it.
+  // A claim this process is still starting (a gateway stop can take minutes,
+  // and a clock that went back can make its record look younger than zero) is
+  // going, whatever its age says.
+  if (state.supervisorPid === process.pid) return startingClaims().has(state.startedAtMs) ? "going" : "lost";
+  // A supervisor that is verifiably still the process that started the pass
+  // judges it itself: its watchdog ends a pass that stops moving and settles
+  // the run within ABANDON_SETTLE_MS of that. A reader elsewhere going by a
+  // record whose writes are late — the throttle, a slow disk, the wait
+  // between two OpenClaw attempts — must not take the lock from under it.
+  if (supervisorVerified(state)) return "going";
+  // A record from a build before the stall rule names no supervisor and
+  // carries no progress mark, so there is nothing to judge a stall by: its
+  // process decides, as it did for the build that wrote it.
+  if (state.supervisorPid === 0) return runIsAlive(state) ? "going" : "lost";
+  return staleRunVerdict(
+    { startedAtMs: state.startedAtMs, progressAtMs: state.progressAtMs, alive: runIsAlive(state) },
+    now,
+    // The record carries the pass's last move at most PROGRESS_WRITE_EVERY_MS
+    // late, and a write takes time: a window set in seconds must not read
+    // that lag as a stall.
+    indexStallMs() + RECORD_LAG_MS,
+  );
+}
+
+/**
+ * The `startedAtMs` stamps of runs this process has claimed and not yet put
+ * under supervision (see startMemoryIndex). Process-wide like the pass.
+ */
+function startingClaims(): Set<number> {
+  return processStore("clawkeep-memory.starting-claims", () => new Set<number>());
+}
+
+/** How far behind the pass a reader of its record may be. */
+const RECORD_LAG_MS = 5_000;
+
+/** The recorded supervisor is still THAT process: the pid and its start key (`processStartKey`). */
+function supervisorVerified(state: PersistedMemoryRunState): boolean {
+  return state.supervisorPid > 0
+    && Boolean(state.supervisorStartKey)
+    && processStartKey(state.supervisorPid) === state.supervisorStartKey;
+}
+
+/**
+ * A stalled record whose indexer outlived the process that supervised it — a
+ * server stopped some other way than through its unit, whose cgroup would
+ * have taken the child with it. Left running, it keeps EMBED_MIGRATION_LOCK
+ * and every later pass ends `migration_busy`; so it is ended before the run
+ * lock is freed, the way `terminate` ends one, and only while the pid is
+ * still the process the record names (`recordedChildIsAlive`, the start key):
+ * never one that was handed the number since. Never the local arm's pid,
+ * which is a web server's own.
+ */
+async function stopOrphanedIndexer(state: PersistedMemoryRunState): Promise<void> {
+  const pid = state.childPid;
+  if (pid <= 0 || pid === process.pid || pid === state.supervisorPid || settlingPasses().has(pid)) return;
+  // Not an orphan while the process supervising it lives: its own watchdog
+  // ends it, and settles the run.
+  if (supervisorVerified(state)) return;
+  if (!recordedChildIsAlive(state)) return;
+  console.warn(`[clawkeep-memory] ending the stalled ${state.mode || "index"} pass's indexer, which no ClawBox process supervises any more`);
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return;
+  }
+  for (let waited = 0; waited < TERMINATE_GRACE_MS && recordedChildIsAlive(state); waited += 250) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  if (recordedChildIsAlive(state)) {
+    try { process.kill(pid, "SIGKILL"); } catch { /* gone */ }
+  }
+}
+
+/**
+ * Settles a `running` record. `rejudge` is for a reconcile (a reader that
+ * found the record lost or stalled): the record is judged once more on the
+ * fresh read, and one that has moved since is left as it is. The supervisor's
+ * own call (a gateway stop that failed before the spawn) settles it as is.
+ */
+async function markInterrupted(
+  state: PersistedMemoryRunState,
+  failure: { error: string; errorCode: MemoryRunErrorCode } = INTERRUPTED_FAILURE,
+  rejudge = false,
+): Promise<PersistedMemoryRunState> {
   // Read once more before overwriting: the record this verdict was reached on
   // may be the "running" row the pass's own `finish` has just replaced with
   // how it really ended, and that answer is the better one.
   const current = await readPersistedRunState();
   if (current.status !== "running" || current.startedAtMs !== state.startedAtMs) return current;
+  // And judged once more on that fresh read: a record that has moved since —
+  // a newer pid, a newer `progressAtMs` — is going, and is left as it is.
+  if (rejudge && runningRecordVerdict(current) === "going") return current;
   const finishedAtMs = Date.now();
   const failed: PersistedMemoryRunState = {
-    ...state,
+    ...current,
     status: "failed",
     finishedAtMs,
-    durationMs: state.startedAtMs ? Math.max(0, finishedAtMs - state.startedAtMs) : 0,
-    error: INTERRUPTED_MESSAGE,
-    errorCode: "interrupted",
+    durationMs: current.startedAtMs ? Math.max(0, finishedAtMs - current.startedAtMs) : 0,
+    error: failure.error,
+    errorCode: failure.errorCode,
     progress: null,
     childPid: 0,
+    childStartKey: "",
+    progressAtMs: 0,
+    supervisorPid: 0,
+    supervisorStartKey: "",
   };
   await writeRunState(failed);
   await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
   return failed;
 }
 
+/**
+ * One section, in this process, for judging and settling a run record and for
+ * taking the run lock. `markInterrupted` re-reads, checks, writes and frees
+ * the lock across awaits: two readers settling the same stale record, or one
+ * settling it while a start judges the lock (`acquireRunLockInSection`), could otherwise free
+ * the lock of a pass that started in between. Process-wide like the pass
+ * itself (see process-store.ts).
+ */
+function runRecordSection<T>(work: () => Promise<T>): Promise<T> {
+  const section = processStore("clawkeep-memory.run-record-section", () => ({ tail: Promise.resolve() as Promise<unknown> }));
+  const turn = section.tail.then(work, work);
+  section.tail = turn.catch(() => undefined);
+  return turn;
+}
+
+/**
+ * A `running` record a reader found is not going: a stalled one's orphaned
+ * indexer is ended first, then the run is settled as `stalled` or
+ * `interrupted`.
+ */
+async function settleStaleRun(
+  state: PersistedMemoryRunState,
+  verdict: "lost" | "stalled",
+): Promise<PersistedMemoryRunState> {
+  if (verdict === "stalled") await stopOrphanedIndexer(state);
+  return markInterrupted(state, verdict === "stalled" ? STALLED_FAILURE : INTERRUPTED_FAILURE, true);
+}
+
 export async function readMemoryRunState(): Promise<MemoryRunState> {
   let state = await readPersistedRunState();
   if (state.status === "running") {
-    const age = Date.now() - state.startedAtMs;
-    const stillStarting = state.childPid === 0 && age >= 0 && age < LOCK_START_GRACE_MS;
-    if (!stillStarting && (!runIsAlive(state.childPid) || age > INDEX_TIMEOUT_MS)) {
-      state = await markInterrupted(state);
-    }
+    const verdict = runningRecordVerdict(state);
+    if (verdict !== "going") state = await runRecordSection(() => settleStaleRun(state, verdict));
   }
   return publicMemoryRunState(state);
 }
@@ -638,17 +931,313 @@ function terminate(child: ChildProcess): void {
  * offline maintenance (a gateway start, a doctor run): that refusal read as
  * "status unavailable", and a read probe is exactly what may simply ask again.
  * See `@/lib/openclaw-maintenance`.
+ *
+ * About ONE agent, the box's default (`@/lib/openclaw-default-agent`), named
+ * with `--agent`: left out, the core probes every configured agent in turn,
+ * and `--deep` costs seconds per agent on a Jetson.
  */
-function collectMemoryStatusJson(): Promise<unknown> {
+async function collectMemoryStatusJson(agentId: string): Promise<unknown> {
+  // OpenClaw 2026.11.3 refuses `memory status` while the gateway owns the
+  // state; the gateway's own `memory.status` answers the same manager status
+  // (`details.legacy`, paths left out). The CLI only when no gateway answers.
+  const live = await memoryStatusFromGateway(agentId);
+  if (live !== null) return live;
   return withOpenclawMaintenanceRetry(
-    (timeoutMs) => collectMemoryStatusJsonOnce(timeoutMs),
+    (timeoutMs) => collectMemoryStatusJsonOnce(timeoutMs, agentId),
     { timeoutMs: STATUS_TIMEOUT_MS, label: "openclaw memory status" },
   );
 }
 
-function collectMemoryStatusJsonOnce(timeoutMs: number): Promise<unknown> {
+/**
+ * Is "Memory embeddings are pending" the ONLY thing the gateway holds against
+ * this index?
+ *
+ * `memory.status` is answered from a read-only manager of its own, and that
+ * manager never starts the embedding provider: its `providerState.mode` is
+ * `pending` on every reading, straight after a search that returned vector
+ * scores included (OpenClaw 2026.11.3, the owner's box, 2026-11-15). The core
+ * words that state before it looks at anything else, so its health is
+ * `degraded` for an index that is valid, complete and searchable, and the card
+ * told the owner "The embedding model is not ready. Check the model, then try
+ * indexing again." — advice that stops the assistant for a full pass over an
+ * index with nothing wrong with it.
+ *
+ * So `pending` is read as "not asked", and what the core would have checked
+ * next is checked here instead: an identity it stands by, no pending changes,
+ * and a vector index it calls complete. Anything short of that keeps the
+ * core's verdict.
+ */
+function embeddingsOnlyPending(legacy: Record<string, unknown>): boolean {
+  const custom = asRecord(legacy.custom);
+  if (cleanString(asRecord(custom.providerState).mode) !== "pending") return false;
+  if (cleanString(asRecord(custom.indexIdentity).status) !== "valid") return false;
+  if (legacy.dirty !== false) return false;
+  return cleanString(asRecord(asRecord(legacy.vector).index).state) === "complete";
+}
+
+/**
+ * `memory.status` over the running gateway, in the CLI's row shape
+ * (`[{agentId, status}]`, `status.dbPath` the agent database the core keeps the
+ * index in). Null when no gateway is there to answer.
+ */
+async function memoryStatusFromGateway(agentId: string): Promise<unknown | null> {
+  // A gateway that is starting (after an index pass, a restart) already owns
+  // the state: it is waited for, and only a stopped one leaves this to the CLI.
+  let answer: unknown;
+  try {
+    const online = await askOpenclawGateway("memory.status", { agentId }, STATUS_TIMEOUT_MS);
+    if (!online.answered) return null;
+    answer = online.result;
+  } catch (err) {
+    throw new Error(`memory status unavailable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const health = asRecord(answer);
+  const legacy = asRecord(asRecord(health.details).legacy);
+  if (Object.keys(legacy).length === 0) throw new Error("memory status unavailable: the gateway reported no index details");
+  // `vector.available` was the CLI's `--deep` probe, and the gateway's own
+  // health is NOT that probe: it never asks the embedder (see EmbedderVerdict),
+  // so on 2026.11.3 a healthy box reads "degraded", "Memory embeddings are
+  // pending", for as long as the gateway runs. Not ready, the embedder's own
+  // probe decides. With no verdict from it, a reading that holds nothing but
+  // "pending" against the index (`embeddingsOnlyPending`) is read as ready, and
+  // any other keeps the gateway's verdict. Any answer the probe gave outweighs
+  // that reading, and so does an ok that ended (`lapsed`): it is the one
+  // reading that actually asked the embedder.
+  const ready = cleanString(health.status) === "ready";
+  const vector = asRecord(legacy.vector);
+  const custom = asRecord(legacy.custom);
+  const providerState = asRecord(custom.providerState);
+  const message = cleanString(health.message);
+  // A gate that THREW (the on-box embedder's own checks) says nothing about
+  // the embedder, and it may have hidden a not-ok held for it: that reading
+  // keeps the gateway's verdict, never the pending-only one.
+  let gateFailed = false;
+  const verdict = ready ? null : await embedderVerdictFor(agentId, legacy).catch(() => { gateFailed = true; return null; });
+  const provider = verdict?.provider || cleanString(legacy.provider);
+  // Over a COMPLETE vector index only: the core says "pending" before it says
+  // "incomplete", so a pending reading can sit over an index it has not
+  // finished embedding. "active" is what the CLI's `--deep` answer carried for
+  // the same state, and what `parseMemoryStatus` reads as healthy.
+  const promoted = verdict?.ok === true
+    && cleanString(providerState.mode) === "pending"
+    && cleanString(asRecord(vector.index).state) === "complete"
+    && Boolean(provider) && provider !== "none";
+  const noVerdict = !gateFailed && (!verdict || (verdict.ok === null && !verdict.lapsed));
+  const onlyPending = !ready && noVerdict && embeddingsOnlyPending(legacy);
+  const available = ready || promoted || onlyPending;
+  const reason = verdict?.ok === false && verdict.error ? verdict.error : message;
+  return [{
+    agentId,
+    status: {
+      ...legacy,
+      dbPath: openclawAgentDbPath(agentId),
+      // The provider the probe started, when one named it: a fallback or none
+      // is a verdict of its own (`provider_mismatch`, `embedder_unavailable`).
+      ...(verdict?.provider ? { provider: verdict.provider } : {}),
+      // A not-ok from the probe is the answer about vector search: whatever
+      // the gateway's own flag says, it cannot run.
+      vector: {
+        ...vector,
+        available: available && vector.enabled !== false,
+        ...(verdict?.ok === false ? { semanticAvailable: false } : {}),
+      },
+      custom: promoted
+        ? { ...custom, providerState: { ...providerState, mode: "active" } }
+        : !available && reason && !cleanString(custom.providerUnavailableReason) ? { ...custom, providerUnavailableReason: reason } : custom,
+    },
+  }];
+}
+
+/**
+ * THE EMBEDDER'S OWN ANSWER, for the gateway arm. OpenClaw 2026.11.3's
+ * `memory.status` opens a fresh memory manager per call and reads its status
+ * without starting the embedder, so it says the same thing ("pending") over an
+ * embedder that answers and one that does not. The core's probe over the
+ * running gateway is `doctor.memory.status` with `deep: true` (one tiny embed);
+ * its answer is kept here, in this process, for ONE embedder setting and agent
+ * (`key`) — another key replaces it.
+ *
+ * `ok` is the core's answer: false stands until a probe the core answers ok
+ * replaces it, and null is no verdict (never answered, or an ok that ended).
+ * An ok ends when the calls themselves keep failing for an hour after its last
+ * answer, and, for the on-box embedder, when its model is no longer on disk.
+ * `provider` is the one the last UNCACHED answer named ("" until one did): a
+ * cached answer starts nothing and echoes the configuration.
+ *
+ * Asked again on the next reload after an invalidation (a pass's finish, a
+ * provider, source or cloud-embedder change: `statusGeneration` moved), else no
+ * sooner than 30 minutes after an ok and 10 minutes after anything else — but
+ * an ok answered from the core's own cache before any uncached answer named
+ * the provider is asked again at once, on the next reload.
+ */
+interface EmbedderVerdict {
+  key: string;
+  ok: boolean | null;
+  provider: string;
+  /**
+   * The core's sentence for a not-ok: the provider's reason in the row, which
+   * the API answer never carries (only the embedder-unavailable log line reads it).
+   */
+  error: string;
+  answeredAtMs: number;
+  nextAskAtMs: number;
+  /** `statusGeneration` when it was last asked. */
+  generation: number;
+  /** The last ask could not be made, or the core answered without checking. */
+  lastAskFailed: boolean;
+  /**
+   * An ok that ENDED (above), until the core answers again. Not the absence of
+   * a verdict: a box with nothing to say about its embedder reads
+   * memory.status's pending-only reading as ready (`embeddingsOnlyPending`),
+   * while this one has cause to doubt it, so the gateway's verdict stands.
+   */
+  lapsed: boolean;
+}
+let embedderVerdict: EmbedderVerdict | null = null;
+const EMBEDDER_OK_REASK_MS = 30 * 60_000;
+const EMBEDDER_RETRY_MS = 10 * 60_000;
+const EMBEDDER_OK_LAPSE_MS = 60 * 60_000;
+
+/**
+ * The verdict that applies to this reading, asked for first when it is due and
+ * may be asked; null when there is none.
+ *
+ * NEVER A WAKE. When memory search points at a loopback address, or at ClawBox's
+ * embed proxy under any host (whatever provider id names it), the probe goes
+ * through the proxy, which
+ * starts clawbox-embed.service — the ~2 GB it stops after ten idle minutes, and
+ * a start the box refuses when memory is short, which would come back as a false
+ * "not ready". So it is asked only while llama-server already answers its health
+ * URL, which wakes nothing. A probe then keeps the awake embedder awake for one
+ * more idle window; it never starts a sleeping one. OpenClaw's `local` embedder
+ * (a llama.cpp server OpenClaw manages) would be started by a probe, and
+ * `ollama` is a server that check cannot see: neither is asked at all.
+ */
+async function embedderVerdictFor(agentId: string, legacy: Record<string, unknown>): Promise<EmbedderVerdict | null> {
+  const config = await readEmbeddingConfig();
+  if (!config) return null;
+  const provider = config.provider || cleanString(legacy.requestedProvider);
+  if (provider === "local" || provider === "ollama") return null;
+  const onBox = isLoopbackBaseUrl(config.baseUrl) || isEmbedProxyUrl(config.baseUrl);
+  const key = JSON.stringify([agentId, config.provider, config.baseUrl, cleanString(legacy.model)]);
+  let held = embedderVerdict?.key === key ? embedderVerdict : null;
+  const due = !held || held.generation !== statusGeneration || Date.now() >= held.nextAskAtMs;
+  if (due && (!onBox || await isEmbedHealthy())) {
+    held = await askEmbedder(key, agentId, held);
+  } else if (onBox && held?.ok === true && !(await getEmbedProvisioningStatus()).installed) {
+    held = embedderVerdict = { ...held, ok: null, lapsed: true };
+  }
+  if (held?.ok === true && held.lastAskFailed && Date.now() - held.answeredAtMs >= EMBEDDER_OK_LAPSE_MS) {
+    held = embedderVerdict = { ...held, ok: null, lapsed: true };
+  }
+  return held;
+}
+
+/**
+ * Does `baseUrl` reach ClawBox's embed proxy, under whatever host: the box's
+ * own name or LAN address reaches it as well as loopback does. The path is the
+ * one `getEmbedProxyBaseUrl()` builds (its `/v1` aside), so the two cannot drift.
+ */
+function isEmbedProxyUrl(baseUrl: string | null): boolean {
+  if (!baseUrl) return false;
+  try {
+    const proxyPath = new URL(getEmbedProxyBaseUrl()).pathname.replace(/\/v1\/?$/, "");
+    const path = new URL(baseUrl).pathname.replace(/\/+$/, "");
+    return Boolean(proxyPath) && (path === proxyPath || path.startsWith(`${proxyPath}/`));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * One `doctor.memory.status {agentId, deep: true}`, bounded like the status
+ * read: STATUS_TIMEOUT_MS outlasts the core's own 60 s ping, so a dead embedder
+ * comes back as the core's not-ok rather than as a call that failed.
+ *
+ * Every ANSWERED `ok: false` is a not-ok, whatever its sentence: the core's
+ * "gateway memory check failed" also wraps an embedder that could not be
+ * created. A call that could not be made (a socket, a gateway gone or not
+ * ready, the bound) is no verdict, and neither is an answer that says it did
+ * not check (`checked: false`): either keeps what was there.
+ */
+async function askEmbedder(key: string, agentId: string, held: EmbedderVerdict | null): Promise<EmbedderVerdict> {
+  const generation = statusGeneration;
+  const kept = (): EmbedderVerdict => (embedderVerdict = {
+    key,
+    ok: held?.ok ?? null,
+    provider: held?.provider ?? "",
+    error: held?.error ?? "",
+    answeredAtMs: held?.answeredAtMs ?? 0,
+    nextAskAtMs: Date.now() + EMBEDDER_RETRY_MS,
+    generation,
+    lastAskFailed: true,
+    lapsed: held?.lapsed ?? false,
+  });
+  const couldNotAsk = (why: string): EmbedderVerdict => {
+    noteEmbedderProbe(key, `the core's embedder readiness probe (doctor.memory.status) could not be asked: ${why}`);
+    return kept();
+  };
+  let answer: Record<string, unknown>;
+  try {
+    const online = await askOpenclawGateway("doctor.memory.status", { agentId, deep: true }, STATUS_TIMEOUT_MS);
+    if (!online.answered) return couldNotAsk("no gateway is running");
+    answer = asRecord(online.result);
+  } catch (err) {
+    return couldNotAsk(errorClass(err));
+  }
+  const embedding = asRecord(answer.embedding);
+  if (typeof embedding.ok !== "boolean" || embedding.checked === false) return couldNotAsk("the core answered without checking");
+  const named = cleanString(answer.provider);
+  const provider = named && embedding.cached !== true ? named : held?.provider ?? "";
+  // No embedder at all (`none`) is the embedder-unavailable line's to say.
+  noteEmbedderProbe(key, embedding.ok || provider === "none"
+    ? ""
+    : `the embedder did not pass the core's readiness probe (doctor.memory.status): ${coreFailureLabels(cleanString(embedding.error)) || "no reason given"}`);
+  return (embedderVerdict = {
+    key,
+    ok: embedding.ok,
+    provider,
+    error: embedding.ok ? "" : cleanString(embedding.error),
+    answeredAtMs: Date.now(),
+    // An ok that only the core's 30 s cache has given (no uncached answer has
+    // named the provider yet) is asked again on the next reload, uncached.
+    nextAskAtMs: Date.now() + (!embedding.ok ? EMBEDDER_RETRY_MS : embedding.cached === true && !provider ? 0 : EMBEDDER_OK_REASK_MS),
+    generation,
+    lastAskFailed: false,
+    lapsed: false,
+  });
+}
+
+/**
+ * The probe's outcome in the device log, once per change for each embedder
+ * setting (`key`, compared but never printed), like the lines below: the card
+ * says only "not ready", and this is what tells a refused key from an endpoint
+ * that is down from a probe this box can no longer ask. A call that could not
+ * be made names its error's class and code only, never its message; a not-ok
+ * names the fixed labels `coreFailureLabels` finds in the core's sentence,
+ * never the sentence. An empty line (an ok) clears it, so the next failure is
+ * said again.
+ */
+let loggedEmbedderProbe = "";
+function noteEmbedderProbe(key: string, line: string): void {
+  const said = line ? `${key}\n${line}` : "";
+  if (said === loggedEmbedderProbe) return;
+  loggedEmbedderProbe = said;
+  if (line) console.warn(`[clawkeep-memory] ${line}`);
+}
+
+/** An error's class, and its code when it has one: never its message. */
+function errorClass(err: unknown): string {
+  const safe = (value: string) => value.replace(/[^\w.-]/g, "").slice(0, 64);
+  const name = safe(err instanceof Error ? err.name : typeof err) || "unknown";
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" || typeof code === "number" ? `${name} ${safe(String(code))}` : name;
+}
+
+/** One `openclaw memory status --agent <agentId> --deep --json` probe, parsed; rejects on a failure or a timeout. */
+function collectMemoryStatusJsonOnce(timeoutMs: number, agentId: string): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    const child = spawn(openclawBin(), ["memory", "status", "--agent", "main", "--deep", "--json"], {
+    const child = spawn(openclawBin(), ["memory", "status", "--agent", agentId, "--deep", "--json"], {
       env: openclawEnv(),
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -908,6 +1497,23 @@ function statusVerdict(facts: {
   return { error: "", errorCode: "" };
 }
 
+/**
+ * `agentId`'s row in a `memory status --json` answer, or the first row when
+ * none names it. The core answers a list, one row per agent it was asked
+ * about; asked with `--agent` that is one row, so the first is a fallback for
+ * a core that labels it some other way, never a pick among agents.
+ */
+function agentStatusRow(raw: unknown, agentId: string): Record<string, unknown> {
+  const rows = Array.isArray(raw) ? raw : [raw];
+  return asRecord(rows.find((entry) => cleanString(asRecord(entry).agentId) === agentId) ?? rows[0]);
+}
+
+/**
+ * The status the panel and the API answer, from the core's `memory status
+ * --json` answer `raw` about `agentId` (its row, see `agentStatusRow`), the
+ * run on record and the schedule. `loadMemoryStatus` reports a parse that
+ * rejects as the unavailable status.
+ */
 export async function parseMemoryStatus(
   raw: unknown,
   run: MemoryRunState,
@@ -917,9 +1523,10 @@ export async function parseMemoryStatus(
   // The provider openclaw.json names ("" for none), or null when that is not
   // known — then the core's own `requestedProvider` stands in for it.
   configuredProvider: string | null = null,
+  // The agent the reading was asked about (`openclawDefaultAgentId`).
+  agentId: string = FALLBACK_AGENT_ID,
 ): Promise<ClawKeepMemoryStatus> {
-  const rows = Array.isArray(raw) ? raw : [raw];
-  const row = asRecord(rows.find((entry) => cleanString(asRecord(entry).agentId) === "main") ?? rows[0]);
+  const row = agentStatusRow(raw, agentId);
   const status = asRecord(row.status);
   const vector = asRecord(status.vector);
   const batch = asRecord(status.batch);
@@ -1040,7 +1647,13 @@ export async function parseMemoryStatus(
   // Search answers, so nothing above catches this either: it just never uses
   // the embedder the card names.
   else if (keywordOnly) health = "degraded";
-  else if (providerMode === "active" && indexIdentity === "valid") health = "healthy";
+  // `pending` is a provider nobody has asked yet, not one that fails to answer:
+  // the gateway reads memory.status from a manager that never starts it (see
+  // `embeddingsOnlyPending`). Everything that makes such a reading degraded —
+  // no vectors to search, a named reason, a fallback, a keyword-only index —
+  // has been ruled out above, so beside an identity the core stands by it is
+  // as healthy as a reading gets.
+  else if ((providerMode === "active" || providerMode === "pending") && indexIdentity === "valid") health = "healthy";
   // An index built by a different model — or one with no fingerprint at all —
   // is a KNOWN state, not an unknown one: search is degraded until it is
   // rebuilt, and the `error` below already says exactly that. Left as
@@ -1050,6 +1663,12 @@ export async function parseMemoryStatus(
 
   return {
     available: Boolean(provider || model || files || chunks),
+    // The agent ASKED about, never the label on the row: a fallback row a core
+    // labels some other way (the roster key as written, say) is still the
+    // answer about this agent, and `getMemoryStatus` reloads any reading whose
+    // id is not the default agent's, so the row's label made every read wait
+    // on a cold probe. `rebuildKeywordOnlyIndex` keys its claim on it too.
+    agentId,
     provider,
     model,
     // Where the embedder that did not answer is SUPPOSED to be, rather than
@@ -1086,13 +1705,16 @@ export async function parseMemoryStatus(
   };
 }
 
+/** The status for a probe that failed or could not be read: about `agentId`, with nothing known of its index. */
 function unavailableStatus(
   run: MemoryRunState,
   schedule: MemoryIndexSchedule,
+  agentId: string,
   now = new Date(),
 ): ClawKeepMemoryStatus {
   return {
     available: false,
+    agentId,
     enabled: false,
     setupComplete: false,
     planGate: planGateFor(null),
@@ -1127,14 +1749,25 @@ async function withLiveRunState(base: ClawKeepMemoryStatus): Promise<ClawKeepMem
   return { ...base, run, schedule, nextRunAtMs: computeNextMemoryRunMs(schedule, new Date()) };
 }
 
+/**
+ * One fresh reading about the box's default agent: the core's probe (or the
+ * local index's answer where there is no OpenClaw), then the run state and the
+ * schedule. A probe that fails, or an answer that cannot be parsed, is the
+ * unavailable status rather than a rejection.
+ */
 async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   // Where there is no OpenClaw there is no CLI to probe: ClawBox's own index
   // answers the same shape, and everything below is unchanged.
   const local = openclawIsAbsent();
+  // Which agent is asked about, read from openclaw.json on every probe (a
+  // `stat` while the file is unchanged); `getMemoryStatus` does not answer a
+  // cached reading about another one. The local arm answers under the same
+  // id, so its row is the one picked.
+  const agentId = await openclawDefaultAgentId();
   // The probe first, the run state after it. Read the other way round, a
   // cold answer carried the run state from when the probe STARTED — "running"
   // for a pass that had finished eight seconds before the answer arrived.
-  const probe = await (local ? localMemoryStatusJson() : collectMemoryStatusJson()).then(
+  const probe = await (local ? localMemoryStatusJson(agentId) : collectMemoryStatusJson(agentId)).then(
     (raw) => ({ raw, ok: true as const }),
     () => ({ raw: null, ok: false as const }),
   );
@@ -1157,17 +1790,17 @@ async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
       )
       : readEmbeddingConfig(),
   ]);
-  if (!probe.ok) return unavailableStatus(run, schedule);
+  if (!probe.ok) return unavailableStatus(run, schedule, agentId);
   try {
     const status = await parseMemoryStatus(
-      probe.raw, run, schedule, new Date(), embedding?.baseUrl ?? null, embedding ? embedding.provider : null,
+      probe.raw, run, schedule, new Date(), embedding?.baseUrl ?? null, embedding ? embedding.provider : null, agentId,
     );
     noteProviderFallback(status);
     noteEmbedderUnavailable(status, probe.raw);
     noteKeywordOnly(status);
     return status;
   } catch {
-    return unavailableStatus(run, schedule);
+    return unavailableStatus(run, schedule, agentId);
   }
 }
 
@@ -1199,13 +1832,12 @@ function noteProviderFallback(status: ClawKeepMemoryStatus): void {
 
 /**
  * A configured embedder the core could not start, in the device log, once per
- * verdict like the line above — with the core's own reason, which is the one
- * thing that tells a refused key from an endpoint that is not there.
- *
- * The reason is the core's (already redacted by it for tools) and is put
- * through the credential shapes here as well, with addresses and paths taken
- * out: it is the device log, and the rule of the line above holds — never the
- * endpoint and never the key. It never reaches the status the API answers.
+ * verdict like the line above — with the fixed labels `coreFailureLabels`
+ * finds in the core's reason, which tell a refused key from an endpoint that
+ * is not there. The reason itself is never printed: it can be the readiness
+ * probe's sentence (`memoryStatusFromGateway` puts it in the reading), and the
+ * rule of the line above holds — never the endpoint and never the key. It
+ * never reaches the status the API answers either.
  */
 let loggedEmbedderUnavailable = "";
 function noteEmbedderUnavailable(status: ClawKeepMemoryStatus, raw: unknown): void {
@@ -1213,7 +1845,7 @@ function noteEmbedderUnavailable(status: ClawKeepMemoryStatus, raw: unknown): vo
   if (verdict === loggedEmbedderUnavailable) return;
   loggedEmbedderUnavailable = verdict;
   if (!verdict) return;
-  const reason = coreEmbedderFailure(raw);
+  const reason = coreEmbedderFailure(raw, status.agentId);
   console.warn(
     `[clawkeep-memory] memory search has fallen back to keyword-only: the core could not start the embedder `
     + `openclaw.json names ("${status.requestedProvider}"${status.location === "unknown" ? "" : `, ${status.location}`})`
@@ -1221,18 +1853,87 @@ function noteEmbedderUnavailable(status: ClawKeepMemoryStatus, raw: unknown): vo
   );
 }
 
-/** The core's own sentence for why no embedder started, made safe for the device log. */
-function coreEmbedderFailure(raw: unknown): string {
-  const rows = Array.isArray(raw) ? raw : [raw];
-  const row = asRecord(rows.find((entry) => cleanString(asRecord(entry).agentId) === "main") ?? rows[0]);
-  const custom = asRecord(asRecord(row.status).custom);
-  const said = cleanString(custom.providerUnavailableReason) || cleanString(asRecord(custom.providerState).reason);
-  if (!said) return "";
-  return redactCredentialShapes(said, "[redacted]")
-    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[endpoint]")
-    .replace(/(?:~|\/(?:home|root|tmp|var|srv|opt|usr|etc|mnt|media|data))\/\S*/g, "[path]")
-    .replace(/\s+/g, " ")
-    .slice(0, 200);
+/** The fixed labels for the core's own sentence on why no embedder started. */
+function coreEmbedderFailure(raw: unknown, agentId: string): string {
+  const custom = asRecord(asRecord(agentStatusRow(raw, agentId).status).custom);
+  return coreFailureLabels(cleanString(custom.providerUnavailableReason) || cleanString(asRecord(custom.providerState).reason));
+}
+
+/**
+ * What the device log may say about a sentence the core wrote on its embedder:
+ * the labels of this table whose pattern it matches, in table order, and never
+ * a piece of the sentence. The sentence is free text that a remote server can
+ * write, and redacting credentials out of it by their shapes always left some
+ * shape behind; here the line can only say words written in this file, so
+ * nothing the sentence holds can reach the log.
+ *
+ * Every pattern is linear (no nested quantifier) and only tested, so no match
+ * reaches the output. A misread label is a wrong word, never a leak.
+ */
+const CORE_FAILURE_TABLE: ReadonlyArray<readonly [label: string, pattern: RegExp]> = [
+  // HTTP statuses (4xx and 5xx cannot be an address octet).
+  ["HTTP 400", /\b400\b/],
+  ["HTTP 401", /\b401\b/],
+  ["HTTP 402", /\b402\b/],
+  ["HTTP 403", /\b403\b/],
+  ["HTTP 404", /\b404\b/],
+  ["HTTP 408", /\b408\b/],
+  ["HTTP 413", /\b413\b/],
+  ["HTTP 422", /\b422\b/],
+  ["HTTP 429", /\b429\b/],
+  ["HTTP 500", /\b500\b/],
+  ["HTTP 502", /\b502\b/],
+  ["HTTP 503", /\b503\b/],
+  ["HTTP 504", /\b504\b/],
+  // Node's socket and DNS codes, undici's and the TLS ones worth telling apart.
+  ["ECONNREFUSED", /\bECONNREFUSED\b/],
+  ["ECONNRESET", /\bECONNRESET\b/],
+  ["ETIMEDOUT", /\bETIMEDOUT\b/],
+  ["ENOTFOUND", /\bENOTFOUND\b/],
+  ["EAI_AGAIN", /\bEAI_AGAIN\b/],
+  ["EHOSTUNREACH", /\bEHOSTUNREACH\b/],
+  ["ENETUNREACH", /\bENETUNREACH\b/],
+  ["EPIPE", /\bEPIPE\b/],
+  ["UND_ERR_CONNECT_TIMEOUT", /\bUND_ERR_CONNECT_TIMEOUT\b/],
+  ["UND_ERR_HEADERS_TIMEOUT", /\bUND_ERR_HEADERS_TIMEOUT\b/],
+  ["UND_ERR_BODY_TIMEOUT", /\bUND_ERR_BODY_TIMEOUT\b/],
+  ["UND_ERR_SOCKET", /\bUND_ERR_SOCKET\b/],
+  ["CERT_HAS_EXPIRED", /\bCERT_HAS_EXPIRED\b/],
+  ["DEPTH_ZERO_SELF_SIGNED_CERT", /\bDEPTH_ZERO_SELF_SIGNED_CERT\b/],
+  ["SELF_SIGNED_CERT_IN_CHAIN", /\bSELF_SIGNED_CERT_IN_CHAIN\b/],
+  ["UNABLE_TO_VERIFY_LEAF_SIGNATURE", /\bUNABLE_TO_VERIFY_LEAF_SIGNATURE\b/],
+  ["ERR_TLS_CERT_ALTNAME_INVALID", /\bERR_TLS_CERT_ALTNAME_INVALID\b/],
+  // Words.
+  ["timeout", /\btime[ds]? ?out\b/i],
+  ["unauthorized", /\bunauthori[sz]ed\b/i],
+  ["forbidden", /\bforbidden\b/i],
+  ["invalid key", /\binvalid[ _](?:api[ _])?key\b/i],
+  ["rate limited", /\brate[ _-]?limit/i],
+  ["quota", /quota/i],
+  ["not found", /\bnot found\b/i],
+  ["refused", /\brefused\b/i],
+  ["aborted", /\baborted\b/i],
+  ["fetch failed", /\bfetch failed\b/i],
+  ["certificate", /\bcertificate\b/i],
+];
+
+/** Every label `coreFailureLabels` can say, in the order it says them. */
+export const CORE_FAILURE_LABELS: readonly string[] = CORE_FAILURE_TABLE.map(([label]) => label);
+
+/** What it says for a sentence in which no label is found. */
+export const CORE_FAILURE_UNRECOGNISED = "no recognised detail";
+
+/**
+ * The labels for `said`, joined with ", "; `CORE_FAILURE_UNRECOGNISED` when
+ * there are none, and "" for no sentence at all. Only its first 1,000
+ * characters are read: text a remote server wrote can be one long run, and
+ * matching must stay cheap on the web server's only thread.
+ */
+function coreFailureLabels(said: string): string {
+  const head = said.slice(0, 1_000);
+  if (!head) return "";
+  const found = CORE_FAILURE_TABLE.filter(([, pattern]) => pattern.test(head)).map(([label]) => label);
+  return found.join(", ") || CORE_FAILURE_UNRECOGNISED;
 }
 
 /**
@@ -1346,7 +2047,11 @@ function reloadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
  * an index a pass has changed since (`cachedStatusUnsettled`) and no pass is
  * going now, the answer is the probe's, not the cache's. That read is the
  * card's flip out of "running", and the probe it waits on is the one the
- * finish already started — ~8 s, up to 90 s on a cold box — so the card
+ * finish already started — ~8 s, up to 90 s on a cold box. On the gateway arm
+ * it is two calls, memory.status and the embedder's own probe, each bounded by
+ * STATUS_TIMEOUT_MS; a socket closed mid-call is asked again after the wait for
+ * a starting gateway, so one call can take about twice its bound plus that
+ * wait — so the card
  * says "Indexing…" for the length of the probe rather than drawing the
  * mid-rebuild identity for 30 s. `peekMemoryStatus` never waits, and
  * `resolveIndexMode` reads through `lastMemoryStatus` for the same reason.
@@ -1357,6 +2062,12 @@ function reloadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
 export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   let base = cachedStatus;
   if (!base) {
+    base = await reloadMemoryStatus();
+  } else if (base.agentId !== await openclawDefaultAgentId()) {
+    // The owner renamed or re-pointed the default agent since this reading
+    // (a `stat` while openclaw.json is unchanged): it describes an agent the
+    // box no longer means, while the next pass already indexes the new one,
+    // so the answer waits for a reading about the right one.
     base = await reloadMemoryStatus();
   } else if (cachedStatusUnsettled && (await readMemoryRunState()).status !== "running") {
     // Bounded by the probe, not by a quiet moment: when a second pass
@@ -1462,14 +2173,14 @@ const KEYWORD_ONLY_RETRY_MS = 10 * 60_000;
  * owner or the assistant asks) asks for it too: the same full pass the
  * embedder's write asks for (`embedderChanged`, which the Memory Shard switch
  * does not govern on this arm — the index is the agent's own memory files),
- * through the same `openclaw memory index --agent main --force`.
+ * through the same `openclaw memory index --agent <default agent> --force`.
  *
  * Only when it can work and only once: a verdict of `index_keyword_only`,
  * which means the core STARTED the configured embedder (one that does not
  * answer is `embedder_unavailable`, where a pass could only fail); no pass
  * running; the lock the gateway's own rebuild and the embeddings check hold
  * free (a pass that met it would end as a failure on the owner's card); no
- * update owning the box; and once per embedder setting per process — a pass
+ * update owning the box; and once per agent and embedder setting per process — a pass
  * that ran and still left text only is not run again until the setting
  * changes or the web server restarts, and the card's "Run a full reindex"
  * stays the owner's way to try again. One that could not start, or started
@@ -1478,7 +2189,15 @@ const KEYWORD_ONLY_RETRY_MS = 10 * 60_000;
  */
 export async function rebuildKeywordOnlyIndex(status: ClawKeepMemoryStatus): Promise<boolean> {
   if (status.errorCode !== "index_keyword_only" || openclawIsAbsent()) return false;
-  const setting = `${status.provider}/${status.model}/${status.location}`;
+  // Per agent too: a renamed agent's index is a different index, and one
+  // rebuilt for the old name says nothing about it.
+  const setting = `${status.agentId}/${status.provider}/${status.model}/${status.location}`;
+  // A reading about an agent the box no longer means (renamed or re-pointed
+  // since) is no reason to force the index of the one it means now. It claims
+  // nothing, so it cannot overwrite the claim of the agent the box does mean:
+  // the next reading, about that one, decides. Asked BEFORE the claim is read,
+  // so nothing is awaited between reading the claim and taking it.
+  if (status.agentId !== await openclawDefaultAgentId()) return false;
   const claim = keywordOnlyRebuild;
   if (claim?.setting === setting) {
     // The run the reading carries is the live one (both callers read it after
@@ -1489,8 +2208,9 @@ export async function rebuildKeywordOnlyIndex(status: ClawKeepMemoryStatus): Pro
     const retryAtMs = startedPassFailed ? run.finishedAtMs + KEYWORD_ONLY_RETRY_MS : claim.retryAtMs;
     if (Date.now() < retryAtMs) return false;
   }
-  // Claimed before the first await, so two reads that arrive together cannot
-  // both start one; every path that started nothing leaves a retry time.
+  // Claimed with no await since the claim was read, so two reads that arrive
+  // together cannot both start one; every path that started nothing leaves a
+  // retry time.
   keywordOnlyRebuild = { setting, retryAtMs: Number.POSITIVE_INFINITY, startedAtMs: null };
   let started = false;
   let askedAtMs = 0;
@@ -1504,7 +2224,7 @@ export async function rebuildKeywordOnlyIndex(status: ClawKeepMemoryStatus): Pro
       + "answers; asking OpenClaw for one full rebuild (memory index --force)",
     );
     askedAtMs = Date.now();
-    const result = await startMemoryIndex("full", "manual", { embedderChanged: true });
+    const result = await startMemoryIndex("full", "manual", { embedderChanged: true, forAgent: status.agentId });
     started = result.accepted;
     if (started) keywordOnlyRebuild = { setting, retryAtMs: Number.POSITIVE_INFINITY, startedAtMs: askedAtMs };
     else console.warn(`[clawkeep-memory] the keyword-only rebuild was not started: ${result.declined ?? "declined"}`);
@@ -1584,7 +2304,9 @@ function providerFellBack(status: Pick<ClawKeepMemoryStatus, "errorCode">): bool
  * Answered from the cached reading when there is one (stale included, and
  * one a run has changed since: the cost of a stale zero is one more pass
  * over an index that was just built, inside the ten seconds before the
- * refresh lands). Only a box that has never been probed waits for the probe —
+ * refresh lands). Only a box that has never been probed — or whose reading is
+ * about another agent than the default, which counts as none (see
+ * planIndexPass) — waits for the probe —
  * `lastMemoryStatus` rather than `getMemoryStatus`, which now waits for the
  * settled reading after a run, and a click of "Index now" seconds after a
  * pass must not sit behind that probe — and `startMemoryIndex` asks this
@@ -1595,7 +2317,7 @@ export async function resolveIndexMode(
   requested: MemoryIndexMode,
   trigger: MemoryIndexTrigger = "manual",
 ): Promise<MemoryIndexMode | null> {
-  const plan = await planIndexPass(requested, trigger);
+  const plan = await planIndexPass(requested, trigger, await openclawDefaultAgentId());
   return plan.heldBack ? null : plan.mode;
 }
 
@@ -1633,10 +2355,23 @@ interface IndexPassPlan {
  * A box in this state has a reading: the panel carrying the button polls the
  * status to draw the banner that names it, and `warmMemoryStatusCache` pays for
  * the first one at boot. Without one the pass is worded the way it always was.
+ *
+ * ONLY A READING ABOUT `agentId`, the agent the pass will index, decides
+ * anything (TASK-2248). A cached reading from before the owner renamed or
+ * re-pointed the default agent is about an index this pass will not touch: its
+ * zero chunks would send `--force` to the new agent's populated index unasked.
+ * Such a reading counts as none — a box never probed for this agent, which
+ * waits for the probe — and if even that answer is about another agent (the
+ * config moved again under it) the pass runs as asked, as for a box we know
+ * nothing about.
  */
-async function planIndexPass(requested: MemoryIndexMode, trigger: MemoryIndexTrigger): Promise<IndexPassPlan> {
+async function planIndexPass(
+  requested: MemoryIndexMode,
+  trigger: MemoryIndexTrigger,
+  agentId: string,
+): Promise<IndexPassPlan> {
   if (requested === "full") {
-    const seen = cachedStatus;
+    const seen = cachedStatus?.agentId === agentId ? cachedStatus : null;
     return { mode: "full", fellBack: seen !== null && seen.available && providerFellBack(seen), heldBack: false };
   }
   try {
@@ -1645,7 +2380,9 @@ async function planIndexPass(requested: MemoryIndexMode, trigger: MemoryIndexTri
     // a cached zero from before a manual pass filled the index would re-embed
     // that index on a timer. The owner's click keeps the cached reading, for the
     // reasons above.
-    const status = await (trigger === "schedule" ? reloadMemoryStatus() : lastMemoryStatus());
+    let status = await (trigger === "schedule" ? reloadMemoryStatus() : lastMemoryStatus());
+    if (status.agentId !== agentId) status = await reloadMemoryStatus();
+    if (status.agentId !== agentId) return { mode: requested, fellBack: false, heldBack: false };
     // `available` is load-bearing: a failed CLI probe returns the unavailable
     // status, which also reports zero chunks AND an "unknown" identity. Without
     // this check a probe timeout would silently turn a scheduled incremental
@@ -1675,7 +2412,8 @@ async function planIndexPass(requested: MemoryIndexMode, trigger: MemoryIndexTri
   }
 }
 
-async function acquireRunLock(): Promise<boolean> {
+/** Takes the run lock. Called inside `runRecordSection` only (see startMemoryIndex). */
+async function acquireRunLockInSection(): Promise<boolean> {
   await ensureDataDir();
   try {
     await fs.mkdir(RUN_LOCK_PATH, { mode: 0o700 });
@@ -1684,13 +2422,14 @@ async function acquireRunLock(): Promise<boolean> {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
   }
   const state = await readPersistedRunState();
-  const age = Date.now() - state.startedAtMs;
-  const stillStarting = state.status === "running" && state.childPid === 0 && age >= 0 && age < LOCK_START_GRACE_MS;
-  if (state.status === "running" && (stillStarting || (runIsAlive(state.childPid) && age <= INDEX_TIMEOUT_MS))) {
-    return false;
+  if (state.status === "running") {
+    // Liveness (the start key) plus the stall rule, never age (TASK-2431).
+    const verdict = runningRecordVerdict(state);
+    if (verdict === "going") return false;
+    await settleStaleRun(state, verdict);
+  } else {
+    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
   }
-  if (state.status === "running") await markInterrupted(state);
-  else await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
   try {
     await fs.mkdir(RUN_LOCK_PATH, { mode: 0o700 });
     return true;
@@ -1782,8 +2521,8 @@ function fixedFailure(
   code: number | null,
   signal: NodeJS.Signals | null,
 ): { error: string; errorCode: MemoryRunErrorCode } {
-  // 124 is `timeout`'s own verdict, which is the same fact arriving as an exit
-  // code rather than as this module's budget.
+  // 124 is `timeout`'s own verdict. Nothing here runs a pass under one — a
+  // pass has no time limit — so this words a limit somebody else put on it.
   if (code === 124) return TIMED_OUT_FAILURE;
   // Killed from outside — the OOM killer, an operator, a service restart. The
   // embedding model had nothing to do with it, so do not send the owner to
@@ -1799,13 +2538,45 @@ function fixedFailure(
 }
 
 /**
+ * What the core prints on its way OUT of every run, pass or fail: the receipt
+ * for closing the agent database (`[state/agent-db] agent database clean-close
+ * receipt: written`, sometimes behind a clock). Never the reason for anything.
+ */
+const CLOSE_RECEIPT_RE = /\[state\/agent-db\] agent database clean-close receipt\b/;
+
+/** One redraw of the reporter's counter (`Indexing session files… 19158/30949 · elapsed 36:10 · eta 22:15 62%`). */
+const PROGRESS_REDRAW_RE = /^Indexing [a-z ]+… \d+\/\d+ · elapsed [\d:]+/;
+
+/**
+ * Two more lines that are never the reason a pass failed (TASK-2431): the
+ * stale-lease notice a pass prints as it reaps the lease a killed pass left
+ * (recovery, not a fault), and `script`'s own line when it is told to end the
+ * session. A pass that failed on OpenClaw's memory workspace lock printed both
+ * after the error that named the lock.
+ */
+const RECOVERY_NOTICE_RE = /\[state\/agent-db\] agent database stale lease:|^Session terminated, killing shell/;
+
+/**
  * The CLI's own last word, for the device log.
  *
  * Only the tail is kept (see `createIndexProgressReader`): nothing here needs
- * the transcript — just whatever it said before it gave up.
+ * the transcript — just whatever it said before it gave up. Its LAST line is
+ * not that since OpenClaw 2026.11.3: the core closes the agent database after
+ * the failure and says so, so every failed pass was logged as "agent database
+ * clean-close receipt: written" and the reason one line up — `Memory index
+ * failed (main): worker task capacity reached` on the owner's box, after 82
+ * minutes with the assistant stopped — was thrown away. The receipt, the
+ * counter's redraws and the recovery notices (RECOVERY_NOTICE_RE) are
+ * skipped: the last line that says something is the one kept.
  */
-function lastMeaningfulLine(text: string): string {
-  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+export function lastMeaningfulLine(text: string): string {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line
+      && !CLOSE_RECEIPT_RE.test(line)
+      && !PROGRESS_REDRAW_RE.test(line)
+      && !RECOVERY_NOTICE_RE.test(line));
   return lines.length ? lines[lines.length - 1].slice(0, 300) : "";
 }
 
@@ -1825,19 +2596,20 @@ type PassOutcome =
  * One indexing pass, however it is performed.
  *
  * The whole point of the interface is that everything AROUND a pass — the
- * decline, the lock, the run-state file, the liveness reconcile, the two-hour
- * budget, the cache invalidation and the reload behind it — is written once and
- * is the same on both editions. Only the work in the middle differs.
+ * decline, the lock, the run-state file, the liveness reconcile, the stall
+ * watchdog, the cache invalidation and the reload behind it — is written once
+ * and is the same on both editions. Only the work in the middle differs.
  */
 interface IndexPass {
   /**
-   * Recorded as `childPid`, which `acquireRunLock` checks with
-   * `processIsAlive`. The OpenClaw arm records the indexer's own pid. The local
-   * arm records THIS process, which is the same fact for a pass that runs
-   * inside it: while the web server is up the run is going, and a run lost to a
+   * Recorded as `childPid` (with its `childStartKey`), which the lock claim
+   * checks with `runIsAlive`. The OpenClaw arm records the indexer's own pid —
+   * the CURRENT one, after a retry (see startOpenclawPass). The local arm
+   * records THIS process, which is the same fact for a pass that runs inside
+   * it: while the web server is up the run is going, and a run lost to a
    * restart reads dead and is reconciled as interrupted — exactly as before.
    */
-  pid: number;
+  readonly pid: number;
   /** Settles when the pass has ended, whatever became of it. */
   ended: Promise<PassOutcome>;
   /** Give up on it. Not the same as failing: the caller decides what to say. */
@@ -1863,12 +2635,163 @@ function ptyHost(): string | null {
   return null;
 }
 
+/** How long an exited indexer's pipes may stay open under a descendant before they are let go. */
+const PIPES_AFTER_EXIT_MS = 10_000;
+
 /** How often the OpenClaw arm reads its progress. `publishProgress` throttles the writes. */
 const OPENCLAW_PROGRESS_POLL_MS = 1_000;
+/**
+ * The same reading off a terminal, where there are no counts to SHOW but the
+ * stall watchdog still has to see the pass move: the chunks in the index it is
+ * writing, on a slower clock — it is a COUNT over the whole index, on the web
+ * server's event loop — and never drawn on the card.
+ */
+const OPENCLAW_ACTIVITY_POLL_MS = 15_000;
 
-function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgressReporter): IndexPass {
+/**
+ * How far a pass has got, on its way to the card and the stall watchdog.
+ * `shown: false` is for the watchdog alone: off a terminal the OpenClaw arm
+ * has a chunk count but no file counts, and a bar with numbers that never move
+ * would be a claim the box cannot back.
+ */
+type PassProgressReporter = (progress: LocalIndexProgress, shown?: boolean) => void;
+
+/**
+ * OpenClaw's memory workspace lock (memory-core `short-term-locks`), named in
+ * the error a pass gives up with when another process holds it (TASK-2431).
+ *
+ * A pass that dies holding it — ended by a stop or by the stall watchdog, the
+ * OOM killer — leaves the entry behind. memory-core takes over an entry only
+ * once it is more than 60 s old AND its owner is dead, and waits only 10 s for
+ * it, so a pass started inside that minute exits 1 with "Timed out waiting for
+ * memory workspace lock … (held by <the dead pid>)". That is the failure the
+ * box logged as `clean-close receipt: active-leases`: the receipt is only the
+ * last thing the CLI prints (see CLOSE_RECEIPT_RE). The agent-database lease the
+ * dead pass leaves too is not the problem — the next pass reaps it itself
+ * ("stale lease: owner-pid-dead"). Waiting the minute out and running the pass
+ * again is the recovery; a holder that is still alive (a gateway still on
+ * its way down) is waited for the same way.
+ */
+const WORKSPACE_LOCK_HELD_RE = /Timed out waiting for memory workspace lock/;
+/** Past memory-core's 60 s, with room for the CLI's boot. */
+const DEFAULT_WORKSPACE_LOCK_RETRY_MS = 65_000;
+/** Retries after the first attempt, before the pass is let fail. */
+const WORKSPACE_LOCK_RETRIES = 2;
+/** How often the wait between two attempts tells the stall watchdog it is waiting on purpose. */
+const WORKSPACE_LOCK_WAIT_BEAT_MS = 1_000;
+
+/** Overridable for tests only: nothing a test can wait out takes 65 s. */
+function workspaceLockRetryMs(): number {
+  const parsed = Number(process.env.CLAWKEEP_MEMORY_LOCK_RETRY_MS?.trim() || NaN);
+  return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 10 * 60_000 ? parsed : DEFAULT_WORKSPACE_LOCK_RETRY_MS;
+}
+
+function workspaceLockWasHeld(outcome: PassOutcome, tail: string): boolean {
+  return outcome.kind === "exit" && outcome.signal === null && outcome.code !== null && outcome.code !== 0
+    && WORKSPACE_LOCK_HELD_RE.test(tail);
+}
+
+/**
+ * Runs the OpenClaw pass, and runs it again when the CLI gave up on a
+ * memory workspace lock that someone else holds — up to WORKSPACE_LOCK_RETRIES
+ * times, WORKSPACE_LOCK_RETRY_MS apart (see WORKSPACE_LOCK_HELD_RE). One pass
+ * to the caller: `ended` is the last attempt's, `abandon` reaches whichever
+ * attempt is current or the wait between two, and `onRespawn` names the new
+ * attempt's process so the record and the liveness check follow it. Through
+ * the wait the record still names the attempt that has exited; what keeps a
+ * reader elsewhere from taking the run for lost then is `supervisorPid`. The
+ * wait is told to the stall watchdog all through (`onWaiting`): it is the pass
+ * doing what it should, not a pass that has hung, and a stall window set
+ * shorter than it would otherwise end the pass in the middle of it.
+ */
+function startOpenclawPass(
+  mode: MemoryIndexMode,
+  onProgress: PassProgressReporter,
+  agentId: string,
+  stallMs: number,
+  onRespawn: (pid: number) => void,
+  onWaiting: () => void,
+): IndexPass {
+  let current = startOpenclawAttempt(mode, onProgress, agentId, stallMs, onWaiting);
+  let abandoned = false;
+  let wake: (() => void) | null = null;
+  const ended = (async (): Promise<PassOutcome> => {
+    for (let retry = 1; ; retry += 1) {
+      const outcome = await current.ended;
+      if (abandoned || retry > WORKSPACE_LOCK_RETRIES || !workspaceLockWasHeld(outcome, current.tail())) return outcome;
+      const waitMs = workspaceLockRetryMs();
+      console.warn(
+        `[clawkeep-memory] ${mode} index pass found OpenClaw's memory workspace lock held`
+        + ` (a pass that ended without releasing it, or the gateway's own memory work);`
+        + ` running it again in ${Math.round(waitMs / 1000)} s (${retry}/${WORKSPACE_LOCK_RETRIES})`,
+      );
+      // Told to the watchdog all through the wait, not only at its two ends: a
+      // window shorter than the wait would otherwise fire inside it.
+      onWaiting();
+      const beat = setInterval(onWaiting, WORKSPACE_LOCK_WAIT_BEAT_MS);
+      beat.unref?.();
+      try {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, waitMs);
+          wake = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+      } finally {
+        clearInterval(beat);
+        wake = null;
+      }
+      if (abandoned) return outcome;
+      onWaiting();
+      try {
+        current = startOpenclawAttempt(mode, onProgress, agentId, stallMs, onWaiting);
+      } catch (error) {
+        // `spawn` throws at once for some failures (ENOMEM, E2BIG) rather
+        // than emitting "error". The pass ends on it like on any other end,
+        // so `finish` still settles the record and frees the lock.
+        return { kind: "threw", error };
+      }
+      onRespawn(current.pid);
+    }
+  })();
+  return {
+    get pid() { return current.pid; },
+    ended,
+    abandon: () => {
+      abandoned = true;
+      wake?.();
+      current.abandon();
+    },
+    tail: () => current.tail(),
+  };
+}
+
+/**
+ * Starts `openclaw memory index --agent <agentId>` (`--force` for a full pass)
+ * under the lock every `memory index` on the box takes. Where there is a
+ * terminal to run it on, its progress comes from the counts it prints there
+ * and from that agent's own database.
+ */
+function startOpenclawAttempt(
+  mode: MemoryIndexMode,
+  onProgress: PassProgressReporter,
+  agentId: string,
+  stallMs: number,
+  /** The index was written to: progress for the stall watchdog, whatever the counts say. */
+  onActivity: () => void,
+): IndexPass {
   const host = ptyHost();
-  const args = ["memory", "index", "--agent", "main"];
+  // The environment the pass is spawned with, so the database watched is the
+  // one its pinned state directory names. The scratch copies already there
+  // are listed BEFORE the spawn: the one this attempt makes is the new name,
+  // whatever the wall clock did (see openclaw-index-progress.ts), and a list
+  // taken after the spawn could already hold it.
+  const dbPath = openclawAgentDbPath(agentId, openclawEnv());
+  const preexisting = scratchIndexNames(dbPath);
+  // The agent the status reads (`openclawDefaultAgentId`), so the card's
+  // counts and the pass that moves them are about the same index.
+  const args = ["memory", "index", "--agent", agentId];
   if (mode === "full") args.push("--force");
   // `--verbose` is what selects the reporter's `line` face — the one that
   // prints the counts. Only asked for where there is a terminal to print them
@@ -1879,7 +2802,7 @@ function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgress
   //
   // `--no-fork` is load-bearing, not tidiness. util-linux `flock` defaults to
   // forking the command and waiting on it, so the process under supervision
-  // would be the WRAPPER: killing it on the timeout or on a failed state write
+  // would be the WRAPPER: killing it on a stop or on a failed state write
   // would leave `openclaw memory index` running unsupervised while the lock it
   // was holding is released with the wrapper — the exact opposite of what both
   // of those paths are trying to achieve. With `--no-fork` flock execs into
@@ -1921,24 +2844,32 @@ function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgress
   }
   // Files come from the reporter, chunks from the index being written; the
   // two are joined here, on a clock rather than per write, because the chunk
-  // count is a database read. Off a terminal nothing is published at all and
+  // count is a database read. Off a terminal nothing is SHOWN and
   // `run.progress` stays null — a bar with numbers that never move would be a
-  // claim the box cannot back.
-  let poll: NodeJS.Timeout | null = null;
-  if (host) {
-    // The environment the pass was spawned with, so the database watched is
-    // the one its pinned state directory names.
-    const dbPath = openclawAgentDbPath(openclawEnv());
-    const since = Date.now();
-    let chunks = 0;
-    poll = setInterval(() => {
-      const counts = reader.latest();
-      const counted = countIndexChunks(dbPath, since, { rebuild: mode === "full" });
-      if (counted !== null) chunks = counted;
-      onProgress({ filesDone: counts?.filesDone ?? 0, filesTotal: counts?.filesTotal ?? 0, chunks });
-    }, OPENCLAW_PROGRESS_POLL_MS);
-    poll.unref();
-  }
+  // claim the box cannot back — but the chunks are still counted, slower, for
+  // the stall watchdog (TASK-2431).
+  const since = Date.now();
+  const readAs = { rebuild: mode === "full", preexisting };
+  let chunks = 0;
+  /** The write mark at the last reading; `undefined` before the first. */
+  let lastWrite: string | null | undefined;
+  let poll: NodeJS.Timeout | null = setInterval(() => {
+    const counts = host ? reader.latest() : null;
+    const counted = countIndexChunks(dbPath, since, readAs);
+    if (counted !== null) chunks = counted;
+    onProgress({ filesDone: counts?.filesDone ?? 0, filesTotal: counts?.filesTotal ?? 0, chunks }, host !== null);
+    // A commit that moved no count — chunks replaced one for one — is
+    // progress all the same, and so is a scratch index appearing where the
+    // last reading found none; an index nobody writes keeps its mark. The
+    // first reading is only the baseline.
+    const written = indexWriteMark(dbPath, since, readAs);
+    if (written !== null && lastWrite !== undefined && written !== lastWrite) onActivity();
+    lastWrite = written;
+    // Off a terminal, inside the stall window however short it is set: a
+    // window shorter than the clock would end a pass that is writing chunks
+    // before its first reading.
+  }, host ? OPENCLAW_PROGRESS_POLL_MS : Math.min(OPENCLAW_ACTIVITY_POLL_MS, Math.max(250, Math.floor(stallMs / 4))));
+  poll.unref();
   const stopPolling = () => {
     if (poll) clearInterval(poll);
     poll = null;
@@ -1949,15 +2880,39 @@ function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgress
   // "running" with a dead pid, and the reconcile later called it interrupted
   // — the one outcome `-E 75` exists to avoid. A spawn error is emitted on
   // the next tick, which without a listener is an unhandled event.
+  /** See the `exit` listener below. */
+  let pipesOpen: NodeJS.Timeout | undefined;
+  let draining: NodeJS.Timeout | undefined;
   const ended = new Promise<PassOutcome>((resolve) => {
     child.once("error", (err) => {
       stopPolling();
       resolve({ kind: "exit", code: (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1, signal: null });
     });
     child.once("close", (code, signal) => {
+      clearTimeout(pipesOpen);
+      clearInterval(draining);
       stopPolling();
       resolve({ kind: "exit", code, signal });
     });
+  });
+  // `close` waits for the child's pipes as well as its exit, and a descendant
+  // that inherited them can hold them open long after the indexer is gone.
+  // Once the indexer itself has exited, its pipes (and the reader on them)
+  // are let go PIPES_AFTER_EXIT_MS later, which closes them and ends the
+  // attempt with the exit's own code. Never while the indexer still runs.
+  child.once("exit", () => {
+    // The indexer is done; what is left is its pipes draining, which is not
+    // a pass that stopped moving. Told to the stall watchdog until `close`
+    // (at most PIPES_AFTER_EXIT_MS), so a window shorter than the drain does
+    // not call an indexer that exited 0 stalled.
+    onActivity();
+    draining = setInterval(onActivity, 1_000);
+    draining.unref?.();
+    pipesOpen = setTimeout(() => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    }, PIPES_AFTER_EXIT_MS);
+    pipesOpen.unref?.();
   });
   return {
     pid: child.pid ?? 0,
@@ -1973,6 +2928,7 @@ function startOpenclawPass(mode: MemoryIndexMode, onProgress: LocalIndexProgress
 function startLocalPass(
   mode: MemoryIndexMode,
   onProgress: LocalIndexProgressReporter,
+  onHeartbeat: () => void,
   mayDiscard: boolean,
 ): IndexPass {
   const controller = new AbortController();
@@ -1984,7 +2940,7 @@ function startLocalPass(
   //
   // `mayDiscard` is false for the schedule: the plan's reading can be minutes
   // old, so the pass re-checks the store itself before it empties anything.
-  const ended = runLocalIndexPass(mode, controller.signal, onProgress, { mayDiscard }).then(
+  const ended = runLocalIndexPass(mode, controller.signal, onProgress, { mayDiscard, onHeartbeat }).then(
     (result): PassOutcome => {
       // The pass's own numbers exist nowhere else — the run record keeps a
       // status and a duration, not a count — so they are said once, here.
@@ -2059,6 +3015,10 @@ function localFailure(error: unknown): { error: string; errorCode: MemoryRunErro
  * resolveIndexMode). It starts nothing, so it takes no lock and writes no run
  * record — the status banner already says what the owner has to do.
  *
+ * The fourth is `gateway_indexes`: an incremental pass on OpenClaw, which the
+ * running gateway does by itself. The schedule's slot always; the owner's
+ * press while the gateway is up. It starts nothing and stops nothing either.
+ *
  * `embedderChanged` is the one pass the switch does not govern, and only on
  * the OpenClaw arm: the rebuild the box owes the CORE'S OWN index after it
  * wrote a new embedder into `memory.search` itself. That index exists whether
@@ -2069,27 +3029,60 @@ function localFailure(error: unknown): { error: string; errorCode: MemoryRunErro
  * with no regard for the switch, and so does the gateway pre-start's for a
  * change of the index's settings. Where ClawBox is the indexer its index holds
  * only the folders the owner chose, so there the switch still decides.
+ *
+ * `forAgent` is for a caller whose reason to index is a reading about one
+ * agent (the keyword-only rebuild): when the box's default agent is no longer
+ * that one by the time the pass is planned, nothing starts and the answer is
+ * `agent_changed` — a verdict about one agent's index never forces another's.
  */
 export async function startMemoryIndex(
   requested: MemoryIndexMode,
   trigger: MemoryIndexTrigger = "manual",
-  options: { embedderChanged?: boolean } = {},
-): Promise<{ accepted: boolean; run: MemoryRunState; declined?: "running" | "disabled" | "full_reindex_required" }> {
+  options: { embedderChanged?: boolean; forAgent?: string } = {},
+): Promise<{
+  accepted: boolean;
+  run: MemoryRunState;
+  declined?: "running" | "disabled" | "full_reindex_required" | "agent_changed" | "gateway_indexes";
+}> {
   const current = await readMemoryRunState();
   if (current.status === "running") return { accepted: false, declined: "running", run: current };
 
-  const { mode, fellBack, heldBack } = await planIndexPass(requested, trigger);
+  // The agent this pass is about, bound before the plan (the read never
+  // rejects): the reading that decides the mode and the pass that runs it
+  // answer for the same agent, so a default re-pointed in between cannot have
+  // the old agent's empty index send `--force` to the new one's populated
+  // index. The plan may wait seconds on a probe, so the id is read again after
+  // it, and a re-point inside that wait is planned once more for the agent
+  // the box means now. Read before the run is on record, too, so nothing
+  // between the state write and the spawn below waits on the disk.
+  let agentId = await openclawDefaultAgentId();
+  let plan = await planIndexPass(requested, trigger, agentId);
+  const repointed = await openclawDefaultAgentId();
+  if (repointed !== agentId) {
+    agentId = repointed;
+    plan = await planIndexPass(requested, trigger, agentId);
+  }
+  const { mode, fellBack, heldBack } = plan;
+  if (options.forAgent !== undefined && options.forAgent !== agentId) {
+    return { accepted: false, declined: "agent_changed", run: await readMemoryRunState() };
+  }
   if (heldBack) return { accepted: false, declined: "full_reindex_required", run: await readMemoryRunState() };
-  if (!await acquireRunLock()) {
-    return { accepted: false, declined: "running", run: await readMemoryRunState() };
+  // OpenClaw 2026.11.3 runs `memory index` only with the gateway stopped, and
+  // its running gateway keeps the index current by itself (it syncs on file
+  // changes and on search, docs/cli/memory.md). An incremental pass is that
+  // same work, so on OpenClaw nothing stops the chat for it: not the
+  // schedule's slot, and not the owner's "Index now" while a gateway is up
+  // to do it. That press used to stop the assistant, wait a minute for a stop
+  // that takes five on a gateway in use, give up and start it again — six
+  // minutes down, nothing indexed, three times on the owner's box on
+  // 2026-11-15. With no gateway running there is nobody else to do the work
+  // and nothing to stop, so the owner's pass runs. A FULL pass (the owner's
+  // rebuild, and the one the box itself needs) still runs, offline.
+  if (mode === "incremental" && !openclawIsAbsent() && (trigger === "schedule" || await openclawGatewayRuns())) {
+    return { accepted: false, declined: "gateway_indexes", run: await readMemoryRunState() };
   }
   const coreIndexRebuild = options.embedderChanged === true && !openclawIsAbsent();
-  if (!coreIndexRebuild && !(await getMemoryShardEnabled())) {
-    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
-    return { accepted: false, declined: "disabled", run: await readMemoryRunState() };
-  }
-
-  const startedAtMs = Date.now();
+  let startedAtMs = Date.now();
   let state: PersistedMemoryRunState = {
     status: "running",
     mode,
@@ -2101,16 +3094,58 @@ export async function startMemoryIndex(
     errorCode: "",
     progress: null,
     childPid: 0,
+    childStartKey: "",
+    progressAtMs: 0,
+    // Written with the very first record, before the spawn (see the field).
+    supervisorPid: process.pid,
+    supervisorStartKey: processStartKey(process.pid),
   };
-  try {
-    await writeRunState(state);
-  } catch (err) {
-    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
-    throw err;
-  }
+  // The lock and the record that claims it, in one section (TASK-2431): a
+  // second start that judged the lock between the two would find the previous
+  // run's settled record, take the fresh lock for a stale one, and start a
+  // second pass beside this one.
+  const claim = await runRecordSection(async (): Promise<"claimed" | "running" | "disabled"> => {
+    if (!await acquireRunLockInSection()) return "running";
+    if (!coreIndexRebuild && !(await getMemoryShardEnabled())) {
+      await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
+      return "disabled";
+    }
+    // The record carries the time the claim was really made.
+    startedAtMs = Date.now();
+    state = { ...state, startedAtMs };
+    try {
+      await writeRunState(state);
+    } catch (err) {
+      await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true });
+      throw err;
+    }
+    return "claimed";
+  });
+  if (claim !== "claimed") return { accepted: false, declined: claim, run: await readMemoryRunState() };
+  // Every stamp this claim's record carries until the pass is supervised: a
+  // reader in this process takes the claim for going by them (see
+  // runningRecordVerdict), never by the record's age.
+  const claimStamps = new Set<number>([startedAtMs]);
+  startingClaims().add(startedAtMs);
+  const endStartClaim = () => {
+    for (const stamp of claimStamps) startingClaims().delete(stamp);
+    claimStamps.clear();
+  };
+  /**
+   * A start that failed before its pass was supervised, settled once the
+   * gateway has been started again (the claim stays registered all through
+   * that start, so no reader here frees the lock under it): the record —
+   * if it is still this claim's — and the claim's end, in one section.
+   */
+  const failStart = () => runRecordSection(async () => {
+    const onRecord = await readPersistedRunState();
+    const ours = onRecord.status === "running" && claimStamps.has(onRecord.startedAtMs);
+    endStartClaim();
+    if (ours) await markInterrupted(onRecord);
+  }).catch(() => undefined);
 
   // The one line that differs by edition. Everything above and below it — the
-  // decline, the lock, the state file, the reconcile, the budget, the cache —
+  // decline, the lock, the state file, the reconcile, the watchdog, the cache —
   // is the same work whoever does the indexing.
   // How far the pass has got, on its way to the card's bar.
   //
@@ -2124,71 +3159,327 @@ export async function startMemoryIndex(
   let settled = false;
   let reportedAtMs = 0;
   let reportInFlight = false;
-  /** The newest progress write, for `finish` to wait behind. */
+  /** The newest write of the running record, for `finish` to wait behind. */
   let progressWritten: Promise<void> = Promise.resolve();
-  const publishProgress = (progress: LocalIndexProgress) => {
-    if (settled || reportInFlight) return;
+  /**
+   * Writes the running record as it is NOW, after every write before it.
+   * Never worth failing a run over. `finish` waits on `progressWritten` before
+   * it writes the settled record: `writeJsonAtomic` is a write-then-rename with
+   * no ordering between two calls, so a report still in flight would otherwise
+   * land after the final state and put a running run's bar back over it — for
+   * good, since nothing writes the file again. Chained for the same reason, so
+   * a retry's new pid (see startOpenclawPass) cannot be overtaken by an older
+   * progress write naming the process before it.
+   */
+  const persistState = (): Promise<void> => {
+    progressWritten = progressWritten
+      .then(() => writeRunState(state))
+      .catch(() => { /* the next write tries again */ });
+    return progressWritten;
+  };
+  /** A report arrived while a write was on its way: write once more after it. */
+  let reportWaiting = false;
+  const persistThrottled = () => {
+    if (settled) return;
+    if (reportInFlight) {
+      reportWaiting = true;
+      return;
+    }
     const now = Date.now();
     // The first report always lands, so the bar gets its denominator the
     // moment the scan has one, whatever the clock says.
     if (reportedAtMs && now - reportedAtMs < PROGRESS_WRITE_EVERY_MS) return;
     reportedAtMs = now;
     reportInFlight = true;
-    state = { ...state, progress };
-    // Never worth failing a run over. `finish` waits on this handle before it
-    // writes the settled record: `writeJsonAtomic` is a write-then-rename with
-    // no ordering between two calls, so a report still in flight would
-    // otherwise land after the final state and put a running run's bar back
-    // over it — for good, since nothing writes the file again.
-    progressWritten = writeRunState(state)
-      .catch(() => { /* the next report tries again */ })
-      .finally(() => { reportInFlight = false; });
+    reportWaiting = false;
+    void persistState().finally(() => {
+      reportInFlight = false;
+      // What came in while the disk was slow is not lost until the next
+      // report: a pass that goes quiet right after (a stall, a long file)
+      // would otherwise leave the record — `progressAtMs` included — behind.
+      if (reportWaiting && !settled) {
+        reportWaiting = false;
+        reportedAtMs = 0;
+        persistThrottled();
+      }
+    });
   };
+  // TASK-2431: the stall watchdog, and the record's own note of when the pass
+  // last moved for a reader in another process. Created once the pass is on
+  // record, below; a report before that only moves `progressAtMs`.
+  let watchdog: StallWatchdog | null = null;
+  let progressAtMs = 0;
+  let lastMark = "";
+  const noteMoved = () => {
+    if (settled) return;
+    progressAtMs = Date.now();
+    watchdog?.touch();
+    state = { ...state, progressAtMs };
+    persistThrottled();
+  };
+  const publishProgress: PassProgressReporter = (progress, shown = true) => {
+    if (settled) return;
+    // The record carries the counts and nothing else: the reporter's object
+    // is the pass's own and may grow fields no screen should get.
+    if (shown) {
+      // The bar's first figures always land, whatever wrote the record just
+      // before (a heartbeat from the walk carries no figures to show).
+      if (!state.progress) reportedAtMs = 0;
+      state = {
+        ...state,
+        progress: { filesDone: progress.filesDone, filesTotal: progress.filesTotal, chunks: progress.chunks },
+      };
+    }
+    const mark = progressMark(progress);
+    if (mark === lastMark) {
+      persistThrottled();
+      return;
+    }
+    lastMark = mark;
+    noteMoved();
+  };
+  const stallMs = indexStallMs();
   const localArm = openclawIsAbsent();
-  const pass = localArm
-    ? startLocalPass(mode, publishProgress, trigger !== "schedule")
-    : startOpenclawPass(mode, publishProgress);
-  if (pass.pid) settlingPasses().add(pass.pid);
-  state = { ...state, childPid: pass.pid };
+  /** Every process this pass has run as: one, unless the OpenClaw arm retried. */
+  const passPids = new Set<number>();
+  // OpenClaw 2026.11.3: `memory index` needs exclusive offline ownership of the
+  // state, so the pass runs with the gateway stopped through its service owner
+  // and starts it again however the pass ends (done, failed, stopped,
+  // abandoned).
+  // Ends the run claim's heartbeat (the OpenClaw arm below); a no-op otherwise.
+  let releaseClaim: () => Promise<void> = async () => {};
+  if (!localArm) {
+    // The stop can take minutes (a gateway in use drains until its unit's
+    // stop timeout, and the stop is waited out), far longer than a run may sit
+    // with no child before the reconcile calls it interrupted and frees the
+    // lock — so the claim is re-stamped while it waits.
+    // Every stamp this call writes is remembered: the run on record is this
+    // call's only while it carries one of them (another run's record carries
+    // its own start time).
+    const ourStamps = new Set<number>([state.startedAtMs]);
+    // The claim's writes run one after another, so none still in flight can
+    // land over a record written after it; the heartbeat keeps going until the
+    // pass has been spawned, so a stalled write cannot let the claim lapse
+    // between the ownership check and the spawn.
+    let claimWrites: Promise<void> = Promise.resolve();
+    const writeClaim = (next: PersistedMemoryRunState) => {
+      claimWrites = claimWrites.then(() => writeRunState(next)).catch(() => { /* the next stamp tries again */ });
+      return claimWrites;
+    };
+    const stamp = () => {
+      const at = Math.max(Date.now(), state.startedAtMs + 1);
+      ourStamps.add(at);
+      claimStamps.add(at);
+      startingClaims().add(at);
+      state = { ...state, startedAtMs: at };
+      return state;
+    };
+    let keepClaim: ReturnType<typeof setInterval> | null = setInterval(() => { void writeClaim(stamp()); }, 10_000);
+    releaseClaim = async () => {
+      if (keepClaim) clearInterval(keepClaim);
+      keepClaim = null;
+      await claimWrites;
+    };
+    try {
+      await stopOpenclawGatewayForOffline();
+    } catch (err) {
+      await releaseClaim();
+      await startOpenclawGatewayAfterOffline().catch(() => undefined);
+      await failStart();
+      throw err;
+    }
+    // Still this run's? Every claim write issued so far has landed first;
+    // if another run has taken the lock over, the gateway goes back and this
+    // call steps aside.
+    await claimWrites;
+    const now = await readPersistedRunState();
+    if (now.status !== "running" || !ourStamps.has(now.startedAtMs)) {
+      await releaseClaim();
+      endStartClaim();
+      await startOpenclawGatewayAfterOffline().catch(() => undefined);
+      return { accepted: false, declined: "running", run: await readMemoryRunState() };
+    }
+    // The pass starts now; the stop's own time is not the pass's.
+    await writeClaim(stamp());
+    startedAtMs = state.startedAtMs;
+  }
+  let pass: IndexPass;
   try {
-    await writeRunState(state);
+    pass = localArm
+      ? startLocalPass(mode, publishProgress, noteMoved, trigger !== "schedule")
+      : startOpenclawPass(mode, publishProgress, agentId, stallMs, (pid) => {
+        // An attempt whose spawn failed has no pid (its "error" ends it at
+        // once): the record keeps the last real one, which stays in
+        // `settlingPasses` until `finish`, so no reader takes the run for lost
+        // in between. The key is read now, while the new attempt is certainly
+        // this one (see below).
+        if (settled || !pid) return;
+        passPids.add(pid);
+        settlingPasses().add(pid);
+        state = { ...state, childPid: pid, childStartKey: processStartKey(pid) };
+        void persistState();
+      }, noteMoved);
+  } catch (err) {
+    await releaseClaim();
+    if (!localArm) await startOpenclawGatewayAfterOffline().catch(() => undefined);
+    await failStart();
+    throw err;
+  } finally {
+    // Spawned (or not): the claim's last write lands before the record names the child.
+    await releaseClaim();
+  }
+  // Set once the pass's own work is over: what follows on the OpenClaw arm is
+  // the gateway's start, which moves no count, and the stall watchdog must not
+  // read that wait as a pass that stopped moving — nor may an owner's stop
+  // that arrives in it turn a pass that finished into a stopped one.
+  let workEnded = false;
+  // A pass given up on (the owner's stop, the stall watchdog) is settled even
+  // if it never ends — see `giveUp` below.
+  let abandonGrace: NodeJS.Timeout | null = null;
+  let settleAbandoned: ((outcome: PassOutcome) => void) | null = null;
+  const abandonedEnd = new Promise<PassOutcome>((resolve) => { settleAbandoned = resolve; });
+  if (!localArm) {
+    // However the pass ended, the assistant is started again — once more after
+    // a pause if the first start fails — and a pass whose assistant could not
+    // be brought back is recorded as failed, not succeeded. An attempt that
+    // never ends after it was given up on counts as ended here too, so the
+    // gateway's start is inside the run, and the run lock is not freed (for a
+    // next pass to stop the gateway again) until that start is over.
+    const inner = pass;
+    const ended = Promise.race([inner.ended, abandonedEnd]).then(async (outcome): Promise<PassOutcome> => {
+      workEnded = true;
+      watchdog?.stop();
+      let lastError: unknown = null;
+      for (let tryNo = 0; tryNo < 2; tryNo += 1) {
+        try {
+          await startOpenclawGatewayAfterOffline();
+          return outcome;
+        } catch (err) {
+          lastError = err;
+          console.error("[clawkeep-memory] the gateway did not start again after the index pass:", err instanceof Error ? err.message : err);
+          if (tryNo === 0) await new Promise((resolve) => setTimeout(resolve, gatewayRestartRetryPauseMs));
+        }
+      }
+      return { kind: "threw", error: new Error(`The assistant could not be started again after the index pass: ${lastError instanceof Error ? lastError.message : String(lastError)}`) };
+    });
+    // A getter, not a copy: after a retry the pass is a new process.
+    pass = {
+      get pid() { return inner.pid; },
+      ended,
+      abandon: () => inner.abandon(),
+      tail: () => inner.tail(),
+    };
+  }
+  if (pass.pid) {
+    passPids.add(pass.pid);
+    settlingPasses().add(pass.pid);
+  }
+  // The key is read here, while the child is certainly this one: it was
+  // spawned a moment ago and its end has not been collected. A child already
+  // gone answers "", and that record is kept alive by `settlingPasses` alone
+  // until `finish` has written how it ended.
+  state = { ...state, childPid: pass.pid, childStartKey: processStartKey(pass.pid) };
+  try {
+    // The first write that names the pass, which must land (see the catch);
+    // later writes queue behind it.
+    // Behind any progress write already on its way, so none can land after
+    // it and leave the record without the child's name.
+    const named = progressWritten.then(() => writeRunState(state));
+    progressWritten = named.catch(() => { /* answered by the await below */ });
+    await named;
   } catch (err) {
     // Without this, the pass keeps indexing unsupervised while the lock stays
     // on disk with childPid 0; LOCK_START_GRACE_MS later the reconcile calls
     // the live run interrupted and frees the lock, and a second index starts
     // on top of the first. `finish` is not attached yet, so the pass's end
     // cannot write a final state over this cleanup.
+    settled = true;
     pass.abandon();
-    settlingPasses().delete(pass.pid);
-    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
+    // A report queued behind the naming write still runs: drained before the
+    // lock goes, so no stale "running" record lands over a next pass's.
+    await progressWritten.catch(() => undefined);
+    // On the OpenClaw arm the gateway is started again behind the attempt's
+    // end (SIGKILLed TERMINATE_GRACE_MS after the SIGTERM at the latest), and
+    // the lock is held until that start is over: a next pass taking it
+    // earlier would have its offline hold cleared by this start.
+    // Bounded like any pass given up on: an attempt whose pipes never close
+    // is counted as ended ABANDON_SETTLE_MS on, and the gateway started.
+    if (!localArm) {
+      const bound = setTimeout(() => settleAbandoned?.({ kind: "exit", code: null, signal: null }), ABANDON_SETTLE_MS);
+      bound.unref?.();
+      await pass.ended.catch(() => undefined);
+      clearTimeout(bound);
+    }
+    // The claim ends in the same turn as the lock: a reader queued before it
+    // still sees the claim and declines, one queued after finds no lock.
+    await runRecordSection(async () => {
+      endStartClaim();
+      for (const pid of passPids) settlingPasses().delete(pid);
+      await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
+    });
     throw err;
   }
-  const supervised: SupervisedPass = { startedAtMs, abandon: () => pass.abandon(), stopRequested: false };
+  // Every way a run is given up on — the owner's stop, the stall watchdog —
+  // comes through here, and a pass given up on is settled even if it never
+  // ends: the OpenClaw arm is SIGKILLed TERMINATE_GRACE_MS after the SIGTERM,
+  // but the local arm can only stop at its next check of the signal, and a
+  // pass that never reached one must not hold the lock for ever.
+  const giveUp = () => {
+    pass.abandon();
+    if (abandonGrace) return;
+    abandonGrace = setTimeout(() => {
+      console.warn(
+        `[clawkeep-memory] the ${mode} index pass had not ended ${Math.round(ABANDON_SETTLE_MS / 1000)} s`
+        + " after it was given up on; recording it as ended",
+      );
+      settleAbandoned?.({ kind: "exit", code: null, signal: null });
+    }, ABANDON_SETTLE_MS);
+    abandonGrace.unref?.();
+  };
+  const supervised: SupervisedPass = {
+    startedAtMs,
+    abandon: giveUp,
+    stopRequested: false,
+    get workEnded() { return workEnded; },
+  };
   supervisedPass().current = supervised;
+  // Supervised from here on: `supervisedHere` answers for the run.
+  endStartClaim();
   // Deliberately no cache invalidation here: nothing the probe reports changes
   // until the pass ends, and dropping the reading at spawn time made the
   // panel's very next read block on the cold probe for the whole run.
 
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    pass.abandon();
-  }, INDEX_TIMEOUT_MS);
+  // NO CAP on how long a pass runs (TASK-2431; see the note above
+  // LOCK_START_GRACE_MS). A pass is given up on only once it has stopped
+  // MOVING for the stall window — see memory-index-stall.ts.
+  let stalled = false;
+  watchdog = startStallWatchdog(stallMs, () => {
+    if (workEnded) return;
+    stalled = true;
+    giveUp();
+  });
   const finish = async (outcome: PassOutcome) => {
     // Before anything else: a report that lands after this point would put a
     // running run's bar back over the settled record.
     settled = true;
-    clearTimeout(timer);
+    watchdog?.stop();
+    if (abandonGrace) clearTimeout(abandonGrace);
     if (supervisedPass().current === supervised) supervisedPass().current = null;
     const finishedAtMs = Date.now();
-    const ok = !timedOut && outcome.kind === "exit" && outcome.code === 0;
-    // The timeout first, because it is the one verdict that does not depend on
-    // which arm ran: whatever the pass said on its way out, the budget is what
-    // ended it. After that each arm is worded by its own mapper.
+    // An OpenClaw pass that was given up on is never a success, whatever came
+    // back: on a terminal `script` answers the SIGTERM it passes on with an
+    // exit 0 of its own, and a stopped pass was recorded as "succeeded". The
+    // local arm's outcome is the pass's own word — one that finished before
+    // it reached a check of the signal did finish.
+    const givenUp = stalled || supervised.stopRequested;
+    const ok = outcome.kind === "exit" && outcome.code === 0 && (localArm || !givenUp);
+    // The stall first, because it is the one verdict that does not depend on
+    // which arm ran: whatever the pass said on its way out, the watchdog is
+    // what ended it. After that each arm is worded by its own mapper.
     const mapped = ok
       ? null
-      : timedOut
-        ? TIMED_OUT_FAILURE
+      : stalled
+        ? STALLED_FAILURE
         : supervised.stopRequested
           ? (mode === "full" ? STOPPED_FULL_FAILURE[localArm ? "local" : "openclaw"] : STOPPED_FAILURE)
           : outcome.kind === "threw"
@@ -2196,7 +3487,7 @@ export async function startMemoryIndex(
             : fixedFailure(outcome.code, outcome.signal);
     // The catch-all, and ONLY the catch-all, gives way to the cause the plan
     // already found. Every other verdict above is a fact about how this pass
-    // ended — a timeout, a signal, a missing binary — and stays what it is:
+    // ended — a stall, a signal, a missing binary — and stays what it is:
     // a box whose config the core ignored can still be killed by the OOM
     // killer, and "re-run setup" would be the wrong thing to say about that.
     const failure = mapped && fellBack && mapped.errorCode === "index_failed"
@@ -2206,9 +3497,10 @@ export async function startMemoryIndex(
       const how = outcome.kind === "exit"
         ? `exit ${outcome.code ?? "none"}${outcome.signal ? `, ${outcome.signal}` : ""}`
         : "threw";
+      const why = stalled ? `no progress for ${stallMinutes(stallMs)} min; ` : "";
       console.warn(
         `[clawkeep-memory] ${mode} index run failed (${failure.errorCode}, ${how}): `
-        + `${lastMeaningfulLine(pass.tail()) || "it said nothing"}`,
+        + `${why}${lastMeaningfulLine(pass.tail()) || "it said nothing"}`,
       );
     }
     const finalState: PersistedMemoryRunState = {
@@ -2223,8 +3515,12 @@ export async function startMemoryIndex(
       // counts are the card's own figures by then.
       progress: null,
       childPid: 0,
+      childStartKey: "",
+      progressAtMs: 0,
+      supervisorPid: 0,
+      supervisorStartKey: "",
     };
-    // See `publishProgress`: no report may still be on its way to the file.
+    // See `persistState`: no report may still be on its way to the file.
     await progressWritten;
     // Tried more than once: left unwritten, the record says "running" beside a
     // reaped pid and the next read calls this pass interrupted, whatever it
@@ -2233,22 +3529,28 @@ export async function startMemoryIndex(
     // refuse every later run until the web server restarted, and the reconcile
     // then says "interrupted", which is at worst the owner being told to run
     // it again.
-    for (let attempt = 1; attempt <= SETTLED_WRITE_ATTEMPTS; attempt += 1) {
-      try {
-        await writeRunState(finalState);
-        break;
-      } catch (err) {
-        if (attempt === SETTLED_WRITE_ATTEMPTS) {
-          console.warn(`[clawkeep-memory] could not record how the ${mode} index run ended:`, err);
-        } else {
-          await new Promise((resolve) => setTimeout(resolve, SETTLED_WRITE_RETRY_MS * attempt));
+    // The settled record and the lock's release in one `runRecordSection`
+    // turn (TASK-2431): a start in between would find the settled record,
+    // take the lock for its own, and have it removed under it by this
+    // release.
+    await runRecordSection(async () => {
+      for (let attempt = 1; attempt <= SETTLED_WRITE_ATTEMPTS; attempt += 1) {
+        try {
+          await writeRunState(finalState);
+          break;
+        } catch (err) {
+          if (attempt === SETTLED_WRITE_ATTEMPTS) {
+            console.warn(`[clawkeep-memory] could not record how the ${mode} index run ended:`, err);
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, SETTLED_WRITE_RETRY_MS * attempt));
+          }
         }
       }
-    }
-    // Only now: until the settled record is on disk, a reader must not take
-    // the reaped pid for a lost run.
-    settlingPasses().delete(pass.pid);
-    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
+      // Only now: until the settled record is on disk, a reader must not take
+      // the reaped pid for a lost run.
+      for (const pid of passPids) settlingPasses().delete(pid);
+      await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
+    });
     // Whatever the cache holds now — the reading from before the pass, or one
     // a TTL probe took while the pass was writing the index — predates the
     // index the owner will see. The invalidation alone only marked it stale,
@@ -2260,9 +3562,16 @@ export async function startMemoryIndex(
     invalidateMemoryStatusCache();
     // Refresh behind the finished run rather than on the next read, so the new
     // counts are there by the time the owner looks, not ten seconds after.
-    reloadMemoryStatus().catch(() => { /* the next read tries again */ });
+    // Awaited only so that `memoryPassSettled` resolves after it: nothing
+    // waits on `finish` itself, and the probe starts at this same moment.
+    await reloadMemoryStatus().catch(() => { /* the next read tries again */ });
   };
-  void pass.ended.then(finish);
+  // A pass that rejected instead of ending is settled the same way: left
+  // unhandled, the record would say "running" and the lock stay for good.
+  // The OpenClaw arm's `ended` already gives up on an attempt that never ends
+  // (and then starts the gateway); the local arm's is raced here.
+  passSettling().current = (localArm ? Promise.race([pass.ended, abandonedEnd]) : pass.ended)
+    .then(finish, (error: unknown) => finish({ kind: "threw", error }));
 
   return { accepted: true, run: publicMemoryRunState(state) };
 }
@@ -2283,7 +3592,9 @@ export async function startMemoryIndex(
 export async function stopMemoryIndex(): Promise<{ stopped: boolean; run: MemoryRunState }> {
   const run = await readMemoryRunState();
   const held = supervisedPass().current;
-  if (run.status !== "running" || !held || held.startedAtMs !== run.startedAtMs) return { stopped: false, run };
+  if (run.status !== "running" || !held || held.startedAtMs !== run.startedAtMs || held.workEnded) {
+    return { stopped: false, run };
+  }
   held.stopRequested = true;
   held.abandon();
   return { stopped: true, run };

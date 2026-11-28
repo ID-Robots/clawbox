@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHmac } from "node:crypto";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, statSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -17,9 +20,8 @@ import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/codin
  *  - The wrapper must not leak ANTHROPIC_BASE_URL into anything but its own
  *    child. OpenClaw drives `claude-cli` through the SAME binary, so a global
  *    export reroutes every OpenClaw Claude call to DeepSeek silently.
- *  - The model must follow the plan. ClawBox AI answers 403 for
- *    deepseek-v4-pro below the Max plan, so a hard-wired pro default would
- *    ship a harness that is broken for most owners.
+ *  - The model is ClawBox AI's one model, on every plan (TASK-2261), and an
+ *    explicit CLAUDE_DS_MODEL still wins over it.
  *  - An inherited Anthropic credential must lose. ANTHROPIC_API_KEY outranks
  *    ANTHROPIC_AUTH_TOKEN, so a stale key in the environment would send the
  *    run to Anthropic under a DeepSeek model name.
@@ -265,16 +267,9 @@ describe("effort", () => {
 });
 
 describe("which model the owner actually gets", () => {
-  it("gives a Max box the pro model", () => {
-    // "pro" is the DEVICE tier name for the Max plan — the only tier ClawBox AI
-    // lets reach deepseek-v4-pro.
-    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
-    runWrapper();
-    expect(capturedEnv().ANTHROPIC_MODEL).toBe("deepseek-v4-pro[1m]");
-  });
-
-  it("gives every other plan flash, because the proxy 403s pro below Max", () => {
-    for (const tier of ["flash", "free", ""]) {
+  it("gives every plan the one ClawBox AI model, the Max plan included (TASK-2261)", () => {
+    // "pro" is the DEVICE tier name for the Max plan. It no longer picks a model.
+    for (const tier of ["pro", "flash", "free", ""]) {
       writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: tier });
       runWrapper();
       expect(capturedEnv().ANTHROPIC_MODEL, `tier=${tier || "<unset>"}`).toBe("deepseek-v4-flash");
@@ -308,17 +303,17 @@ describe("which model the owner actually gets", () => {
     expect(capturedEnv().CLAUDE_CODE_SUBAGENT_MODEL).toBe("deepseek-v4-flash");
   });
 
-  it("lets an override win over the plan", () => {
-    runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-pro" });
+  it("lets an override win over the default", () => {
+    runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" });
     const env = capturedEnv();
-    expect(env.ANTHROPIC_MODEL).toBe("deepseek-v4-pro");
-    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("deepseek-v4-pro");
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("deepseek-v4-pro");
+    expect(env.ANTHROPIC_MODEL).toBe("deepseek-v4-flash[1m]");
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("deepseek-v4-flash[1m]");
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("deepseek-v4-flash[1m]");
   });
 
   it("says on screen which model is about to answer", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
-    expect(runWrapper().stderr).toContain("deepseek-v4-pro[1m]");
+    expect(runWrapper().stderr).toContain("deepseek-v4-flash");
   });
 });
 
@@ -333,7 +328,7 @@ describe("which model the owner actually gets", () => {
 describe("the auto-compact window", () => {
   it("gives a 1M model a window of 84% of the 1,048,576 tokens the proxy really serves", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
-    const { status, stderr } = runWrapper();
+    const { status, stderr } = runWrapper({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" });
     expect(status).toBe(0);
     expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe(String(Math.floor(1_048_576 * 84 / 100)));
     expect(stderr).toContain("auto-compact window 880803 tokens");
@@ -352,13 +347,13 @@ describe("the auto-compact window", () => {
     expect(capturedEnv().ANTHROPIC_MODEL).toBe("deepseek-v4-flash");
     expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined();
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
-    runWrapper({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000" });
+    runWrapper({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000", CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" });
     expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("880803");
   });
 
   it("takes an explicit window, or `off` for Claude Code's default", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
-    runWrapper({ CLAUDE_DS_AUTOCOMPACT_WINDOW: "700000" });
+    runWrapper({ CLAUDE_DS_AUTOCOMPACT_WINDOW: "700000", CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" });
     expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("700000");
     runWrapper({ CLAUDE_DS_AUTOCOMPACT_WINDOW: "off" });
     expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined();
@@ -380,6 +375,62 @@ describe("the auto-compact window", () => {
     expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined();
     runWrapper({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_CODE_AUTO_COMPACT_WINDOW: "500000" });
     expect(capturedEnv().CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("500000");
+  });
+});
+
+/**
+ * TASK-2638: a 200k model's runs died of "Autocompact is thrashing" because four
+ * 20k-token reads in one message put ~70k into the context a turn, two turns
+ * from the next compaction. The size of one read is what the wrapper can cut.
+ */
+describe("the read cap of a 200k model", () => {
+  const READ = "CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS";
+  // One launch's environment, never an earlier one's: the dump is removed
+  // first and the launch must have reached the fake `claude`.
+  const launchedEnv = (extraEnv: Record<string, string | undefined> = {}) => {
+    rmSync(envDump, { force: true });
+    const { status, stderr } = runWrapper(extraEnv);
+    expect(status, stderr).toBe(0);
+    return capturedEnv();
+  };
+
+  it("cuts one read to a 25th of the 200k window Claude Code believes", () => {
+    const env = launchedEnv();
+    expect(env.ANTHROPIC_MODEL).toBe("deepseek-v4-flash");
+    expect(env[READ]).toBe("8000");
+  });
+
+  it("leaves a 1M model Claude Code's own default", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
+    expect(launchedEnv({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]" })[READ]).toBeUndefined();
+    // The 8000 an outer 200k session exported must not follow into a nested 1M one.
+    expect(launchedEnv({ CLAUDE_DS_MODEL: "deepseek-v4-flash[1m]", [READ]: "8000" })[READ]).toBeUndefined();
+  });
+
+  it("keeps a smaller cap the runner inherited, and lowers a larger one", () => {
+    expect(launchedEnv({ [READ]: "3000" })[READ]).toBe("3000");
+    expect(launchedEnv({ [READ]: "25000" })[READ]).toBe("8000");
+    expect(launchedEnv({ [READ]: "junk" })[READ]).toBe("8000");
+  });
+
+  it("takes an explicit cap, or `off` for Claude Code's default", () => {
+    expect(launchedEnv({ CLAUDE_DS_READ_CAP: "12000" })[READ]).toBe("12000");
+    expect(launchedEnv({ CLAUDE_DS_READ_CAP: "off", [READ]: "3000" })[READ]).toBeUndefined();
+  });
+
+  it("refuses a cap that is not a number of tokens, before Claude Code starts", () => {
+    rmSync(envDump, { force: true });
+    for (const bad of ["8k", "0", "-1"]) {
+      const { status, stderr } = runWrapper({ CLAUDE_DS_READ_CAP: bad });
+      expect(status, bad).not.toBe(0);
+      expect(stderr, bad).toContain("CLAUDE_DS_READ_CAP must be a number of tokens or 'off'");
+      expect(existsSync(envDump), bad).toBe(false);
+    }
+  });
+
+  it("leaves an Anthropic run exactly as it was", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro", anthropic_api_key: "sk-ant-api03-test-key" });
+    expect(launchedEnv({ CLAUDE_DS_PROVIDER: "anthropic" })[READ]).toBeUndefined();
   });
 });
 
@@ -666,7 +717,7 @@ describe("the provider split", () => {
       ANTHROPIC_AUTH_TOKEN: "claw_test_token",
       ANTHROPIC_BASE_URL: "https://clawbox.com/api/ai/anthropic",
       CLAUDE_CODE_API_BASE_URL: "https://clawbox.com/api/ai/anthropic",
-      ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-pro[1m]",
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-flash[1m]",
       CLAUDE_CONFIG_DIR: path.join(home, ".claude-ds"),
     });
     expect(res.status).toBe(0);
@@ -892,5 +943,162 @@ describe("the optional provider lock", () => {
     const lock = path.join(home, "coding-provider-lock");
     writeFileSync(lock, "clawbox-ai\n", "utf-8");
     expect(runWrapper({ CLAUDE_DS_PROVIDER_LOCK: lock }).status).toBe(0);
+  });
+});
+
+describe("the box's own engine (`local`, TASK-2501 PR-E)", () => {
+  const LOCAL_AI_TOKEN = "fedcba9876543210fedcba9876543210";
+  const routeToken = () => "clawbox-local-" + createHmac("sha256", LOCAL_AI_TOKEN).update("clawbox local coding route v1").digest("hex");
+  let server: Server;
+  let base: string;
+  let engine: { status: number; body: unknown };
+  let seen: Array<{ url: string; auth: string }>;
+
+  beforeEach(async () => {
+    writeFileSync(path.join(root, "data", ".local-ai-token"), LOCAL_AI_TOKEN, { mode: 0o600 });
+    engine = { status: 200, body: { data: [{ type: "model", id: "dsv41-flash", clawbox: { engine: "clawext", context_tokens: 1_000_000, max_output_tokens: 32_000 } }] } };
+    seen = [];
+    server = createServer((req, res) => {
+      seen.push({ url: req.url ?? "", auth: String(req.headers.authorization ?? "") });
+      const ok = req.headers.authorization === `Bearer ${routeToken()}`;
+      res.writeHead(ok ? engine.status : 401, { "content-type": "application/json" });
+      res.end(JSON.stringify(ok ? engine.body : { type: "error", error: { type: "authentication_error", message: "The local coding token is required." } }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/setup-api/local-ai/anthropic`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  /** The wrapper, run without blocking this process: the stand-in route answers from here. */
+  function runLocal(extraEnv: Record<string, string | undefined> = {}): Promise<{ status: number | null; stderr: string }> {
+    return new Promise((resolve) => {
+      const child = spawn("bash", [WRAPPER, "-p", "hello"], {
+        cwd: REPO,
+        env: { PATH: `${binDir}:/usr/bin:/bin`, HOME: home, CLAWBOX_ROOT: root, CLAUDE_DS_PROVIDER: "local", CLAUDE_DS_LOCAL_BASE_URL: base, ...extraEnv } as unknown as NodeJS.ProcessEnv,
+      });
+      let stderr = "";
+      child.stderr.on("data", (d) => { stderr += String(d); });
+      child.on("close", (status) => resolve({ status, stderr }));
+    });
+  }
+
+  it("points both of Claude Code's bases at the box's route, with the token derived from the Local AI token", async () => {
+    const r = await runLocal({ CLAWBOX_AI_PROXY_URL: "https://proxy.example/api/ai", ANTHROPIC_API_KEY: "sk-ant-stale" });
+    expect(r.status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_BASE_URL).toBe(base);
+    expect(env.CLAUDE_CODE_API_BASE_URL).toBe(base);
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe(routeToken());
+    // The route was asked with that token, for the engine's model, and nothing else.
+    expect(seen).toEqual([{ url: "/setup-api/local-ai/anthropic/v1/models", auth: `Bearer ${routeToken()}` }]);
+    // Nothing of the cloud paths reaches the session.
+    expect(env.CLAWBOX_AI_PROXY_URL).toBeUndefined();
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(Object.values(env).join("\n")).not.toMatch(/claw_test_token|fedcba9876543210fedcba9876543210/);
+    expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1");
+    expect(env.CLAUDE_CONFIG_DIR).toBe(path.join(home, ".claude-ds-local"));
+  });
+
+  it("puts the engine's model in every slot, named for its million-token window, and sizes the session to the engine", async () => {
+    expect((await runLocal()).status).toBe(0);
+    const env = capturedEnv();
+    for (const slot of ["ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"]) {
+      expect(env[slot], slot).toBe("dsv41-flash[1m]");
+    }
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe(String(Math.floor(1_000_000 * 84 / 100)));
+    expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("32000");
+  });
+
+  it("names a smaller engine's model as it is, compacts inside its window, and keeps a lower reply cap the runner set", async () => {
+    engine.body = { data: [{ type: "model", id: "qwen3-coder", clawbox: { engine: "llamacpp", context_tokens: 131_072, max_output_tokens: 8_192 } }] };
+    expect((await runLocal({ CLAUDE_CODE_MAX_OUTPUT_TOKENS: "4000" })).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_MODEL).toBe("qwen3-coder");
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe(String(Math.floor(131_072 * 84 / 100)));
+    expect(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).toBeUndefined();
+    expect(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS).toBe("4000");
+  });
+
+  // Claude Code takes no auto-compact window under 100k: an engine whose 84%
+  // is below that gets the window AT 100k and the point inside it moved, or
+  // the session would grow past the engine's window before compacting.
+  it("compacts a small engine's session inside its window, below Claude Code's smallest window", async () => {
+    engine.body = { data: [{ type: "model", id: "small-coder", clawbox: { engine: "ollama", context_tokens: 65_536, max_output_tokens: 8_192 } }] };
+    expect((await runLocal({ CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: "95" })).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("100000");
+    // 84% of 65,536 is 55,050 tokens: 55% of the 100k window, rounded down.
+    expect(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE).toBe("55");
+    expect(Number(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE) * 1_000).toBeLessThanOrEqual(Math.floor(65_536 * 84 / 100));
+  });
+
+  // The runner clamps a local run's ultracode to xhigh (effortOnProvider); an
+  // older run record resumed, or the owner's stored ultracode in a terminal,
+  // reaches the wrapper as ultracode all the same, and is clamped here too.
+  it("never runs the engine on ultracode, whoever asked for it, as xhigh", async () => {
+    expect((await runLocal({ CLAUDE_DS_EFFORT: "ultracode" })).status).toBe(0);
+    expect(readFileSync(claudeLog, "utf-8")).not.toContain("ultracode");
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("xhigh");
+    writeDeviceConfig({ coding_agent_effort: "ultracode" });
+    expect((await runLocal()).status).toBe(0);
+    expect(readFileSync(claudeLog, "utf-8")).not.toContain("ultracode");
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("xhigh");
+  });
+
+  it("keeps the session's token off any proxy the box's environment names, and leaves the proxy to the run's tools", async () => {
+    expect((await runLocal({ HTTPS_PROXY: "http://proxy.corp.example:3128", NO_PROXY: "git.corp.example" })).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.NO_PROXY).toBe("127.0.0.1,localhost,::1,git.corp.example");
+    // curl reads the lowercase spelling first: the owner's exclusion is there too.
+    expect(env.no_proxy).toBe("127.0.0.1,localhost,::1,git.corp.example");
+    expect(env.HTTPS_PROXY).toBe("http://proxy.corp.example:3128");
+  });
+
+  it("keeps the exclusions inherited under either spelling, in both", async () => {
+    expect((await runLocal({ HTTPS_PROXY: "http://proxy.corp.example:3128", no_proxy: "git.corp.example", NO_PROXY: "pkg.corp.example" })).status).toBe(0);
+    const env = capturedEnv();
+    expect(env.no_proxy).toBe("127.0.0.1,localhost,::1,git.corp.example,pkg.corp.example");
+    expect(env.NO_PROXY).toBe(env.no_proxy);
+    expect((await runLocal({ HTTPS_PROXY: "http://proxy.corp.example:3128", no_proxy: "git.corp.example", NO_PROXY: "git.corp.example" })).status).toBe(0);
+    expect(capturedEnv().no_proxy).toBe("127.0.0.1,localhost,::1,git.corp.example");
+  });
+
+  it("denies WebSearch and WebFetch in the local harness's own settings, beside the rules already there", async () => {
+    mkdirSync(path.join(home, ".claude-ds-local"), { recursive: true });
+    writeFileSync(path.join(home, ".claude-ds-local", "settings.json"), JSON.stringify({ permissions: { deny: ["Read(//etc/**)"] }, theme: "dark" }));
+    expect((await runLocal()).status).toBe(0);
+    const settings = JSON.parse(readFileSync(path.join(home, ".claude-ds-local", "settings.json"), "utf-8"));
+    expect(settings.permissions.deny).toEqual(["Read(//etc/**)", "WebSearch", "WebFetch"]);
+    expect(settings.theme).toBe("dark");
+    // A second launch adds nothing twice.
+    expect((await runLocal()).status).toBe(0);
+    expect(JSON.parse(readFileSync(path.join(home, ".claude-ds-local", "settings.json"), "utf-8")).permissions.deny).toHaveLength(3);
+  });
+
+  it("says the route's own words, and starts nothing, when the box has no engine for it", async () => {
+    engine = { status: 400, body: { type: "error", error: { type: "invalid_request_error", message: "No engine is set up on this box for local coding runs." } } };
+    const r = await runLocal();
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("No engine is set up on this box for local coding runs.");
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("refuses a route that is not on this box, before any token is made", async () => {
+    const r = await runLocal({ CLAUDE_DS_LOCAL_BASE_URL: "https://engine.example/setup-api/local-ai/anthropic" });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/not on this box/);
+    expect(seen).toEqual([]);
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("says so when the box has no Local AI token to derive one from", async () => {
+    rmSync(path.join(root, "data", ".local-ai-token"));
+    const r = await runLocal();
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toMatch(/no Local AI token/);
+    expect(seen).toEqual([]);
   });
 });

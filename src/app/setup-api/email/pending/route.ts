@@ -16,7 +16,7 @@
 // everything queued" shortcut that would have made such a card optional.
 //
 // AUTHORIZATION IS STRICTER HERE THAN ANYWHERE ELSE IN THIS SUBTREE, and that
-// is the entire point of the route. src/middleware.ts admits a caller to
+// is the entire point of the route. src/proxy.ts admits a caller to
 // /setup-api/* on a session cookie OR the MCP bearer token. The agent holds
 // that bearer. If this route accepted it, a prompt-injected agent could queue a
 // draft and approve it on the next tool call — the gate would authenticate the

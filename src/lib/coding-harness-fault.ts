@@ -6,7 +6,7 @@
  * WHAT THE OWNER SAW. A run died in a few seconds and its card carried, whole,
  * the line the CLI printed:
  *
- *     [claude-code:unrecognized_model] {"model":"deepseek-v4-pro[1m]","query_source":"sdk"}
+ *     [claude-code:unrecognized_model] {"model":"<model>[1m]","query_source":"sdk"}
  *
  * Nothing in that is actionable by the person it was shown to. It is not about
  * their task, their folder or their files; it says the model this box's harness

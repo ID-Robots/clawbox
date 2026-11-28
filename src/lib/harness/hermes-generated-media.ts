@@ -182,7 +182,7 @@ interface AdoptionRoot {
  * path the model simply invented — is refused, and a refused picture costs a
  * card, never the reply.
  */
-async function adoptionRoots(mediaRoot: string | null): Promise<AdoptionRoot[]> {
+async function adoptionRoots(mediaRoot: string | null, cacheOnly = false): Promise<AdoptionRoot[]> {
   const roots: AdoptionRoot[] = [];
   const add = async (dir: string, guarded: boolean) => {
     if (!dir) return;
@@ -200,6 +200,14 @@ async function adoptionRoots(mediaRoot: string | null): Promise<AdoptionRoot[]> 
   // root, so a later, guarded root would otherwise claim it and the guard would
   // refuse it for being under `~/.hermes`.
   await add(hermesImageCacheDir(), false);
+  // A member of staff's turn on an organisation box (src/lib/org-mode.ts)
+  // adopts from the agent's image cache only. Every argument below rests on
+  // "the only reader is the device owner", which is not true for them: the
+  // media tree holds other people's chat files, the browse root and /tmp are
+  // the owner's, and a copy made here is recorded as the member's own
+  // (src/lib/chat-media-owners.ts) — so a path the model was talked into
+  // naming would hand them someone else's picture.
+  if (cacheOnly) return roots;
   // The chat's OWN tree, as a source as well as a destination. It is normally
   // never reached: `reclaimImageMentions` leaves a path this tree already holds
   // in the caption, precisely so an attachment the model echoed back is not
@@ -274,6 +282,8 @@ async function resolveInAdoptionRoot(
 export async function adoptHermesGeneratedImages(
   sources: readonly string[],
   mediaRoot?: string | null,
+  /** A member of staff's turn on an organisation box: adopt from the agent's image cache only. */
+  options: { cacheOnly?: boolean } = {},
 ): Promise<string[]> {
   if (!sources.length) return [];
   // Resolved ONCE per turn, by the caller, and threaded through. Resolving it
@@ -283,7 +293,7 @@ export async function adoptHermesGeneratedImages(
   // the only thing able to adopt it — the path gone from the sentence and no
   // card in its place. A caller with no root of its own says so, and gets one.
   const resolved = mediaRoot === undefined ? await servableMediaRoot() : mediaRoot;
-  const roots = await adoptionRoots(resolved);
+  const roots = await adoptionRoots(resolved, options.cacheOnly === true);
   // No root resolves on this box, so there is nowhere a picture could be.
   if (!roots.length) return [];
 

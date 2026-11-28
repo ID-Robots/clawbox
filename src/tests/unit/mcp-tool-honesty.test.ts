@@ -1271,6 +1271,35 @@ describe("ai_set_provider is not a one-way door", () => {
   });
 });
 
+// ── The coding tools under the local-only AI lock ───────────────────────────
+
+describe("the coding tools follow the device's providers under the local-only AI lock (TASK-2501 PR-E)", () => {
+  function deviceAnswers(status: Record<string, unknown>) {
+    hasBinary.mockResolvedValue(false);
+    spawnArgv.mockResolvedValue({ exitCode: 1, stdout: "", stderr: "", timedOut: false });
+    apiTry.mockImplementation(async (p: unknown) => (p === "/setup-api/coding-agent/status" ? status : null));
+  }
+
+  it("narrows the providers to the box's engine when the device says the lock is on", async () => {
+    deviceAnswers({ enabled: true, ready: true, readiness: { anyProviderReady: true }, cloudAiLocked: true, providers: ["local"] });
+    const built = await buildContext("openclaw", "openclaw", "full", "openclaw");
+    expect(built.codingAgent).toBe(true);
+    expect(built.codingProviders).toEqual(["local"]);
+  });
+
+  it("leaves them alone on a box with no lock, and on a server that predates it", async () => {
+    deviceAnswers({ enabled: true, ready: true, readiness: { anyProviderReady: true }, cloudAiLocked: false, providers: ["clawbox-ai", "anthropic"] });
+    expect((await buildContext("openclaw", "openclaw", "full", "openclaw")).codingProviders).toBeNull();
+    deviceAnswers({ enabled: true, ready: true });
+    expect((await buildContext("openclaw", "openclaw", "full", "openclaw")).codingProviders).toBeNull();
+  });
+
+  it("registers no coding tool on a locked box whose engine cannot run one", async () => {
+    deviceAnswers({ enabled: true, ready: false, readiness: { anyProviderReady: false }, cloudAiLocked: true, providers: ["local"] });
+    expect((await buildContext("openclaw", "openclaw", "full", "openclaw")).codingAgent).toBe(false);
+  });
+});
+
 // ── Drawing, on a box that cannot ────────────────────────────────────────────
 //
 // Image generation on this device is not a ClawBox MCP tool at all: on Hermes
@@ -1701,4 +1730,32 @@ describe("device_status — nothing read is reported as unknown", () => {
 
     expect(ai.device_default).toMatchObject({ provider: "unknown", model: "unknown" });
   });
+});
+
+// ── update_run ───────────────────────────────────────────────────────────────
+
+describe("update_run — the device's own reason for not asking the owner", () => {
+  /**
+   * update/request answers 409 when it refuses to raise the owner's question
+   * (an update already in flight, another power question waiting, the owner's
+   * recent "no"), with a sentence that says which. The generic 409 told the
+   * agent to have the user "finish the setup in Settings", untrue for all three.
+   */
+  for (const edition of ["openclaw", "hermes"] as const) {
+    it(`passes the route's sentence on, not unfinished setup, on ${edition}`, async () => {
+      const h = captureRegistrar(edition);
+      registerSystemTools(h.reg, ctx(edition));
+      apiPost.mockRejectedValue(new ApiError(409, JSON.stringify({
+        error: "An update is already running; the desktop shows how it ends.",
+      })));
+
+      const out = await h.call("update_run", { confirm: true, reason: "The user asked to update." });
+      expect(out.isError).toBe(true);
+      if (!out.isError) return;
+      expect(out.error.code).toBe("CONFLICT");
+      expect(out.error.message).toContain("An update is already running; the desktop shows how it ends.");
+      expect(out.error.next).toMatch(/do not retry/i);
+      expect(out.error.next).not.toMatch(/settings/i);
+    });
+  }
 });

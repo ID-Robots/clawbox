@@ -47,6 +47,7 @@ export const CLAWBOX_READ_ONLY_TOOLS = [
   "clawbox_health",
   "code_project_list",
   "coding_agent_status",
+  "coding_project_folders",
   "coding_project_status",
   "coding_run_list",
   "coding_secret_list",
@@ -58,6 +59,9 @@ export const CLAWBOX_READ_ONLY_TOOLS = [
   // The docs shipped with the install, searched and read offline (TASK-2177).
   "docs_read",
   "docs_search",
+  // Reads whether send-approval cards are on and hands back the chat line for
+  // a draft; it cannot send, and nothing it reaches can (TASK-2363).
+  "email_draft_card",
   "email_list",
   "email_read",
   "glob",

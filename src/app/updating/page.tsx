@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { I18nProvider } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
+import { getDeskScreens, subscribeDeskScreens, updatingScreenRect } from "@/lib/desktop-screens";
+import { useMonitorLayoutSync } from "@/lib/use-monitor-layout";
 import { useFollowSessionSwitch } from "@/lib/session-switch";
 import { useSessionExpiryGuard } from "@/hooks/useSessionExpiryGuard";
 import {
@@ -49,10 +51,13 @@ import {
  *     NOT offer a link to the desktop, because the middleware would redirect
  *     such a navigation straight back here. The same hint replaces "returning
  *     to the desktop" on a finished run whose lock is never released, and the
- *     clock starts again for a run the owner resumes from here. A run that
+ *     clock starts again for a run the owner starts from here. A run that
  *     stops says so with its step and reason, Resume where the box can resume
- *     it, and Dismiss, which clears the verdict and goes back to the desktop —
- *     or, when the box does not take it, keeps the verdict and says why.
+ *     it, Try again (the update run again; a run the box lost continues where
+ *     it stopped) on any other failure of the full update but a refused
+ *     downgrade, which has its own override, and Dismiss, which clears
+ *     the verdict and goes back to the desktop — or, when the box does not
+ *     take it, keeps the verdict and says why (with no Try again beside it).
  *  3. LEAVE WHEN THE LOCK DOES. The lock is the middleware's to release, and
  *     the middleware marks every /setup-api answer while it is set
  *     (UPDATE_LOCK_HEADER). A finished run — or none — on an answer without
@@ -82,6 +87,8 @@ import {
 const STUCK_AFTER_MS = 25 * 60 * 1000;
 /** How long "Update complete" stays up before the desktop replaces it. */
 const RETURN_AFTER_COMPLETE_MS = 3_000;
+/** The server's render, and the hydrating one, know no monitors: one screen. */
+const noLayout = () => null;
 
 function UpdatingScreen() {
   // Translated when the catalogue is there, English when it is not — never the
@@ -95,7 +102,7 @@ function UpdatingScreen() {
   const [versions, setVersions] = useState<VersionInfo | null>(null);
   const [channel, setChannel] = useState<string | null>(null);
   // The run this page is timing: bumped when the owner starts one from here
-  // (Resume, or "Back up and update anyway"), so a verdict that sat on screen
+  // (Resume, Try again, or "Back up and update anyway"), so a verdict that sat on screen
   // for half an hour does not greet the run after it with "restart it".
   const [runEpoch, setRunEpoch] = useState(0);
   const [stuckEpoch, setStuckEpoch] = useState<number | null>(null);
@@ -193,42 +200,70 @@ function UpdatingScreen() {
 
   const { headline, subhead } = runHeadline(status, run.state, tr);
 
+  // The monitors this window is laid over: the desktop kept the box's last
+  // answer for this window, and the box is down for minutes mid-rebuild.
+  useMonitorLayoutSync(true, { recall: true });
+  const layout = useSyncExternalStore(subscribeDeskScreens, getDeskScreens, noLayout);
+  // Over a row of monitors the run is drawn on the main one only, laid out and
+  // scaled for that monitor; the others are plain ground. One screen: null,
+  // and the run fills the viewport as it always has.
+  const on = updatingScreenRect(layout);
+
   // On a computer's screen a live or finished run fills it, top to bottom
   // (TASK-2137): `data-update-screen` (the run's status) and the frame's `us-*`
   // marks are what the run view's own CSS lays out (UPDATE_SCREEN_CSS). A
   // phone scrolls the stacked view, and a stopped run keeps the window's layout.
+  // The box around the page is the main monitor's rect over a row of monitors
+  // and no box at all (`contents`) otherwise, so the tree — and the run view's
+  // state — stays the same when the layout comes and goes.
   return (
-    <div className="h-dvh w-full overflow-y-auto bg-[var(--ground,#0a0f1a)] text-gray-200" data-testid="updating-screen" data-update-screen={status}>
-      <main className="us-page min-h-full w-full flex items-start justify-center p-6 pt-8 bg-[var(--bg-deep,#111827)]">
-        <div className="us-frame w-full max-w-[1200px]">
-          <UpdateRunView
-            fill
-            status={status}
-            state={run.state}
-            error={run.error}
-            versions={versions}
-            channel={channel}
-            heading="h1"
-            headline={headline}
-            lede={subhead}
-            offline={run.offline}
-            reconnects={run.reconnects}
-            notice={notice}
-            dismissError={run.dismissError}
-            // Dismiss clears the verdict on the server and goes back to the
-            // desktop; a click the server did not take stays, and says so.
-            onDismiss={() => {
-              void run.dismiss().then((outcome) => {
-                if (outcome === "dismissed") window.location.replace("/");
-              });
-            }}
-            // Resume starts the fresh run that continues an interrupted one,
-            // and this screen follows it like the first.
-            onResume={canResume(run.state) ? () => startRun() : undefined}
-            onOverrideDowngrade={() => startRun(true)}
-          />
-        </div>
-      </main>
+    <div
+      className={`${on ? "relative overflow-hidden" : "overflow-y-auto"} h-dvh w-full bg-[var(--ground,#0a0f1a)] text-gray-200`}
+      data-testid="updating-screen"
+      data-update-screen={status}
+      data-update-main={on ? on.id : undefined}
+    >
+      <div
+        className={on ? "absolute overflow-y-auto" : "contents"}
+        style={on ? { left: on.x, top: on.y, width: on.width, height: on.height } : undefined}
+        data-testid="updating-main-screen"
+      >
+        <main className="us-page min-h-full w-full flex items-start justify-center p-6 pt-8 bg-[var(--bg-deep,#111827)]">
+          <div className="us-frame w-full max-w-[1200px]">
+            <UpdateRunView
+              fill
+              screen={on}
+              status={status}
+              state={run.state}
+              error={run.error}
+              versions={versions}
+              channel={channel}
+              heading="h1"
+              headline={headline}
+              lede={subhead}
+              offline={run.offline}
+              reconnects={run.reconnects}
+              notice={notice}
+              dismissError={run.dismissError}
+              // Dismiss clears the verdict on the server and goes back to the
+              // desktop; a click the server did not take stays, and says so.
+              onDismiss={() => {
+                void run.dismiss().then((outcome) => {
+                  if (outcome === "dismissed") window.location.replace("/");
+                });
+              }}
+              // Resume starts the fresh run that continues an interrupted one,
+              // and Try again runs the update again over any other failure (a
+              // run the box lost still continues where it stopped); this screen
+              // follows either like the first. Like Resume, it does not ask
+              // about agent work: the hook sends `ignoreBusy` here.
+              onResume={canResume(run.state) ? () => startRun() : undefined}
+              onTryAgain={() => startRun()}
+              onOverrideDowngrade={() => startRun(true)}
+            />
+          </div>
+        </main>
+      </div>
     </div>
   );
 }

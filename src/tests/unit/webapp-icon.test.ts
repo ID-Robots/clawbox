@@ -545,6 +545,21 @@ describe("buildIconPrompt", () => {
   });
 });
 
+describe("shrinkIcon", () => {
+  /** The PNG's colour type from its IHDR: 2 is RGB, 6 is RGBA. */
+  const colourType = (png: Buffer) => png.readUInt8(25);
+
+  it("keeps an opaque picture RGB, and gives it an alpha channel when asked (an ICO's PNG must be RGBA)", async () => {
+    // PNG above is opaque, as the image model's pictures are.
+    expect(colourType(PNG)).toBe(2);
+    const plain = await mod.shrinkIcon(PNG, 2);
+    expect(colourType(plain)).toBe(2);
+    const rgba = await mod.shrinkIcon(PNG, 2, { alpha: true });
+    expect(colourType(rgba)).toBe(6);
+    expect((await sharp(rgba).metadata()).width).toBe(2);
+  });
+});
+
 describe("safeAppId", () => {
   it("accepts exactly what the icon route and code-projects accept, and hands back a fresh copy", async () => {
     const { APP_ID_RE } = await import("@/lib/code-projects");

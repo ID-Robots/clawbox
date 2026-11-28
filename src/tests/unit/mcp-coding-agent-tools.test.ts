@@ -36,9 +36,9 @@ vi.mock("../../../mcp/lib/api", async () => {
 });
 
 import { captureRegistrar } from "../helpers/mcp-registrar";
-import { registerCodingAgentTools } from "../../../mcp/tools/coding-agent";
+import { offeredCodingProviders, registerCodingAgentTools, runProviderDescription } from "../../../mcp/tools/coding-agent";
 import { ApiError } from "../../../mcp/lib/errors";
-import { BANNED_DESCRIPTION_RE, MAX_DESCRIPTION_CHARS } from "../../../mcp/lib/register";
+import { BANNED_DESCRIPTION_RE, MAX_DESCRIPTION_CHARS, paramDescriptionViolations } from "../../../mcp/lib/register";
 import { PARAM_NAME_RE, TOOL_NAME_RE } from "../../../mcp/lib/schema";
 import { MAX_SECRETS } from "../../../src/lib/project-secrets-shape";
 import { OPENAI_MODELS } from "../../../src/lib/coding-provider";
@@ -55,6 +55,8 @@ const NAMES = [
   "coding_project_import",
   // 2026-10-30: the coding team's settings (src/tests/unit/mcp-coding-settings-tools.test.ts).
   "coding_settings_get", "coding_settings_set",
+  // TASK-2757: multi-folder projects (src/tests/unit/mcp-coding-project-folders.test.ts).
+  "coding_project_create", "coding_project_folder_add", "coding_project_folder_remove", "coding_project_folders",
 ];
 
 function harness(edition: "openclaw" | "hermes" = "openclaw", codingAgent = true) {
@@ -713,6 +715,16 @@ describe("coding_agent_run — provider and model", () => {
     expect(out.text).toMatch(/model gpt-6-astra/);
   });
 
+  it("says when a run was on the box's own engine, never as somebody's account", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, provider: "local", requestedModel: "local-engine", model: "dsv41-flash" } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/on the box's own engine/);
+    expect(out.text).not.toMatch(/owner's .* account/);
+    expect(out.text).toMatch(/model dsv41-flash/);
+  });
+
   it("says nothing about the account for an ordinary ClawBox AI run", async () => {
     apiGet.mockResolvedValue({ run: { ...RUN, provider: "clawbox-ai" } });
     const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
@@ -1023,11 +1035,75 @@ describe("a run whose pull request's CI failed", () => {
   });
 });
 
+describe("coding_agent_run and the role settings under the local-only AI lock (TASK-2501 PR-E)", () => {
+  type Shape = Record<string, { safeParse: (v: unknown) => { success: boolean } }>;
+  function locked() {
+    const h = captureRegistrar("openclaw");
+    registerCodingAgentTools(h.reg, { codingAgent: true, codingProviders: ["local"] });
+    return h;
+  }
+
+  it("offers the box's engine alone, and no model to name", () => {
+    const shape = locked().get("coding_agent_run").shape as Shape;
+    expect(shape.provider.safeParse("local").success).toBe(true);
+    for (const cloud of ["clawbox-ai", "anthropic", "openai"]) expect(shape.provider.safeParse(cloud).success, cloud).toBe(false);
+    expect(shape.model).toBeUndefined();
+    const described = runProviderDescription(["local"]);
+    expect(described).toMatch(/local-only AI lock is on/);
+    expect(described).not.toMatch(/anthropic|openai|clawbox-ai/);
+    expect(runProviderDescription(["clawbox-ai", "anthropic", "openai", "local"])).toMatch(/"local" \(the box's own engine\)/);
+    // What the device narrowed it to, else every provider; never an id this build does not know.
+    expect(offeredCodingProviders({ codingProviders: ["local", "mistral"] })).toEqual(["local"]);
+    expect(offeredCodingProviders({ codingProviders: null })).toEqual(["clawbox-ai", "anthropic", "openai", "local"]);
+    expect(offeredCodingProviders({})).toEqual(["clawbox-ai", "anthropic", "openai", "local"]);
+  });
+
+  it("lets a team role be put on the box's engine only", () => {
+    const shape = locked().get("coding_settings_set").shape as Shape;
+    for (const role of ["planner", "worker", "reviewer"]) {
+      expect(shape[`${role}_provider`].safeParse("local").success).toBe(true);
+      expect(shape[`${role}_provider`].safeParse("default").success).toBe(true);
+      expect(shape[`${role}_provider`].safeParse("anthropic").success).toBe(false);
+    }
+  });
+
+  it("sends a local run on with the provider named and nothing else", async () => {
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, provider: "local" } });
+    const out = await locked().call("coding_agent_run", { task: "t", project_id: "site", provider: "local" });
+    expect(out.isError).toBe(false);
+    expect(apiPost.mock.calls[0][1]).toEqual({ task: "t", projectId: "site", provider: "local" });
+  });
+
+  // With no lock, where `model` is a parameter at all: under the lock the
+  // schema has none to name (see "offers the box's engine alone" above).
+  it("refuses a model named for the box's engine on a box with no lock, since the engine serves one", async () => {
+    const out = await harness().call("coding_agent_run", { task: "t", project_id: "site", provider: "local", model: "claude-opus-5-5" });
+    expect(out.isError).toBe(true);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
+  it("keeps every provider — the box's engine with them — on a box with no lock", () => {
+    const shape = harness().get("coding_agent_run").shape as Shape;
+    for (const id of ["clawbox-ai", "anthropic", "openai", "local"]) expect(shape.provider.safeParse(id).success, id).toBe(true);
+    expect(shape.model).toBeDefined();
+  });
+
+  // The schema a model is shown, locked or not: mcp/check-tools.ts fails the
+  // install on a parameter description over the ceiling, and the two variants
+  // of `provider` (and `model`, offered only without the lock) differ in length.
+  it("keeps every parameter description within the ceiling, locked or not", () => {
+    for (const [label, h] of [["locked", locked()], ["no lock", harness()]] as const) {
+      for (const tool of h.reg.list()) expect(paramDescriptionViolations(tool), `${label}: ${tool.name}`).toEqual([]);
+    }
+  });
+});
+
 /**
  * `effort` (2026-10-30): the per-request level, offered as the app's own list,
  * sent only when named, and the route's refusal of one turned into advice on
  * that argument rather than on the folder.
  */
+
 describe("coding_agent_run effort", () => {
   it("offers exactly the levels the app offers, and sends only a named one", async () => {
     const { OFFERED_EFFORT_LEVELS } = await import("../../../src/lib/coding-effort");
@@ -1049,19 +1125,20 @@ describe("coding_agent_run effort", () => {
     const { z } = await import("zod");
     const shape = harness().get("coding_agent_run").shape;
     const schema = z.object(shape);
-    expect(schema.safeParse({ task: "x", project_id: "site", effort: "medium" }).success).toBe(false);
+    expect(schema.safeParse({ task: "x", project_id: "site", effort: "turbo" }).success).toBe(false);
+    expect(schema.safeParse({ task: "x", project_id: "site", effort: "medium" }).success).toBe(true);
     expect(schema.safeParse({ task: "x", project_id: "site", effort: "ultracode" }).success).toBe(true);
     expect(schema.safeParse({ task: "x", project_id: "site" }).success).toBe(true);
   });
 
   it("turns the route's effort refusal into advice on the effort, not the folder", async () => {
-    apiPost.mockRejectedValueOnce(new ApiError(400, JSON.stringify({ error: 'Unknown effort "medium". Use one of: low, xhigh, max, ultracode.', kind: "invalid", code: "effort" })));
+    apiPost.mockRejectedValueOnce(new ApiError(400, JSON.stringify({ error: 'Unknown effort "turbo". Use one of: low, medium, high, xhigh, max, ultracode.', kind: "invalid", code: "effort" })));
     const out = await harness().call("coding_agent_run", { task: "x", project_id: "site", effort: "max" });
     expect(out.isError).toBe(true);
     if (!out.isError) return;
     expect(out.error.code).toBe("BAD_ARGUMENT");
     expect(out.error.message).toMatch(/Unknown effort/);
-    expect(out.error.next).toMatch(/low, xhigh, max, ultracode/);
+    expect(out.error.next).toMatch(/low, medium, high, xhigh, max, ultracode/);
     expect(out.error.next).not.toMatch(/folder/);
   });
 });

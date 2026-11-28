@@ -37,6 +37,14 @@
   <img src="docs-site/images/4.3/desktop.webp" alt="The ClawBox desktop: app icons down the left, Files open on a project folder, and the Coding Agent in front, its live chart showing a run and its reviewer at work on that project" width="920" />
 </p>
 
+<p align="center">
+  <a href="https://youtu.be/GlAdIWvbpBs">
+    <img src="https://i.ytimg.com/vi/GlAdIWvbpBs/hqdefault.jpg" alt="Watch the video: ClawBox: Your AI Employee That Works 24/7" width="480" />
+  </a>
+  <br/>
+  <a href="https://youtu.be/GlAdIWvbpBs">▶ Watch: <b>ClawBox: Your AI Employee That Works 24/7</b></a>
+</p>
+
 ---
 
 ## What is ClawBox?
@@ -69,6 +77,19 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 
 ---
 
+## ✨ New in 4.4
+
+| | |
+|---|---|
+| 🔐 **ClawBox Vault, passwords built in** | A password manager built into ClawBox, opened by the owner from its desktop icon. Once you choose a vault PIN, the box's browser offers to save your logins and fills them in, and the assistant can sign in to a site for you without ever seeing the password. |
+| 🏢 **Organisation mode, for a company's staff** | A switch in **Settings → System → Users** gives other users only Chat, Files and their own settings. Each member of staff chats with a limited assistant that has a memory of their own and keeps files in a home folder of their own. The owner gives staff chosen tools, sets upload, storage and chat limits, and reads an audit log. |
+| 🔌 **A ClawBox Workstation as your AI engine** | **Settings → Local AI → External engine** runs the chat on an OpenAI-compatible AI engine on your network, such as a ClawBox Workstation built from NVIDIA DGX Sparks, instead of the model on the box. On a Workstation of several Sparks, once the others are listed in its settings, the owner sees each Spark and the shared engine under **Settings → System → Cluster**. |
+| 📅 **A weekly update check, on Telegram too** | Every Monday morning the box looks for a newer ClawBox and tells you once per version, on Telegram with an **Update** button when the bot can reach you, otherwise on the desktop. Send **/update** to the bot in a private chat at any time; the update still waits for you to confirm it. |
+| 📄 **Word, Excel and PowerPoint files in the chat** | The chat takes Word, Excel, PowerPoint and OpenDocument attachments (.docx, .xlsx, .pptx, .odt, .ods), and the box reads their text for the assistant. |
+
+Before you update: on the OpenClaw edition the move to OpenClaw 2026.11.5 is one-way and the periodic check-in becomes an automation job, and ClawBox AI is one model now, DeepSeek V4 Flash.
+Full detail, and how to upgrade: **[RELEASE-NOTES-4.4.0.md](RELEASE-NOTES-4.4.0.md)**.
+
 ## ✨ New in 4.3
 
 | | |
@@ -83,7 +104,7 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 🔁 **Switching between Anthropic accounts, fixed** | An account is no longer marked expired because the box was off or offline, an account whose organization switched off subscription access is left at once, and a failure counts only against the account the assistant was really using. |
 | 🛠️ **Smaller things** | **Settings → Appearance** sets the remote desktop to 1280 × 720, 1600 × 900 or 1920 × 1080. When the cloud voice does not answer, a spoken reply gives up in about 20 seconds and says so, and the chat shows coding runs started elsewhere without a reload. The Projects app and its GitHub backup are gone; your folders stay where they are and open in **Files**. |
 
-Full detail, and how to upgrade: **[RELEASE-NOTES-4.3.0.md](RELEASE-NOTES-4.3.0.md)**.
+Full detail: **[RELEASE-NOTES-4.3.0.md](RELEASE-NOTES-4.3.0.md)**.
 
 ## ✨ New in 4.2
 
@@ -242,9 +263,13 @@ password) and navigate to:
 - `http://clawbox.local/`
 - `http://10.42.0.1/`
 
-### Install on x86_64
+### Install on x86_64 or an arm64 workstation
 
-`install-x64.sh` installs the same web OS on an x86_64 Linux host. It runs a
+`install-x64.sh` installs the same web OS on an x86_64 Linux host, or on an
+arm64 workstation that is not a Jetson: NVIDIA DGX Spark and its partner builds
+(such as Gigabyte's AI TOP Atom), where the local model is built for the GB10
+GPU and a fresh install seeds one sized for its 128 GB. A Jetson keeps
+`install.sh`. It runs a
 read-only `preflight_host` check first — ports already in use, services it would
 replace, desktop services it would take over — and refuses rather than colliding
 with them. Run it alone with `--preflight` to see what it would do.
@@ -252,7 +277,8 @@ with them. Run it alone with `--preflight` to see what it would do.
 The web, gateway and terminal ports are selectable with `CLAWBOX_PORT`,
 `CLAWBOX_GATEWAY_PORT` and `CLAWBOX_TERMINAL_WS_PORT`, and
 `CLAWBOX_SKIP_DESKTOP_SERVICES=1` leaves existing VNC, websockify and browser
-services untouched.
+services untouched. Settings → Remote Control's Cloudflare tunnel forwards to
+the web port you chose (3005 by default), not the appliance's port 80.
 
 ### Update
 
@@ -412,7 +438,7 @@ Node.js runs the production server because Bun doesn't support `http.Server` upg
 | **Language** | TypeScript 5 |
 | **Runtime & tooling** | Node.js 24 (production), Bun (dev/build/packages) |
 | **AI Engine** | [OpenClaw](https://github.com/openclaw/openclaw) or [Hermes Agent](https://nousresearch.com), via MCP |
-| **ClawBox AI** | DeepSeek V4 Flash on every plan (`deepseek-v4-flash`; `deepseek-v4-pro` is the Max plan's id for the same model) |
+| **ClawBox AI** | DeepSeek V4.1 Flash on every plan (`deepseek-v4-flash`), for chat and for looking at pictures — checked at every start; if upstream takes its vision away, pictures go to a vision fallback, and the chat says so plainly when nothing can see |
 | **Local Models** | llama.cpp (Gemma 4 E2B ships preinstalled) + Ollama · Kokoro TTS · faster-whisper STT · Qwen3 embeddings |
 | **Coding Agent** | Headless Claude Code (`claude-ds`) in a git worktree, `gh` for pull requests |
 | **Backups** | ClawKeep (Python) → Cloudflare R2 |
@@ -445,9 +471,9 @@ Full runtime topology in the [Architecture reference](https://docs.clawbox.com/t
 │   ├── lib/                Config, network, auth, OAuth, i18n, updater, chat, harness,
 │   │                       coding agent, named tunnel, memory shard, code-projects
 │   ├── tests/              Unit, component and API route tests
-│   └── middleware.ts       Captive portal detection + session auth
+│   └── proxy.ts            Captive portal detection + session auth (Next 16 proxy, formerly middleware.ts)
 ├── production-server.js    Node.js HTTP + WebSocket proxy wrapper
-├── install-x64.sh          x86_64 installer (host preflight, configurable ports)
+├── install-x64.sh          PC installer: x86_64 and arm64 workstations (host preflight, configurable ports)
 └── install.sh              Full system installer (idempotent)
 ```
 
@@ -487,7 +513,6 @@ it checks, how cleanup works and how to add a test:
 | `TERMINAL_WS_PORT` | `3006` | Terminal WebSocket PTY port |
 | `NOVNC_WS_PORT` | `6080` | noVNC WebSocket port (remote desktop) |
 | `NETWORK_INTERFACE` | `wlP1p1s0` | WiFi interface for AP |
-| `CANONICAL_ORIGIN` | `http://clawbox.local` | Default redirect origin |
 | `ALLOWED_HOSTS` | `clawbox.local,10.42.0.1,10.43.0.1,localhost` | Trusted hostnames |
 | `SESSION_SECRET` | Auto-generated | Session cookie signing key, persisted in `data/.session-secret` |
 | `CLAWBOX_MCP_TOKEN` | Auto-generated | Bearer token the MCP server uses on `/setup-api`, persisted in `data/.mcp-token` |

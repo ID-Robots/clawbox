@@ -94,6 +94,7 @@ async function rearmDeviceLocalSchedules(): Promise<void> {
   const refreshes: Array<[label: string, run: () => Promise<void>]> = [
     ["ClawKeep backup", async () => (await import("@/lib/clawkeep-scheduler")).refresh()],
     ["memory index", async () => (await import("@/lib/clawkeep-memory-scheduler")).refresh()],
+    ["weekly update check", async () => (await import("@/lib/update-notice-scheduler")).refresh()],
   ];
   for (const [label, run] of refreshes) {
     try {
@@ -144,7 +145,7 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  // OWNER ONLY, both halves. `src/middleware.ts` admits any /setup-api/*
+  // OWNER ONLY, both halves. `src/proxy.ts` admits any /setup-api/*
   // request carrying a valid MCP bearer, so without this the AGENT could move
   // the box's clock, both harness zones, OpenClaw's heartbeat active hours and
   // its cron — and a same-site proxied webapp under /apps/<id>/ carrying the

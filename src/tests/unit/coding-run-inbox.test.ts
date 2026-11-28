@@ -211,6 +211,12 @@ describe("the --settings a run is spawned with", () => {
   });
 });
 
+// TODO(next release): three of these fail when vitest is itself started from a
+// Claude Code session ("lets a run with nothing of its own going on stop…",
+// "refuses the stop while a registered job's process lives…", "counts a job
+// with no pid as running until it is old…"): the hook takes that session's CLI
+// for the run's harness (harnessPid) and what else runs under it for the run's
+// work. They pass in CI. The suite should give the hook a harness of its own.
 describe("the keep-alive Stop hook", () => {
   const STOP = { hook_event_name: "Stop", session_id: "s", stop_hook_active: false };
   const blockOf = (out: string): { decision: string; reason: string } => JSON.parse(out) as { decision: string; reason: string };

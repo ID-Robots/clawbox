@@ -10,7 +10,7 @@
 // binary location, and occasionally a token echoed back by an upstream error.
 // Every string that leaves this module passes through scrubPaths() + redact().
 
-import { redactCredentials } from "./redact-credentials";
+import { redactCredentials, redactQuotedCredentialValues } from "./redact-credentials";
 
 const CLAWBOX_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const HOME_DIR = process.env.HOME || "/home/clawbox";
@@ -90,9 +90,10 @@ export function redact(text: string): string {
     .replace(LONG_HEX_RE, "[REDACTED]");
 }
 
-/** The one sanitiser every outbound string goes through. */
+/** The one sanitiser every outbound string goes through. Its result is the
+ *  error envelope's text as it is sent, so the quoted-value pass runs last. */
 export function sanitize(text: string): string {
-  return redact(scrubPaths(text));
+  return redactQuotedCredentialValues(redact(scrubPaths(text)));
 }
 
 // ── Per-route mapping ────────────────────────────────────────────────────────

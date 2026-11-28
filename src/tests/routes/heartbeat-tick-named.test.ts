@@ -20,6 +20,7 @@ vi.mock("@/lib/language-persona", () => ({
   retireOnboardingRitual: vi.fn(async () => false),
 }));
 vi.mock("@/lib/hermes-model-options", () => ({ refreshCatalogIfDue: vi.fn(async () => undefined) }));
+vi.mock("@/lib/clawbox-agents-sections", () => ({ ensureClawboxAgentsSections: vi.fn(async () => undefined) }));
 vi.mock("@/lib/cloudflared", () => cloudflared);
 vi.mock("@/lib/portal-heartbeat", () => heartbeat);
 vi.mock("@/lib/tunnel-liveness", () => liveness);

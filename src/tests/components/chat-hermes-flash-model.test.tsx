@@ -3,6 +3,10 @@ import { fireEvent, screen, waitFor } from "@/tests/helpers/test-utils";
 import { installHermesBox, mountHermesChat } from "@/tests/helpers/hermes-chat-box";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { HERMES_CHAT_PREFS_KEY } from "@/lib/hermes-chat-prefs";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a box not yet migrated still names (TASK-2261). */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 
 beforeEach(() => {
   resetHarnessCache();
@@ -23,7 +27,7 @@ describe("Hermes ClawBox AI chat model", () => {
   ])("uses the existing Flash alias without changing OpenClaw when its state is $openclawState", async ({ staleOpenclawState }) => {
     window.localStorage.setItem(HERMES_CHAT_PREFS_KEY, JSON.stringify({
       provider: "clawai",
-      models: { clawai: "deepseek-v4-pro" },
+      models: { clawai: RETIRED_CHAT_ID },
     }));
     const box = installHermesBox();
     const inner = globalThis.fetch;
@@ -42,19 +46,19 @@ describe("Hermes ClawBox AI chat model", () => {
             ok: true,
             json: async () => ({
               activeOptionId: "clawai",
-              activeModel: "deepseek/deepseek-v4-pro",
+              activeModel: `deepseek/${RETIRED_CHAT_ID}`,
               activeLabel: "Max Tier",
               activeSource: "primary",
               options: [{
                 id: "clawai",
                 label: "ClawBox AI",
                 provider: "clawai",
-                model: "deepseek/deepseek-v4-pro",
+                model: `deepseek/${RETIRED_CHAT_ID}`,
                 available: true,
                 settingsSection: "ai",
                 isLocal: false,
               }],
-              primary: { available: true, label: "Max Tier", model: "deepseek/deepseek-v4-pro" },
+              primary: { available: true, label: "Max Tier", model: `deepseek/${RETIRED_CHAT_ID}` },
               local: { available: false, label: null, model: null },
             }),
           };
@@ -70,10 +74,10 @@ describe("Hermes ClawBox AI chat model", () => {
             authenticated: true,
             models: [
               { id: "deepseek-v4-flash", description: "Pro Tier" },
-              { id: "deepseek-v4-pro", description: "Max Tier" },
+              { id: RETIRED_CHAT_ID, description: "Max Tier" },
             ],
-            current: "deepseek-v4-pro",
-            defaultModel: "deepseek-v4-pro",
+            current: RETIRED_CHAT_ID,
+            defaultModel: RETIRED_CHAT_ID,
             savedElsewhere: null,
             reasoning: "off",
             source: "dashboard",

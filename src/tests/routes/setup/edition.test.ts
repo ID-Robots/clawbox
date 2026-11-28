@@ -4,6 +4,7 @@ import path from "path";
 import { promisify } from "util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { saveEnv } from "@/tests/helpers/env";
+import { answerJournalctl, numberedEntries } from "@/tests/helpers/journalctl-model";
 
 /**
  * /setup-api/setup/edition — the first-setup wizard's "Choose your assistant"
@@ -31,6 +32,8 @@ const h = vi.hoisted(() => ({
   ),
   unitState: "ActiveState=inactive\n",
   journal: [] as string[],
+  /** When set, journalctl answers by its argv instead (helpers/journalctl-model.ts). */
+  journalAnswer: null as null | ((args: string[]) => { stdout: string; stderr: string } | Error),
 }));
 
 vi.mock("@/lib/route-auth", async (orig) => ({
@@ -47,6 +50,11 @@ vi.mock("@/lib/root-step-follow", async (orig) => ({
 vi.mock("child_process", async (orig) => {
   const actual = await orig<typeof import("child_process")>();
   const run = async (cmd: string, args: string[]) => {
+    if (cmd.endsWith("journalctl") && h.journalAnswer) {
+      const answer = h.journalAnswer(args);
+      if (answer instanceof Error) throw answer;
+      return answer;
+    }
     if (cmd.endsWith("journalctl")) return { stdout: `${h.journal.join("\n")}\n`, stderr: "" };
     if (args.includes("ActiveState")) return { stdout: h.unitState, stderr: "" };
     return { stdout: "", stderr: "" };
@@ -96,6 +104,7 @@ beforeEach(() => {
   h.setupComplete = false;
   h.unitState = "ActiveState=inactive\n";
   h.journal = [];
+  h.journalAnswer = null;
   h.session.mockReset().mockResolvedValue(null);
   h.sameOrigin.mockReset().mockReturnValue(true);
   h.updateLocked.mockReset().mockResolvedValue(false);
@@ -343,5 +352,23 @@ describe("POST /setup-api/setup/edition — the activation", () => {
     stepLandsOn("hermes");
     const out = await lines(await route.POST(post({ edition: "hermes" })));
     expect(out.at(-1)).toMatchObject({ success: true });
+  });
+});
+
+describe("latestSelectPhase", () => {
+  it.each([249, 255] as const)("reads the newest marker of a long run when --grep cannot be used (journalctl %i)", async (generation) => {
+    // The fallback read is `--since T -n 4000`: on systemd up to 253 that is
+    // the run's FIRST 4000 entries, so a long run answered its first phase.
+    const entries = [
+      "[edition-select] phase=check",
+      ...numberedEntries(4400, (i) => `  Unpacking a Hermes dependency (${i})`),
+      "[edition-select] phase=provision",
+      ...numberedEntries(99, (i) => `  Building wheel ${i}`),
+    ];
+    h.journalAnswer = (args) => args.includes("-g")
+      ? Object.assign(new Error("Compiled without pattern matching support"), { code: 1 })
+      : answerJournalctl(entries, args, generation);
+
+    expect(await lib.latestSelectPhase(Date.now() - 60_000)).toBe("provision");
   });
 });

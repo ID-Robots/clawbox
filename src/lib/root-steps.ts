@@ -140,6 +140,117 @@ export function isWebRootStep(step: string): boolean {
 }
 
 /**
+ * The root steps an x86 PC's root side can actually run (TASK-2418).
+ *
+ * WEB_ROOT_STEPS is the appliance's list: install.sh implements every one. The
+ * two x86 installs implement fewer, and a step that is not here is not one
+ * an update cut short — no repair command adds it, so a refusal must not
+ * send the owner to one. `embed_model` is the case that did: Memory Shard's
+ * "On this box" told an x86 owner to re-run the installer's launcher step
+ * for a step that installer has never had.
+ *
+ *  - X64_INSTALL_ROOT_STEPS: what install-x64.sh's root dispatcher
+ *    (scripts/x64-migration/clawbox-x64-root-step.sh) runs — its
+ *    INSTALLER_STEPS plus the steps it implements itself. Everything else it
+ *    refuses: "has no implementation on the x64 install".
+ *  - X64_DESKTOP_ROOT_STEPS: what the desktop integration package grants and
+ *    its worker runs (the launcher allow-list in
+ *    scripts/x64-migration/build-package.py, the cases of
+ *    scripts/x64-migration/clawbox-x64-step.sh).
+ *
+ * src/tests/unit/root-steps.test.ts pins both to those scripts.
+ */
+export const X64_INSTALL_ROOT_STEPS: readonly string[] = [
+  "apt_update",
+  "chpasswd",
+  "chromium_install",
+  "clawkeep_install",
+  "cloudflared_install",
+  "ffmpeg_install",
+  "fix_git_perms",
+  "gateway_setup",
+  "google_chrome_install",
+  "llamacpp_install",
+  "ollama_install",
+  "openclaw_config",
+  "openclaw_install",
+  "openclaw_patch",
+  "openclaw_setup",
+  "performance_mode",
+  "post_update",
+  "restart_ap",
+  "set_hostname",
+  "set_timezone",
+  "user_add",
+  "user_remove",
+  "vnc_install",
+];
+
+/** Which x86 install a PC's root side is. */
+export type X64RootSide = "desktop" | "install";
+
+/**
+ * The owner's sentence for a step this PC's install does not have (TASK-2418):
+ * not an update cut short, so it names no repair command — a command that
+ * cannot add the step would only send the owner round in a circle.
+ */
+export function rootStepNotImplementedMessage(step: string, side: X64RootSide): string {
+  const install = side === "desktop" ? "the ClawBox desktop integration" : "the x86 install (install-x64.sh)";
+  return `This PC cannot run the root step "${step}": ${install} does not implement it — `
+    + "it exists only on the ClawBox appliance (Jetson) install, and no repair command adds it.";
+}
+
+/**
+ * The x86 root sides' own refusal of a step they do not have, as the unit's
+ * journal carries it: install-x64.sh's dispatcher
+ * (clawbox-x64-root-step.sh) and the desktop integration's worker
+ * (clawbox-x64-step.sh). Anchored to those lines.
+ */
+const X64_ROOT_SIDE_REFUSAL: ReadonlyArray<readonly [X64RootSide, RegExp]> = [
+  ["install", /^clawbox-root-step: step '[a-z0-9_]+' has no implementation on the x64 install$/m],
+  ["desktop", /^Error: [a-z0-9_]+ is not supported by this desktop integration$/m],
+];
+
+/**
+ * A failed root step's reason as the owner reads it: the x86 root side's terse
+ * refusal of a step it does not implement becomes
+ * {@link rootStepNotImplementedMessage}; any other reason comes back as it was.
+ */
+export function explainRootStepFailure(step: string, reason: string): string {
+  const said = reason.trim();
+  for (const [side, pattern] of X64_ROOT_SIDE_REFUSAL) {
+    if (pattern.test(said)) return rootStepNotImplementedMessage(step, side);
+  }
+  return reason;
+}
+
+export const X64_DESKTOP_ROOT_STEPS: readonly string[] = [
+  "apt_update",
+  "bootstrap_updater",
+  "chpasswd",
+  "chromium_install",
+  "clawkeep_install",
+  "cloudflared_install",
+  "ffmpeg_install",
+  "fix_git_perms",
+  "gateway_setup",
+  "llamacpp_install",
+  "nvidia_jetpack",
+  "openclaw_config",
+  "openclaw_install",
+  "openclaw_patch",
+  "openclaw_setup",
+  "performance_mode",
+  "post_update",
+  "rebuild_reboot",
+  "set_timezone",
+  "user_add",
+  "user_remove",
+  "vnc_install",
+  "vnc_refresh",
+];
+
+/**
  * Steps a UI button may start. A subset of WEB_ROOT_STEPS: anything that
  * reboots, rewrites networking or wipes state stays out, so a one-tap
  * escalation surface never exists.

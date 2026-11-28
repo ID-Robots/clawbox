@@ -6,6 +6,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from '
 import Link from 'next/link'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
+import { useSettledSessionUser } from '@/lib/use-session-user'
 import { chatFailureNote, describeChatFailure, describeFallbackReply, EMPTY_RUN_TEXT } from '@/lib/chat-error-text'
 import {
   SESSION_EXPIRED_CHAT_MESSAGE,
@@ -25,7 +26,6 @@ import {
   type ChatMessage,
   uuid,
 } from '@/lib/chat-history-cache'
-import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 import { samePlainData } from '@/lib/same-plain-data'
 
@@ -50,6 +50,8 @@ import { prettifyAssistantText, isSentinel, isInterSessionEnvelope } from '@/lib
 // apart again.
 import { splitEmailRefs, streamingEmailRefsText, dropUnfinishedDirective, parseEmailUid, CONTROL_UI_EMAIL_PARAM } from '@/lib/chat-email-refs'
 import { EmailCard, EmailFullView } from '@/lib/chat-email'
+import { splitDraftRefs, streamingDraftRefsText } from '@/lib/chat-email-draft-refs'
+import { EmailDraftCard } from '@/lib/chat-email-draft'
 // Same reason, one convention over: a generated picture and a spoken reply are
 // named by a `MEDIA:` line inside the reply text rather than delivered as
 // attachments (see lib/chat-media.ts), and only the mascot chat had learned to
@@ -102,6 +104,7 @@ import { useHarnessAdapter } from '@/lib/harness/use-harness-adapter'
 // so a wrapped reply showed its tags live and lost them after a reload — the
 // replayed path goes through this module's projection.
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
+import { advanceChatStream, createChatStreamCursor } from '@/lib/chat-stream-message'
 import { useSlashCommands } from '@/lib/use-slash-commands'
 import SlashCommandMenu from '@/components/SlashCommandMenu'
 import {
@@ -132,6 +135,7 @@ import { ChatDropOverlay, ChatUploadChips } from './ChatDropUploads'
 import {
   gatewayFrameError,
   isGatewayStartingRefusal,
+  retryWhileAgentStarting,
   STARTING_MAX_RETRIES,
   STARTING_RETRY_DELAY_MS,
 } from '@/lib/chat-gateway-starting'
@@ -232,7 +236,9 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail,
   // A fact about the owner's account (no API quota right now), not a fault:
   // calm blue, never the red of an error.
   const isNotice = msg.role === 'system' && msg.variant === 'notice'
-  const bodyText = isStopped ? t("chat.stopped") : emailRefs ? emailRefs.text : msg.text
+  // Drafts waiting for the person's Send (`EMAIL_DRAFT:<id>`): same rule.
+  const draftRefs = emailRefs ? splitDraftRefs(emailRefs.text) : null
+  const bodyText = isStopped ? t("chat.stopped") : draftRefs ? draftRefs.text : msg.text
   const images = msg.images ?? []
   const audio = msg.audio ?? []
   const files = msg.files ?? []
@@ -312,6 +318,13 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail,
             ))}
           </div>
         )}
+        {draftRefs && draftRefs.draftIds.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {draftRefs.draftIds.map(id => (
+              <EmailDraftCard key={id} draftId={id} t={t} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -349,7 +362,7 @@ const ChatAppStreamingBubble = memo(function ChatAppStreamingBubble({ text, t }:
             still agree, which is the property that matters; there is no
             `dropUnfinishedDirective` equivalent for media, and the
             mascot chat accepts the same token. */}
-        {renderText(streamingEmailRefsText(splitMediaDirectives(text).text), t("chat.table"), t("chat.detailsSummary"))}
+        {renderText(streamingDraftRefsText(streamingEmailRefsText(splitMediaDirectives(text).text)), t("chat.table"), t("chat.detailsSummary"))}
         <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
       </div>
     </div>
@@ -399,6 +412,11 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // it. The login state itself flips out of the gate as soon as the user
   // signs in on the portal in another tab — no manual refresh needed.
   const clawboxLogin = useClawboxLogin()
+  // Never on an organisation box (src/lib/org-mode.ts): the ClawBox AI offers
+  // are hidden for everyone there — and not before the box has said who is
+  // looking, which is the only way to know it is not one.
+  const viewer = useSettledSessionUser()
+  const offerAllowed = viewer != null && viewer.orgMode !== true
   const [welcomeDismissed, setWelcomeDismissed] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false
     return kv.get('clawbox-portal-welcome-dismissed') === '1'
@@ -447,7 +465,12 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     streamingRef.current = next
     setStreamingState(next)
   }, [])
+  // The live message the gateway's delta frames add up to: after its first
+  // frame of a run it sends only the characters added (lib/chat-stream-message).
+  const liveStreamRef = useRef(createChatStreamCursor())
   const [sending, setSending] = useState(false)
+  // The send is waiting out a gateway that is still starting (dispatchSend).
+  const [startingUp, setStartingUp] = useState(false)
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   // The coding cards — one per run of its own, one per team, live then
   // settled — and the Create card over the composer, the SAME host the mascot
@@ -491,6 +514,10 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // The same key as state, for what renders from it: the progress card.
   const [boundSessionKey, setBoundSessionKey] = useState('')
   const runIdRef = useRef<string | null>(null)
+  // The wait for a starting gateway a send is in (dispatchSend); Stop ends it.
+  const startingWaitRef = useRef<AbortController | null>(null)
+  // Nor does a send outlive the chat that made it.
+  useEffect(() => () => { startingWaitRef.current?.abort() }, [])
   // Timer for the ack-only `chat.history` refetch — see ChatPopup.tsx for
   // the deferred-reply rationale. Single-flight + cleared on unmount so
   // a burst of acked turns doesn't pile up overlapping fetches.
@@ -523,7 +550,6 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // Which history read was asked for last, and which was painted last — so an
   // answer that arrives after a later one's is dropped (`claimHistoryRead`).
   const historyReadOrderRef = useRef<HistoryReadOrder>({ issued: 0, applied: 0 })
-  const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
   // The provider's own refusal rides on the lifecycle frames; see lib/chat-run-failure.ts.
@@ -536,6 +562,16 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
   // Runs stuck on a model this account cannot run, reported to the box once
   // each (lib/model-fallback-chat.ts) — and the "Stopped." a box-made stop owes.
   const fallbackWatchRef = useRef(new ModelFallbackWatch())
+  // Everything that grows the transcript — the streaming reply, a new
+  // message, pills, cards, pictures that load late — followed only while the
+  // reader is at the bottom; a reader who scrolled up to read is left there
+  // until they are back down (TASK-2222). The full page is always on screen,
+  // so the observers are always attached. `scrollToBottom` is for the owner's
+  // own actions — a send, a click — which land them on the answer wherever
+  // they were.
+  const transcriptRef = useRef<HTMLDivElement>(null)
+  const scrollToBottom = useStickToBottom(transcriptRef, true)
+
   // A calm notice's one-click move to another provider the box has set up:
   // this page has no header picker, so the picker's request is sent here, and
   // the line under it says whether it landed. Stable for the memoised rows.
@@ -545,8 +581,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       setMessages(prev => [...prev, result.ok
         ? { role: 'system', variant: 'notice', timestamp: Date.now(), text: modelAvailabilityText(words.t, 'chat.modelUnavailableSwitchedTo', { provider: target.label }) }
         : { role: 'system', timestamp: Date.now(), text: modelAvailabilityText(words.t, 'chat.modelUnavailableSwitchFailed', { provider: target.label }) }])
+      scrollToBottom()
     })
-  }, [])
+  }, [scrollToBottom])
   // A connect the gateway refused only because it is still booting is
   // retried on this ladder; reset once a connect lands.
   const startingRetriesRef = useRef(0)
@@ -580,19 +617,6 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     attachments: ChatAttachment[]
     idempotencyKey: string
   }>>([])
-
-  // Auto-scroll to bottom — see scrollToBottomAfterLayout for the rationale
-  // behind the double-rAF wait.
-  const scrollToBottom = useCallback(() => {
-    scrollToBottomAfterLayout(messagesEndRef.current)
-  }, [])
-
-  useEffect(() => { scrollToBottom() }, [messages, streaming, scrollToBottom])
-  // Everything else that grows the transcript — pills, cards, pictures that
-  // load late — followed only while the reader is at the bottom. The full page
-  // is always on screen, so the observers are always attached.
-  const transcriptRef = useRef<HTMLDivElement>(null)
-  useStickToBottom(transcriptRef, true)
 
   // `?email=<uid>` opens that message on arrival — the other end of a card on
   // the gateway's own Control UI chat (TASK-700). That page is a third `webchat`
@@ -1165,6 +1189,10 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           const payload = data.payload as Record<string, unknown>
           if (!payload) return
           const sk = payload.sessionKey as string
+          // Every run's frames, shown or not: the gateway sends this socket only
+          // what it added since the last frame, so one skipped while another
+          // conversation was open would leave a gap once this one is back.
+          const live = payload.state === 'delta' ? advanceChatStream(liveStreamRef.current, payload) : undefined
           if (sk !== sessionKeyRef.current) return
 
           const state = payload.state as string
@@ -1174,8 +1202,8 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           const settledError = state === 'error' ? runFailureRef.current.settleError(payload) : undefined
 
           if (state === 'delta') {
-            const text = extractText(msg)
-            if (text && !isInterSessionEnvelope(text, msg)) applyStreaming(text)
+            const text = extractText(live)
+            if (text && !isInterSessionEnvelope(text, live)) applyStreaming(text)
           } else if (state === 'final') {
             // Split on the way INTO state, as the mascot chat does and through
             // the same reader: a generated picture arrives as a `MEDIA:` line
@@ -1609,7 +1637,13 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     }).catch(() => { /* an older box, or offline: nothing changes here */ })
     let result: TurnResult
     try {
-      result = await transport.sendTurn({
+      // A gateway that is still starting (every restart, a network switch's
+      // included) refuses `chat.send` with its retryable startup refusal: wait
+      // it out under "Starting up, one moment…" and send again, under the same
+      // idempotency key, rather than show the owner that refusal.
+      const startingWait = new AbortController()
+      startingWaitRef.current = startingWait
+      result = await retryWhileAgentStarting(() => transport.sendTurn({
         // The owner's words, verbatim. The adapter owns the empty-text case —
         // the gateway's is "(file attached)" — and an English sentence invented
         // here would be stored as the owner's own message on both editions, read
@@ -1632,6 +1666,15 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase, detail: event.detail })
           if (isCodingAgentTool(event.name)) nudgeCodingCards()
         }
+      }), {
+        signal: startingWait.signal,
+        onWaiting: () => { if (runIdRef.current === idempotencyKey) setStartingUp(true) },
+      }).catch((err: unknown) => {
+        // Stop during the wait: the turn was never taken, and must not be sent later.
+        throw err instanceof Error && err.name === 'AbortError' ? new HarnessError('aborted', 'Stopped.') : err
+      }).finally(() => {
+        setStartingUp(false)
+        if (startingWaitRef.current === startingWait) startingWaitRef.current = null
       })
     } catch (err) {
       // A Stop is not a failure and must never become a red bubble. Never render
@@ -1731,6 +1774,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
       images,
       idempotencyKey,
     }])
+    // The owner's own words: shown, and the reply to them followed, wherever
+    // they had scrolled to.
+    scrollToBottom()
     setSending(true)
     applyStreaming('')
 
@@ -1747,7 +1793,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     }
 
     await dispatchSend(text, staged, idempotencyKey)
-  }, [input, sending, pendingAttachments, caps.hasLiveConnection, status, dispatchSend, applyStreaming])
+  }, [input, sending, pendingAttachments, caps.hasLiveConnection, status, dispatchSend, applyStreaming, scrollToBottom])
 
   // The Create card — and the Coding Agent app's hand-off buttons — send
   // their one message through CHAT_MESSAGE_EVENT, the way the mascot chat
@@ -1802,6 +1848,8 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
     // the run to finish on its own. Through the adapter so Stop reaches the turn
     // whichever harness is running it — on the gateway a `chat.abort`, on a
     // harness that answers on a promise the fetch that carries it.
+    // A send still waiting for the gateway to finish starting is not sent at all.
+    startingWaitRef.current?.abort()
     if (!adapterRef.current.capabilities.canAbortTurn) return
     await adapterRef.current.abortTurn()
   }, [])
@@ -2131,7 +2179,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
 
       {/* Messages area */}
       <div ref={transcriptRef} data-testid="chatapp-transcript" data-chat-text-scale={textScale !== 1 ? textScale : undefined} style={{
-        flex: 1, overflowY: 'auto', padding: '12px 14px',
+        // 22px at the bottom: the 12px all round plus the gap the end sentinel
+        // used to add after the last bubble.
+        flex: 1, overflowY: 'auto', padding: '12px 14px 22px',
         display: 'flex', flexDirection: 'column', gap: 10,
         ...(textScale !== 1 ? { '--chat-text-scale': String(textScale) } as React.CSSProperties : {}),
         scrollbarWidth: 'thin',
@@ -2174,7 +2224,7 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: '0 16px' }}>
             <img src={harnessId === 'hermes' ? '/hermes-agent.png' : '/clawbox-crab.png'} alt="" style={{ width: 25, height: 25, objectFit: 'contain', opacity: 0.4 }} />
             <span>{t("chat.saySomething")}</span>
-            {!clawboxLogin.loading && !clawboxLogin.loggedIn && !welcomeDismissed && (
+            {offerAllowed && !clawboxLogin.loading && !clawboxLogin.loggedIn && !welcomeDismissed && (
               <div style={{
                 marginTop: 8,
                 padding: '12px 14px',
@@ -2271,6 +2321,9 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
                   animation: `chatapp-bounce-dot 1s ${delay}s ease-in-out infinite`,
                 }} />
               ))}
+              {startingUp && (
+                <span role="status" style={{ marginLeft: 6, fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>{t('chat.startingUp')}</span>
+              )}
             </div>
           </div>
         )}
@@ -2326,7 +2379,6 @@ function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhon
           )
         )}
 
-        <div ref={messagesEndRef} />
       </div>
 
       {/* The agent's progress card, over the composer and in the column —

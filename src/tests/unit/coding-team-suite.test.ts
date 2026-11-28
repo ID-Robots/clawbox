@@ -96,6 +96,30 @@ describe("what counts as a suite", () => {
     expect(await detectSuites(dir)).toEqual(["bun run test"]);
   });
 
+  it("runs `bun test` for a bun project whose test files are bun's own and that has no test script", async () => {
+    const BUN_TEST = 'import { expect, test } from "bun:test";\ntest("adds", () => { expect(1 + 1).toBe(2); });\n';
+    // The files alone are not enough: the lock is what says bun runs here.
+    write({ "package.json": JSON.stringify({ scripts: { build: "next build" } }), "lib/calc.test.ts": BUN_TEST });
+    expect(await detectSuites(dir)).toEqual([]);
+    write({ "bun.lock": "" });
+    expect(await detectSuites(dir)).toEqual(["bun test"]);
+    // A real test script still wins — it is the project's own word.
+    write({ "package.json": JSON.stringify({ scripts: { test: "bun test lib" } }) });
+    expect(await detectSuites(dir)).toEqual(["bun run test"]);
+  });
+
+  it("does not guess `bun test` for another runner's files, for files that are not bun's, or from inside dependencies", async () => {
+    write({ "bun.lock": "", "package.json": JSON.stringify({ devDependencies: { vitest: "^3" } }), "src/a.test.ts": 'import { test } from "bun:test";\n' });
+    expect(await detectSuites(dir)).toEqual([]);
+    write({ "package.json": JSON.stringify({ scripts: {} }), "src/a.test.ts": 'import { test } from "node:test";\n' });
+    expect(await detectSuites(dir)).toEqual([]);
+    write({ "src/a.test.ts": "export {};\n", "node_modules/pkg/x.test.ts": 'import { test } from "bun:test";\n', ".clawbox/worktrees/t1-1/lib/y.test.ts": 'import { test } from "bun:test";\n' });
+    expect(await detectSuites(dir)).toEqual([]);
+    // Three folders down is found; the walk is small, not blind.
+    write({ "packages/core/src/z.spec.tsx": "import { describe } from 'bun:test';\n" });
+    expect(await detectSuites(dir)).toEqual(["bun test"]);
+  });
+
   it("runs both when a project has both, Python first", async () => {
     write({ "test_api.py": "", "package.json": JSON.stringify({ scripts: { test: "vitest run" } }) });
     expect(await detectSuites(dir)).toEqual(["python3 -m unittest discover", "npm test"]);
@@ -244,6 +268,25 @@ describe("reading a JavaScript runner's output", () => {
       excerpt: "AssertionError [ERR_ASSERTION]: 1.609344 == 0.621371",
       summary: "# fail 1 (exit 1)",
     });
+  });
+
+  it("bun's own runner: each `(fail)` line once, its bracketed time taken off", () => {
+    const output = [
+      "bun test v1.4.2 (744846f84)",
+      "",
+      "lib/calc.test.ts:",
+      "error: expect(received).toBe(expected)",
+      "      at <anonymous> (/srv/app/lib/calc.test.ts:4:61)",
+      "(fail) calc > power is right associative [61.03ms]",
+      "(pass) calc > adds",
+      "(fail) top level fails [1.35ms]",
+      "",
+      " 1 pass",
+      " 2 fail",
+      "Ran 3 tests across 1 file. [68.00ms]",
+    ].join("\n");
+    expect(failingTests(output)).toEqual(["calc > power is right associative", "top level fails"]);
+    expect(namedFiles(output, "/srv/app")).toEqual(["lib/calc.test.ts"]);
   });
 
   it("names files by the project's real path too, and never one outside it", () => {

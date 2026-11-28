@@ -5,6 +5,7 @@ import Image from "next/image";
 import SignalBars from "./SignalBars";
 import StatusMessage from "./StatusMessage";
 import WifiHandoffOverlay from "./WifiHandoffOverlay";
+import WifiConnectedDialog, { wifiConnectStatusText, type WifiConnectStatus } from "./WifiConnectedDialog";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel } from "@/lib/wifi-utils";
 import { useT } from "@/lib/i18n";
@@ -31,17 +32,27 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   // animated overlay that guides the user onto the home network and auto-
   // redirects to the box's new address once it's reachable there.
   const [handoffSsid, setHandoffSsid] = useState<string | null>(null);
+  // The box joined while this page could still reach it: the "Connected" dialog.
+  const [joined, setJoined] = useState<{ ssid: string; ip: string | null } | null>(null);
   const [status, setStatus] = useState<{
     type: "success" | "error" | "info";
     message: string;
   } | null>(null);
   // null = first probe in flight ("detecting…"); otherwise the live cable/connection state.
-  const [eth, setEth] = useState<{ connected: boolean; cable: boolean } | null>(null);
+  // `online`: the machine already reaches the internet without a cable — a PC
+  // on the Wi-Fi its own operating system manages (install-x64.sh), where the
+  // box's scan has nothing to offer.
+  const [eth, setEth] = useState<{ connected: boolean; cable: boolean; online: boolean } | null>(null);
   // True once a cable has been plugged in but hasn't gained internet for a while
   // (bad cable / dead port / no DHCP) — lets us nudge to Wi-Fi instead of
   // spinning on "Connecting…" forever with the recommended button disabled.
   const [cableStuck, setCableStuck] = useState(false);
   const controllerRef = useRef<AbortController | null>(null);
+  // Set once the owner leaves the first screen for the WiFi list. The look
+  // below for an earlier failure answers whenever it answers; after the owner
+  // has gone on to choose a network, reopening the form on the failed one
+  // would put its name over theirs and its failure over their form.
+  const ownerChoosingRef = useRef(false);
 
   // Abort any in-flight WiFi connect/poll when the step unmounts. (Kept separate
   // from the ethernet poll so the eth effect re-running never aborts a connect.)
@@ -57,18 +68,13 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     fetch("/setup-api/wifi/connect-status", { cache: "no-store" })
       .then((r) => (r.ok ? r.json() : null))
       .then((s) => {
-        if (cancelled || !s || s.phase !== "failed" || !s.ssid) return;
+        if (cancelled || ownerChoosingRef.current || !s || s.phase !== "failed" || !s.ssid) return;
         // Only act on a recent failure so a stale verdict from a much earlier
         // session doesn't hijack a fresh setup attempt.
         if (typeof s.at === "number" && Date.now() - s.at > 10 * 60_000) return;
         setManualMode(true);
         setSsid(s.ssid);
-        setStatus({
-          type: "error",
-          message: s.reason === "wrong-password"
-            ? t("wifi.wrongPassword")
-            : t("wifi.lostConnection", { url: localUrl }),
-        });
+        setStatus(wifiConnectStatusText(t, s, s.ssid) ?? { type: "error", message: t("wifi.lostConnection", { url: localUrl }) });
       })
       .catch(() => {});
     return () => { cancelled = true; };
@@ -88,12 +94,12 @@ export default function WifiStep({ onNext }: WifiStepProps) {
       fetch("/setup-api/wifi/ethernet", { cache: "no-store" })
         .then((r) => r.json())
         .then((data) => {
-          if (!cancelled) setEth({ connected: data.connected === true, cable: data.cable === true });
+          if (!cancelled) setEth({ connected: data.connected === true, cable: data.cable === true, online: data.online === true });
         })
         .catch(() => {
           // A transport error says nothing about the cable — keep last-known-good
           // instead of de-gating the button on a transient hiccup.
-          if (!cancelled) setEth((prev) => prev ?? { connected: false, cable: false });
+          if (!cancelled) setEth((prev) => prev ?? { connected: false, cable: false, online: false });
         });
     };
     pollEth();
@@ -112,6 +118,11 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     }
     setCableStuck(false);
   }, [eth?.cable, eth?.connected]);
+
+  // Online without a working cable: the network is already the machine's own.
+  // A cable with carrier but no connection (an unconfigured second port, a DGX
+  // Spark's stacking port) does not hold back a machine that is online anyway.
+  const onlineWithoutCable = eth?.connected !== true && eth?.online === true;
 
   const [hasScanned, setHasScanned] = useState(false);
 
@@ -198,15 +209,14 @@ export default function WifiStep({ onNext }: WifiStepProps) {
     }
     if (controller.signal.aborted) return;
 
-    // The switch is underway and the hotspot is dropping — surface the
-    // full-screen handoff overlay so the user gets an animated "joining…,
-    // reconnect this device, we'll auto-continue" loop instead of a frozen
-    // form. We keep polling connect-status underneath: if the box restores the
-    // AP and reports a failure (e.g. wrong password), we dismiss the overlay
-    // and show the error; otherwise the overlay carries the success path
-    // (probe the home-network address, then redirect there).
-    setHandoffSsid(activeSsid);
-
+    // The switch is underway. While this page can still reach the box
+    // (Ethernet, or before the hotspot drops) it shows each step, and the
+    // "Connected" dialog once the box joined. The moment it cannot, the
+    // full-screen handoff overlay takes over with its animated "joining…,
+    // reconnect this device, we'll auto-continue" loop: it probes the box's
+    // home-network address and redirects there. Polling goes on underneath: if
+    // the box restores the AP and reports a failure (e.g. wrong password), the
+    // overlay goes and the error shows.
     // Poll for the outcome, tolerating the hotspot outage during the switch.
     // The failure path is connect-attempt + AP-restore, so give it generous
     // headroom — otherwise a slow restore would trip the deadline and we'd
@@ -225,30 +235,41 @@ export default function WifiStep({ onNext }: WifiStepProps) {
         return;
       }
       try {
-        const r = await fetch("/setup-api/wifi/connect-status", { cache: "no-store", signal: controller.signal });
-        const s = await r.json();
+        // A dropped hotspot can leave a request hanging rather than failing:
+        // give each one 5 s, then call it off (as the step's own abort does).
+        const request = new AbortController();
+        const timer = setTimeout(() => request.abort(), 5000);
+        const stop = () => request.abort();
+        controller.signal.addEventListener("abort", stop, { once: true });
+        const s: WifiConnectStatus = await fetch("/setup-api/wifi/connect-status", { cache: "no-store", signal: request.signal })
+          .then((r) => r.json())
+          .finally(() => { clearTimeout(timer); controller.signal.removeEventListener("abort", stop); });
         if (s.phase === "failed") {
           setHandoffSsid(null);
           setConnecting(false);
-          setStatus(
-            s.reason === "wrong-password"
-              ? { type: "error", message: t("wifi.wrongPassword") }
-              : { type: "error", message: t("wifi.lostConnection", { url: primaryUrl }) }
-          );
+          setStatus(wifiConnectStatusText(t, s, activeSsid));
           return;
         }
         if (s.phase === "connected") {
-          // Box joined the home network — leave the overlay up to detect the
-          // new address and redirect there (resumes at Step 2). No onNext():
-          // advancing this page is pointless once we've lost the box here.
+          // Joined, and this page still reaches the box: say where it is now.
+          setHandoffSsid(null);
+          setConnecting(false);
+          setStatus(null);
+          setJoined({ ssid: s.ssid || activeSsid, ip: s.ip ?? null });
           return;
         }
+        const step = wifiConnectStatusText(t, s, activeSsid);
+        if (step) setStatus(step);
       } catch {
-        // Hotspot down mid-switch — expected; keep polling until it returns.
+        if (controller.signal.aborted) return;
+        // Hotspot down mid-switch — expected: the overlay guides the user, and
+        // polling goes on until the box answers again.
+        setHandoffSsid(activeSsid);
       }
-      if (!controller.signal.aborted) setTimeout(poll, 2500);
+      // Often enough to show a step that takes a second or two (turning the radio on).
+      if (!controller.signal.aborted) setTimeout(poll, 1500);
     };
-    setTimeout(poll, 3000);
+    setTimeout(poll, 1000);
   };
 
   const skipEthernet = () => {
@@ -265,6 +286,9 @@ export default function WifiStep({ onNext }: WifiStepProps) {
   return (
     <div className="w-full max-w-[520px]" data-testid="setup-step-wifi">
       {handoffSsid && <WifiHandoffOverlay ssid={handoffSsid} targetUrl={localUrl} />}
+      {joined && (
+        <WifiConnectedDialog ssid={joined.ssid} ip={joined.ip} onClose={() => { setJoined(null); onNext(); }} />
+      )}
       <div className="card-surface rounded-2xl p-5 sm:p-8">
         <div className="flex flex-col items-center gap-2 mb-5 sm:mb-6">
           <Image
@@ -301,6 +325,13 @@ export default function WifiStep({ onNext }: WifiStepProps) {
                   </span>
                   <span className="text-sm text-[#00e5cc]">{t("wifi.ethConnected")}</span>
                 </div>
+              ) : onlineWithoutCable ? (
+                <div className="flex items-center gap-3 px-4 py-3 bg-[#00e5cc]/10 border border-[#00e5cc]/20 rounded-lg">
+                  <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[#00e5cc]/20 shrink-0">
+                    <span className="w-2.5 h-2.5 rounded-full bg-[#00e5cc]" />
+                  </span>
+                  <span className="text-sm text-[#00e5cc]">{t("wifi.onlineReady")}</span>
+                </div>
               ) : eth?.cable ? (
                 <div className="flex items-center gap-3 px-4 py-3 bg-amber-400/10 border border-amber-400/20 rounded-lg">
                   {cableStuck ? (
@@ -322,11 +353,13 @@ export default function WifiStep({ onNext }: WifiStepProps) {
               <button
                 type="button"
                 onClick={skipEthernet}
-                disabled={eth?.connected !== true}
+                disabled={eth?.connected !== true && !onlineWithoutCable}
                 className="w-full py-3 px-4 btn-gradient text-white rounded-lg text-sm font-semibold transition transform hover:scale-[1.02] active:scale-[0.98] shadow-lg shadow-[rgba(249,115,22,0.25)] cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50 disabled:hover:scale-100 disabled:cursor-not-allowed"
               >
                 <span className="whitespace-nowrap">
-                  {eth?.cable && !eth?.connected ? t("connecting") : t("wifi.proceedEthernet")}
+                  {onlineWithoutCable
+                    ? t("wifi.proceedOnline")
+                    : eth?.cable && !eth?.connected ? t("connecting") : t("wifi.proceedEthernet")}
                 </span>
                 <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide rounded bg-white/20 text-white leading-none">{t("recommended")}</span>
               </button>
@@ -337,7 +370,7 @@ export default function WifiStep({ onNext }: WifiStepProps) {
               {eth?.connected !== true && (
                 <button
                   type="button"
-                  onClick={() => { setShowWifiList(true); fetchNetworks(); }}
+                  onClick={() => { ownerChoosingRef.current = true; setShowWifiList(true); fetchNetworks(); }}
                   className="w-full py-2.5 bg-transparent border border-[#fb923c]/40 text-[#fb923c] rounded-lg text-sm font-semibold cursor-pointer hover:border-[#fb923c] hover:bg-[#fb923c]/10 active:scale-[0.98] transition"
                 >
                   {t("wifi.useWifiInstead")}

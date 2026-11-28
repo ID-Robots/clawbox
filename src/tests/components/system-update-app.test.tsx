@@ -162,7 +162,7 @@ describe("SystemUpdateApp — a dismissal refused by a live update", () => {
 // offered Dismiss alone (which forgets the position) and the hero's update
 // button is hidden while a run is settled, so the resume was reachable by no
 // gesture. The Resume button is that gesture, and only an interrupted run
-// gets it: any other failure keeps the panel it had.
+// gets it: any other failure gets Try again, which runs the update again (below).
 describe("SystemUpdateApp — an interrupted run offers Resume", () => {
   const INTERRUPTED =
     "The update was interrupted before it could finish: the box restarted — or lost power — while "
@@ -236,7 +236,86 @@ describe("SystemUpdateApp — an interrupted run offers Resume", () => {
     await view.findAllByText(/Rebuild failed/);
     expect(view.queryByRole("button", { name: "Resume update" })).toBeNull();
     expect(view.queryByRole("button", { name: "Start the update again" })).toBeNull();
+    expect(view.getByRole("button", { name: "Try again" })).toBeTruthy();
     expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+  });
+});
+
+// A step that failed with a cause of its own left the owner Dismiss alone, and
+// nothing runs a failed update again by itself: the assistant stayed down
+// until they found "Update everything", or "Force full update" under Advanced
+// options. Try again is the same request as those, from the failed panel.
+describe("SystemUpdateApp — Try again on a failed run", () => {
+  const FAILED = {
+    phase: "failed",
+    error: "openclaw_install exited with code 1",
+    currentStepIndex: -1,
+    steps: [
+      { id: "bootstrap_updater", label: "Refreshing updater scripts", status: "completed" },
+      { id: "apt_update", label: "Updating system packages", status: "completed" },
+      { id: "openclaw_install", label: "Updating OpenClaw", status: "failed", error: "npm could not reach the registry" },
+      { id: "restart", label: "Updating ClawBox and restarting", status: "pending" },
+    ],
+  };
+
+  function mount(answers: { run?: () => Response; dismiss?: () => Response } = {}) {
+    const runBodies: unknown[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/setup-api/update/versions")) {
+          return jsonResponse({
+            clawbox: { current: "4.0.0", target: "4.0.0", updateAvailable: false },
+            openclaw: { current: "2026.9.3", target: "2026.9.3", updateAvailable: false },
+          });
+        }
+        if (url.includes("/setup-api/system/update-branch")) return jsonResponse({ branch: "beta" });
+        if (url.includes("/setup-api/update/run")) {
+          runBodies.push(JSON.parse(String(init?.body ?? "null")));
+          return answers.run?.() ?? jsonResponse({ started: true });
+        }
+        if (url.includes("/setup-api/update/dismiss")) return answers.dismiss?.() ?? jsonResponse({ ok: true });
+        if (url.includes("/setup-api/update/status")) return jsonResponse(FAILED);
+        return jsonResponse({});
+      }),
+    );
+    return { view: render(<SystemUpdateApp />), runBodies };
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("starts one fresh run with exactly the Update everything request, however often it is pressed", async () => {
+    const { view, runBodies } = mount();
+    await view.findByRole("button", { name: "Dismiss" });
+    expect(view.queryByRole("button", { name: "Resume update" })).toBeNull();
+    const button = view.getByRole("button", { name: "Try again" });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    await view.findByTestId("update-handover");
+    expect(runBodies).toEqual([{ force: true }]);
+  });
+
+  it("asks first while agents are working, as Update everything does", async () => {
+    const { view, runBodies } = mount({
+      run: () => jsonResponse({ started: false, busy: true, work: { coding: 1, agents: 0, total: 1 } }, false, 409),
+    });
+    await view.findByRole("button", { name: "Dismiss" });
+    fireEvent.click(view.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(view.queryByRole("dialog")).not.toBeNull());
+    expect(view.getByRole("dialog")).toHaveTextContent("Agents are working right now");
+    expect(runBodies).toEqual([{ force: true }]);
+  });
+
+  it("offers no Try again on the panel of a Dismiss the box did not take", async () => {
+    const { view, runBodies } = mount({ dismiss: () => jsonResponse({ error: "disk full" }, false, 500) });
+    fireEvent.click(await view.findByRole("button", { name: "Dismiss" }));
+    await view.findAllByText(/The device could not clear that result/);
+    expect(view.queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(view.getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    expect(runBodies).toEqual([]);
   });
 });
 

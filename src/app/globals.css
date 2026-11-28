@@ -61,11 +61,18 @@
   font-display: swap;
   unicode-range: U+2190-23FF, U+2500-27BF, U+2B00-2BFF, U+E000-F8FF, U+F0000-FFFFD;
 }
+/* The icon font, by a RELATIVE url(): the bundler emits it under
+   /_next/static/media with a content hash, which Next caches `immutable` and
+   sends as stored (WOFF2 is already compressed). From public/ it was
+   revalidated on every load, and as a TTF gzipped again on every uncached
+   request. Made from the TTF next to the WOFF2 (docs/agents/desktop.md has
+   the command). `block`: the glyphs are ligatures, so any other value paints
+   their names in the fallback face until the font arrives. */
 @font-face {
   font-family: "Material Symbols Rounded";
   font-style: normal;
   font-weight: 400;
-  src: url("/fonts/material-symbols-rounded.ttf") format("truetype");
+  src: url("../assets/fonts/material-symbols-rounded.woff2") format("woff2");
   font-display: block;
 }
 
@@ -137,7 +144,7 @@
      doing two jobs. --bg-deep #111827 is the INSET colour: the well under
      a segmented tab tray (AIModelsStep), the provider-list backing, the
      tier pill tray. The page ground is #0a0f1a, hardcoded three times —
-     setup/page.tsx, layout.tsx's PWA themeColor twice, and page.tsx's
+     setup/page.tsx, layout.tsx's PWA themeColor (viewport), and page.tsx's
      desktop fallback. #0a0f1a wins because it is what the customer's
      browser chrome and splash screen already paint, so anything else
      creates a seam at the edge of the viewport on a phone.
@@ -2703,6 +2710,14 @@ input[type="range"].appearance-none::-moz-range-track {
   min-height: 40px;
   font-size: 12.5px;
   border-radius: 12px;
+}
+
+/* The portrait phone chat's menu slides in from the left (TASK-2778,
+ * ChatPhoneChrome.tsx); its bottom sheets reuse `slide-up`. Reduced motion is
+ * the blanket rule's. */
+@keyframes chat-phone-menu-in {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
 }
 
 /* The phone chat's text size (TASK-1157, src/lib/chat-phone-layout.ts). Set on

@@ -72,6 +72,6 @@ export async function POST(req: Request) {
   // Reported rather than awaited into the verdict: a gateway that would not
   // come back does not make the setting untrue, and the panel says which of the
   // two happened instead of collapsing them into one green tick.
-  const restarted = await applyBackgroundJobRestart(status.harness);
+  const restarted = await applyBackgroundJobRestart(status.harness, id);
   return NextResponse.json({ ok: true, restarted, ...status });
 }

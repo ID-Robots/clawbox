@@ -10,7 +10,7 @@
  * What it reads is the `## Highlights` section's top-level bullets, in the two
  * shapes the releases have used:
  *
- *   - **More of the phone for the chat.** On a phone the chat opens …   (4.0 to 4.3)
+ *   - **More of the phone for the chat.** On a phone the chat opens …   (4.0 to 4.4)
  *   - **Hermes edition** — a single-harness SKU locked at install time …  (3.9)
  *
  * A bullet wraps over indented lines; those are joined back into one. Nested
@@ -32,9 +32,9 @@ export interface ReleaseHighlight {
 
 /**
  * A panel shows a handful and links to the rest: the update screen's step list
- * stays the thing to read. The 4.3 notes list eleven (the first seven are the
- * headline features), the 4.2 notes seven, the 4.1 notes four, the 4.0 notes
- * eight.
+ * stays the thing to read. The 4.4 notes list five, the 4.3 notes eleven (the
+ * first seven are the headline features), the 4.2 notes seven, the 4.1 notes
+ * four, the 4.0 notes eight.
  */
 export const MAX_HIGHLIGHTS = 7;
 /** Longer than any title the notes have used, short enough for one line or two. */

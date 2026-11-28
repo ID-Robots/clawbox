@@ -63,7 +63,30 @@ const PROVIDER_WORDS: Readonly<Record<string, string>> = {
   "clawbox-ai": "ClawBox AI",
   anthropic: "Anthropic",
   openai: "OpenAI",
+  local: "the box's own engine",
 };
+
+/**
+ * The providers this box's coding tools may name: what the device narrowed
+ * them to (under the local-only AI lock, `local` alone — mcp/lib/context.ts),
+ * else every provider this build knows. Never empty.
+ */
+export function offeredCodingProviders(ctx: Pick<McpContext, "codingProviders">): readonly string[] {
+  const narrowed = (ctx.codingProviders ?? []).filter((p) => (CODING_PROVIDERS as readonly string[]).includes(p));
+  return narrowed.length > 0 ? narrowed : CODING_PROVIDERS;
+}
+
+/**
+ * The `provider` parameter's description, for the providers this box offers.
+ * Both answers stay within MAX_PARAM_DESCRIPTION_CHARS (mcp/lib/register.ts):
+ * mcp/check-tools.ts fails the install on a longer one.
+ */
+export function runProviderDescription(providers: readonly string[]): string {
+  if (providers.length === 1 && providers[0] === "local") {
+    return `"local": the box's own engine — the local-only AI lock is on, so runs use nothing else. Omit: the same.`;
+  }
+  return `"clawbox-ai" (box's plan), "anthropic"/"openai" (owner's, if connected), "local" (the box's own engine). Omit: default.`;
+}
 // Pure too: the store's own bounds, so the output cap below is derived from
 // what the device can actually hold rather than from a round number.
 import { MAX_SECRETS } from "../../src/lib/project-secrets-shape";
@@ -176,9 +199,9 @@ const PROVIDER_CHOICE_NEXT =
  * tools say the same thing; the route validates the value and answers
  * `code: "effort"` when it refuses one.
  */
-const EFFORT_PARAM_DESCRIPTION = "This run's effort: low, xhigh, max or ultracode (the highest, far more tokens: only when asked). Omit: owner's setting.";
+const EFFORT_PARAM_DESCRIPTION = "This run's effort: low, medium, high, xhigh, max, ultracode (most tokens: only when asked). Omit: owner's setting.";
 /** The team's: every member run gets the level, and a planner or reviewer is still capped at xhigh. */
-const TEAM_EFFORT_PARAM_DESCRIPTION = "Every run's effort: low, xhigh, max or ultracode (highest, far more tokens; readers stay at xhigh). Omit: owner's.";
+const TEAM_EFFORT_PARAM_DESCRIPTION = "Every run's effort: low, medium, high, xhigh, max, ultracode (most tokens; readers capped at xhigh). Omit: owner's.";
 const EFFORT_CHOICE_NEXT = `Pass one of ${OFFERED_EFFORT_LEVELS.join(", ")} as effort, or omit it to use the owner's setting.`;
 
 const SWITCH_NEXT =
@@ -261,6 +284,14 @@ const STATUS_RULES: ErrorRule[] = [
     message: "There is no coding run with that id on this ClawBox.",
     next: "Call coding_agent_status without a run_id to list the recent runs and their ids.",
   },
+];
+
+/** The project-folders route's typed refusals (`kind`, src/lib/project-folders.ts). */
+const PROJECT_FOLDER_RULES: ErrorRule[] = [
+  { status: 400, match: /"kind":\s*"not_a_repository"/, code: "BAD_ARGUMENT", message: "That folder is not a git repository directly inside the owner's project folder.", next: "Call coding_project_status for the folders that are, and ask the user which one they meant.", withRouteDetail: true },
+  { status: 409, match: /"kind":\s*"exists"/, code: "CONFLICT", message: "That project already lists folders.", next: "Nothing was changed. Use coding_project_folder_add or coding_project_folder_remove instead." },
+  { status: 404, code: "NOT_FOUND", message: "That project does not list that folder.", next: "Call coding_project_folders for what it lists." },
+  { status: 400, code: "BAD_ARGUMENT", message: "The request was refused as malformed.", next: "Names are folder names (letters, digits, - and _) and at most 8 folders; check them and call again.", withRouteDetail: true },
 ];
 
 /** The import route's typed refusals (`kind`), as the next step the agent takes. */
@@ -377,6 +408,11 @@ interface RunPayload {
     /** What the last attempt to bring the branch home came to. Absent until one was made. */
     result?: { kind?: "merged" | "unmerged"; reason?: string | null; detail?: string | null; base?: string | null } | null;
   } | null;
+  /** A MULTI-FOLDER run's copies (TASK-2757): one per repository, side by side in `directory`. Absent on every other run. */
+  multiFolder?: {
+    project: string;
+    folders: { name: string; branch: string; base: string; removed?: boolean; result?: { kind?: "merged" | "unmerged" } | null; pr?: { url: string } | null }[];
+  };
   /**
    * The systemd scope the run lives in, or null when it is an ordinary child of
    * the web server. Set means DETACHED: the run keeps working through a restart
@@ -583,11 +619,19 @@ function describeRun(run: RunPayload, tail: number): string {
       parts.push(ownerDecidesMerge(run.worktree.branch));
     }
   }
+  // A multi-folder run: where each repository's copy and work is.
+  if (run.multiFolder?.folders.length) {
+    const each = run.multiFolder.folders.map((f) => {
+      const where = f.pr?.url ? `pull request ${f.pr.url}` : f.result?.kind === "merged" ? `merged into ${f.base}` : f.removed ? "copy removed" : "copy on disk";
+      return `${f.name} on ${f.branch} (from ${f.base}; ${where})`;
+    });
+    parts.push(`This run works on ${run.multiFolder.folders.length} repositories of ${run.multiFolder.project}, each in its own copy: ${each.join("; ")}.`);
+  }
   const facts = [
     // Which account paid is said whenever it is not the box's own plan: the
     // owner asked for that run to go somewhere else and is entitled to see it
     // in the report, and "model claude-opus-5-5" alone does not say whose bill.
-    run.provider && run.provider !== "clawbox-ai" ? `on the owner's ${PROVIDER_WORDS[run.provider] ?? run.provider} account` : null,
+    run.provider === "local" ? `on ${PROVIDER_WORDS.local}` : run.provider && run.provider !== "clawbox-ai" ? `on the owner's ${PROVIDER_WORDS[run.provider] ?? run.provider} account` : null,
     run.model ? `model ${run.model}` : (run.requestedModel ? `model ${run.requestedModel}` : null),
     `${run.numTurns} turns`,
     run.thinkingTokens ? `${run.thinkingTokens} reasoning tokens` : null,
@@ -1068,10 +1112,10 @@ const SETTINGS_RULES: ErrorRule[] = [
 ];
 
 /** The three halves of one role, as `<role>_provider` / `<role>_model` / `<role>_effort`. */
-function roleHalfParams(role: ModelRole, who: string): Shape {
+function roleHalfParams(role: ModelRole, who: string, providers: readonly string[] = CODING_PROVIDERS): Shape {
   const reset = ROLE_RESET_WORDS.join("/");
   return {
-    [`${role}_provider`]: zEnumOf([...ROLE_RESET_WORDS, ...CODING_PROVIDERS], `The account that pays for ${who}; must be connected. ${reset}: the team's own.`).optional(),
+    [`${role}_provider`]: zEnumOf([...ROLE_RESET_WORDS, ...providers], `The account that pays for ${who}; must be connected. ${reset}: the team's own.`).optional(),
     [`${role}_model`]: zOptText(64, `Model for ${who}: ${ROLE_MODEL_TIERS.join("/")}, a model id its provider offers, or ${reset}.`),
     [`${role}_effort`]: zEnumOf([...ROLE_RESET_WORDS, ...ROLE_EFFORT_LEVELS], `Effort for ${who}; ${reset} follows the owner's. A reader never goes above xhigh.`).optional(),
   };
@@ -1157,27 +1201,33 @@ export function describeSettings(s: SettingsPayload): string {
 const RESUME_NEXT =
   "Do not retry. Tell the user what the ClawBox said; the run's page in the Coding Agent app shows the same.";
 
-export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "codingAgent">): void {
+export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "codingAgent" | "codingProviders">): void {
   // The device said no (switch off, harness missing, or an older build without
   // the route). Registering nothing is the safe direction.
   if (!ctx.codingAgent) return;
+  // Under the local-only AI lock the device offers `local` alone (TASK-2501):
+  // the schemas name nothing else, and a run takes no model — the engine
+  // serves one.
+  const providers = offeredCodingProviders(ctx);
+  const namesModels = providers.some((p) => p === "anthropic" || p === "openai");
 
   reg.tool(
     "coding_agent_run",
     "Use for any request to build or fix an app, site, script or tool bigger than one page; don't code it yourself or start servers. A coding session (Codex on openai) works in the background in one folder (project_id or directory); the task must stand alone. Returns a run id at once: say it is running, then STOP; no coding_agent_status until asked. Do not start a second run.",
     {
       task: zText(MAX_TASK_CHARS, "What to build or change, with enough detail to work unattended. Name the files or features involved."),
-      project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
+      project_id: zOptText(64, "A code project id from code_project_list, or a multi-folder project from coding_project_folders. Give this OR directory."),
       directory: zOptText(512, "A folder inside the owner's project folder to work in (its name, or its absolute path), when it is not a code project."),
       resume_run_id: zOptText(40, "A finished run's id, e.g. \"run-k3x9q2ab\", to continue that session with this task."),
-      provider: zEnumOf(
-        CODING_PROVIDERS,
-        `Who pays: "clawbox-ai" (the box's plan), "anthropic" or "openai" (the owner's own, once connected). Omit: default.`,
-      ).optional(),
-      model: zEnumOf(
-        RUN_MODELS,
-        `claude-* for "anthropic", gpt-* for "openai"; omit for its default. Naming a model with "clawbox-ai" is refused.`,
-      ).optional(),
+      provider: zEnumOf(providers, runProviderDescription(providers)).optional(),
+      ...(namesModels
+        ? {
+          model: zEnumOf(
+            RUN_MODELS,
+            `claude-* for "anthropic", gpt-* for "openai"; omit for its default. Refused with "clawbox-ai" or "local".`,
+          ).optional(),
+        }
+        : {}),
       effort: zEnumOf(
         OFFERED_EFFORT_LEVELS,
         EFFORT_PARAM_DESCRIPTION,
@@ -1815,6 +1865,82 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
     },
   );
 
+  // ─── Multi-folder projects (TASK-2757) ────────────────────────────────────
+  //
+  // A project that lists several git repositories of the owner's project
+  // folder (src/lib/project-folders.ts). A run on it — coding_agent_run with
+  // its name as project_id — gets a copy of each, side by side, and opens one
+  // pull request per repository that changed. Backed by
+  // /setup-api/coding-agent/project-folders, which admits this process's bearer.
+  const folderList = (project: string, folders: { folder: string; base?: string }[]): string =>
+    folders.length
+      ? `${project}: ${folders.map((f) => (f.base ? `${f.folder} (from ${f.base})` : f.folder)).join(", ")}. Run it with coding_agent_run project_id "${project}".`
+      : `${project} lists no folders: it is a single-folder project.`;
+  const postFolders = (body: Record<string, unknown>) =>
+    apiPost<{ project?: string; folders?: { folder: string; base?: string }[] }>("/setup-api/coding-agent/project-folders", body, { timeoutMs: 15_000, rules: PROJECT_FOLDER_RULES });
+
+  reg.tool(
+    "coding_project_create",
+    "Create a multi-folder project: one name for several git repositories in the owner's project folder (e.g. a gateway and its dashboard). A run on it gets a copy of each and opens one pull request per repository that changed. Only when the USER asks.",
+    {
+      project: zText(64, "The new project's name: letters, digits, - and _."),
+      folders: z.array(zText(64, "A repository's folder name in the project folder.")).min(1).max(8).describe("The repositories' folder names, as coding_project_status lists them."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false },
+    async ({ project, folders }: { project: string; folders: string[] }) => {
+      const data = await postFolders({ project, action: "create", folders });
+      return text(redact(`Created ${folderList(data.project ?? project, data.folders ?? [])}`));
+    },
+  );
+
+  reg.tool(
+    "coding_project_folder_add",
+    "Add one git repository of the owner's project folder to a project, making it (or keeping it) a multi-folder project. Only when the USER asks.",
+    {
+      project: zText(64, "The project's name, as coding_project_status or coding_project_folders lists it."),
+      folder: zText(64, "The repository's folder name in the project folder."),
+      base_branch: zOptText(200, "The branch runs fork this repository from; leave out for the branch its checkout is on."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false },
+    async ({ project, folder, base_branch }: { project: string; folder: string; base_branch?: string }) => {
+      const data = await postFolders({ project, action: "add", folder, ...(base_branch?.trim() ? { base: base_branch.trim() } : {}) });
+      return text(redact(folderList(data.project ?? project, data.folders ?? [])));
+    },
+  );
+
+  reg.tool(
+    "coding_project_folder_remove",
+    "Take one repository off a multi-folder project's list. The repository itself is not touched. Only when the USER asks.",
+    {
+      project: zText(64, "The project's name."),
+      folder: zText(64, "The folder to take off its list."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false },
+    async ({ project, folder }: { project: string; folder: string }) => {
+      const data = await postFolders({ project, action: "remove", folder });
+      return text(redact(folderList(data.project ?? project, data.folders ?? [])));
+    },
+  );
+
+  reg.tool(
+    "coding_project_folders",
+    "List the multi-folder projects and the repositories each one's runs work on; name one project for its list alone.",
+    {
+      project: zOptText(64, "A project's name, for its folders alone. Leave it out for every multi-folder project."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: LIST_MAX_CHARS },
+    async ({ project }: { project?: string }) => {
+      const wanted = project?.trim();
+      if (wanted) {
+        const data = await apiGet<{ project?: string; folders?: { folder: string; base?: string }[] }>("/setup-api/coding-agent/project-folders", { query: { project: wanted }, timeoutMs: 15_000, rules: PROJECT_FOLDER_RULES });
+        return text(redact(folderList(data.project ?? wanted, data.folders ?? [])));
+      }
+      const data = await apiGet<{ projects?: { project: string; folders: { folder: string; base?: string }[] }[] }>("/setup-api/coding-agent/project-folders", { timeoutMs: 15_000, rules: PROJECT_FOLDER_RULES });
+      const rows = Array.isArray(data.projects) ? data.projects : [];
+      return text(redact(rows.length ? rows.map((r) => folderList(r.project, r.folders)).join("\n") : "There are no multi-folder projects on this ClawBox; coding_project_create makes one."));
+    },
+  );
+
   // ─── The coding TEAM's settings ───────────────────────────────────────────
   //
   // The owner's preferences about their coding agent, as a pair of tools
@@ -1842,9 +1968,9 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
     "Change the owner's coding-team settings: effort, a role's provider/model/effort (planner_*, worker_*, reviewer_*), review pass, auto PR and merge, PR body, dynamic team, runs at once, history, media, commit identity. Only the fields given change. They are the owner's preferences: confirm before changing effort, a model or runs at once unless the user just asked for exactly that.",
     {
       effort: zEnumOf(AGENT_EFFORT_LEVELS, "How hard every run thinks. Costs more at each step up.").optional(),
-      ...roleHalfParams("planner", "the planner (and the team's lead)"),
-      ...roleHalfParams("worker", "the workers, which write the code"),
-      ...roleHalfParams("reviewer", "the reviewer of each task"),
+      ...roleHalfParams("planner", "the planner (and the team's lead)", providers),
+      ...roleHalfParams("worker", "the workers, which write the code", providers),
+      ...roleHalfParams("reviewer", "the reviewer of each task", providers),
       review_pass: z.boolean().optional().describe("One extra review run after every completed run that changed files."),
       auto_pr: z.boolean().optional().describe("Branch, open a pull request and wait for its checks after a run."),
       auto_merge: z.boolean().optional().describe("May the box squash-merge a pull request its own review loop cleared? Never into main."),

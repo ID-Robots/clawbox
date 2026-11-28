@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { OLLAMA_MAX_MODEL_PARAM_B } from "@/lib/resource-limits";
+import { ollamaMaxModelParamB } from "@/lib/ollama-size-cap";
 
 /**
  * Search the Ollama model library and filter for models that can run
@@ -14,7 +14,6 @@ import { OLLAMA_MAX_MODEL_PARAM_B } from "@/lib/resource-limits";
 // The size class the box can actually serve. Not "what fits in 8 GB": the
 // cap is ollama.service's MemoryMax — see src/lib/resource-limits.ts and the
 // "Known and deliberate" paragraph in config/clawbox-resource-limits.env.
-const MAX_PARAM_BILLIONS = OLLAMA_MAX_MODEL_PARAM_B;
 
 interface SearchResult {
   name: string;
@@ -130,13 +129,13 @@ function parseSearchResults(html: string): SearchResult[] {
   return results;
 }
 
-function filterForJetson(results: SearchResult[]): (SearchResult & { filteredSizes: string[] })[] {
+function filterForCap(results: SearchResult[], maxParamBillions: number): (SearchResult & { filteredSizes: string[] })[] {
   return results
     .map((r) => {
       // Filter sizes to only those that fit under the memory cap
       const filteredSizes = r.sizes.filter((s) => {
         const num = sizeInBillions(s);
-        return !isNaN(num) && num <= MAX_PARAM_BILLIONS;
+        return !isNaN(num) && num <= maxParamBillions;
       });
       // If no sizes listed, include the model (it might be small)
       // If sizes listed but none fit, exclude
@@ -151,23 +150,32 @@ const searchCache = new Map<string, { results: (SearchResult & { filteredSizes: 
 const CACHE_TTL_MS = 45_000; // 45 seconds
 
 /** `maxParamBillions` rides along so the picker's copy cannot drift from the filter. */
-function answer(results: (SearchResult & { filteredSizes: string[] })[]) {
-  return NextResponse.json({ results, maxParamBillions: MAX_PARAM_BILLIONS });
+function answer(results: (SearchResult & { filteredSizes: string[] })[], maxParamBillions: number) {
+  return NextResponse.json({ results, maxParamBillions });
 }
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get("q")?.trim();
+  // This host's figure (src/lib/ollama-size-cap.ts): the Jetson's under its
+  // ollama.service memory cap, the machine's own on an uncapped PC.
+  const maxParamBillions = ollamaMaxModelParamB();
 
   if (!query) {
-    return answer([]);
+    return answer([], maxParamBillions);
   }
 
-  // Check cache first
-  const cacheKey = query.toLowerCase();
+  // Check cache first. The cap is part of the key: the entry holds results
+  // already filtered through filterForCap under ONE figure, and that figure
+  // changes under the process (the drop-in appears when the resource-limits
+  // step runs, os.totalmem() moves on a VM). Keyed on the query alone, a
+  // search made under a 4B cap was served back under the host's real 122B —
+  // with the larger number in the answer's `maxParamBillions` and none of the
+  // models it promises in `results`.
+  const cacheKey = `${maxParamBillions}:${query.toLowerCase()}`;
   const cached = searchCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
-    return answer(cached.results);
+    return answer(cached.results, maxParamBillions);
   }
 
   try {
@@ -191,7 +199,7 @@ export async function GET(request: Request) {
 
     const html = await res.text();
     const allResults = parseSearchResults(html);
-    const filtered = filterForJetson(allResults);
+    const filtered = filterForCap(allResults, maxParamBillions);
     const results = filtered.slice(0, 20);
 
     // Evict oldest entry before inserting to keep cache within limit
@@ -201,7 +209,7 @@ export async function GET(request: Request) {
     }
     searchCache.set(cacheKey, { results, ts: Date.now() });
 
-    return answer(results);
+    return answer(results, maxParamBillions);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Search failed" },

@@ -16,8 +16,15 @@ type BackgroundJobId = "checkIns" | "memoryReview" | "skillLearning";
 interface BackgroundJobsStatus {
   harness: string;
   degraded: boolean;
+  /** Absent from an older server, which never kept these off: read as false. */
+  singleEngine?: boolean;
   jobs: { id: BackgroundJobId; enabled: boolean; supported: boolean; key: string | null }[];
 }
+
+// TASK-2387: on a single-engine box (every chat shares one AI engine) the boot
+// script keeps these two off by default, and the row says why — an owner who
+// finds them off should not have to guess whether something is broken.
+const SINGLE_ENGINE_ROWS: ReadonlySet<BackgroundJobId> = new Set(["memoryReview", "skillLearning"]);
 
 // The three things the box does on its own initiative — ON by default (owner
 // ruling 2026-09-15; TASK-609's opt-outs of 2026-09-03 are taken back once at
@@ -31,7 +38,9 @@ interface BackgroundJobsStatus {
 // jobs exist at all.
 //
 // EVERY ROW IS A HARNESS KEY, and the panel says which one. The switches write
-// `agents.defaults.heartbeat.every`, `plugins.entries.memory-core.config.
+// `agents.defaults.heartbeat.every` (from OpenClaw 2026.11.5, where that key is
+// retired, the row names and switches the heartbeat's automation job instead,
+// or says there is none), `plugins.entries.memory-core.config.
 // dreaming.enabled` and `skills.workshop.autonomous.mode` on OpenClaw, and
 // `auxiliary.background_review.enabled` / `curator.enabled` on Hermes. Naming
 // the key is not decoration on an appliance whose owner may also have a
@@ -169,6 +178,14 @@ export default function BackgroundJobsPanel() {
                 <span className="block text-[11px] text-[var(--text-secondary)] leading-relaxed">
                   {t(row.hintKey)}
                 </span>
+                {status.singleEngine === true && SINGLE_ENGINE_ROWS.has(row.id) && (
+                  <span
+                    className="block text-[11px] text-[var(--text-secondary)] leading-relaxed mt-0.5"
+                    data-testid={`bg-job-single-engine-${row.id}`}
+                  >
+                    {t("settings.bgSingleEngine")}
+                  </span>
+                )}
                 {job.key && (
                   <span className="block text-[10px] text-[var(--text-muted)] font-mono mt-0.5 break-all">
                     {job.key}

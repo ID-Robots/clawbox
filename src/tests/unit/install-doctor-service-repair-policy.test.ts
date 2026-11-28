@@ -127,6 +127,8 @@ const AMBIENT = [
   // Stubbed, never lifted: the step calls it with no arguments, which means the
   // REAL /usr and /usr/local (install-shadowing-system-openclaw.test.ts).
   "remove_shadowing_system_openclaw() { :; }",
+  // Its own suite: install-rebuild-checkout-rollback.test.ts.
+  "keep_checkout_with_installed_core() { :; }",
   // The migration disk pre-flight and verdict record have suites of their own
   // (install-openclaw-migration-preflight.test.ts); here they pass.
   "openclaw_migration_disk_preflight() { return 0; }",
@@ -146,6 +148,8 @@ const AMBIENT = [
   // which is also what lets `env VAR=… cmd` through unchanged — the shape the
   // call sites now use, because `sudo -u` resets the environment.
   'as_clawbox() { while [ "${1:-}" = "-H" ]; do shift; done; "$@"; }',
+  // The probes install.sh asks as the service account (runuser -u … -- cmd…).
+  'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; "$@"; }',
   'stop_openclaw_gateways_for_migration() { printf "stop-gateways-for-migration\\n" >> "$ST/calls"; }',
 ];
 

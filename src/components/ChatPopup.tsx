@@ -104,6 +104,7 @@ import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 // wrapper tags, which is genuinely OpenClaw-specific. `boundedAudio` is not,
 // and now lives with the rest of the media helpers.
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
+import { advanceChatStream, createChatStreamCursor } from '@/lib/chat-stream-message'
 import { chatKeyUser, defaultTranscriptKeyFor } from '@/lib/chat-scope'
 import { useSessionUser } from '@/lib/use-session-user'
 import { CHAT_TABS_ROUTE, conversationToFollow, isChatTabKey, nextTabSeq, parseActiveRecord, parseTabList, sortTabs, tabLabelFromText, type ChatActiveRecord, type ChatTabRecord } from '@/lib/chat-tabs'
@@ -338,6 +339,12 @@ interface ChatPopupProps {
    * as it was before multi-user.
    */
   chatUser?: string | null
+  /**
+   * A member of staff on an organisation box (src/lib/org-mode.ts): their
+   * chat is a chat and nothing more — no coding-run cards, no "create an
+   * app", no owner's email drafts, whose routes answer them 403.
+   */
+  orgMember?: boolean
   onOpenFull?: () => void
   onOpenSettingsSection?: (section: 'ai' | 'localAi') => void
   onThinkingChange?: (thinking: boolean) => void
@@ -419,6 +426,14 @@ export function stoppedMarker(): ChatMessage {
 }
 
 /**
+ * The status line under a running turn: when it started (the clock counts from
+ * here), what the harness last said it was doing, the spinner verb picked for
+ * it, and whether the model has been heard from. Kept with a tab its owner
+ * leaves mid-run, so coming back shows the same turn's line (TASK-2494).
+ */
+type TurnLine = { startedAt: number; status: string | null; verb: string | null; heardFrom: boolean }
+
+/**
  * Whether the latest question already has this answer under it — a followed
  * turn's reply that the history read had already brought in (see `attachTurn`).
  */
@@ -469,8 +484,9 @@ interface ChatModelState {
     thinkingLevels?: string[]
   }>
   primary: { available: boolean; label: string | null; model: string | null }
-  /** `contextWindow`: what OpenClaw sizes a local turn against (TASK-2127). */
-  local: { available: boolean; label: string | null; model: string | null; contextWindow?: number | null }
+  /** `contextWindow`: what OpenClaw sizes a local turn against (TASK-2127).
+   *  `external`: the slot holds the owner's external AI engine (TASK-2376). */
+  local: { available: boolean; label: string | null; model: string | null; contextWindow?: number | null; external?: boolean }
   /** Providers this box authenticates to by SUBSCRIPTION only. The catalogue's
    * `availableOnSubscription` stamp says what a provider's subscription
    * surface carries; this says whether that applies to this device. Optional
@@ -504,30 +520,10 @@ function thinkingSnapDue(state: ChatModelState, current: ThinkingLevel): boolean
   return readPersistedThinkingLevel(provider, cfg) !== current
 }
 
-// Compact provider labels for the chat header pill. The chat panel
-// can be docked at ~370px wide where "OpenAI Codex" + "GPT-5.4 Mini"
-// + "Medium" combined exceeds the available width and pills truncate
-// to "OpenAI Co...". Drop the brand prefix on the provider pill so
-// users see the distinctive part ("Codex" vs "GPT" — both still
-// clearly OpenAI) without overflow. Settings page and notification
-// messages still use the full PROVIDER_LABELS values from the chat
-// model route.
-const PROVIDER_PILL_LABEL: Record<string, string> = {
-  'ClawBox AI': 'ClawBox',
-  'Anthropic Claude': 'Claude',
-  'OpenAI GPT': 'GPT',
-  'OpenAI Codex': 'Codex',
-  'Google Gemini': 'Gemini',
-  'OpenRouter': 'OpenRouter',
-  'xAI Grok': 'Grok',
-  'Ollama Local': 'Ollama',
-  'Gemma 4 Local': 'Gemma 4',
-}
-
 function getProviderPillText(option: ChatModelState['options'][number]): string {
   const full = getChatModelOptionText(option)
   if (!option.available) return full
-  return PROVIDER_PILL_LABEL[option.label ?? ''] ?? full
+  return chatProviderPillLabel(option.label ?? '') ?? full
 }
 
 import { claimSpokenReply, releaseSpokenReply, spokenReplyInterruptions, stopSpokenReply } from '@/lib/spoken-reply-playback'
@@ -550,11 +546,14 @@ import {
 } from '@/lib/chat-attachments'
 import { useChatFileDrop, useChatUploads } from '@/lib/use-chat-drop'
 import { ChatDropOverlay, ChatUploadChips } from './ChatDropUploads'
-import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
 import { usePortrait } from '@/lib/use-portrait'
 import { useChatFullscreen, useChatTextScale } from '@/lib/use-chat-phone-layout'
-import { ChatFullscreenButton, ChatHeaderStrip, ChatTextSizeBar, ChatTextSizeButton } from '@/components/ChatPhoneChrome'
+import {
+  ChatFullscreenButton, ChatHeaderStrip, ChatModelPill, ChatPhoneBar, ChatPhoneMenu, ChatPhonePickerGroup,
+  ChatPhoneSheet, ChatPhoneSheetAction, ChatTextSizeBar, ChatTextSizeButton,
+  type ChatPhoneMenuChat, type ChatPhonePicker,
+} from '@/components/ChatPhoneChrome'
 import LocalAiChatBanner, { chatOnLocalAi, useLocalAiBannerDismissed, useLocalAiLoadingLabel } from '@/components/LocalAiChatBanner'
 import LocalAiLongChatOffer from '@/components/LocalAiLongChatOffer'
 import { useLocalAiLongChat } from '@/lib/use-local-ai-long-chat'
@@ -596,12 +595,13 @@ import {
   type HermesReasoningLevel,
 } from '@/lib/hermes-reasoning'
 import { readHermesChatPrefs, writeHermesChatPrefs } from '@/lib/hermes-chat-prefs'
-import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_MODEL_BY_TIER, CLAWBOX_AI_CHAT_MODEL_LABEL, isClawboxAiProvider } from '@/lib/clawbox-ai-models'
+import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_CHAT_MODEL, CLAWBOX_AI_CHAT_MODEL_LABEL, isClawboxAiProvider } from '@/lib/clawbox-ai-models'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
 import VoiceSecureNotice from '@/components/VoiceSecureNotice'
-import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
+import { chatProviderPillLabel, shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
+import { isLocalAiProviderId } from '@/lib/cloud-providers'
 import {
   chatKeepsEarlierModel,
   conversationModelFor,
@@ -733,6 +733,10 @@ const TRANSCRIPT_PANEL_ID = 'chat-transcript-panel'
 // What the phone's fullscreen strip and its text size button open (TASK-1157).
 const HEADER_REGION_ID = 'chat-header-region'
 const TEXT_SIZE_BAR_ID = 'chat-text-size-bar'
+// The portrait phone's menu and model sheet (TASK-2778). The "+" sheet is
+// 'chat-composer-options', the id of the row it stands in for.
+const PHONE_MENU_ID = 'chat-phone-menu'
+const MODEL_SHEET_ID = 'chat-model-sheet'
 /**
  * A tab's DOM id, derived from its session key so the panel can name the
  * selected tab as its label without either side holding an index. `null` is the
@@ -1015,7 +1019,7 @@ function shownCodingCardIds(transcript: HTMLElement | null): string[] {
   return Array.from(transcript.querySelectorAll(CODING_CARD_SELECTOR), el => el.getAttribute('data-run-id') ?? '')
 }
 
-function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
+function ChatPopup({ isOpen, onClose, chatUser = null, orgMember = false, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t, locale } = useT()
   const tr = useTr()
   // The kiosk bar's height on the laptop (0 everywhere else): the docked panel
@@ -1052,8 +1056,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // conversation gets the screen. On until the owner leaves it, and remembered
   // either way (lib/chat-phone-layout.ts). A phone only — the desktop never
   // reads it.
+  //
+  // Upright, a phone has no fullscreen mode (TASK-2778): its slim bar is the
+  // only header there is, so the stored choice is neither read nor written
+  // there and landscape keeps it.
   const [fullscreenPref, setFullscreenPref] = useChatFullscreen()
-  const fullscreenChat = mobile && fullscreenPref
+  // The mode the phone's landscape layout follows; upright it waits unused.
+  const fullscreenMode = mobile && fullscreenPref
+  const fullscreenChat = fullscreenMode && !portraitComposer
   // The conversation's text size, on a phone only; the desktop stays at 100%.
   const [textScalePref, setTextScalePref] = useChatTextScale()
   const textScale = mobile ? textScalePref : 1
@@ -1064,20 +1074,40 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // phone: folded in fullscreen chat, on show otherwise, and either way the
   // owner can flip them — on a 390px screen three pickers and Create pushed
   // the conversation up by a whole row for a choice that changes once a week.
-  const [composerOptionsOpen, setComposerOptionsOpen] = useState(!fullscreenChat)
+  const [composerOptionsOpen, setComposerOptionsOpen] = useState(!fullscreenMode)
   // Closing the chat, or switching fullscreen, puts both back where the mode
   // says they belong — otherwise a peek would come back open on the next
   // visit, which is not what "folded by default" means. Adjusted while
   // rendering (React's pattern for state that follows a value), so no frame is
   // drawn with the previous mode's regions.
-  const layoutKey = !isOpen ? 'closed' : fullscreenChat ? 'fullscreen' : 'standard'
+  const layoutKey = !isOpen ? 'closed' : fullscreenMode ? 'fullscreen' : 'standard'
   const [layoutFor, setLayoutFor] = useState(layoutKey)
   if (layoutFor !== layoutKey) {
     setLayoutFor(layoutKey)
     setHeaderPeek(false)
-    setComposerOptionsOpen(!fullscreenChat)
+    setComposerOptionsOpen(!fullscreenMode)
     if (!isOpen) setTextSizeOpen(false)
   }
+  // Upright only (TASK-2778): the menu that holds what the slim bar leaves
+  // out, the "+" sheet (attachment, Create, a picture) and the model pill's
+  // sheet. Their own state, so a turn through portrait leaves landscape's
+  // fold and peek as they were; closing the chat or turning the phone shuts
+  // all three.
+  const [phoneMenuOpen, setPhoneMenuOpen] = useState(false)
+  const [plusSheetOpen, setPlusSheetOpen] = useState(false)
+  const [modelSheetOpen, setModelSheetOpen] = useState(false)
+  const phoneOverlaysKey = isOpen && portraitComposer
+  const [phoneOverlaysFor, setPhoneOverlaysFor] = useState(phoneOverlaysKey)
+  if (phoneOverlaysFor !== phoneOverlaysKey) {
+    setPhoneOverlaysFor(phoneOverlaysKey)
+    setPhoneMenuOpen(false)
+    setPlusSheetOpen(false)
+    setModelSheetOpen(false)
+  }
+  // Read by the hold-to-talk key, which listens on the window: the menu and
+  // the sheets are modal, so the key must not start a recording behind them.
+  const phoneOverlayOpenRef = useRef(false)
+  useEffect(() => { phoneOverlayOpenRef.current = phoneMenuOpen || plusSheetOpen || modelSheetOpen }, [phoneMenuOpen, plusSheetOpen, modelSheetOpen])
   const toggleFullscreenChat = useCallback(() => {
     setFullscreenPref(!fullscreenPref)
   }, [fullscreenPref, setFullscreenPref])
@@ -1182,6 +1212,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     streamingRef.current = next
     setStreamingState(next)
   }, [])
+  // The live message the gateway's delta frames add up to: after its first
+  // frame of a run it sends only the characters added (lib/chat-stream-message).
+  const liveStreamRef = useRef(createChatStreamCursor())
   const [sending, setSending] = useState(false)
   // Queued while a run is in flight; drained one at a time on `final`.
   const [queuedSends, setQueuedSends] = useState<QueuedSend[]>([])
@@ -1215,8 +1248,22 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // than pick a verb (see `onLocalAi`). Latched for the turn, so a stream
   // that is cleared between tool steps does not bring the words back.
   const [turnHeardFrom, setTurnHeardFrom] = useState(false)
+  // The line as it stands, for the tab switch to put down with the tab it
+  // leaves (TASK-2494): a turn still running there keeps its own clock and
+  // words, and coming back picks them up instead of starting a new count.
+  const turnLineRef = useRef<TurnLine>({ startedAt: 0, status: null, verb: null, heardFrom: false })
   useEffect(() => {
+    turnLineRef.current = { startedAt: turnStartedAt, status: turnStatus, verb: turnVerbRef.current, heardFrom: turnHeardFrom }
+  }, [turnStartedAt, turnStatus, turnHeardFrom])
+  // Set by `switchSession` when the tab it enters has a run still going; the
+  // line is already back on screen, so the `sending` flip that comes with the
+  // switch must not restart it. Read once — any later flip clears it.
+  const resumedTurnRef = useRef(false)
+  useEffect(() => {
+    const resumed = resumedTurnRef.current
+    resumedTurnRef.current = false
     if (!sending) { setTurnStatus(null); setTurnStartedAt(0); setTurnHeardFrom(false); return }
+    if (resumed) return
     turnVerbRef.current = pickSpinnerVerb(turnVerbRef.current)
     setTurnStartedAt(Date.now())
   }, [sending])
@@ -1251,7 +1298,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // still in the document; moved once the chip is.
   const restoreChipRef = useRef<HTMLButtonElement>(null)
   const focusRestoreChipRef = useRef(false)
-  const codingCards = useCodingChatCards(isOpen, (id) => {
+  const codingCards = useCodingChatCards(isOpen && !orgMember, (id) => {
     const focused = document.activeElement?.closest('[data-testid="coding-agent-activity"], [data-testid="coding-team-activity"]')
     if (focused?.getAttribute('data-run-id') === id || (focused?.getAttribute('data-team-id') && `team:${focused.getAttribute('data-team-id')}` === id)) focusRestoreChipRef.current = true
   })
@@ -2108,7 +2155,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // The composer a tab was left with: its draft and the turns queued behind
   // its running one. Restored when the tab is shown again, so text typed for
   // one conversation is never sent into another.
-  const tabStashRef = useRef<Map<string, { input: string; queuedSends: QueuedSend[]; attachments: ChatAttachment[]; runId: string | null; voiceTurnKey: string | null; askedTurnKey: string | null }>>(new Map())
+  const tabStashRef = useRef<Map<string, { input: string; queuedSends: QueuedSend[]; attachments: ChatAttachment[]; runId: string | null; voiceTurnKey: string | null; askedTurnKey: string | null; turn?: TurnLine | null }>>(new Map())
   // A run that died in a background tab leaves NOTHING in the transcript to
   // explain itself — the error line is client-side only. It is kept here when
   // the terminal event goes by and handed over when the tab is next shown.
@@ -2348,6 +2395,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     if (error) tabErrorsRef.current.set(key, error)
   }, [])
   const runIdRef = useRef<string | null>(null)
+  // The waits for a starting gateway sends are in (dispatchTurn), one per
+  // conversation: Stop ends the one on screen, a reset its own conversation's.
+  const startingWaitsRef = useRef(new Map<string, AbortController>())
+  // Nor does a send outlive the chat that made it.
+  useEffect(() => () => { for (const wait of startingWaitsRef.current.values()) wait.abort() }, [])
   // What the gateway said about a run before it declared the turn dead — the
   // provider's own refusal rides on the lifecycle frames, never on the `chat`
   // error itself. See lib/chat-run-failure.ts.
@@ -2425,10 +2477,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // from throwing rather than silently reading the transcript.
     return typeof document !== 'undefined' && document.visibilityState !== 'visible'
   }, [])
-  const messagesEndRef = useRef<HTMLDivElement>(null)
-  // `transcriptRef` — the transcript itself, so it can follow content that
-  // grows without a new message: pills, run and approval cards, pictures that
-  // load late — is declared with the run cards above, whose focus it takes.
+  // `transcriptRef` — the transcript itself, which follows what grows in it
+  // while the reader is at its bottom (useStickToBottom, below) — is declared
+  // with the run cards above, whose focus it takes.
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
   const hasEverConnectedRef = useRef(false)
@@ -2441,17 +2492,20 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     attachments: ChatAttachment[]
     idempotencyKey: string
   }>>([])
-  // Auto-scroll to bottom — see scrollToBottomAfterLayout for the rationale
-  // behind the double-rAF wait.
-  const scrollToBottom = useCallback(() => {
-    scrollToBottomAfterLayout(messagesEndRef.current)
-  }, [])
-
-  useEffect(() => { scrollToBottom() }, [messages, streaming, queuedSends, scrollToBottom])
-  useEffect(() => { if (visible) scrollToBottom() }, [visible, scrollToBottom])
-  // Everything else that grows the transcript — see useStickToBottom. Only
-  // while the reader is at the bottom: a reader who scrolled up is left there.
-  useStickToBottom(transcriptRef, visible)
+  // Everything that grows the transcript — the streaming reply, a new
+  // message, a queued send, pills, cards, pictures that load late — followed
+  // only while the reader is at the bottom: a reader who scrolled up to read
+  // is left there until they are back down (TASK-2222, see useStickToBottom).
+  // `scrollToBottom` re-pins it for what the OWNER does — a send, a
+  // conversation opened, switched to or cleared — never for what the bot writes.
+  //
+  // `isOpen && visible`, not `visible` alone: `visible` is set two frames after
+  // an open and a close does not cancel that, so a close inside those frames
+  // leaves it true over a transcript that is not rendered — and the hook,
+  // attached to nothing, would never attach to the one the next open draws.
+  const transcriptShown = isOpen && visible
+  const scrollToBottom = useStickToBottom(transcriptRef, transcriptShown)
+  useEffect(() => { if (transcriptShown) scrollToBottom() }, [transcriptShown, scrollToBottom])
 
 
   /**
@@ -2540,7 +2594,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // idle, so the chat says so: a note at the top (LocalAiChatBanner) and,
   // until the turn's first token, "Loading the local model…" in place of a
   // spinner verb.
-  const onLocalAi = harnessLoaded && chatOnLocalAi(harnessId, hermesProvider, chatModelState?.activeSource)
+  // An external engine in the Local AI slot is not on this box: no load note,
+  // no on-device long-chat handling (TASK-2376).
+  const onLocalAi = harnessLoaded
+    && chatOnLocalAi(harnessId, hermesProvider, chatModelState?.activeSource, chatModelState?.local?.external === true)
   const [localAiBannerDismissed, dismissLocalAiBanner] = useLocalAiBannerDismissed()
   const localAiLoadingLabel = useLocalAiLoadingLabel()
   // A long conversation on Local AI (TASK-2127): measured between turns, held
@@ -2711,7 +2768,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     if (wireLevel === null) return
     // Reconcile legacy Pro session pins even when the device default is
     // already Flash. The gateway owns this write and preserves the transcript.
-    const model = isClawboxAiChat ? CLAWBOX_AI_MODEL_BY_TIER.flash : undefined
+    const model = isClawboxAiChat ? CLAWBOX_AI_CHAT_MODEL : undefined
     const wireValue = `${wireLevel}:${model ?? ''}`
     if (wireValue === lastSentThinkingRef.current) return
     lastSentThinkingRef.current = wireValue
@@ -3432,6 +3489,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           if (!payload) return
           const sk = payload.sessionKey as string
           const state = payload.state as string
+          // Every run's frames, shown or not: the gateway sends this socket only
+          // what it added since the last frame, so one skipped while another
+          // tab was open would leave a gap once this one is back.
+          const live = state === 'delta' ? advanceChatStream(liveStreamRef.current, payload) : undefined
           // A run the owner left behind in another tab has ended: the tab is
           // no longer busy and has something new to read. Checked BEFORE the
           // session filter, which is what would otherwise drop the event. The
@@ -3475,7 +3536,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             // turn holding text with its directives already gone and the
             // messages it named unopenable for good. The bubble looks the same
             // either way; only what survives an interrupt differs.
-            const text = splitMediaDirectives(extractText(msg)).text
+            const text = splitMediaDirectives(extractText(live)).text
             // Sentinels would flash before the final-state filter drops them.
             // Asked of the text as the BUBBLE will show it, not of the buffer:
             // `SENTINEL_RE` anchors the whole string, so once the directives
@@ -3483,7 +3544,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             // stopped looking like a sentinel and the marker reached the
             // bubble. The buffer is still what gets STORED, so an interrupt
             // keeps the directives and their cards.
-            if (text && !isSentinel(streamingEmailRefsText(text)) && !isInterSessionEnvelope(text, msg)) {
+            if (text && !isSentinel(streamingEmailRefsText(text)) && !isInterSessionEnvelope(text, live)) {
               applyStreaming(text); setReloadingSkill(false)
               // Short spoken answers start from here, not from the final.
               speakFromStreamRef.current(runIdRef.current, text)
@@ -3533,6 +3594,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
               // first is a race — merging them put two players on one answer
               // whenever the box spoke for the chat first. The chat's clip
               // stays in its ring, which releases it.
+              // Its run rides along: a read that painted this reply first — the
+              // one a tab switch makes on return (TASK-2494) — has it under the
+              // same run, and the append below then changes nothing.
+              const finalRun = typeof payload.runId === 'string' && payload.runId ? payload.runId : undefined
               const reply: ChatMessage = {
                 role: 'assistant',
                 text,
@@ -3540,6 +3605,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
                 images,
                 audio,
                 ...(files.length ? { files } : {}),
+                ...(finalRun ? { idempotencyKey: finalRun } : {}),
               }
               setMessages(prev => withAssistantReply(prev, reply, { ownClips: new Set(spokenUrlsRef.current) }))
               // The picture reached us over the socket after all — nothing
@@ -4214,6 +4280,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const clearTranscript = useCallback(() => {
     setMessages([])
     applyStreaming('')
+    // The conversation that replaces it is read from its newest line.
+    scrollToBottom()
     // The bubbles holding spoken replies are gone for good (a returned-to tab
     // repaints from the box's history, which cannot carry a browser-local
     // blob URL), so the blobs go with them. This panel never unmounts while
@@ -4244,13 +4312,16 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
-  }, [clearToolCalls, clearClarifies, applyStreaming])
+  }, [clearToolCalls, clearClarifies, applyStreaming, scrollToBottom])
 
   const resetSession = useCallback(async () => {
     // Captured BEFORE the await, as the adapter captures its own: the owner may
     // switch tabs while the transcript delete is in flight, and the record to
     // clear is the reset conversation's, not the one on screen by then.
     const key = sessionKeyRef.current
+    // A send still waiting for a starting gateway belongs to the conversation
+    // being cleared: it must not land in the fresh one.
+    startingWaitsRef.current.get(key)?.abort()
     await adapter.resetSession()
     // The next turn opens a fresh session on whatever the header names.
     noteConversationModel(key)
@@ -4277,10 +4348,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         timestamp: Date.now(),
         variant: 'error',
       }])
+      // The answer to the owner's own click: shown where they will see it.
+      scrollToBottom()
     } finally {
       setStartingSession(false)
     }
-  }, [resetSession])
+  }, [resetSession, scrollToBottom])
 
   /**
    * Show another tab's session in this popup.
@@ -4314,7 +4387,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // whether the frame belongs to the run this popup is showing, and a tab
     // returned to with the id dropped would take its own reply as a stranger's
     // and stop painting it.
-    if (oldKey) tabStashRef.current.set(oldKey, { input, queuedSends, attachments, runId: runIdRef.current, voiceTurnKey: voiceTurnKeyRef.current, askedTurnKey: askedTurnKeyRef.current })
+    // The status line of a run left going rides with it too: its clock counts
+    // from when the turn started, not from when the owner came back (TASK-2494).
+    const turn = sendingRef.current && turnLineRef.current.startedAt > 0 ? { ...turnLineRef.current, verb: turnVerbRef.current } : null
+    if (oldKey) tabStashRef.current.set(oldKey, { input, queuedSends, attachments, runId: runIdRef.current, voiceTurnKey: voiceTurnKeyRef.current, askedTurnKey: askedTurnKeyRef.current, turn })
     voiceTurnKeyRef.current = null
     // Rides with the tab for the same reason: a question typed in THIS tab and
     // still running is owed its clip when the owner comes back, and a single
@@ -4386,6 +4462,16 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       runIdRef.current = stash?.runId ?? null
       voiceTurnKeyRef.current = stash?.voiceTurnKey ?? null
       askedTurnKeyRef.current = stash?.askedTurnKey ?? null
+      // Its status line as it was left — the same start, the harness's own
+      // words, the same verb — set here rather than by the `sending` effect,
+      // which does not run at all when the tab left was busy too.
+      // A run whose start this popup never saw counts from now, as before.
+      const turn = stash?.turn
+      resumedTurnRef.current = true
+      turnVerbRef.current = turn?.verb ?? pickSpinnerVerb(turnVerbRef.current)
+      setTurnStartedAt(turn?.startedAt || Date.now())
+      setTurnStatus(turn?.status ?? null)
+      setTurnHeardFrom(turn?.heardFrom ?? false)
     }
     // A spoken question whose run finished while the owner was elsewhere:
     // the reply is in the history about to load, and it is still owed aloud.
@@ -4496,6 +4582,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // owner's conversation back on disk and the picture billed against a
     // conversation that no longer exists.
     drawingRef.current.get(key)?.abort()
+    // Likewise a send of THIS tab still waiting for a starting gateway: it
+    // must not reach the conversation this close is about to delete.
+    startingWaitsRef.current.get(key)?.abort()
     const dispose = async () => {
       // switchSession marks the key busy on the way out when its run is
       // live; the tab is gone now, so the mark must go too.
@@ -5769,6 +5858,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         return
       }
       if (!isHoldToTalkKey(e) || isKeyForwardingTarget(e.target)) return
+      // Not behind the upright chat's menu or sheets (a hold already running
+      // keeps going; Escape above still ends it).
+      if (!holdRef.current && phoneOverlayOpenRef.current) return
       e.preventDefault()
       // Offered only while the mic button would be: a chat with no
       // connection cannot send what it hears.
@@ -5918,6 +6010,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
    * for the turn-end caller and `recoverEmailDrafts` for the scheduled one.
    */
   const collectEmailDrafts = useCallback(async () => {
+    // The box's mail is the owner's; an organisation box's staff have none here.
+    if (orgMember) return
     const read = ++emailQueueReadSeq.current
     try {
       // `no-store`, and not because the route is slow to change: the route's
@@ -5995,7 +6089,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // The queue could not be read. Nothing is waiting as far as this surface
       // is concerned, and Settings → Email is unaffected.
     }
-  }, [])
+  }, [orgMember])
 
   /**
    * The turn-end caller: collect at once, but only for a turn that asked to
@@ -6354,12 +6448,21 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           setClarifies(prev => expireClarifyCard(prev, event.requestId))
         }
       }
+      // A gateway that is still starting (every restart, a network switch's
+      // included) refuses `chat.send` with its retryable startup refusal: wait
+      // it out under "Starting up, one moment…" and send again, under the same
+      // idempotency key, rather than show the owner that refusal.
+      const startingUp = failureWordsRef.current.t('chat.startingUp')
+      const startingWait = new AbortController()
+      startingWaitsRef.current.set(keyAtSend, startingWait)
       result = attach
         ? await (adapter.attachLiveTurn?.(onEvent) ?? Promise.resolve(null))
-        : await adapter.sendTurn({
+        : await retryWhileAgentStarting(() => adapter.sendTurn({
           text,
           attachments: sendAttachments,
           idempotencyKey,
+          // Every try to the conversation it was typed in, a tab switch during the wait included.
+          sessionKey: keyAtSend,
           // Ignored by a harness with no such dial. Read here, at send time, so a
           // pill changed mid-run applies to the NEXT turn rather than
           // retroactively to this one.
@@ -6370,7 +6473,18 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           // none at all, so a failed seeding fetch cannot silently override the
           // device's own reasoning effort with "medium".
           reasoning: hermesReasoningKnownRef.current ? hermesReasoningRef.current : '',
-        }, onEvent)
+        }, onEvent), {
+          signal: startingWait.signal,
+          onWaiting: () => { if (runIdRef.current === idempotencyKey) setTurnStatus(startingUp) },
+        }).then((sent) => {
+          setTurnStatus(prev => (prev === startingUp ? null : prev))
+          return sent
+        }, (err: unknown) => {
+          // Stop during the wait: the turn was never taken, and must not be sent later.
+          throw err instanceof Error && err.name === 'AbortError' ? new HarnessError('aborted', 'Stopped.') : err
+        }).finally(() => {
+          if (startingWaitsRef.current.get(keyAtSend) === startingWait) startingWaitsRef.current.delete(keyAtSend)
+        })
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line. Never render a
       // harness's own error text: it is written for an operator reading a log
@@ -6495,11 +6609,15 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // before answering, so that tab replays it on return; here it only went
     // from busy to unread (settleRun).
     if (sessionKeyRef.current !== keyAtSend) return
-    const hasMedia = (result.media?.length ?? 0) > 0 || (result.audio?.length ?? 0) > 0
-    // A followed turn can have landed in the transcript the page just read —
-    // it ended between that read and the attach — and the same answer twice
-    // is a second reply the agent never gave.
-    setMessages(prev => attach && answerAlreadyShown(prev, result.text) ? prev : [...prev, {
+    const hasMedia = (result.media?.length ?? 0) > 0 || (result.audio?.length ?? 0) > 0 || (result.files?.length ?? 0) > 0
+    // The answer can already be on screen from the transcript: the route writes
+    // it down and only then answers, so a followed turn that ended between the
+    // read and the attach, and a tab the owner left and came back to inside
+    // that window (TASK-2494), both read it before this promise settles. The
+    // same answer twice under one question is a second reply the agent never
+    // gave. Outside a follow only a text reply is skipped, so a picture or a
+    // clip the settled turn carries is never lost to the bubble the read drew.
+    setMessages(prev => (attach || !hasMedia) && answerAlreadyShown(prev, result.text) ? prev : [...prev, {
       role: 'assistant',
       // A reply that is nothing BUT a picture is still a real answer — don't
       // call it '(no response)'.
@@ -6507,6 +6625,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       timestamp: Date.now(),
       images: [...(result.media ?? [])],
       audio: boundedAudio([...(result.audio ?? [])]),
+      // A document the reply named: its download card, the same one the transcript replays.
+      ...(result.files?.length ? { files: [...result.files] } : {}),
       // Beside the answer, never folded into it — the live bubble and the one
       // replayed from the transcript have to be the same bubble.
       ...(result.reasoning ? { reasoning: result.reasoning } : {}),
@@ -6633,6 +6753,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const enqueueRun = useCallback((text: string, origin: TurnOrigin = {}) => {
     const trimmed = text.trim()
     if (!trimmed) return
+    // Sent now or queued behind the running turn, it is shown at the bottom
+    // and the reply to it followed — not when the queue drains it later, by
+    // which time the owner may have scrolled up to read.
+    scrollToBottom()
     // Decide from the refs, not the render-time `sending`: this can run in the
     // window between "previous turn finished" committing and the drain's next
     // run committing, where the closure still says idle while a run is already
@@ -6646,7 +6770,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       return
     }
     startRun(trimmed, [], origin)
-  }, [sending, startRun])
+  }, [sending, startRun, scrollToBottom])
 
   // The owner's own words, spoken — both flags, and the only caller that sets
   // either. The UI's own lines (a skill change, and the two window events that
@@ -6698,6 +6822,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // the same rule `dispatchTurn` and `loadHistory` already follow.
     const keyAtSend = sessionKeyRef.current
     setInput('')
+    scrollToBottom()
     const controller = new AbortController()
     drawingRef.current.set(tabAtSend, controller)
     syncDrawingTabs()
@@ -6736,7 +6861,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         syncDrawingTabs()
       }
     }
-  }, [input, adapter, syncDrawingTabs])
+  }, [input, adapter, syncDrawingTabs, scrollToBottom])
 
   // A wait nobody is watching is a paid generation still running. Closing the
   // popup ends it, the same way it drops the agent's image wait just above —
@@ -6756,6 +6881,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const sendMessage = useCallback(() => {
     const text = input.trim()
     if (!text && attachments.length === 0) return
+    // The owner's own words: shown, and the reply followed — see enqueueRun.
+    scrollToBottom()
     // A new prompt: the reply still speaking stops. Its text and its clip stay
     // on the bubble, to be played again from the start.
     stopSpokenReply()
@@ -6778,7 +6905,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       return
     }
     startRun(text, currentAttachments, { asked: true })
-  }, [input, sending, attachments, startRun])
+  }, [input, sending, attachments, startRun, scrollToBottom])
 
   useEffect(() => {
     // sendingRef guards the commit-lag case: a send that started between this
@@ -6803,10 +6930,12 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       if (!ctx?.message) return
       greetedRef.current = true
       setQueuedSends(prev => [...prev, { id: uuid(), text: buildFixErrorPrompt(ctx), attachments: [] }])
+      // Asked for from elsewhere on the desktop: the owner is not reading here.
+      scrollToBottom()
     }
     window.addEventListener(FIX_ERROR_EVENT, handler)
     return () => window.removeEventListener(FIX_ERROR_EVENT, handler)
-  }, [])
+  }, [scrollToBottom])
 
   // A message handed over by another app — the Coding Agent's New wizard —
   // goes through the SAME queue as a fix-error prompt, and for the same
@@ -6819,10 +6948,11 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       if (typeof text !== 'string' || !text.trim()) return
       greetedRef.current = true
       setQueuedSends(prev => [...prev, { id: uuid(), text: text.trim(), attachments: [] }])
+      scrollToBottom()
     }
     window.addEventListener(CHAT_MESSAGE_EVENT, handler)
     return () => window.removeEventListener(CHAT_MESSAGE_EVENT, handler)
-  }, [])
+  }, [scrollToBottom])
 
   // A DRAFT handed over by another app — the Coding Agent run page's "Message
   // in chat" — lands in the composer and nowhere else: nothing is queued, nothing
@@ -6883,6 +7013,8 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     // part of what the owner is stopping, whether it is sounding yet or still
     // being made (an unnamed stop also keeps a queued one from starting).
     if (runIdRef.current && streamedSpeechRef.current?.runKey === runIdRef.current) stopSpokenReply()
+    // A send still waiting for the gateway to finish starting is not sent at all.
+    startingWaitsRef.current.get(sessionKeyRef.current)?.abort()
     try {
       await adapter.abortTurn()
     } catch (err) {
@@ -6931,6 +7063,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           text: t('chat.modelSwitchBusy'),
           timestamp: Date.now(),
         }])
+        // The owner's own pick gets its answer in sight; a switch the chat made
+        // by itself moves nobody.
+        if (!target.automatic) scrollToBottom()
         return false
       }
       // 502 WITH a warning = the model IS written and the route returned the new
@@ -6948,6 +7083,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           text: data.warning,
           timestamp: Date.now(),
         }])
+        if (!target.automatic) scrollToBottom()
       }
 
       setChatModelState(data as ChatModelState)
@@ -6981,7 +7117,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     } finally {
       setSwitchingModel(false)
     }
-  }, [chatModelState, connect, switchingModel, t])
+  }, [chatModelState, connect, switchingModel, t, scrollToBottom])
 
   // The old Pro and Flash aliases now serve the same Flash model. Move a
   // saved chat choice to the Flash alias once, without clearing its history.
@@ -7001,7 +7137,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     if (!ownerConfirmed) return
     if (!harnessLoaded || harnessId !== 'openclaw') return
     const active = chatModelState?.activeModel
-    if (!isClawboxAiChat || (active === CLAWBOX_AI_MODEL_BY_TIER.flash && !chatModelState?.needsFlashModelMigration)) {
+    if (!isClawboxAiChat || (active === CLAWBOX_AI_CHAT_MODEL && !chatModelState?.needsFlashModelMigration)) {
       flashModelAttemptRef.current = null
       return
     }
@@ -7009,7 +7145,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
     if (switchingModel || flashModelAttemptRef.current === active) return
     flashModelAttemptRef.current = active
     void switchChatModel({
-      model: CLAWBOX_AI_MODEL_BY_TIER.flash,
+      model: CLAWBOX_AI_CHAT_MODEL,
       label: CLAWBOX_AI_CHAT_MODEL_LABEL,
       automatic: true,
     })
@@ -7129,6 +7265,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         current?: unknown
         reasoning?: unknown
         stale?: unknown
+        cloudProvidersHidden?: unknown
       }
       // `aborted` alone is not enough: a response can resolve before the abort
       // lands, and `json()` adds a second await for a newer seed to start in.
@@ -7156,6 +7293,13 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // Keep what is rendered and go back for the real list; only a header with
       // nothing on offer yet falls back to the device's own provider.
       if (degraded && hermesProvidersRef.current.length > 0) {
+        // The setting is the box's own, not the dashboard's: a degraded answer
+        // carries it too, so rows already on screen follow it while the
+        // dashboard is away (src/lib/cloud-providers.ts).
+        if (mData?.cloudProvidersHidden === true) {
+          const kept = hermesProvidersRef.current.filter(p => isLocalAiProviderId(p.id))
+          if (kept.length !== hermesProvidersRef.current.length) setHermesProviders(kept)
+        }
         retryLater()
         return
       }
@@ -7165,6 +7309,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // `null` means the source couldn't tell — keep those.
       const rows: HermesChatProvider[] = reported
         .filter(p => typeof p?.id === 'string' && p.id && p.authenticated !== false)
+        // "Hide cloud AI providers" (src/lib/cloud-providers.ts): the box's
+        // own AI only.
+        .filter(p => mData?.cloudProvidersHidden !== true || isLocalAiProviderId(p.id))
         .map(p => ({
           id: p.id as string,
           name: typeof p.name === 'string' ? p.name : (p.id as string),
@@ -7174,7 +7321,10 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
       // The configured provider always belongs in the list even if Hermes
       // reports it unauthenticated — it is what this chat is running on,
       // so the header must be able to show it.
-      if (deviceProvider && !rows.some(r => r.id === deviceProvider)) {
+      // Not a cloud one while they are hidden: the header offers the box's own
+      // AI alone, and falls back to its plain label without a row.
+      if (deviceProvider && !rows.some(r => r.id === deviceProvider)
+        && (mData?.cloudProvidersHidden !== true || isLocalAiProviderId(deviceProvider))) {
         rows.unshift({ id: deviceProvider, name: deviceProvider })
       }
       setHermesProviders(rows)
@@ -7825,38 +7975,285 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   // The whole settings row — attachment, Create, the pickers. Behind the fold
   // control on a phone (folded in fullscreen chat until asked for); always on
   // show on a big screen.
-  const composerExtrasShown = !mobile || composerOptionsOpen
+  // Upright, the row's actions are the "+" sheet instead (below), never in the flow.
+  const composerExtrasShown = !mobile || (composerOptionsOpen && !portraitComposer)
   // The phone's fold control. It leads the input row in BOTH states, so the
   // button a thumb (or the keyboard focus) just pressed never moves: folding
-  // takes the row under it away and nothing else.
+  // takes the row under it away and nothing else. Upright it is the "+" that
+  // opens the options as a bottom sheet (TASK-2778).
   const renderComposerToggle = () => {
     const label = tr('chat.composer.options', 'Chat options')
+    const open = portraitComposer ? plusSheetOpen : composerOptionsOpen
     return (
       <button
         type="button"
-        onClick={() => setComposerOptionsOpen(open => !open)}
+        onClick={(e) => {
+          if (!portraitComposer) { setComposerOptionsOpen(o => !o); return }
+          // Focused first, so the sheet hands focus back here when it closes
+          // (a tap does not focus a button in Safari).
+          e.currentTarget.focus()
+          setPlusSheetOpen(true)
+        }}
         // The folded pickers' answer rides along as the description, so the
         // choice is still said while the pills are out of sight.
-        title={!composerOptionsOpen && pillSummary ? `${label} · ${pillSummary}` : label}
+        title={!portraitComposer && !composerOptionsOpen && pillSummary ? `${label} · ${pillSummary}` : label}
         aria-label={label}
-        aria-expanded={composerOptionsOpen}
-        aria-controls={composerOptionsOpen ? 'chat-composer-options' : undefined}
+        aria-haspopup={portraitComposer ? 'dialog' : undefined}
+        aria-expanded={open}
+        aria-controls={open ? 'chat-composer-options' : undefined}
         data-testid="composer-options-toggle"
         className="chat-composer-options-toggle"
         style={{
-          background: composerOptionsOpen ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
-          color: composerOptionsOpen ? '#f97316' : 'rgba(255,255,255,0.4)',
+          background: open ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
+          color: open ? '#f97316' : portraitComposer ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.4)',
         }}
       >
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-          <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
-          <circle cx="16" cy="6" r="2" />
-          <circle cx="10" cy="12" r="2" />
-          <circle cx="16" cy="18" r="2" />
-        </svg>
+        {portraitComposer ? (
+          <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 24 }}>add</span>
+        ) : (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h10M18 18h2" />
+            <circle cx="16" cy="6" r="2" />
+            <circle cx="10" cy="12" r="2" />
+            <circle cx="16" cy="18" r="2" />
+          </svg>
+        )}
       </button>
     )
   }
+  // The OpenClaw pickers' data, shared by the pills and the portrait model
+  // sheet so the two cannot drift. Moved here unchanged from the pills.
+  const providerPicker = (() => {
+    if (!chatModelState) return null
+    // No `activeOptionId` means no row on this list is what the box
+    // is running — whether because the primary matches none of them,
+    // or because nothing is pinned at all. Both used to default to
+    // options[0], which named the first provider in the list — ClawBox
+    // AI on every paired box — as the active one. It also made the
+    // owner's most natural recovery gesture a no-op: HeaderDropdown
+    // fires onChange only when the pick differs from `value`, so
+    // clicking the row the header was already showing did nothing.
+    // Empty `value` keeps that click live and the label honest.
+    //
+    // The `activeModel` half of this test was dropped when chat/model
+    // stopped resolving a null primary onto the Local-AI placeholder:
+    // that made "nothing pinned" a null/null state, which this
+    // predicate had been reading as "a row is active".
+    const unselectableActive = !chatModelState.activeOptionId
+    const activeId = chatModelState.activeOptionId
+      ?? (unselectableActive ? '' : (chatModelState.options[0]?.id ?? ''))
+    const activeOption = chatModelState.options.find(o => o.id === activeId)
+    const triggerLabel = activeOption
+      ? getProviderPillText(activeOption)
+      : (unselectableActive ? (chatModelState.activeLabel ?? t('chat.noChatModel')) : activeId)
+    const options = chatModelState.options.map((option) => ({
+      id: option.id,
+      label: getChatModelOptionText(option),
+    }))
+    return { activeId, triggerLabel, options }
+  })()
+  const providerModelPicker = (() => {
+    // Inline model switcher: renders next to the provider dropdown
+    // whenever the active provider has multiple available models.
+    // Lets users hot-swap between Claude Haiku/Sonnet/Opus, GPT
+    // variants, Gemini variants, or OpenRouter's 340+ models
+    // mid-chat without opening Settings. If the current model
+    // isn't in the live catalog (custom ID typed in Settings),
+    // we prepend it as a "Custom" entry so the select reflects
+    // reality.
+    //
+    // The catalog is the live one from /setup-api/ai-models/catalog
+    // (kept in sync via the useEffect above), with the static
+    // fallback as cold-start render. Used to be a hand-curated
+    // array that rotted on every upstream rename — see the comment
+    // at the top of provider-models.ts for the migration history.
+    if (!chatModelState) return null
+    const activeOption = chatModelState.options.find(
+      (option) => option.id === chatModelState.activeOptionId,
+    )
+    if (!activeOption?.provider) return null
+    // ClawBox AI: nothing here. Same rule as the Hermes branch above,
+    // through the same predicate — one product, one chat model, so the
+    // provider pill is the last word before the thinking dial. The row
+    // collapses rather than leaving a gap: this returns no node, and
+    // .chat-header-pills only puts a gap BETWEEN pills that render.
+    //
+    // Stated here even though `chatProviderCatalog` is already null for
+    // this provider (see useProviderCatalog above), because THIS is
+    // where the pill is built: a future change that gives ClawBox AI a
+    // catalogue again must not quietly give it a pill again too.
+    if (isClawboxAiChat) return null
+    const catalog = chatProviderCatalog
+    if (!catalog) return null
+    // Show the dropdown when there are multiple models to pick OR
+    // the catalog permits a custom model id (then the picker
+    // surfaces a "type your own" affordance, which is the only way
+    // to switch to a different Claude variant when Anthropic's
+    // OAuth scope returned a single canonical model).
+    if (catalog.models.length < 2 && !catalog.allowCustom) return null
+    // ClawBox AI's wire-format provider is `deepseek` (Mike's
+    // gateway forwards to DeepSeek's API), while the UI normalizes
+    // to `clawai`. Try the canonical provider first, then fall
+    // back to the deepseek alias so the picker can resolve the
+    // active model id either way.
+    // The ChatGPT row's UI id is `codex` while its models are written
+    // `openai/<id>` — OpenClaw 2 retired the namespace but not the
+    // label (src/lib/chatgpt-subscription.ts). Comparing the row's id
+    // against the reference verbatim answered "not this provider's
+    // model" on every ChatGPT box and took this dropdown — the only
+    // way to move between GPT-5.5 / GPT-5.4 / GPT-5.6 after setup —
+    // off the screen entirely.
+    const activeModelId = extractProviderModelId(
+      chatModelState.activeModel,
+      chatgptReferenceProvider(activeOption.provider),
+    )
+    if (!activeModelId) return null
+    const curatedHasActive = catalog.models.some(
+      (option) => option.id === activeModelId,
+    )
+    const modelOptions = curatedHasActive
+      ? catalog.models
+      : [
+          { id: activeModelId, label: activeModelId, hint: 'Custom model' },
+          ...catalog.models,
+        ]
+    const activeRow = modelOptions.find(o => o.id === activeModelId)
+    const activeModelLabel = activeRow?.label ?? activeModelId
+    // A model the box's SUBSCRIPTION surface does not carry is
+    // SHOWN, not hidden, and it says why — the same treatment the
+    // setup wizard gives it, because the wizard's help line sends
+    // the customer here to switch models. Dropping the row would
+    // be the same lie in the other direction.
+    const options = modelOptions.map(option => {
+      const blocked = !isModelUsableOnSubscription(option, headerOnSubscription)
+      return {
+        id: option.id,
+        label: option.label,
+        hint: option.hint,
+        disabled: blocked,
+        unavailableReason: blocked ? t('ai.modelNeedsApiKey') : undefined,
+      }
+    })
+    const onChange = (nextId: string) => {
+      if (nextId === activeModelId) return
+      // The list already refuses a disabled row, but the switch is
+      // not allowed to depend on that: the server guard exists for
+      // ids that arrive some other way, and this one exists so the
+      // customer is never shown a "Switched to ..." for a model
+      // the same screen just told them the box cannot run.
+      const next = modelOptions.find(option => option.id === nextId)
+      if (next && !isModelUsableOnSubscription(next, headerOnSubscription)) return
+      // The ChatGPT row's models are written `openai/<id>`: its
+      // UI id `codex` is a label, not a namespace. Posting
+      // `codex/<id>` from the product's own daily switcher made the
+      // server's legacy-ref shim — written for a stale tab — the
+      // happy path, and the row signal below the thing that was
+      // never exercised.
+      const wireProvider = chatgptReferenceProvider(activeOption.provider)
+      void switchChatModel({
+        provider: activeOption.provider,
+        model: `${wireProvider}/${nextId}`,
+        label: next?.label ?? nextId,
+      })
+    }
+    return { activeOption, activeModelId, activeModelLabel, options, onChange }
+  })()
+  // The effort / thinking levels, worded once for the pill and the sheet.
+  // THINKING_LEVEL_LABELS is the gateway's English vocabulary; the pill is a
+  // control on a desktop that may be in any of ten languages, so the level is
+  // worded here and the English is the floor for a level the catalogue does
+  // not know.
+  const thinkingLevelOptions = visibleThinkingLevels.map(level => ({
+    id: level,
+    label: tr(`chat.effort.${level}`, THINKING_LEVEL_LABELS[level] ?? level),
+  }))
+  const hermesReasoningPickerOptions = hermesReasoningOptions.map(level => ({
+    id: level,
+    label: hermesReasoningLabel(level),
+    /* Thinking on this model is ~25x slower on a short
+       question (measured: 0.2s vs 8.4s). A dial that hides
+       that is a dial that surprises people.
+       `isThinkingOnLevel` is the SAME predicate the proxy
+       uses to set enable_thinking — deriving "is on" here
+       instead (e.g. "the last option") would let this hint
+       and the wire behaviour drift apart silently. */
+    hint: hermesBinaryReasoning
+      ? (isThinkingOnLevel(hermesProvider, level)
+        ? tr('chat.thinkingOnHint', 'Better at reasoning. Much slower.')
+        : tr('chat.thinkingOffHint', 'Fastest. Answers immediately.'))
+      : undefined,
+  }))
+  const hermesModelPicked = !isClawboxAiProvider(hermesProvider) && showModelPill
+  // The portrait model sheet (TASK-2778): the same pickers as the pills, with
+  // the same values, options and handlers — the providers, the provider's
+  // models where it has a choice, then the effort or thinking row.
+  const ownerPicks = switchingModel || chatUser !== null
+  const phonePickers: ChatPhonePicker[] = []
+  if (portraitComposer) {
+    if (harnessId === 'hermes') {
+      if (hermesProviders.length > 0) {
+        phonePickers.push({
+          id: 'provider', label: tr('chat.pillChatProvider', 'Chat provider'), value: hermesProvider,
+          options: hermesProviders.map(p => ({ id: p.id, label: hermesProviderName(p.id) })), onChange: changeHermesProvider,
+        })
+        if (hermesModelPicked) {
+          phonePickers.push({
+            id: 'model', label: tr('chat.pillHermesModel', 'Hermes model'), value: hermesModelsLoading ? '' : hermesModel,
+            options: (hermesScope?.models ?? []).map(m => ({ id: m.id, label: m.id })), onChange: changeHermesModel,
+            disabled: hermesModelsLoading,
+          })
+        }
+        if (hermesReasoningOptions.length > 0) {
+          phonePickers.push({
+            id: 'effort', chips: true, value: hermesEffectiveReasoning, options: hermesReasoningPickerOptions,
+            label: hermesBinaryReasoning ? tr('chat.pillThinking', 'Thinking') : tr('chat.pillReasoningEffort', 'Reasoning effort'),
+            onChange: changeHermesReasoning,
+          })
+        }
+      }
+    } else {
+      if (providerPicker) {
+        phonePickers.push({
+          id: 'provider', label: tr('chat.pillChatProvider', 'Chat provider'), value: providerPicker.activeId,
+          options: providerPicker.options, onChange: handleChatSourceChange, disabled: ownerPicks,
+        })
+      }
+      if (providerModelPicker) {
+        phonePickers.push({
+          id: 'model', label: tr('chat.pillProviderModel', '{provider} model', { provider: providerModelPicker.activeOption.label }),
+          value: providerModelPicker.activeModelId, options: providerModelPicker.options,
+          onChange: providerModelPicker.onChange, disabled: ownerPicks,
+        })
+      }
+      if (visibleThinkingLevels.length > 1) {
+        phonePickers.push({
+          id: 'effort', chips: true, label: tr('chat.pillReasoningEffort', 'Reasoning effort'),
+          value: effectiveThinkingLevel, options: thinkingLevelOptions, onChange: handleThinkingLevelChange,
+          disabled: effortStarting,
+        })
+      }
+    }
+  }
+  // A sheet with nothing left to list closes, rather than reopening on its own
+  // when the pickers come back.
+  if (modelSheetOpen && phonePickers.length === 0) setModelSheetOpen(false)
+  // What the model pill says: the model (or the provider where there is no
+  // model to choose), then the effort beside it in a quieter voice.
+  const modelPillLabel = harnessId === 'hermes'
+    ? (hermesModelPicked && !hermesModelsLoading && hermesModel ? shortModelPillLabel(hermesModel, hermesProviderPill) : hermesProviderPill || 'Hermes')
+    : (providerModelPicker?.activeModelLabel ?? providerPicker?.triggerLabel ?? '')
+  const modelPillDetail = harnessId === 'hermes'
+    ? (hermesReasoningOptions.length > 0 ? hermesReasoningTriggerLabel(hermesEffectiveReasoning) : undefined)
+    : visibleThinkingLevels.length > 1
+      ? (effortStarting ? tr('chat.effort.starting', 'Starting…') : tr(`chat.effort.${effectiveThinkingLevel}`, THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel))
+      : undefined
+  // Plain functions: this is past the closed chat's early return, so no hooks;
+  // the overlays read their close handler through a ref anyway.
+  const closeModelSheet = () => setModelSheetOpen(false)
+  const closeComposerOptions = () => setPlusSheetOpen(false)
+  const closePhoneMenu = () => setPhoneMenuOpen(false)
+  // Anything for "+" to offer at all; with nothing, there is no "+".
+  const hasComposerOptions = caps.canAttachImages || caps.canAttachDocuments || !orgMember || caps.imageGenerationTrigger === 'composer'
   // What the fullscreen strip says in place of the header: the conversation on
   // screen, and whether another one is answering or holds an unread reply —
   // the per-tab dots it would otherwise hide.
@@ -7873,7 +8270,23 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
   const stripActivity: 'busy' | 'unread' | null = [...busyKeys].some(k => !!k && k !== shownSessionKey)
     ? 'busy'
     : [...unreadKeys].some(k => !!k && k !== shownSessionKey) ? 'unread' : null
-  const headerHidden = fullscreenChat && !headerPeek
+  // Upright the slim bar stands in for the whole header (TASK-2778). It stays
+  // in the tree, hidden, for the tab ids the transcript is labelled by.
+  const headerHidden = (fullscreenChat && !headerPeek) || portraitComposer
+  // The menu's conversations: main first, then the tabs, with the strip's
+  // busy and unread facts and names.
+  const phoneChats: ChatPhoneMenuChat[] = !(portraitComposer && phoneMenuOpen) ? [] : [
+    { key: mainSessionKey, label: 'ClawBox', main: true },
+    ...tabs.map(tb => ({ key: tb.key, label: tabLabel(tb), main: false })),
+  ].map(chat => {
+    const active = chat.main ? activeTabKey === null : activeTabKey === chat.key
+    const busy = !!chat.key && busyKeys.has(chat.key)
+    const unread = !!chat.key && !active && unreadKeys.has(chat.key)
+    const name = busy ? t('chat.tabBusy', { label: chat.label })
+      : unread ? t('chat.tabUnread', { label: chat.label })
+      : chat.label
+    return { ...chat, active, busy, unread, name }
+  })
   const renderViewControls = (size: number) => (
     <>
       <ChatTextSizeButton open={textSizeOpen} onToggle={() => setTextSizeOpen(open => !open)} controls={TEXT_SIZE_BAR_ID} size={size} />
@@ -8127,6 +8540,17 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           {renderViewControls(32)}
         </ChatHeaderStrip>
       )}
+      {/* Upright, the only header: the menu, and the conversation's name once
+          there is a conversation (TASK-2778). */}
+      {portraitComposer && (
+        <ChatPhoneBar
+          menuOpen={phoneMenuOpen}
+          menuId={PHONE_MENU_ID}
+          onOpenMenu={() => setPhoneMenuOpen(true)}
+          title={messages.length > 0 ? activeTabLabel : undefined}
+          activity={stripActivity}
+        />
+      )}
       <div
         data-testid="chat-header"
         id={HEADER_REGION_ID}
@@ -8370,7 +8794,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         )}
         {/* A phone outside fullscreen: the text size and the way into
             fullscreen chat. In fullscreen both live on the strip instead. */}
-        {mobile && !fullscreenChat && renderViewControls(40)}
+        {mobile && !fullscreenChat && !portraitComposer && renderViewControls(40)}
         {mobile ? (
           // On a phone the chat is where the page LANDS (src/lib/mobile-chat-first.ts),
           // so closing it is not dismissing a popup but going to the desktop
@@ -8412,7 +8836,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         )}
       </div>
 
-      {mobile && textSizeOpen && (
+      {mobile && textSizeOpen && !portraitComposer && (
         <ChatTextSizeBar id={TEXT_SIZE_BAR_ID} scale={textScalePref} onChange={setTextScalePref} />
       )}
 
@@ -8440,7 +8864,9 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         // (globals.css, `[data-chat-text-scale]`) and to nothing around it.
         data-chat-text-scale={textScale !== 1 ? textScale : undefined}
         style={{
-          flex: 1, overflowY: 'auto', padding: '12px 14px 12px',
+          // 22px at the bottom: the 12px all round plus the gap the end
+          // sentinel used to add after the last bubble.
+          flex: 1, overflowY: 'auto', padding: '12px 14px 22px',
           display: 'flex', flexDirection: 'column', gap: 10,
           userSelect: 'text',
           scrollbarWidth: 'thin',
@@ -8868,7 +9294,6 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           </div>
         )}
 
-        <div ref={messagesEndRef} />
       </div>
 
       {/* The agent's progress card, pinned at the top of the composer stack —
@@ -9104,8 +9529,19 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         {/* Primary phone row: the fold control, text, then microphone and
             send/stop (portrait) or microphone-or-send/stop (landscape). Folded,
             this row IS the composer — the text box and its send action. */}
-        <div className="chat-composer-primary" data-testid={mobile ? 'chat-composer-primary' : undefined} style={mobile ? { display: 'flex', alignItems: 'flex-end', gap: 8 } : { display: 'contents' }}>
-        {mobile && renderComposerToggle()}
+        {/* Upright (TASK-2778) the row is one rounded box: the text across the
+            top, then "+", the model, the microphone and Send/Stop under it. */}
+        <div
+          className="chat-composer-primary"
+          data-testid={mobile ? 'chat-composer-primary' : undefined}
+          style={portraitComposer
+            ? {
+                display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, padding: '2px 8px 8px',
+                borderRadius: 22, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)',
+              }
+            : mobile ? { display: 'flex', alignItems: 'flex-end', gap: 8 } : { display: 'contents' }}
+        >
+        {mobile && !portraitComposer && renderComposerToggle()}
         <textarea
           ref={inputRef}
           value={input}
@@ -9142,11 +9578,14 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
           disabled={status !== 'connected' || greetingPending}
           rows={1}
           style={{
-            width: '100%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)',
+            width: '100%',
+            // Upright the rounded box around the row is the field's frame.
+            background: portraitComposer ? 'transparent' : 'rgba(255,255,255,0.06)',
+            border: portraitComposer ? 'none' : '1px solid rgba(255,255,255,0.08)',
             borderRadius: 12, padding: '8px 12px', color: '#fff', fontSize: 13.5,
             resize: 'none', outline: 'none', maxHeight: 100, lineHeight: 1.4,
             fontFamily: 'inherit',
-            ...(mobile ? { flex: 1, minWidth: 0 } : {}),
+            ...(portraitComposer ? { flex: '1 0 100%', minWidth: 0 } : mobile ? { flex: 1, minWidth: 0 } : {}),
           }}
           onInput={(e) => {
             const el = e.currentTarget
@@ -9160,6 +9599,22 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             space above and below it). Same button and same orange as before;
             `[data-chat-mobile] .chat-composer-primary > button` sizes it to
             the 44px tap target every control in this row gets. */}
+        {portraitComposer && hasComposerOptions && renderComposerToggle()}
+        {portraitComposer && (
+          // Takes the row's free width, so the microphone and Send always sit
+          // at its far end, with or without a pill in it.
+          <div style={{ flex: '1 1 0', minWidth: 0, display: 'flex' }}>
+            {phonePickers.length > 0 && (
+              <ChatModelPill
+                label={modelPillLabel}
+                detail={modelPillDetail}
+                open={modelSheetOpen}
+                controls={MODEL_SHEET_ID}
+                onOpen={() => setModelSheetOpen(true)}
+              />
+            )}
+          </div>
+        )}
         {portraitComposer && caps.canTranscribe && renderVoiceButton(true)}
         {mobile && (mobileVoiceAction ? renderVoiceButton(true) : renderSendButton())}
         {/* Portaled and fixed — this wrapper is `display: contents` on desktop
@@ -9204,7 +9659,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         {/* Create: the Coding Agent's New app wizard, right here. The owner
             asked for it beside the attach and microphone buttons — the chat is
             where the handoff lands, so it is where the request should start. */}
-        <NewAppToggleButton card={newApp} />
+        {!orgMember && <NewAppToggleButton card={newApp} />}
         {/* Making a picture, where the AGENT cannot.
             Shown on the trigger and not on `canGenerateImages`, because the two
             answer different questions: the flag says a picture can be made
@@ -9327,22 +9782,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
                        and truncated the level away; the glyph costs ~11px. */
                     triggerLabel={hermesReasoningTriggerLabel(hermesEffectiveReasoning)}
                     triggerIcon={REASONING_PILL_ICON}
-                    options={hermesReasoningOptions.map(level => ({
-                      id: level,
-                      label: hermesReasoningLabel(level),
-                      /* Thinking on this model is ~25x slower on a short
-                         question (measured: 0.2s vs 8.4s). A dial that hides
-                         that is a dial that surprises people.
-                         `isThinkingOnLevel` is the SAME predicate the proxy
-                         uses to set enable_thinking — deriving "is on" here
-                         instead (e.g. "the last option") would let this hint
-                         and the wire behaviour drift apart silently. */
-                      hint: hermesBinaryReasoning
-                        ? (isThinkingOnLevel(hermesProvider, level)
-                          ? tr('chat.thinkingOnHint', 'Better at reasoning. Much slower.')
-                          : tr('chat.thinkingOffHint', 'Fastest. Answers immediately.'))
-                        : undefined,
-                    }))}
+                    options={hermesReasoningPickerOptions}
                     onChange={changeHermesReasoning}
                     onPointerDown={stopHeaderDrag}
                     triggerMaxWidth={120}
@@ -9354,165 +9794,36 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
               <span className="header-dropdown-trigger" style={{ cursor: 'default', maxWidth: 130 }}>Hermes</span>
             )
           ) : (<>
-          {chatModelState && (() => {
-            // No `activeOptionId` means no row on this list is what the box
-            // is running — whether because the primary matches none of them,
-            // or because nothing is pinned at all. Both used to default to
-            // options[0], which named the first provider in the list — ClawBox
-            // AI on every paired box — as the active one. It also made the
-            // owner's most natural recovery gesture a no-op: HeaderDropdown
-            // fires onChange only when the pick differs from `value`, so
-            // clicking the row the header was already showing did nothing.
-            // Empty `value` keeps that click live and the label honest.
-            //
-            // The `activeModel` half of this test was dropped when chat/model
-            // stopped resolving a null primary onto the Local-AI placeholder:
-            // that made "nothing pinned" a null/null state, which this
-            // predicate had been reading as "a row is active".
-            const unselectableActive = !chatModelState.activeOptionId
-            const activeId = chatModelState.activeOptionId
-              ?? (unselectableActive ? '' : (chatModelState.options[0]?.id ?? ''))
-            const activeOption = chatModelState.options.find(o => o.id === activeId)
-            const triggerLabel = activeOption
-              ? getProviderPillText(activeOption)
-              : (unselectableActive ? t('chat.noChatModel') : activeId)
-            return (
-              <HeaderDropdown
-                ariaLabel={tr('chat.pillChatProvider', 'Chat provider')}
-                value={activeId}
-                triggerLabel={triggerLabel}
-                options={chatModelState.options.map((option) => ({
-                  id: option.id,
-                  label: getChatModelOptionText(option),
-                }))}
-                onChange={handleChatSourceChange}
-                onPointerDown={stopHeaderDrag}
-                // The box's model: shown to every user, moved by the owner.
-                disabled={switchingModel || chatUser !== null}
-                triggerMaxWidth={130}
-                popoverWidth={220}
-              />
-            )
-          })()}
-          {(() => {
-            // Inline model switcher: renders next to the provider dropdown
-            // whenever the active provider has multiple available models.
-            // Lets users hot-swap between Claude Haiku/Sonnet/Opus, GPT
-            // variants, Gemini variants, or OpenRouter's 340+ models
-            // mid-chat without opening Settings. If the current model
-            // isn't in the live catalog (custom ID typed in Settings),
-            // we prepend it as a "Custom" entry so the select reflects
-            // reality.
-            //
-            // The catalog is the live one from /setup-api/ai-models/catalog
-            // (kept in sync via the useEffect above), with the static
-            // fallback as cold-start render. Used to be a hand-curated
-            // array that rotted on every upstream rename — see the comment
-            // at the top of provider-models.ts for the migration history.
-            if (!chatModelState) return null
-            const activeOption = chatModelState.options.find(
-              (option) => option.id === chatModelState.activeOptionId,
-            )
-            if (!activeOption?.provider) return null
-            // ClawBox AI: nothing here. Same rule as the Hermes branch above,
-            // through the same predicate — one product, one chat model, so the
-            // provider pill is the last word before the thinking dial. The row
-            // collapses rather than leaving a gap: this returns no node, and
-            // .chat-header-pills only puts a gap BETWEEN pills that render.
-            //
-            // Stated here even though `chatProviderCatalog` is already null for
-            // this provider (see useProviderCatalog above), because THIS is
-            // where the pill is built: a future change that gives ClawBox AI a
-            // catalogue again must not quietly give it a pill again too.
-            if (isClawboxAiChat) return null
-            const catalog = chatProviderCatalog
-            if (!catalog) return null
-            // Show the dropdown when there are multiple models to pick OR
-            // the catalog permits a custom model id (then the picker
-            // surfaces a "type your own" affordance, which is the only way
-            // to switch to a different Claude variant when Anthropic's
-            // OAuth scope returned a single canonical model).
-            if (catalog.models.length < 2 && !catalog.allowCustom) return null
-            // ClawBox AI's wire-format provider is `deepseek` (Mike's
-            // gateway forwards to DeepSeek's API), while the UI normalizes
-            // to `clawai`. Try the canonical provider first, then fall
-            // back to the deepseek alias so the picker can resolve the
-            // active model id either way.
-            // The ChatGPT row's UI id is `codex` while its models are written
-            // `openai/<id>` — OpenClaw 2 retired the namespace but not the
-            // label (src/lib/chatgpt-subscription.ts). Comparing the row's id
-            // against the reference verbatim answered "not this provider's
-            // model" on every ChatGPT box and took this dropdown — the only
-            // way to move between GPT-5.5 / GPT-5.4 / GPT-5.6 after setup —
-            // off the screen entirely.
-            const activeModelId = extractProviderModelId(
-              chatModelState.activeModel,
-              chatgptReferenceProvider(activeOption.provider),
-            )
-            if (!activeModelId) return null
-            const curatedHasActive = catalog.models.some(
-              (option) => option.id === activeModelId,
-            )
-            const modelOptions = curatedHasActive
-              ? catalog.models
-              : [
-                  { id: activeModelId, label: activeModelId, hint: 'Custom model' },
-                  ...catalog.models,
-                ]
-            const activeRow = modelOptions.find(o => o.id === activeModelId)
-            const activeModelLabel = activeRow?.label ?? activeModelId
-            return (
-              <HeaderDropdown
-                ariaLabel={tr('chat.pillProviderModel', '{provider} model', { provider: activeOption.label })}
-                value={activeModelId}
-                triggerLabel={shortModelPillLabel(
-                  activeModelLabel,
-                  getProviderPillText(activeOption),
-                )}
-                // A model the box's SUBSCRIPTION surface does not carry is
-                // SHOWN, not hidden, and it says why — the same treatment the
-                // setup wizard gives it, because the wizard's help line sends
-                // the customer here to switch models. Dropping the row would
-                // be the same lie in the other direction.
-                options={modelOptions.map(option => {
-                  const blocked = !isModelUsableOnSubscription(option, headerOnSubscription)
-                  return {
-                    id: option.id,
-                    label: option.label,
-                    hint: option.hint,
-                    disabled: blocked,
-                    unavailableReason: blocked ? t('ai.modelNeedsApiKey') : undefined,
-                  }
-                })}
-                onChange={(nextId) => {
-                  if (nextId === activeModelId) return
-                  // The list already refuses a disabled row, but the switch is
-                  // not allowed to depend on that: the server guard exists for
-                  // ids that arrive some other way, and this one exists so the
-                  // customer is never shown a "Switched to ..." for a model
-                  // the same screen just told them the box cannot run.
-                  const next = modelOptions.find(option => option.id === nextId)
-                  if (next && !isModelUsableOnSubscription(next, headerOnSubscription)) return
-                  // The ChatGPT row's models are written `openai/<id>`: its
-                  // UI id `codex` is a label, not a namespace. Posting
-                  // `codex/<id>` from the product's own daily switcher made the
-                  // server's legacy-ref shim — written for a stale tab — the
-                  // happy path, and the row signal below the thing that was
-                  // never exercised.
-                  const wireProvider = chatgptReferenceProvider(activeOption.provider)
-                  void switchChatModel({
-                    provider: activeOption.provider,
-                    model: `${wireProvider}/${nextId}`,
-                    label: next?.label ?? nextId,
-                  })
-                }}
-                onPointerDown={stopHeaderDrag}
-                disabled={switchingModel || chatUser !== null}
-                triggerMaxWidth={140}
-                popoverWidth={240}
-              />
-            )
-          })()}
+          {providerPicker && (
+            <HeaderDropdown
+              ariaLabel={tr('chat.pillChatProvider', 'Chat provider')}
+              value={providerPicker.activeId}
+              triggerLabel={providerPicker.triggerLabel}
+              options={providerPicker.options}
+              onChange={handleChatSourceChange}
+              onPointerDown={stopHeaderDrag}
+              // The box's model: shown to every user, moved by the owner.
+              disabled={switchingModel || chatUser !== null}
+              triggerMaxWidth={130}
+              popoverWidth={220}
+            />
+          )}
+          {providerModelPicker && (
+            <HeaderDropdown
+              ariaLabel={tr('chat.pillProviderModel', '{provider} model', { provider: providerModelPicker.activeOption.label })}
+              value={providerModelPicker.activeModelId}
+              triggerLabel={shortModelPillLabel(
+                providerModelPicker.activeModelLabel,
+                getProviderPillText(providerModelPicker.activeOption),
+              )}
+              options={providerModelPicker.options}
+              onChange={providerModelPicker.onChange}
+              onPointerDown={stopHeaderDrag}
+              disabled={switchingModel || chatUser !== null}
+              triggerMaxWidth={140}
+              popoverWidth={240}
+            />
+          )}
           {/* Per-provider effort levels — see REASONING_BY_PROVIDER for
               the upstream-API-accurate set per provider. The wire vocabulary
               is the OpenClaw gateway's full union; the gateway translates
@@ -9525,14 +9836,7 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
             <HeaderDropdown
               ariaLabel={tr('chat.pillReasoningEffort', 'Reasoning effort')}
               value={effectiveThinkingLevel}
-              /* THINKING_LEVEL_LABELS is the gateway's English vocabulary;
-                 the pill is a control on a desktop that may be in any of ten
-                 languages, so the level is worded here and the English is
-                 the floor for a level the catalogue does not know. */
-              options={visibleThinkingLevels.map(level => ({
-                id: level,
-                label: tr(`chat.effort.${level}`, THINKING_LEVEL_LABELS[level] ?? level),
-              }))}
+              options={thinkingLevelOptions}
               onChange={handleThinkingLevelChange}
               onPointerDown={stopHeaderDrag}
               disabled={effortStarting}
@@ -9553,6 +9857,77 @@ function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSetting
         </div>
         )}
       </div>
+
+      {/* The portrait phone's menu and its two sheets (TASK-2778). Drawn inside
+          the chat, which is the whole screen there, so they cover exactly it;
+          each one is a modal, and Back closes it before the chat. */}
+      {portraitComposer && phoneMenuOpen && (
+        <ChatPhoneMenu
+          id={PHONE_MENU_ID}
+          onClose={closePhoneMenu}
+          chats={phoneChats}
+          connected={status === 'connected'}
+          onNewChat={() => { closePhoneMenu(); void newTab() }}
+          onSelectChat={(key) => {
+            closePhoneMenu()
+            const chat = phoneChats.find(c => c.key === key)
+            // The tab strip's rule: a switch needs the box, and the open one
+            // is already on screen.
+            if (chat && !chat.active && key && status === 'connected') void switchSession(key)
+          }}
+          onCloseChat={(key) => { closePhoneMenu(); closeTab(key) }}
+          onRestart={() => { closePhoneMenu(); if (!startingSession) void startNewSession() }}
+          restartDisabled={startingSession}
+          onShowDesktop={onClose}
+          textSizeId={TEXT_SIZE_BAR_ID}
+          textScale={textScalePref}
+          onTextScaleChange={setTextScalePref}
+        />
+      )}
+      {portraitComposer && plusSheetOpen && (
+        <ChatPhoneSheet id="chat-composer-options" testId="chat-plus-sheet" title={tr('chat.composer.options', 'Chat options')} onClose={closeComposerOptions}>
+          <div style={{ display: 'flex', gap: 10 }}>
+            {/* The same actions, gates and handlers as the composer row. */}
+            {(caps.canAttachImages || caps.canAttachDocuments) && (
+              <ChatPhoneSheetAction
+                testId="chat-attach"
+                icon="attach_file"
+                label={tr('chat.attachFile', 'Attach file')}
+                disabled={status !== 'connected'}
+                // The file picker opens from this tap, while it still counts
+                // as one; the sheet closes after.
+                onClick={() => { fileInputRef.current?.click(); closeComposerOptions() }}
+              />
+            )}
+            {!orgMember && (
+              <ChatPhoneSheetAction
+                testId="chat-new-app-toggle"
+                icon="deployed_code"
+                label={t('codingAgent.createNewProject')}
+                pressed={newApp.show}
+                onClick={() => { closeComposerOptions(); newApp.toggle() }}
+              />
+            )}
+            {caps.imageGenerationTrigger === 'composer' && (
+              <ChatPhoneSheetAction
+                testId="generate-image"
+                icon={drawing ? 'hourglass_top' : 'imagesmode'}
+                label={t('chat.generatePicture')}
+                title={input.trim().length === 0 ? t('chat.generatePictureEmpty') : undefined}
+                disabled={status !== 'connected' || drawing || input.trim().length === 0}
+                onClick={() => { closeComposerOptions(); void generatePicture() }}
+              />
+            )}
+          </div>
+        </ChatPhoneSheet>
+      )}
+      {portraitComposer && modelSheetOpen && phonePickers.length > 0 && (
+        <ChatPhoneSheet id={MODEL_SHEET_ID} testId="chat-model-sheet" title={tr('chat.phone.model', 'Model')} onClose={closeModelSheet}>
+          {phonePickers.map(picker => (
+            <ChatPhonePickerGroup key={picker.id} picker={picker} onPicked={closeModelSheet} />
+          ))}
+        </ChatPhoneSheet>
+      )}
 
       {/* Where a drop against an edge would land the chat — the same plate the
           app windows draw, portalled so the popup's own overflow cannot clip

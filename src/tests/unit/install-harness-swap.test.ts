@@ -5,6 +5,7 @@ import os from "os";
 import path from "path";
 
 import { testEnv } from "@/tests/helpers/env";
+import { accountOnlyHome, CAN_LOCK_HOME, unlockTree } from "../helpers/account-only-home";
 import { failureReason } from "@/lib/root-step-follow";
 import { SELF_UPDATING_ROOT_STEPS, UI_ROOT_STEPS, WEB_ROOT_STEPS } from "@/lib/root-steps";
 
@@ -133,9 +134,11 @@ const STUB_INSTALL_SH = [
   "    esac ;;",
   "  openclaw_install)",
   '    mkdir -p "$(dirname "$STUB_OPENCLAW_BIN")"',
+  // The launcher sits in the service account's npm prefix: it says who ran it.
+  "    said_who='[ -n \"${AS_SERVICE_USER:-}\" ] && who=service || who=root; echo \"$who openclaw $*\" >> \"$LAUNCHER_RUNS\"'",
   '    case "${STUB_OPENCLAW_INSTALL:-runnable}" in',
-  "      runnable) printf '#!/bin/sh\\nexit 0\\n' > \"$STUB_OPENCLAW_BIN\"; chmod +x \"$STUB_OPENCLAW_BIN\" ;;",
-  "      broken) printf '#!/bin/sh\\necho \"env: node: No such file or directory\" >&2\\nexit 127\\n' > \"$STUB_OPENCLAW_BIN\"; chmod +x \"$STUB_OPENCLAW_BIN\" ;;",
+  "      runnable) printf '#!/bin/sh\\n%s\\nexit 0\\n' \"$said_who\" > \"$STUB_OPENCLAW_BIN\"; chmod +x \"$STUB_OPENCLAW_BIN\" ;;",
+  "      broken) printf '#!/bin/sh\\n%s\\necho \"env: node: No such file or directory\" >&2\\nexit 127\\n' \"$said_who\" > \"$STUB_OPENCLAW_BIN\"; chmod +x \"$STUB_OPENCLAW_BIN\" ;;",
   "      nothing) ;;",
   "    esac ;;",
   "  edition_lock)",
@@ -155,6 +158,7 @@ let lockFile: string;
 let systemctlCalls: string;
 let sleepCalls: string;
 let openclawBin: string;
+let launcherRuns: string;
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-swap-"));
@@ -174,6 +178,8 @@ beforeEach(() => {
   sleepCalls = path.join(tmp, "sleep-calls");
   fs.writeFileSync(sleepCalls, "");
   openclawBin = path.join(home, ".npm-global", "bin", "openclaw");
+  launcherRuns = path.join(tmp, "launcher-runs");
+  fs.writeFileSync(launcherRuns, "");
 });
 
 afterEach(() => {
@@ -197,6 +203,7 @@ function driverEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
     STUB_OPENCLAW_BIN: openclawBin,
     SYSTEMCTL_CALLS: systemctlCalls,
     SLEEP_CALLS: sleepCalls,
+    LAUNCHER_RUNS: launcherRuns,
     ...extra,
   });
 }
@@ -243,7 +250,11 @@ interface StepRun {
  * user; systemctl, the gateway probes and sleep are stubs that answer what the
  * STUB_* flags say and record what they were asked.
  */
-function runStep(recorded: string, extra: Record<string, string> = {}): StepRun {
+function runStep(
+  recorded: string,
+  extra: Record<string, string> = {},
+  { prelude = "", lock = false }: { prelude?: string; lock?: boolean } = {},
+): StepRun {
   const script = [
     "set -euo pipefail",
     `PROJECT_DIR=${JSON.stringify(projectDir)}`,
@@ -255,8 +266,11 @@ function runStep(recorded: string, extra: Record<string, string> = {}): StepRun 
     // install.sh initialises this at parse time; wait_for_gateway_port reads
     // it under `set -u`, and a fresh dispatch of the step starts it at 0.
     "GATEWAY_READY_SPENT=0",
-    // `runuser -u clawbox -- env HOME=… cmd…` → run cmd… as this user.
-    'runuser() { shift 2; [ "${1:-}" = "--" ] && shift; "$@"; }',
+    // `runuser -u clawbox -- env HOME=… cmd…` → run cmd… as this user, marked
+    // as the service account's run only when -u names it: a switch to root
+    // must still read as root.
+    'runuser() { local who=""; [ "${1:-}" = "-u" ] && [ "${2:-}" = "$CLAWBOX_USER" ] && who=1; '
+      + 'shift 2; [ "${1:-}" = "--" ] && shift; AS_SERVICE_USER=$who "$@"; }',
     "systemctl() {",
     `  printf '%s\\n' "$*" >> ${JSON.stringify(systemctlCalls)}`,
     '  if [ "${1:-}" = "is-enabled" ]; then printf \'%s\\n\' "${STUB_UNIT_ENABLED:-enabled}"; fi',
@@ -269,7 +283,11 @@ function runStep(recorded: string, extra: Record<string, string> = {}): StepRun 
     'gateway_port_listening() { [ "${STUB_GATEWAY_LISTENING:-1}" = 1 ]; }',
     'gateway_unit_running_or_starting() { [ "${STUB_GATEWAY_TRYING:-1}" = 1 ]; }',
     `sleep() { printf 'sleep %s\\n' "$*" >> ${JSON.stringify(sleepCalls)}; }`,
+    // The service account removes the request it wrote: here, this suite's user.
+    'as_clawbox() { AS_SERVICE_USER=1 "$@"; }',
+    prelude,
     ...SWAP_FUNCTIONS.map(extractShellFunction),
+    ...(lock ? ["__ao_lock"] : []),
     "step_harness_swap",
   ].join("\n");
   const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", env: driverEnv(extra), timeout: SPAWN_TIMEOUT_MS });
@@ -455,6 +473,71 @@ d("step_harness_swap — refusals before anything is touched", () => {
       expect(r.substeps, name).toEqual([]);
       expect(r.requestLeft, name).toBe(true);
     }
+  });
+});
+
+/**
+ * The request sits in data/, the service account's: the account removes it.
+ * Run against a checkout only `as_clawbox` can write to
+ * (src/tests/helpers/account-only-home.ts): a root `rm` there fails with
+ * EACCES, and a root command on a checkout path is logged.
+ */
+(CAN_RUN && CAN_LOCK_HOME ? describe : describe.skip)("step_harness_swap removes the request as the service account", () => {
+  function runLocked(recorded: string, prelude = "") {
+    const aux = path.join(tmp, "aux");
+    fs.mkdirSync(aux, { recursive: true });
+    const account = accountOnlyHome(projectDir, aux);
+    const r = runStep(recorded, {}, { prelude: `${account.shell}\n${prelude}`, lock: true });
+    unlockTree(projectDir);
+    return { ...r, rootInHome: account.rootInHome(), asClawbox: account.asClawbox() };
+  }
+  const failRm = 'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"\n'
+    + 'as_clawbox() { [ "$1" = rm ] && return 1; __real_as_clawbox "$@"; }';
+
+  it("answers 'nothing to do' on the box it already is, and the account removes the request", () => {
+    writeRequest("openclaw");
+    const r = runLocked("openclaw");
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("  Already the OpenClaw edition — nothing to do\n");
+    expect(r.requestLeft).toBe(false);
+    expect(r.asClawbox).toEqual([`rm -f -- ${requestFile}`]);
+    expect(r.rootInHome.filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
+  });
+
+  it("removes the request as the account once a swap is done", () => {
+    writeRequest("hermes");
+    const r = runLocked("openclaw");
+    expect(r.status, r.out).toBe(0);
+    expect(r.phases.at(-1)).toBe("[harness-swap] phase=done");
+    expect(r.out).toContain("This box is now the Hermes edition");
+    expect(r.requestLeft).toBe(false);
+    expect(r.asClawbox).toContain(`rm -f -- ${requestFile}`);
+    expect(r.rootInHome.filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
+  });
+
+  it("finishes as before, with a warning, when the account cannot remove the request", () => {
+    writeRequest("openclaw");
+    const r = runLocked("openclaw", failRm);
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toContain("  Already the OpenClaw edition — nothing to do\n");
+    expect(r.out).toContain(`  Warning: could not remove ${requestFile}\n`);
+    expect(r.requestLeft).toBe(true);
+  });
+
+  it("reports a finished swap as finished, with a warning, when the account cannot remove the request after it", () => {
+    // The box is already the target edition by then: under errexit, a failed
+    // removal must not turn that into a failed step. Only the request's
+    // removal fails.
+    writeRequest("hermes");
+    const failRequestRm = 'eval "$(declare -f as_clawbox | sed \'1s/^as_clawbox /__real_as_clawbox /\')"\n'
+      + `as_clawbox() { [ "$1" = rm ] && [ "\${@: -1}" = ${JSON.stringify(requestFile)} ] && return 1; __real_as_clawbox "$@"; }`;
+    const r = runLocked("openclaw", failRequestRm);
+    expect(r.status, r.out).toBe(0);
+    expect(r.phases.at(-1)).toBe("[harness-swap] phase=done");
+    expect(r.out).toContain(`  Warning: could not remove ${requestFile}\n`);
+    expect(r.out).toContain("  This box is now the Hermes edition\n");
+    expect(r.requestLeft).toBe(true);
+    expect(r.rootInHome.filter((l) => !/^(cat|awk) /.test(l))).toEqual([]);
   });
 });
 
@@ -665,6 +748,24 @@ d("step_harness_swap — hermes → openclaw", () => {
       expect(line, shape).toMatch(/OpenClaw does not run on this box after its install step/);
       expect(line, shape).toMatch(reasons[shape]);
       expect(line, shape).toMatch(/still the Hermes edition and nothing was changed/);
+    }
+  });
+
+  it("asks the OpenClaw launcher as the service account, never as root, whether or not it runs", () => {
+    // The launcher is a file in the service account's npm prefix, so root does
+    // not run it — the same rule the Hermes probe beside it keeps.
+    for (const shape of ["runnable", "broken"]) {
+      fs.rmSync(lockFile, { force: true });
+      fs.rmSync(openclawBin, { force: true });
+      fs.writeFileSync(callsFile, "");
+      fs.writeFileSync(launcherRuns, "");
+      writeRequest("openclaw");
+
+      const r = runStep("hermes", { STUB_OPENCLAW_INSTALL: shape });
+
+      expect(r.status === 0, shape).toBe(shape === "runnable");
+      const runs = fs.readFileSync(launcherRuns, "utf-8").split("\n").filter(Boolean);
+      expect(runs, shape).toEqual(["service openclaw --version"]);
     }
   });
 

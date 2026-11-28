@@ -1,7 +1,7 @@
 /**
  * Captive-portal detection — when a phone/laptop joins the ClawBox-Setup
  * AP, the OS issues a probe request to a vendor-specific URL. ClawBox's
- * middleware (src/middleware.ts) intercepts those probes and either
+ * middleware (src/proxy.ts) intercepts those probes and either
  * redirects to the setup UI at http://10.42.0.1/ or returns the magic
  * "no internet" response, which prompts the OS to pop a captive-portal
  * notification.

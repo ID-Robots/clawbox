@@ -61,6 +61,7 @@ import CodingProjectWorkspace, { type WorkspaceTab } from "./CodingProjectWorksp
 import CodingTeamPage, { isTeamActive, TEAM_STATUS_TONE, type TeamView } from "./CodingTeamPage";
 import { mergeSlimRuns, mergeSlimTeams, runsSettledSinceHeld, teamsSettledSinceHeld } from "@/lib/coding-agent-slim";
 import CodingProjectMcpServersCard from "./CodingProjectMcpServersCard";
+import CodingProjectFoldersCard from "./CodingProjectFoldersCard";
 import CodingAgentLiveAgents, { RunAgentsDiagram } from "./CodingAgentLiveAgents";
 import { turnsKnown } from "./CodingAgentDiagram";
 import { livePreviewCommand } from "@/lib/coding-run-preview";
@@ -196,6 +197,8 @@ interface Run {
    * every run this box made before worktrees existed.
    */
   worktree?: RunWorktreeView | null;
+  /** A multi-folder run's copies, one per repository (TASK-2757); absent on every other run. */
+  multiFolder?: { project: string };
   /** WHY a paused run is paused. Absent on a record written before it was
    *  kept, which reads the same as an ordinary pause: nothing to explain. */
   pauseReason?: CodingPauseReason | null;
@@ -358,7 +361,7 @@ function runBelongsTo(r: Run, pr: Project): boolean {
   // A run with a copy of its own works two folders deeper, so the folder it
   // BELONGS to is the copy's project — matching `directory` alone would file
   // every such run under nothing.
-  return (r.worktree?.project ?? r.directory) === pr.directory;
+  return (r.worktree?.project ?? r.multiFolder?.project ?? r.directory) === pr.directory;
 }
 
 /** The project a team works in: a code project by its id, a folder by its path. */
@@ -396,7 +399,7 @@ function missingProjectOf(r: Run, projects: Project[], projectsDir: string | nul
     return projects.some((pr) => pr.kind === "codeProject" && pr.folder === r.projectId) ? null : r.projectId;
   }
   if (!projectsDir) return null;
-  const worked = r.worktree?.project ?? r.directory;
+  const worked = r.worktree?.project ?? r.multiFolder?.project ?? r.directory;
   if (typeof worked !== "string" || !worked) return null;
   const base = projectsDir.endsWith("/") ? projectsDir : `${projectsDir}/`;
   if (!worked.startsWith(base)) return null;
@@ -502,7 +505,7 @@ function StatTile({ label, value, hint, testId }: { label: string; value: ReactN
  * A row across the full width rather than a tile: the longest value on the
  * whole page is a model identifier, and in a ~118 px tile it had nowhere to
  * go. Here it has the column's width and wraps at its own hyphens, which is
- * where a name like `deepseek-v4-pro[1m]` wants to break.
+ * where a name like `deepseek-v4-flash[1m]` wants to break.
  */
 function StatLine({ label, value, hint, note, mono = false, testId }: { label: string; value: string; hint?: string; note?: string; mono?: boolean; testId?: string }) {
   return (
@@ -3079,14 +3082,16 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
                       />
                     </div>
                   )}
-                  {(run.commit || run.pr?.url || webApp) && (
+                  {/* A multi-folder run has a commit per repository (its timeline names
+                      each), none of them the project folder's own: no one commit here. */}
+                  {((run.commit && !run.multiFolder) || run.pr?.url || webApp) && (
                     <div className="mt-2 flex flex-wrap items-center gap-2">
-                      {run.commit && (
+                      {run.commit && !run.multiFolder && (
                         <span className={`${BTN_SECONDARY} font-mono cursor-default hover:bg-white/[0.06] hover:text-[var(--text-secondary)]`} data-testid="coding-agent-run-commit" title={run.commit}>
                           {t("codingAgent.statCommit").toLowerCase()} {run.commit.slice(0, 7)}
                         </span>
                       )}
-                      {run.commit && project && (
+                      {run.commit && project && !run.multiFolder && (
                         <button
                           type="button"
                           onClick={() => {
@@ -3606,6 +3611,16 @@ export default function CodingAgentApp({ meta }: { meta?: Record<string, string>
                   <CodingProjectMcpServersCard key={`mcp-${p.folder}`} project={p.folder} />
                 )}
               </div>
+              {/* The repositories this project's runs get a copy of each of
+                  (TASK-2757, src/lib/project-folders.ts): its own folder, and
+                  any other project folder added here. Folder projects only. */}
+              {p.kind === "folder" && (
+                <CodingProjectFoldersCard
+                  key={`folders-${p.folder}`}
+                  project={p.folder}
+                  candidates={projects.filter((x) => x.kind === "folder" && x.folder !== p.folder && x.lastCommit).map((x) => x.folder)}
+                />
+              )}
               {/* The last row of the page: removing the folder. Quiet and
                   last, like an iOS trailing destructive row; everything that
                   makes it safe is in the dialog behind it. */}

@@ -347,7 +347,7 @@ describe("the table speaks the desktop's language", () => {
   });
 
   it("names a feature with no app by its own key, with a glyph the bundled font carries", () => {
-    const font = readFileSync(path.join(process.cwd(), "public/fonts/material-symbols-rounded.ttf"), "latin1").split("\n");
+    const font = readFileSync(path.join(process.cwd(), "src/assets/fonts/material-symbols-rounded.ttf"), "latin1").split("\n");
     for (const [brand, def] of Object.entries(TOOL_STEP_APPS)) {
       if (def.app) continue;
       expect(def.nameKey, brand).toBeTruthy();

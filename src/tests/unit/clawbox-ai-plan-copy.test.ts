@@ -11,6 +11,9 @@ import { CLAWBOX_AI_CHAT_MODEL_LABEL } from "@/lib/clawbox-ai-models";
 import { codingModelName } from "@/lib/coding-model-names";
 import { MAX_PLAN_BONUSES } from "@/lib/max-subscription";
 import { CLAWAI_MODELS } from "@/lib/provider-models";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 import { translations } from "@/lib/translations";
 import type { Locale } from "@/lib/i18n";
 
@@ -18,7 +21,7 @@ const LOCALES: Locale[] = ["en", "bg", "de", "es", "fr", "it", "ja", "nl", "sv",
 const NON_EN = LOCALES.filter((l) => l !== "en");
 
 /** Product names: a locale that leaves these alone is right, not lazy. */
-const BRAND_ONLY = new Set(["ai.planFeatureFlashModel", "ai.planFeatureProModel"]);
+const BRAND_ONLY = new Set(["ai.planFeatureFlashModel"]);
 
 /** Words a language spells exactly as English does — Spanish "Plan" is the
  *  Spanish word, not an untranslated string. */
@@ -117,22 +120,18 @@ describe("ClawBox AI plan copy is keyed and translated", () => {
 });
 
 /**
- * Every plan is served by DeepSeek V4 Flash. The proxy answers the Max plan's
- * `deepseek-v4-pro` id with the same Flash model, so copy that sells Max a
+ * Every plan is served by the one ClawBox AI model, DeepSeek V4 Flash
+ * (TASK-2261: the Max plan's own id is retired), so copy that sells Max a
  * bigger one ("V4 Pro", "1.6T", "frontier", "DeepSeek 4.1" in any of its
- * translations) names a model the box does not run. The wire id and the i18n
- * keys stay; only the words change.
+ * translations) names a model the box does not run.
  */
 describe("ClawBox AI copy names the model that serves it", () => {
   const SERVED_MODEL = "DeepSeek V4 Flash";
   /** "V4 Pro", "1.6T", "frontier" and "DeepSeek 4.1", as the ten locale packs spelled them. */
   const OVERCLAIM =
     /V4[ -]?Pro|1[.,]6\s?T|DeepSeek 4\.1|fronti|frontera|frontlinje|フロンティア|前沿|最上位|фронт|челн|Spitzen|de pointe|di punta|topp?model/i;
-  /** The keys that carried the claim. Each is still a key: only its words changed. */
+  /** The keys that carried the claim and are still keys. */
   const CLAIM_KEYS = [
-    "ai.planFeatureProModel",
-    "ai.clawboxTierMaxHint",
-    "ai.clawboxTierFlashHint",
     "tierCelebration.maxBody",
     "upgradeCard.trialBannerSubtitle",
   ];
@@ -166,11 +165,8 @@ describe("ClawBox AI copy names the model that serves it", () => {
     }
   });
 
-  it("names the served model on both picker rows and the Max celebration", () => {
+  it("names the served model on the Max celebration", () => {
     for (const locale of LOCALES) {
-      // Same model on both rows, so neither may call itself the faster one.
-      expect(translations[locale]["ai.clawboxTierFlashHint"], locale).toContain(SERVED_MODEL);
-      expect(translations[locale]["ai.clawboxTierMaxHint"], locale).toContain(SERVED_MODEL);
       expect(translations[locale]["tierCelebration.maxBody"], locale).toContain(SERVED_MODEL);
     }
   });
@@ -179,15 +175,19 @@ describe("ClawBox AI copy names the model that serves it", () => {
     for (const model of CLAWAI_MODELS) {
       expect(`${model.label} ${model.hint ?? ""}`, model.id).not.toMatch(OVERCLAIM);
     }
-    expect(CLAWAI_MODELS.find((m) => m.id === "deepseek-v4-pro")?.hint).toContain(SERVED_MODEL);
+    // One row: the one model, named.
+    expect(CLAWAI_MODELS.map((m) => m.id)).toEqual(["deepseek-v4-flash"]);
+    expect(CLAWAI_MODELS[0].label).toBe(SERVED_MODEL);
     expect(CLAWBOX_AI_CHAT_MODEL_LABEL).toBe(SERVED_MODEL);
-    expect(codingModelName("deepseek-v4-pro")).toBe(codingModelName("deepseek-v4-flash"));
-    expect(codingModelName("deepseek-v4-pro[1m]")).not.toMatch(/Pro/);
+    // A run recorded on the retired Max-plan id still reads as the model that answered it.
+    expect(codingModelName(RETIRED_CHAT_ID)).toBe(codingModelName("deepseek-v4-flash"));
+    expect(codingModelName(`${RETIRED_CHAT_ID}[1m]`)).not.toMatch(/Pro/);
   });
 
   // The docs sold Max the same bigger model, last as "DeepSeek 4.1", which is
-  // no model id at all. A paragraph about the Max plan may name the wire id
-  // `deepseek-v4-pro`; with that taken out it must name nothing bigger.
+  // no model id at all. A paragraph about the Max plan may name the retired
+  // wire id (the 4.0.0 notes do); with that taken out it must name nothing
+  // bigger.
   it.each(["README.md", "docs-site/whats-new.mdx", "RELEASE-NOTES-4.0.0.md"])(
     "%s names no bigger model for the Max plan",
     (doc) => {
@@ -195,7 +195,7 @@ describe("ClawBox AI copy names the model that serves it", () => {
       const maxParagraphs = text.split(/\n\s*\n/).filter((p) => /\bMax (plan|Tier)\b/.test(p));
       expect(maxParagraphs.length, `${doc} mentions the Max plan`).toBeGreaterThan(0);
       for (const paragraph of maxParagraphs) {
-        expect(paragraph.replace(/deepseek-v4-pro(\[1m\])?/g, ""), doc).not.toMatch(OVERCLAIM);
+        expect(paragraph.split(RETIRED_CHAT_ID).join(""), doc).not.toMatch(OVERCLAIM);
       }
     },
   );

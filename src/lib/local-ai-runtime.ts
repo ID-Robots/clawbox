@@ -7,6 +7,7 @@ import { isOllamaExecutable } from "@/lib/local-models";
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 import { getActiveHarnessSource } from "@/lib/harness";
+import { externalEngineSelected } from "@/lib/external-engine";
 import {
   getLlamaCppLaunchSpec,
   getLlamaCppProvisioningStatus,
@@ -16,8 +17,9 @@ import {
 } from "@/lib/llamacpp-server";
 import {
   EMBED_UNIT,
+  embedServedAlias,
+  getActiveEmbedLaunchSpec,
   getEmbedBaseUrl,
-  getEmbedLaunchSpec,
   getEmbedProvisioningStatus,
   getEmbedProxyBaseUrl,
   isEmbedHealthy,
@@ -25,6 +27,8 @@ import {
   isEmbeddingServerArgv,
   type EmbedLaunchSpec,
 } from "@/lib/embed-server";
+
+import { DEFAULT_LOCAL_EMBEDDING_MODEL_ID, isLocalEmbeddingModelId } from "@/lib/embed-runtime-ids";
 
 export { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
 
@@ -440,7 +444,7 @@ async function waitForEmbedReady(spec: EmbedLaunchSpec): Promise<void> {
     if (budgetMs === null) {
       // GGUF on disk → a wake (4 s measured); missing → the start script is
       // downloading 640 MB and only the provisioning budget is honest.
-      const provisioning = await getEmbedProvisioningStatus().catch(() => null);
+      const provisioning = await getEmbedProvisioningStatus(spec).catch(() => null);
       budgetMs = provisioning?.modelAvailable ? getLlamaCppWakeTimeoutMs() : spec.startupTimeoutMs;
       deadline = Date.now() + budgetMs;
     }
@@ -467,9 +471,57 @@ async function waitForEmbedReady(spec: EmbedLaunchSpec): Promise<void> {
  * protects the box from the EMBEDDER — it cannot stop a wake from squeezing
  * the gateway or a running build; see DEFAULT_EMBED_WAKE_MIN_AVAILABLE_MB.
  */
+const EMBED_MODEL_RESTART_COOLDOWN_MS = 60_000;
+let lastEmbedModelRestartAt = 0;
+
+/**
+ * Does the running embedder serve a DIFFERENT CATALOG MODEL than the one the
+ * box is set to? Only that is a reason to restart it (TASK-2411).
+ *
+ * The default slot's alias comes from .env, which the web server read when IT
+ * started and the unit reads when IT starts: an owner's edit in between makes
+ * the two names differ for the same model, and treating that as a mismatch
+ * would restart the embedder under every request. So with the default slot
+ * picked, only a server answering as another catalog model (the 4B the owner
+ * just switched away from) is restarted; with another model picked, anything
+ * but that model's id is. A server that does not say is taken at its word.
+ */
+export function embedServesOtherModel(
+  served: string | null,
+  spec: Pick<EmbedLaunchSpec, "alias" | "modelId">,
+): boolean {
+  if (served === null || served === spec.alias) return false;
+  if (spec.modelId === DEFAULT_LOCAL_EMBEDDING_MODEL_ID) {
+    return isLocalEmbeddingModelId(served) && served !== DEFAULT_LOCAL_EMBEDDING_MODEL_ID;
+  }
+  return served !== spec.modelId;
+}
+
+/** For the tests. */
+export function resetEmbedModelRestartCooldownForTests(): void {
+  lastEmbedModelRestartAt = 0;
+}
+
 async function startEmbedIfNeeded(): Promise<void> {
-  const spec = getEmbedLaunchSpec();
-  if (await isEmbedHealthy(spec.healthUrl)) return;
+  const spec = await getActiveEmbedLaunchSpec();
+  if (await isEmbedHealthy(spec.healthUrl)) {
+    // Up, but is it the model this box is set to? A server still holding the
+    // model the owner just switched away from (TASK-2411) must not embed one
+    // more passage: vectors from two models in one index answer nothing. It is
+    // stopped and woken again, and the start script loads the model the box is
+    // set to now. A server that does not say (an older build) is taken at its
+    // word, rather than restarted on every request.
+    const served = await embedServedAlias(spec.baseUrl);
+    if (!embedServesOtherModel(served, spec)) return;
+    // Once per minute at most: a unit that comes back as the same other model
+    // (a config it cannot read, a hand edit) must not be restarted under every
+    // request — the restart is a repair, not a loop.
+    const now = Date.now();
+    if (now - lastEmbedModelRestartAt < EMBED_MODEL_RESTART_COOLDOWN_MS) return;
+    lastEmbedModelRestartAt = now;
+    console.warn(`[local-ai] the memory embedder runs ${served} but this box is set to ${spec.alias}; restarting it`);
+    await stopEmbed();
+  }
 
   const minMb = getEmbedWakeMinAvailableMb();
   if (minMb > 0) {
@@ -603,6 +655,12 @@ export async function activateLocalAiProvider(provider: LocalAiProvider): Promis
 }
 
 export async function ensureLocalAiReady(provider: LocalAiProvider): Promise<void> {
+  // An external AI engine holds the Local AI slot (TASK-2376): the on-device
+  // runtimes are not started by any caller — the proxy, the Ollama pull and
+  // delete routes, an activation. The memory embedder is not one of them.
+  if (provider !== "embed" && await externalEngineSelected()) {
+    throw new Error("An external AI engine is selected as Local AI, so the on-device model is not started. Remove the engine in Settings → Local AI first.");
+  }
   clearIdleTimer(provider);
 
   const state = runtimeStates[provider];
@@ -640,6 +698,37 @@ export async function stopLocalAiProvider(provider: LocalAiProvider): Promise<vo
   state.activeRequests = 0;
   await PROVIDERS[provider].stop();
 }
+
+/** Is the Ollama server answering right now? */
+export async function isOllamaRunning(): Promise<boolean> {
+  return isOllamaReachable();
+}
+
+/**
+ * While an external AI engine holds the Local AI slot (TASK-2376), the
+ * on-device CHAT runtimes stay down — including an Ollama that systemd started
+ * at boot (install.sh enables the unit) or that an update's post step brought
+ * back, neither of which goes through ClawBox. `stop`, never `disable`, as in
+ * the idle standby: Remove, or the next boot without an engine, has it back.
+ * A no-op on a box with no engine (the appliance default). The memory
+ * embedder is not a chat runtime and is never touched.
+ */
+export async function standDownChatRuntimesForExternalEngine(): Promise<{ ollama: boolean; llamacpp: boolean }> {
+  const stopped = { ollama: false, llamacpp: false };
+  if (!(await externalEngineSelected())) return stopped;
+  if (await isOllamaReachable()) {
+    await stopLocalAiProvider("ollama");
+    stopped.ollama = true;
+  }
+  if (await PROVIDERS.llamacpp.isUp()) {
+    await stopLocalAiProvider("llamacpp");
+    stopped.llamacpp = true;
+  }
+  return stopped;
+}
+
+/** The boot check and every 5 minutes after (an update can start Ollama again minutes after boot). */
+export const EXTERNAL_ENGINE_STAND_DOWN_MS = 5 * 60_000;
 
 export function getLocalAiRuntimeSnapshot(provider: LocalAiProvider) {
   const state = runtimeStates[provider];

@@ -14,9 +14,12 @@ import { clawaiPitchEn } from "@/lib/edition-translations/en-clawai-pitch";
 import { anthropicAccountsEn } from "@/lib/edition-translations/en-anthropic-accounts";
 import { whatsNewEn } from "@/lib/edition-translations/en-whats-new";
 import { usersEn } from "@/lib/edition-translations/en-users";
+import { cloudProvidersEn } from "@/lib/edition-translations/en-cloud-providers";
 import { dbMaintenanceEn } from "@/lib/edition-translations/en-db-maintenance";
 import { modelAvailabilityEn } from "@/lib/edition-translations/en-model-availability";
 import { jobAlertsEn } from "@/lib/edition-translations/en-job-alerts";
+import { updateNoticeEn } from "@/lib/edition-translations/en-update-notice";
+import { clusterEn } from "@/lib/edition-translations/en-cluster";
 import { bg } from "@/lib/edition-translations/bg";
 import { de } from "@/lib/edition-translations/de";
 import { es } from "@/lib/edition-translations/es";
@@ -73,10 +76,10 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // owner who cannot read "Limited until 14:30" cannot tell a waiting run from
   // a broken one.
   { name: "Anthropic accounts card", matches: (k) => k.startsWith("settings.anthropicAccounts.") },
-  // The desktop's "What's new in 4.3" card (TASK-1059, TASK-1195): the
+  // The desktop's "What's new in 4.4" card (TASK-1059, TASK-1195): the
   // release's highlights and the plan it takes to use them. The first thing an
   // updated box says about itself, so it is not left in English on any locale.
-  { name: "What's new in 4.3 card", matches: (k) => k.startsWith("whatsNew.") },
+  { name: "What's new in 4.4 card", matches: (k) => k.startsWith("whatsNew.") },
   // Multi-user ClawBox OS (TASK-1256): Settings → Users, the login screen's
   // user picker and error lines, and the tray's "signed in as". The login
   // screen is the one page every person on the box sees before anything else.
@@ -85,6 +88,9 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // why the assistant paused for it. An owner who cannot read "skipped — the
   // assistant was busy" cannot tell a skipped night from a broken one.
   { name: "Agent databases card", matches: (k) => k.startsWith("dbMaintenance.") },
+  // "Hide cloud AI providers" and the local-first AI providers page
+  // (TASK-2497): shown to an organisation's owner in their own language.
+  { name: "Cloud providers switch and local-first page", matches: (k) => k.startsWith("cloudProviders.") },
   // The chat's line when a model cannot run on the owner's account — a rate
   // limit of zero, a model the provider dropped — and which model the chat was
   // moved to. The one thing that explains why the reply came from another model.
@@ -93,6 +99,10 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // itself, which the server words in the box's language: an owner who cannot
   // read "failed 3 times in a row" has not been warned.
   { name: "Scheduled job alerts", matches: (k) => k.startsWith("jobAlerts.") },
+  // Settings → System Update → Weekly update check (TASK-2260), and the
+  // notice itself — the Telegram message, its button and the replies to
+  // /update — which the server words in the box's language.
+  { name: "Weekly update check", matches: (k) => k.startsWith("updateNotice.") },
 ];
 
 /**
@@ -179,6 +189,11 @@ describe("edition-translations (TASK-458)", () => {
       ["dbMaintenanceEn", dbMaintenanceEn, (k) => k.startsWith("dbMaintenance.")],
       ["modelAvailabilityEn", modelAvailabilityEn, (k) => k.startsWith("chat.modelUnavailable")],
       ["jobAlertsEn", jobAlertsEn, (k) => k.startsWith("jobAlerts.")],
+      ["updateNoticeEn", updateNoticeEn, (k) => k.startsWith("updateNotice.")],
+      // Settings → AI providers on a box whose AI is the owner's own (TASK-2497).
+      ["cloudProvidersEn", cloudProvidersEn, (k) => k.startsWith("cloudProviders.")],
+      // Settings → System → Cluster, the owner's view of a Workstation's Sparks (TASK-2670).
+      ["clusterEn", clusterEn, (k) => k.startsWith("cluster.")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {

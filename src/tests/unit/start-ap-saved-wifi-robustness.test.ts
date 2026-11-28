@@ -344,6 +344,9 @@ EOF
     printf '%s' "$con" > "$d/name"
     printf '%s' "$con" > "$d/esc"
     echo "Connection '$con' (${HOTSPOT}) successfully added." ;;
+  "radio ")
+    [ "$fields" = WIFI ] || unsupported "$@"
+    echo enabled ;;
   *) unsupported "$@" ;;
 esac
 `;
@@ -1162,7 +1165,18 @@ fi`);
 
   it("bounds stalled AP activation and restores policy on exhaustion", () => {
     makeBox({ setupComplete: true, profiles: [] });
-    wrapNm(`if [[ "$*" == *'connection up uuid ${HOTSPOT}'* ]]; then /bin/sleep 10; exit 4; fi`);
+    // The stalled nmcli is ONE process, as the real one is: `exec`, not a
+    // `sleep` child. phase_command's `timeout --signal=KILL` reaches the
+    // command it started on every coreutils, but only GNU's also kills that
+    // command's children. uutils' timeout (Ubuntu 25.10+, so GitHub's
+    // ubuntu-26.04 runners) shields itself from the signal it sends its own
+    // group by setting it to SIG_IGN first; SIGKILL cannot be ignored, that
+    // call fails, and the group is never signalled (uucore 0.10.0,
+    // send_signal_group). A `sleep 10` left behind then held this run's
+    // stdout, and spawnSync waited the full 10 s for a script that had given
+    // up after its 2 s budget. That the group kill holds on the boxes' GNU
+    // coreutils is phase_command's claim, not this test's subject.
+    wrapNm(`if [[ "$*" == *'connection up uuid ${HOTSPOT}'* ]]; then exec /bin/sleep 10; fi`);
     const began = Date.now();
     const r = runStartAp({ AP_TOTAL_BUDGET: "2", SKIP_PRESCAN: "1" });
     expect(r.status).not.toBe(0);

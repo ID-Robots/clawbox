@@ -13,8 +13,10 @@ import {
   addRunWorktree,
   branchExists,
   branchIsMerged,
+  bringBaseHome,
   commitsAhead,
   deleteRunBranch,
+  hardlinkSharedNodeModules,
   linkSharedNodeModules,
   listRunWorktrees,
   mergeRunBranch,
@@ -111,15 +113,63 @@ describe("a run's worktree", () => {
     expect(git(dir, "show", "--name-only", "--format=", "clawbox/run-bbbbbbbb").trim()).toBe("b.js");
   });
 
-  it("symlinks the project's node_modules into the worktree and never over one that is already there", async () => {
-    fs.mkdirSync(path.join(dir, "node_modules", "left-pad"), { recursive: true });
+  it("gives the worktree the project's node_modules as a tree of hard links, never over one that is already there", async () => {
+    // A bundler that will not follow a link out of its folder (Next.js 16's
+    // Turbopack: "Could not find the Next.js package") could not build
+    // through the symlink a worktree used to get; every run on a Next app
+    // worked round it, and the review pass's preview failed on it.
+    fs.mkdirSync(path.join(dir, "node_modules", "left-pad", "lib"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "node_modules", ".bin"));
+    fs.writeFileSync(path.join(dir, "node_modules", "left-pad", "package.json"), '{"name":"left-pad"}\n');
+    fs.writeFileSync(path.join(dir, "node_modules", "left-pad", "lib", "index.js"), "module.exports = 1;\n");
+    fs.symlinkSync("../left-pad/lib/index.js", path.join(dir, "node_modules", ".bin", "left-pad"));
     const made = await addRunWorktree({ projectDir: dir, runId: "run-nodemods", protectedRoot: PROTECTED });
     if (!made.ok) throw new Error(made.detail);
-    const link = path.join(made.path, "node_modules");
-    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
-    expect(fs.existsSync(path.join(link, "left-pad"))).toBe(true);
-    // A second call over an existing entry changes nothing.
+    const tree = path.join(made.path, "node_modules");
+    // A real folder inside the worktree, not a link out of it...
+    expect(fs.lstatSync(tree).isDirectory()).toBe(true);
+    expect(fs.lstatSync(path.join(tree, "left-pad", "lib")).isDirectory()).toBe(true);
+    // ...whose files are the project's own bytes on disk (one inode, two names)...
+    const mine = fs.statSync(path.join(tree, "left-pad", "lib", "index.js"));
+    const theirs = fs.statSync(path.join(dir, "node_modules", "left-pad", "lib", "index.js"));
+    expect(mine.ino).toBe(theirs.ino);
+    expect(mine.nlink).toBe(2);
+    // ...and whose own links are links still, with the target as written.
+    expect(fs.readlinkSync(path.join(tree, ".bin", "left-pad"))).toBe("../left-pad/lib/index.js");
+    expect(fs.readFileSync(path.join(tree, ".bin", "left-pad"), "utf8")).toBe("module.exports = 1;\n");
+    // An install in the worktree replaces a file (unlink, then write): the project's stays as it was.
+    fs.unlinkSync(path.join(tree, "left-pad", "package.json"));
+    fs.writeFileSync(path.join(tree, "left-pad", "package.json"), '{"name":"left-pad","version":"2.0.0"}\n');
+    expect(fs.readFileSync(path.join(dir, "node_modules", "left-pad", "package.json"), "utf8")).toBe('{"name":"left-pad"}\n');
+    // A second call over an existing entry changes nothing, for either way of sharing.
+    expect(await hardlinkSharedNodeModules(dir, made.path)).toBe(false);
     expect(linkSharedNodeModules(dir, made.path)).toBe(false);
+  });
+
+  it("falls back to the link when the tree cannot be made, and leaves no half of one", async () => {
+    // The project's node_modules is itself a link (a workspace's): not a tree to copy.
+    const real = fs.mkdtempSync(path.join(os.tmpdir(), "run-wt-nm-"));
+    try {
+      fs.mkdirSync(path.join(real, "left-pad"));
+      fs.symlinkSync(real, path.join(dir, "node_modules"), "dir");
+      const made = await addRunWorktree({ projectDir: dir, runId: "run-nmlinked", protectedRoot: PROTECTED });
+      if (!made.ok) throw new Error(made.detail);
+      expect(await hardlinkSharedNodeModules(dir, path.join(real, "nowhere"))).toBe(false);
+      expect(fs.existsSync(path.join(real, "nowhere"))).toBe(false);
+      const link = path.join(made.path, "node_modules");
+      expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(fs.existsSync(path.join(link, "left-pad"))).toBe(true);
+    } finally {
+      fs.rmSync(real, { recursive: true, force: true });
+    }
+    // No node_modules in the project at all: nothing is made, and nothing is said.
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), "run-wt-bare-"));
+    try {
+      expect(await hardlinkSharedNodeModules(bare, path.join(bare, "wt"))).toBe(false);
+      expect(fs.existsSync(path.join(bare, "wt"))).toBe(false);
+    } finally {
+      fs.rmSync(bare, { recursive: true, force: true });
+    }
   });
 
   it("keeps the old in-place behaviour for a folder that is not a repository, is not its root, or is ClawBox's own checkout", async () => {
@@ -249,14 +299,16 @@ describe("a run's worktree", () => {
    * the branch, and a commit that failed after `git add -A` leaves the work
    * staged in the tree with the branch where it was.
    */
-  it("says whether the tree holds work its branch does not, never counting the linked node_modules", async () => {
+  it("says whether the tree holds work its branch does not, never counting the shared node_modules", async () => {
     // `node_modules/` (trailing slash) matches directories only; the box also
-    // excludes `/node_modules`, so the worktree's LINK is neither untracked
-    // nor swept into the branch by a settle's `git add -A`.
-    fs.mkdirSync(path.join(dir, "node_modules"));
+    // excludes `/node_modules`, so the worktree's tree of hard links — or the
+    // LINK it falls back to — is neither untracked nor swept into the branch
+    // by a settle's `git add -A`.
+    fs.mkdirSync(path.join(dir, "node_modules", "left-pad"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "node_modules", "left-pad", "index.js"), "module.exports = 1;\n");
     const made = await addRunWorktree({ projectDir: dir, runId: "run-unsaved0", protectedRoot: PROTECTED });
     if (!made.ok) throw new Error(made.detail);
-    expect(fs.lstatSync(path.join(made.path, "node_modules")).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(path.join(made.path, "node_modules", "left-pad", "index.js"))).toBe(true);
     expect(git(made.path, "status", "--porcelain")).not.toContain("node_modules");
     git(made.path, "add", "-A");
     expect(git(made.path, "diff", "--cached", "--name-only")).not.toContain("node_modules");
@@ -294,6 +346,116 @@ describe("a run's worktree", () => {
  * is that the reason comes back named — the card words a different next step
  * for each — and that nothing of the owner's is touched on the way out.
  */
+describe("bringing a merged pull request home", () => {
+  let origin: string;
+  let elsewhere: string;
+
+  /** `dir` gets a GitHub of its own (a bare repository), and a second clone stands in for the merge made there. */
+  beforeEach(() => {
+    origin = fs.mkdtempSync(path.join(os.tmpdir(), "run-wt-origin-"));
+    elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "run-wt-elsewhere-"));
+    git(origin, "init", "-q", "--bare", "-b", "master");
+    git(dir, "remote", "add", "origin", origin);
+    git(dir, "push", "-q", "-u", "origin", "master");
+    git(elsewhere, "clone", "-q", origin, ".");
+    git(elsewhere, "config", "user.email", "t@x");
+    git(elsewhere, "config", "user.name", "t");
+  });
+  afterEach(() => {
+    fs.rmSync(origin, { recursive: true, force: true });
+    fs.rmSync(elsewhere, { recursive: true, force: true });
+  });
+  /** What a merged pull request leaves on GitHub: a commit on the base the project folder does not have. */
+  const mergeOnGitHub = (file = "feature.txt"): string => {
+    fs.writeFileSync(path.join(elsewhere, file), "merged work\n");
+    git(elsewhere, "add", "-A");
+    git(elsewhere, "commit", "-q", "-m", "Merge pull request #1");
+    git(elsewhere, "push", "-q", "origin", "master");
+    return git(elsewhere, "rev-parse", "HEAD");
+  };
+
+  it("fast-forwards a clean folder on the base to what GitHub has, and says nothing moved the second time", async () => {
+    // run-deyse3g9 (2026-11-10): merged on GitHub, and the project folder — and
+    // the app served from it — stayed on the base from before the run.
+    const merged = mergeOnGitHub();
+    expect(fs.existsSync(path.join(dir, "feature.txt"))).toBe(false);
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: true, moved: true, commit: merged, checkedOut: true });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(merged);
+    expect(fs.readFileSync(path.join(dir, "feature.txt"), "utf8")).toBe("merged work\n");
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: true, moved: false, commit: merged, checkedOut: true });
+  });
+
+  it("moves nothing when the merge would write over uncommitted work, and names why", async () => {
+    // GitHub's merge changes index.html; so has the owner, without committing.
+    fs.writeFileSync(path.join(elsewhere, "index.html"), "<h1>Merged</h1>\n");
+    mergeOnGitHub();
+    const before = git(dir, "rev-parse", "HEAD");
+    fs.writeFileSync(path.join(dir, "index.html"), "<h1>Mine, not saved yet</h1>\n");
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: false, reason: "dirty", detail: "uncommitted changes there are in files the merge also changes" });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(before);
+    expect(fs.readFileSync(path.join(dir, "index.html"), "utf8")).toBe("<h1>Mine, not saved yet</h1>\n");
+    expect(fs.existsSync(path.join(dir, "feature.txt"))).toBe(false);
+  });
+
+  it("is not stopped by a changed file the merge does not touch — the box's own notes in a project that tracks them", async () => {
+    // Five of the owner's projects track .clawbox/run-notes.md, and the box
+    // writes a run's lessons there: Timer's folder was "dirty" by that one
+    // file when its pull request merged (2026-11-10). The change stays.
+    fs.mkdirSync(path.join(dir, ".clawbox"));
+    fs.writeFileSync(path.join(dir, ".clawbox", "run-notes.md"), "- an old lesson\n");
+    git(dir, "add", "-f", ".clawbox/run-notes.md");
+    git(dir, "commit", "-q", "-m", "notes, tracked");
+    git(dir, "push", "-q", "origin", "master");
+    git(elsewhere, "pull", "-q", "origin", "master");
+    const merged = mergeOnGitHub();
+    fs.appendFileSync(path.join(dir, ".clawbox", "run-notes.md"), "- a lesson the box just wrote\n");
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: true, moved: true, commit: merged, checkedOut: true });
+    expect(fs.readFileSync(path.join(dir, "feature.txt"), "utf8")).toBe("merged work\n");
+    expect(fs.readFileSync(path.join(dir, ".clawbox", "run-notes.md"), "utf8")).toBe("- an old lesson\n- a lesson the box just wrote\n");
+  });
+
+  it("moves only the base's ref when the folder is on another branch, and never touches the tree", async () => {
+    const merged = mergeOnGitHub();
+    git(dir, "checkout", "-q", "-b", "clawbox/team-abcd1234");
+    fs.writeFileSync(path.join(dir, "notes.txt"), "the team's, uncommitted\n");
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: true, moved: true, commit: merged, checkedOut: false });
+    expect(git(dir, "rev-parse", "master")).toBe(merged);
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-abcd1234");
+    expect(fs.existsSync(path.join(dir, "feature.txt"))).toBe(false);
+    expect(fs.readFileSync(path.join(dir, "notes.txt"), "utf8")).toBe("the team's, uncommitted\n");
+  });
+
+  it("refuses a base that went its own way: never a merge, never a rebase", async () => {
+    mergeOnGitHub();
+    fs.writeFileSync(path.join(dir, "local.txt"), "committed here only\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "local work");
+    const before = git(dir, "rev-parse", "HEAD");
+    const home = await bringBaseHome({ projectDir: dir, base: "master" });
+    expect(home).toMatchObject({ ok: false, reason: "diverged" });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(before);
+    expect(git(dir, "log", "--oneline", "--merges")).toBe("");
+  });
+
+  it("says a fetch that failed, and moves nothing", async () => {
+    const before = git(dir, "rev-parse", "HEAD");
+    git(dir, "remote", "set-url", "origin", path.join(origin, "gone"));
+    const home = await bringBaseHome({ projectDir: dir, base: "master" });
+    expect(home).toMatchObject({ ok: false, reason: "fetch" });
+    expect(git(dir, "rev-parse", "HEAD")).toBe(before);
+    // And a project with no remote at all.
+    git(dir, "remote", "remove", "origin");
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toMatchObject({ ok: false, reason: "fetch" });
+  });
+
+  it("takes the box's own untracked favicon out of the way of one the merge brings", async () => {
+    const merged = mergeOnGitHub("favicon.ico");
+    fs.writeFileSync(path.join(dir, "favicon.ico"), "drawn by the box\n");
+    expect(await bringBaseHome({ projectDir: dir, base: "master" })).toEqual({ ok: true, moved: true, commit: merged, checkedOut: true });
+    expect(fs.readFileSync(path.join(dir, "favicon.ico"), "utf8")).toBe("merged work\n");
+  });
+});
+
 describe("merging a run's branch home", () => {
   /** A run's worktree with one commit on its branch. */
   async function withWork(runId: string) {
@@ -421,6 +583,59 @@ describe("merging a run's branch home", () => {
     if (out.ok) return;
     expect(out.detail).toContain("release");
     expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("release");
+  });
+
+  it("never moves the checkout of a team that is STILL working: its workers merge into whatever the checkout is on", async () => {
+    // A single run can settle while a team's worker is out in its own
+    // worktree. Put back on the base, the checkout would take that worker's
+    // merge on the base — past the team's review and its pull request.
+    git(dir, "checkout", "-q", "-b", "clawbox/team-live0001");
+    const made = await withWork("run-teamlive01");
+    const asked: string[] = [];
+    const out = await mergeRunBranch({ projectDir: dir, branch: made.branch, base: made.base, message: "Coding agent: test", teamLive: async (branch) => { asked.push(branch); return true; } });
+    expect(asked).toEqual(["clawbox/team-live0001"]);
+    expect(out).toMatchObject({ ok: false, reason: "not_on_base" });
+    if (out.ok) return;
+    expect(out.detail).toBe("the project is on clawbox/team-live0001, the branch of a coding team that is still working");
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-live0001");
+    // The same folder once that team has settled: put back, as for any finished team's.
+    const later = await mergeRunBranch({ projectDir: dir, branch: made.branch, base: made.base, message: "Coding agent: test", teamLive: async () => false });
+    expect(later).toMatchObject({ ok: true, merged: true, returnedFrom: "clawbox/team-live0001" });
+  });
+
+  it("puts a CLEAN checkout a coding team left on its branch back on the base, and lands the run's work there", async () => {
+    // A team leaves the checkout on its branch; a run started there forks from
+    // the base (forkBase), so its merge home was refused before it began.
+    git(dir, "checkout", "-q", "-b", "clawbox/team-abcd1234");
+    fs.writeFileSync(path.join(dir, "team.txt"), "the team's unmerged work\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "the team's work");
+    const made = await withWork("run-teamhome01");
+    expect(made.base).not.toBe("clawbox/team-abcd1234");
+    const out = await merge(made.branch, made.base);
+    expect(out).toMatchObject({ ok: true, merged: true, returnedFrom: "clawbox/team-abcd1234" });
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe(made.base);
+    // The team's branch keeps everything on it; the base holds the run's work and not the team's.
+    expect(git(dir, "log", "-1", "--format=%s", "clawbox/team-abcd1234")).toBe("the team's work");
+    expect(fs.existsSync(path.join(dir, "team.txt"))).toBe(false);
+    expect(git(dir, "status", "--porcelain")).toBe("");
+  });
+
+  it("leaves a team's branch checked out when the folder holds uncommitted work, and when the run has nothing to land", async () => {
+    git(dir, "checkout", "-q", "-b", "clawbox/team-abcd1234");
+    const empty = await addRunWorktree({ projectDir: dir, runId: "run-teamhome02", protectedRoot: PROTECTED });
+    if (!empty.ok) throw new Error(empty.detail);
+    expect(await merge(empty.branch, empty.base)).toMatchObject({ ok: false, reason: "not_on_base" });
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-abcd1234");
+
+    const made = await withWork("run-teamhome03");
+    fs.writeFileSync(path.join(dir, "index.html"), "<h1>the owner's unsaved line</h1>\n");
+    const out = await merge(made.branch, made.base);
+    expect(out).toMatchObject({ ok: false, reason: "not_on_base" });
+    if (out.ok) return;
+    expect(out.detail).toContain("clawbox/team-abcd1234");
+    expect(git(dir, "rev-parse", "--abbrev-ref", "HEAD")).toBe("clawbox/team-abcd1234");
+    expect(fs.readFileSync(path.join(dir, "index.html"), "utf8")).toBe("<h1>the owner's unsaved line</h1>\n");
   });
 
   it("refuses `conflict` and aborts rather than guessing, leaving the project on its own commit", async () => {

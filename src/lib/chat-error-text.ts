@@ -18,7 +18,7 @@
 // `sanitizeErrorMessage`, and otherwise the customer gets our own sentence.
 // What is different about a chat turn is that the customer can *do* something
 // about it — send it again — so the fallback says that rather than apologising.
-import { redactCredentialShapes } from "@/lib/incident-sanitize";
+import { redactCredentialShapes, redactQuotedCredentialValues } from "@/lib/incident-sanitize";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import {
   formatFreesUpAt,
@@ -286,7 +286,15 @@ function providerMessageFromDetail(detail: string | undefined): string | undefin
   if (!plain) return undefined;
   const safe = sanitizeErrorMessage(plain);
   if (!safe) return undefined;
-  return safe.length > PROVIDER_MESSAGE_MAX ? `${safe.slice(0, PROVIDER_MESSAGE_MAX - 1).trimEnd()}…` : safe;
+  const cut = safe.length > PROVIDER_MESSAGE_MAX;
+  const kept = cut ? safe.slice(0, PROVIDER_MESSAGE_MAX - 1).trimEnd() : safe;
+  // A quoted value under a credential name comes out last, after the check and
+  // the cut above, so they work on what they always did; with the empty
+  // replacement nothing it does can lengthen the sentence. The cut's "…" goes
+  // on after it, so a value read to the end of the sentence never takes it.
+  const masked = redactQuotedCredentialValues(kept, "").replace(/\s+/g, " ").trim();
+  if (!masked) return undefined;
+  return cut ? `${masked}…` : masked;
 }
 
 /** The human sentence inside a provider's error envelope, whichever shape it takes. */
@@ -407,6 +415,26 @@ export function describeFallbackReply(context: ChatRunFailureContext): string | 
 const GENERIC = "That message did not go through. Send it again — the details stayed in this box's log.";
 
 /**
+ * The refusal of a turn past a user's chat limit, as scripts/user-limits.js
+ * `chatLimitSentence` words it on both runtimes (the relay's RATE_LIMITED
+ * frame, the Hermes route's 429). Read back by its numbers and said again in
+ * the same words — never the raw text passed through — or null for any other
+ * failure. A unit test holds the two wordings together.
+ */
+const CHAT_LIMIT_RE = /^You have reached your chat limit on this ClawBox: (\d{1,7}) messages? an? (minute|hour)\. Try again in (\d{1,7}) (seconds?|minutes)\.$/;
+
+export function userChatLimitSentence(raw: unknown): string | null {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  const m = CHAT_LIMIT_RE.exec(text);
+  if (!m) return null;
+  const limit = Number(m[1]);
+  const window = m[2] === "minute" ? "a minute" : "an hour";
+  const n = Number(m[3]);
+  const unit = m[4].startsWith("minute") ? "minutes" : n === 1 ? "second" : "seconds";
+  return `You have reached your chat limit on this ClawBox: ${limit} ${limit === 1 ? "message" : "messages"} ${window}. Try again in ${n} ${unit}.`;
+}
+
+/**
  * A rate limit is transient and external: the box is fine, the provider is just
  * throttling it. So the sentence names the cause, says the box is not broken,
  * and gives the two real remedies — wait, or switch to another provider in
@@ -421,6 +449,30 @@ const RATE_LIMIT = "That message did not go through — the AI provider is rate-
  * one thing they can act on is two taps away.
  */
 const CREDENTIAL_REJECTED = "That message did not go through — the AI provider is not accepting this box's sign-in any more. Reconnect it in Settings, under Providers, and send it again.";
+
+/**
+ * A turn refused because nothing could look at the picture on it (TASK-2261).
+ *
+ * ClawBox AI's model can lose its vision upstream between two checks of it
+ * (src/lib/clawbox-ai-vision.ts), and an owner's own model may never have had
+ * one. Either way the provider's answer is an operator line — DeepSeek's
+ * "unknown variant `image_url`", OpenClaw's "Model does not support images" or
+ * "No image model configured" — and none of them tells the customer what to do.
+ */
+const PICTURE_REFUSED = "That message did not go through — the model this chat runs on cannot look at pictures right now. Send it again without the picture, or try again later.";
+
+/** The provider or the gateway refused the turn because of the picture on it. */
+export function isPictureRefused(raw: string): boolean {
+  // OpenClaw's history renders the provider's words markdown-escaped (a
+  // backslash before every backtick, underscore and bracket); read them as
+  // the provider wrote them.
+  const evidence = raw.replace(/\\(.)/g, "$1");
+  return /unknown variant [`'"]?image_url/i.test(evidence)
+    || /model does not support images?\b(?! ?generat)/i.test(evidence)
+    || /no image model configured/i.test(evidence)
+    || /\b(images?|image input|vision)\b(?! ?generat)[^.\n]{0,40}\bnot supported\b/i.test(evidence)
+    || /\bdoes not support (images?|image input|vision)\b(?! ?generat)/i.test(evidence);
+}
 
 /**
  * There is no sign-in to refuse (see `missingCredential`). Its own sentence,
@@ -458,6 +510,17 @@ export function isUnacknowledgedTurn(raw: unknown): boolean {
   const text = raw instanceof Error ? raw.message : typeof raw === "string" ? raw : "";
   return /^request timeout$/i.test(text.trim());
 }
+
+/**
+ * OpenClaw 2026.11.3 fails a turn whose skills were being published while a
+ * settings change reloaded the gateway ("Skills discovery was retired before
+ * publication", its dist/refresh-*.mjs): nothing is wrong, the next send works.
+ */
+function isSkillsReloadRace(raw: string): boolean {
+  return /skills discovery was retired before publication/i.test(raw);
+}
+
+const SKILLS_RELOAD = "That message did not go through — the assistant was reloading its settings at that moment. Send it again.";
 
 /** The conversation changed under the turn; retry may work, New chat always does. */
 const TAKEOVER = "That message did not go through. That can happen when this chat is open in another tab or on Telegram — or when the session gets stuck. Send it again, and if it keeps failing, start a New chat — that clears it.";
@@ -708,11 +771,18 @@ export function isAccountQuotaFailure(raw: unknown, context?: ChatRunFailureCont
  */
 export function describeChatFailure(raw: unknown, context?: ChatRunFailureContext, words?: ChatFailureWords): string {
   const text = typeof raw === "string" ? raw.trim() : "";
+  // The box's own refusal of a turn past this user's chat limit (TASK-2446):
+  // ahead of everything, because "send it again" is the wrong advice for it.
+  const limit = userChatLimitSentence(text);
+  if (limit) return limit;
   // The predicates read the provider's detail too: a 429 or a 401 lives in
   // the detail line when the gateway's own sentence is the generic one.
   const evidence = [text, context?.detail ?? "", context?.reason ?? ""].join("\n").trim();
   if (!evidence) return GENERIC;
   if (isSessionTakeover(text)) return TAKEOVER;
+  // The turn's own error only: a fallback attempt's detail must not answer
+  // for the requested model's (a missing credential is not cured by a resend).
+  if (isSkillsReloadRace(requestedAttempt(text) ?? text)) return SKILLS_RELOAD;
   // Ahead of everything that reads the reason or a status: the gateway tags a
   // missing sign-in `reason=auth`, which the refused-credential rule below
   // would answer with a sentence that is false here, and its line quotes a
@@ -758,6 +828,9 @@ export function describeChatFailure(raw: unknown, context?: ChatRunFailureContex
   if (isCredentialRejected(evidence) || context?.reason === "auth" || context?.reason === "auth_permanent") {
     return CREDENTIAL_REJECTED;
   }
+  // Before the sanitizer: "Model does not support images" carries no path or
+  // handle, so it would otherwise be relayed verbatim.
+  if (isPictureRefused(evidence)) return PICTURE_REFUSED;
   // The gateway's reason and the provider's words beat the gateway's sentence:
   // for a reason it has no copy for, that sentence is the generic one, and
   // for one it has, ours says the same thing in the customer's terms.

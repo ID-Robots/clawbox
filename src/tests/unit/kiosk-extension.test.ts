@@ -37,6 +37,10 @@ import nodePath from "node:path";
  *    against a recorded hash of each release's files: Chrome caches unpacked
  *    extension code across restarts and re-reads it only when the version
  *    changes;
+ *  - Ctrl+Shift+1 … 9 (workspaces.js, on every page and the start page)
+ *    switches between the linked ClawBoxes through the worker, with the
+ *    desktop's own names for the mark it leaves on the page, the event
+ *    Settings fires and the route the list comes from (src/lib/box-switcher.ts);
  *  - what keeps the extension cheap on a busy page: offset.js judges a box
  *    again only for a change that can move one, the bar redraws its strip
  *    only when the tabs changed and not at all while hidden, and the worker
@@ -61,7 +65,7 @@ function stringConst(source: string, name: string): string {
   return m[1];
 }
 
-const JS_FILES = ["background.js", "bar.js", "offset.js", "content.js", "desktop.js", "newtab.js"];
+const JS_FILES = ["background.js", "bar.js", "offset.js", "content.js", "desktop.js", "newtab.js", "workspaces.js"];
 const BAR_H = 40;
 
 const versionNumber = (v: string) => {
@@ -82,6 +86,32 @@ const RELEASES: readonly { version: string; files: string }[] = [
   { version: "1.5.2", files: "3e6c440c9f6bc37e4abc2d7d674657cd6c84aa2eafebec7cdb1ee0064773995c" },
   // The desktop bar's flat fill instead of a backdrop blur.
   { version: "1.5.3", files: "c05f89216307470adbaf94161ceebf6f4d267c3a55182c0a8a1b23fa0ad7b257" },
+  // Ctrl+Shift+1 … 9: the linked-box switcher (workspaces.js, `storage`).
+  { version: "1.6.0", files: "87e7fa523b9069c7de0a1c1f7faf21701516741aaf7de1db1d3b159ea4332b33" },
+  // One switch at a time, in the order the keys were pressed.
+  { version: "1.6.1", files: "f47af3210c8cfdb790619ad9d8b8c3f96d0f52593c3682252505fd6df2d3a298" },
+  // The owner's list in session storage only, forgotten on the kiosk's /login and on a refused read.
+  { version: "1.6.2", files: "8e827c04002d9040e992d2ab5bf541f7faee19dcbad153ba45d144760cf3d532" },
+  // The kept list is used no longer than the session that read it.
+  { version: "1.6.3", files: "94d918220f0dc388308170e4a1d903cd6461fb394c17f0b7c9104502940f12f2" },
+  // A list asked of the desktop obeys the same session end before it is used.
+  { version: "1.6.4", files: "1e64d63326e85115078fccc5bf4e3b605f82e8a3690a425efb38db9f81563589" },
+  // A list read begun before the list was forgotten (or replaced) is never used, a refusal always is; reads have deadlines; newest list wins.
+  { version: "1.6.5", files: "3a3e1b04680c64d3ad5652bfce7e0eaa4490350a13b463a2a5dbb0670c9ccc61" },
+  // A switch checks the session end too, before it opens a box and before it sends the names.
+  { version: "1.6.6", files: "fa072b2ee83f8f6d8debc940bf8a5604beb6e06aa288646444d100c0e5983725" },
+  // The indicator is never drawn into a page still being parsed (it broke a React page's hydration).
+  { version: "1.6.7", files: "d01d07ff6c8d48b466a3ccbdb1c8d65d2570f4f8f1531152afffe69017bf5156" },
+  // A kept indicator (the owner's box names) is dropped with the list and never handed out past its session.
+  { version: "1.6.8", files: "e57e1294e0b35c6a4b920c1fcb72a2c94752c7bf8c9f54c91c6d69592429b526" },
+  // …and one whose send was still out when the list was forgotten is not kept at all.
+  { version: "1.6.9", files: "877dfd45df8b313ba0db1f93754d1c7e6ed679144859fd8c9c1502222d8b9542" },
+  // The switcher is the experiment's: keys left to the page and the owner's list forgotten while pref ui_linked_boxes is off.
+  { version: "1.7.0", files: "8beb31bd59ef5a658a6ef2b001abe70a38e06c38d85eeddee2ba38b50a5c8ab0" },
+  // A switch answer that comes back after a newer one was kept is ignored: it no longer has the list revoked.
+  { version: "1.7.1", files: "f74920a9b3c8761a3e215e4a6741905dbb6c732c2ee77f4066beb82de1da27ca" },
+  // A linked box's page is laid out by this kiosk's monitors (second experiment): the worker hands it the geometry, the kiosk's desktop reads it.
+  { version: "1.8.0", files: "03b81586d20de9309f725bed41173c8d5b2fb1bfac2ace25ab877e437cc969dd" },
 ];
 
 /**
@@ -117,16 +147,17 @@ describe("kiosk extension", () => {
     }
   });
 
-  it("asks for tabs (and DevTools' two), http(s) only; web pages and the desktop each get their own script", () => {
+  it("asks for tabs (and DevTools' two, and storage), http(s) only; web pages and the desktop each get their own script", () => {
     const m = JSON.parse(read("manifest.json"));
     expect(m.manifest_version).toBe(3);
     // `debugger` for getTargets() alone and the loopback host for the kiosk's
-    // CDP port: what DevTools on a tab needs, and nothing wider.
-    expect(m.permissions).toEqual(["tabs", "debugger"]);
+    // CDP port: what DevTools on a tab needs, and nothing wider. `storage`
+    // for the linked-box switcher's copy of the list and its tab per box.
+    expect(m.permissions).toEqual(["tabs", "debugger", "storage"]);
     expect(m.host_permissions).toEqual(["http://127.0.0.1/*"]);
     expect(m.background).toEqual({ service_worker: "background.js" });
-    expect(m.content_scripts).toHaveLength(2);
-    const [web, desk] = m.content_scripts;
+    expect(m.content_scripts).toHaveLength(3);
+    const [web, desk, keys] = m.content_scripts;
     expect(web.matches).toEqual(["http://*/*", "https://*/*"]);
     expect(web.exclude_matches).toEqual(expect.arrayContaining(["http://localhost:3005/*", "http://127.0.0.1:3005/*"]));
     expect(web.all_frames).toBe(false);
@@ -142,6 +173,15 @@ describe("kiosk extension", () => {
     expect(desk.css).toEqual(["content.css"]);
     expect(read("content.css")).toMatch(/^html\.clawbox-kiosk-bar-shown \{/m);
     expect(desk.all_frames).toBe(false);
+    // The linked-box switcher's keys: every http(s) page, the desktop's hosts
+    // included, at document_start — its mark is on the page before the
+    // desktop's own handler could act, and its listener is the first.
+    expect(keys.matches).toEqual(["http://*/*", "https://*/*"]);
+    expect(keys.exclude_matches).toBeUndefined();
+    expect(keys.js).toEqual(["workspaces.js"]);
+    expect(keys.run_at).toBe("document_start");
+    expect(keys.all_frames).toBe(false);
+    expect(keys.css).toBeUndefined();
   });
 
   it("desktop.js: the desktop bar on the desktop, nothing on the shell, the web bar everywhere else", () => {
@@ -477,8 +517,9 @@ describe("kiosk extension", () => {
 
   it("the start page loads the bar, searches through the bar's rule, and links the four sites", () => {
     const html = read("newtab.html");
-    // Scripts in load order: the bar's definition, then the page's own.
-    expect(html).toMatch(/<script src="bar\.js"><\/script>\s*<script src="newtab\.js"><\/script>/);
+    // Scripts in load order: the bar's definition, then the page's own, then
+    // the linked-box switcher's keys (they work on the start page too).
+    expect(html).toMatch(/<script src="bar\.js"><\/script>\s*<script src="newtab\.js"><\/script>\s*<script src="workspaces\.js"><\/script>/);
     for (const ref of [...html.matchAll(/(?:src|href)="([^":]+)"/g)].map((m) => m[1])) {
       expect(exists(ref), ref).toBe(true);
     }
@@ -569,5 +610,59 @@ describe("kiosk extension", () => {
     const idFor = (p: string) =>
       [...crypto.createHash("sha256").update(p).digest("hex").slice(0, 32)].map((c) => "abcdefghijklmnop"[parseInt(c, 16)]).join("");
     expect(idFor("/home/clawbox/clawbox/kiosk/extension")).toBe("nehkanofolimmnmadochopjangeomkhk");
+  });
+
+  it("switches linked ClawBoxes on Ctrl+Shift+1 … 9 with the desktop's own names for the mark, the event and the route", () => {
+    const ws = read("workspaces.js");
+    const bg = read("background.js");
+    const lib = fs.readFileSync(nodePath.resolve(__dirname, "../../lib/box-switcher.ts"), "utf-8");
+    const exported = (name: string) => {
+      const m = new RegExp(`export const ${name} = "([^"]*)";`).exec(lib);
+      if (!m) throw new Error(`${name} not found in box-switcher.ts`);
+      return m[1];
+    };
+    // The mark the desktop's handler stands down on, the event Settings fires
+    // and the route the list comes from: one name each, on both sides.
+    expect(stringConst(ws, "SWITCHER_ATTR")).toBe(exported("KIOSK_SWITCHER_ATTR"));
+    expect(stringConst(ws, "LINKED_BOXES_EVENT")).toBe(exported("LINKED_BOXES_CHANGED_EVENT"));
+    expect(stringConst(ws, "LINKED_BOXES_PATH")).toBe(exported("LINKED_BOXES_URL"));
+    // …and the experiment's switch: the event Settings fires when it is saved
+    // and the preference it is read from.
+    expect(stringConst(ws, "FLAG_EVENT")).toBe(exported("LINKED_BOXES_FLAG_EVENT"));
+    // …read together with the second experiment's (TASK-2771).
+    expect(stringConst(ws, "FLAG_PATH")).toBe(`/setup-api/preferences?keys=${exported("LINKED_BOXES_FLAG_PREF")},${exported("VIEWER_SCREENS_FLAG_PREF")}`);
+    expect(stringConst(ws, "SCREENS_FLAG_EVENT")).toBe(exported("VIEWER_SCREENS_FLAG_EVENT"));
+    // The mark a linked box's page reads its host kiosk's monitors from, and where the kiosk's own box says them.
+    expect(stringConst(ws, "VIEWER_ATTR")).toBe(exported("VIEWER_SCREENS_ATTR"));
+    expect(stringConst(ws, "SCREENS_PATH")).toBe("/setup-api/monitors");
+    // The second switch is kept under one name, in the script that reads it and the worker that checks it.
+    expect(stringConst(bg, "SCREENS_FLAG_KEY")).toBe(stringConst(ws, "SCREENS_FLAG_KEY"));
+    // The kiosk's own desktop, by the worker's list of its origins.
+    const origins = (src: string) => [...(/const DESKTOP_ORIGINS = \[([\s\S]*?)\];/.exec(src)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((x) => x[1]);
+    expect(origins(ws)).toEqual(origins(bg));
+    expect(origins(ws).length).toBeGreaterThan(0);
+    // By code (any layout), only a key the owner pressed, only while the
+    // experiment is switched on, ahead of the page.
+    expect(ws).toContain('const m = /^Digit([1-9])$/.exec(e.code || "");');
+    expect(ws).toContain("if (slot === null || !e.isTrusted || !on) return;");
+    expect(ws).toMatch(/window\.addEventListener\("keydown", \(e\) => \{[\s\S]*?\}, true\);/);
+    // The worker activates a tab per box, never navigates one, and takes the
+    // list only from the kiosk's own desktop.
+    expect(bg).toContain('case "switchBox":');
+    expect(bg).toContain("if (tab) await chrome.tabs.update(tab.id, { active: true });");
+    expect(bg).toContain("else tab = await chrome.tabs.create({ url: box.url, active: true });");
+    expect(bg).toMatch(/case "boxes":\s*\/\/[^\n]*\n\s*if \(!sender\.tab \|\| !isDesktop\(sender\.tab\.url\)/);
+    // A linked box's page gets the kiosk's monitors from the worker alone, which
+    // answers only a page on the origin of one of the owner's boxes, by the address
+    // Chrome gives for it, and asks the kiosk's own desktop to read them.
+    expect(bg).toContain('case "viewerScreens":\n        return viewerScreens(sender);');
+    expect(bg).toContain("const url = sender.url || (sender.tab && sender.tab.url);");
+    expect(bg).toContain("return !!list && cleanBoxes(list.boxes).some((b) => webOrigin(b.url) === origin);");
+    expect(bg).toContain('chrome.tabs.sendMessage(desk.id, { type: "readMonitors" })');
+    expect(ws).toContain('if (msg.type === "readMonitors" && isDesktop) {');
+    expect(ws).toContain("root.setAttribute(VIEWER_ATTR, value);");
+    // A name drawn as text, never markup.
+    expect(ws).toContain("text.textContent = indicatorText(ind);");
+    expect(ws).not.toMatch(/innerHTML/);
   });
 });

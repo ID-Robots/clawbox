@@ -130,6 +130,16 @@ const cli = vi.hoisted(() => ({
 }));
 cli.CONFIG_PATH = `${tmp}/openclaw/openclaw.json`;
 vi.mock("@/lib/openclaw-config", () => cli);
+// OpenClaw 2026.11.3: the sign-out's logout goes to the gateway's
+// models.authLogout while it runs (src/lib/openclaw-auth-ops.ts, tested on its
+// own); here it takes the offline arm, one `models auth logout` per profile.
+vi.mock("@/lib/openclaw-auth-ops", () => ({
+  providerOfProfileId: (id: string) => id.split(":")[0]?.trim().toLowerCase() ?? "",
+  logoutOpenclawAuthProfiles: async (_provider: string, ids: string[]) => {
+    for (const id of ids) await cli.spawnOpenclawCli(["models", "auth", "logout", id, "--yes"], { timeoutMs: 60_000 });
+    return ids;
+  },
+}));
 vi.mock("@/lib/openclaw-auth-store", () => ({
   readGatewayAuthProfile: vi.fn((id: string) => (box.storeUnreadable
     ? { kind: "unreadable" }
@@ -178,7 +188,13 @@ const credentials = vi.hoisted(() => ({
   resolveClawaiToken: vi.fn(),
   hasClawaiToken: vi.fn(async () => false),
 }));
-vi.mock("@/lib/harness/credentials", () => credentials);
+// Signing out reads the credential the way "is this box linked" does — lock or
+// not (TASK-2501) — so the entitlement readers answer what these two do.
+vi.mock("@/lib/harness/credentials", () => ({
+  ...credentials,
+  resolveClawaiEntitlementToken: (...a: unknown[]) => (credentials.resolveClawaiToken as (...b: unknown[]) => unknown)(...a),
+  hasClawaiEntitlementToken: () => credentials.hasClawaiToken(),
+}));
 vi.mock("@/lib/harness", () => ({
   getActiveHarness: vi.fn(async () => box.harness),
   getActiveHarnessSource: vi.fn(async () => ({ active: box.harness, defaulted: false, edition: box.edition, locked: box.edition !== "dual" })),
@@ -269,7 +285,7 @@ function hermesBox(): void {
   box.gatewayStore = {};
   box.hermesConfig = {
     "model.provider": "clawai",
-    "model.default": "deepseek-v4-pro",
+    "model.default": "deepseek-v4-flash",
     "providers.clawai.base_url": "https://proxy",
     "providers.clawai.api_key": TOKEN,
     // ClawBox AI's cloud voice carries the token too.
@@ -308,7 +324,7 @@ beforeEach(() => {
     clawai_token: TOKEN,
     clawai_tier: "flash",
     clawai_plan_tier: "flash",
-    ai_model_explicit_picks: { clawai: "deepseek-v4-pro", openai: "gpt-5.6" },
+    ai_model_explicit_picks: { clawai: "deepseek-v4-flash", openai: "gpt-5.6" },
     ai_model_provider: "clawai",
   };
   box.session = null;
@@ -598,7 +614,7 @@ describe("signOutOfProvider — every other provider on OpenClaw", () => {
     box.gatewayStore = everyProviderStore();
     box.store = {
       clawai_token: TOKEN,
-      ai_model_explicit_picks: { clawai: "deepseek-v4-pro", openai: "gpt-5.6", codex: "gpt-5.6-codex", google: "gemini-3-pro", openrouter: "auto", anthropic: "claude-sonnet-5" },
+      ai_model_explicit_picks: { clawai: "deepseek-v4-flash", openai: "gpt-5.6", codex: "gpt-5.6-codex", google: "gemini-3-pro", openrouter: "auto", anthropic: "claude-sonnet-5" },
       ai_model_unavailable: { openai: { "gpt-old": { reason: "not_found", at: Date.now() } }, google: { "gemini-old": { reason: "not_found", at: Date.now() } } },
       provider_verified_at: { openrouter: new Date().toISOString(), clawai: new Date().toISOString() },
       anthropic_accounts: [{ id: "1a2b3c4d", kind: "oauth" }],
@@ -617,7 +633,7 @@ describe("signOutOfProvider — every other provider on OpenClaw", () => {
     expect(profilesNow()).not.toContain("openai:default");
     expect(profilesNow()).not.toContain("openai:chatgpt");
     expect(providersNow().openai).toEqual({ apiKey: "claw_legacy_image_slot_0123" });
-    expect(box.store.ai_model_explicit_picks).toEqual({ clawai: "deepseek-v4-pro", google: "gemini-3-pro", openrouter: "auto", anthropic: "claude-sonnet-5" });
+    expect(box.store.ai_model_explicit_picks).toEqual({ clawai: "deepseek-v4-flash", google: "gemini-3-pro", openrouter: "auto", anthropic: "claude-sonnet-5" });
     expect(box.store.ai_model_unavailable).not.toHaveProperty("openai");
     expect(box.store.ai_model_unavailable).toHaveProperty("google");
     // ClawBox AI, its token and the owner's voice key: untouched.
@@ -817,7 +833,7 @@ describe("signOutOfProvider — Hermes", () => {
     openrouterDefault();
     // Hermes lists a provider defined in config.yaml as signed in while its
     // block has a base URL, key or no key: the block goes with the key.
-    box.hermesConfig["providers.clawai.models"] = "deepseek-v4-pro";
+    box.hermesConfig["providers.clawai.models"] = "deepseek-v4-flash";
     // The auxiliary slots the link pointed at it go back to Hermes' own; an
     // owner's slot on another provider stays.
     box.hermesConfig["auxiliary.vision.provider"] = "clawai";
@@ -900,7 +916,7 @@ describe("signOutOfProvider — Hermes", () => {
   });
 
   it("OpenRouter: its pool row through `hermes auth remove`, nothing of anyone else's", async () => {
-    box.store.ai_model_explicit_picks = { clawai: "deepseek-v4-pro", openrouter: "auto" };
+    box.store.ai_model_explicit_picks = { clawai: "deepseek-v4-flash", openrouter: "auto" };
     expect(await signOutOfProvider("openrouter")).toEqual({ ok: true, changed: true, gatewayRestarting: false });
     expect(removed()).toEqual(["auth remove openrouter 087208"]);
     const auth = readAuth();
@@ -909,7 +925,7 @@ describe("signOutOfProvider — Hermes", () => {
     expect(auth.providers).toHaveProperty("anthropic");
     expect(hermesYaml.patchHermesConfig).not.toHaveBeenCalled();
     expect(box.hermesEnv.CLAWBOX_AI_TOKEN).toBe(TOKEN);
-    expect(box.store.ai_model_explicit_picks).toEqual({ clawai: "deepseek-v4-pro" });
+    expect(box.store.ai_model_explicit_picks).toEqual({ clawai: "deepseek-v4-flash" });
     expect(box.store.clawai_token).toBe(TOKEN);
     expect(bounce.bounceHermesDashboardShared).toHaveBeenCalledTimes(1);
   });
@@ -1021,7 +1037,7 @@ describe("signOutOfProvider — a dual box", () => {
     box.config = signedInConfig();
     box.gatewayStore = { "deepseek:default": { provider: "deepseek", type: "api_key" } };
     expect(await signOutOfProvider("clawai")).toMatchObject({ ok: true, changed: true });
-    expect(box.hermesConfig).toEqual({ "model.provider": "openrouter", "model.default": "deepseek-v4-pro" });
+    expect(box.hermesConfig).toEqual({ "model.provider": "openrouter", "model.default": "deepseek-v4-flash" });
     expect(cli.spawnOpenclawCli).toHaveBeenCalledWith(["models", "auth", "logout", "deepseek:default", "--yes"], expect.anything());
     expect(box.config).toMatchObject({ models: { providers: { deepseek: { baseUrl: "https://proxy" } } } });
     expect((box.config.models as { providers: { deepseek: Record<string, unknown> } }).providers.deepseek).not.toHaveProperty("apiKey");

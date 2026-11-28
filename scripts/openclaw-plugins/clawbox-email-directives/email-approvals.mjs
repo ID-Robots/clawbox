@@ -90,7 +90,7 @@ export function looksLikeApproval(text) {
 const TIMEOUT_MS = 120_000;
 
 const CLAWBOX_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
-const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
+export const API_BASE = process.env.CLAWBOX_API_BASE || "http://127.0.0.1:80";
 const MIN_TOKEN_LEN = 16;
 
 /**
@@ -103,7 +103,7 @@ const MIN_TOKEN_LEN = 16;
  * pattern allows. `src/lib/mcp-token.ts` mints hex, so this is wide enough for
  * anything token-shaped and narrow enough to be a sanitizer.
  */
-const TOKEN_RE = /^([A-Za-z0-9._~+/=-]{16,512})$/;
+export const TOKEN_RE = /^([A-Za-z0-9._~+/=-]{16,512})$/;
 
 let cachedToken = null;
 
@@ -115,7 +115,7 @@ let cachedToken = null;
  * up. This is not what authorises the approval (the sender id is); it is what
  * gets the request past middleware at all.
  */
-function apiToken() {
+export function apiToken() {
   if (cachedToken) return cachedToken;
   // CHECKED BEFORE IT IS CACHED, never after. A token that fails the shape can
   // never be sent, so caching one would pin this process to a value it will
@@ -140,6 +140,14 @@ function apiToken() {
 }
 
 /**
+ * Drop the cached bearer so the next `apiToken()` reads the file again — the
+ * stale-token retry, shared with update-commands.mjs.
+ */
+export function forgetApiToken() {
+  cachedToken = null;
+}
+
+/**
  * The sender, from the fields the core promises for an inbound context.
  *
  * `ctx.senderId` is the first-class field the docs tell hooks to prefer; the
@@ -148,7 +156,7 @@ function apiToken() {
  * and inventing one here would be the one way to turn "we do not know who this
  * is" into an approval.
  */
-function senderOf(event, ctx) {
+export function senderOf(event, ctx) {
   for (const candidate of [ctx?.senderId, event?.senderId]) {
     if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
     if (typeof candidate === "number" && Number.isFinite(candidate)) return String(candidate);
@@ -156,7 +164,7 @@ function senderOf(event, ctx) {
   return "";
 }
 
-function contentOf(event) {
+export function contentOf(event) {
   for (const candidate of [event?.content, event?.body]) {
     if (typeof candidate === "string" && candidate) return candidate;
   }
@@ -208,7 +216,7 @@ async function ask(token, body) {
  * delivery this hook cannot place at all is not offered — an unknown surface is
  * not an argument for treating its ids as Telegram's.
  */
-function channelOf(event, ctx) {
+export function channelOf(event, ctx) {
   for (const candidate of [ctx?.channelId, event?.channel]) {
     if (typeof candidate === "string" && candidate.trim()) return candidate.trim().toLowerCase();
   }

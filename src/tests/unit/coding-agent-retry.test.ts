@@ -31,7 +31,7 @@ describe("what counts as transient", () => {
       "socket hang up",
       "TypeError: fetch failed",
       // Seen live: the proxy refused a model it had served minutes before.
-      '[claude-code:unrecognized_model] {"model":"deepseek-v4-pro[1m]","query_source":"sdk"}',
+      '[claude-code:unrecognized_model] {"model":"deepseek-v4-flash[1m]","query_source":"sdk"}',
     ]) {
       expect(isTransientFailure(err), err).toBe(true);
     }

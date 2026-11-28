@@ -25,7 +25,8 @@ describe("the kiosk work is inert on a Jetson", () => {
   it("the desktop asks for kiosk tabs only on the kiosk's own page", () => {
     const page = read("src/app/page.tsx");
     expect(page).toContain("const onKiosk = kioskBarInset > 0;");
-    expect(page).toContain("const kiosk = useKioskTabs(ownerApis && onKiosk);");
+    // `boxApis`: a signed-in person's box routes (never an organisation box's member of staff).
+    expect(page).toContain("const kiosk = useKioskTabs(boxApis && onKiosk);");
     // Every external open goes through openInKiosk, which is plain
     // window.open off the kiosk, decided from the page itself.
     const client = read("src/lib/kiosk-tabs-client.ts");

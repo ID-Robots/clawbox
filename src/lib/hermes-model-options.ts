@@ -33,8 +33,10 @@ import {
 } from "@/lib/hermes-dashboard-control";
 import { get, set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
+import { EXTERNAL_ENGINE_PROVIDER, EXTERNAL_ENGINE_STORE_KEY, externalEngineDisplayName, isExternalEngineRef } from "@/lib/external-engine-shared";
 import { createSerialLock } from "@/lib/serial-lock";
 import { CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-models";
+import { isRetiredClawboxAiModel } from "@/lib/clawbox-ai-retired-models";
 import { pickedClawboxAiModelIdAmong, readExplicitModelPicks } from "@/lib/explicit-model-pick";
 import {
   CLAWAI_PROVIDER,
@@ -58,9 +60,9 @@ export const MODEL_ID_RE = HERMES_MODEL_ID_RE;
 export const isSafeModelId = isSafeHermesModelId;
 
 /**
- * The ids we have *proven* route on this hardware — ClawBox AI's two tier
- * models (a vendor-prefixed slug gets HTTP 400 "Model not allowed" from the
- * proxy). Used twice:
+ * The ids we have *proven* route on this hardware — ClawBox AI's one model
+ * (a vendor-prefixed slug gets HTTP 400 "Model not allowed" from the proxy).
+ * Used twice:
  *   1. cold start — a factory device with no dashboard and no catalog on disk;
  *   2. to seed the ClawBox AI row (see normalizeRow), for a box whose Hermes
  *      config does not declare them yet.
@@ -453,6 +455,9 @@ async function configuredLocalModelId(): Promise<string> {
   try {
     const stored = await get("local_ai_model");
     if (typeof stored !== "string") return "";
+    // An external engine in the Local AI slot is not the on-device model, and
+    // its id must not seed `clawlocal` (TASK-2376) — see externalEngineSeed.
+    if (isExternalEngineRef(stored)) return "";
     const bare = stored.split("/").pop() || "";
     return isSafeModelId(bare) ? bare : "";
   } catch {
@@ -532,7 +537,32 @@ export async function isMoaConfigured(): Promise<boolean> {
   }
 }
 
-function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesProviderRow | null {
+/**
+ * The external engine (TASK-2376) as its `clawext` row should read: the model
+ * it was saved with and its name. Hermes lists what the endpoint's /models
+ * answers, which needs the engine up; the saved id is offered even when it is
+ * not, exactly like the on-device id below — it is the configured model, not
+ * a guess.
+ */
+interface ExternalEngineSeed { modelId: string; name: string }
+
+async function externalEngineSeed(): Promise<ExternalEngineSeed | null> {
+  try {
+    const raw = await get(EXTERNAL_ENGINE_STORE_KEY);
+    if (!raw || typeof raw !== "object") return null;
+    const modelId = (raw as { modelId?: unknown }).modelId;
+    if (typeof modelId !== "string" || !isSafeModelId(modelId)) return null;
+    return { modelId, name: externalEngineDisplayName(modelId) };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRow(
+  raw: DashboardProviderRow,
+  localModelId: string,
+  external: ExternalEngineSeed | null = null,
+): HermesProviderRow | null {
   const id = asString(raw.slug);
   if (!isPlausibleHermesProviderId(id)) return null;
 
@@ -552,6 +582,9 @@ function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesPr
       ? entry.trim()
       : asString((entry as { id?: unknown })?.id);
     if (!isSafeModelId(modelId) || seen.has(modelId)) continue;
+    // A retired ClawBox AI id (TASK-2261) is never offered, whatever list
+    // Hermes still holds — a box not yet migrated, a stale catalogue cache.
+    if (id === CLAWAI_PROVIDER && isRetiredClawboxAiModel(modelId, { bare: true })) continue;
     seen.add(modelId);
     const pricing = normalizePricing(pricingMap[modelId]);
     models.push({
@@ -577,8 +610,8 @@ function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesPr
   //
   // ONLY when the row is EMPTY, which is what "fallback" has to mean in code:
   // if Hermes ever reports a non-empty clawai list that differs from ours (a
-  // renamed tier id, or the proxy starting to speak the OpenAI envelope with a
-  // different set), topping it up would show the live ids PLUS two stale ones —
+  // renamed id, or the proxy starting to speak the OpenAI envelope with a
+  // different set), topping it up would show the live ids PLUS a stale one —
   // the provider/model mismatch this module exists to prevent.
   if (id === CLAWAI_PROVIDER && models.length === 0) {
     for (const known of COLD_START_MODELS[CLAWAI_PROVIDER] ?? []) {
@@ -598,18 +631,23 @@ function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesPr
     seen.add(localModelId);
     models.push({ id: localModelId, description: "on-device" });
   }
+  const isExternal = id === EXTERNAL_ENGINE_PROVIDER && external !== null;
+  if (isExternal && !seen.has(external.modelId)) {
+    seen.add(external.modelId);
+    models.unshift({ id: external.modelId, description: "external engine" });
+  }
 
   const warning = asString(raw.warning);
   return {
     id,
-    name: asString(raw.name) || id,
+    name: isExternal ? external.name : (asString(raw.name) || id),
     authenticated: typeof raw.authenticated === "boolean" ? raw.authenticated : null,
     verified: typeof raw.verified === "boolean" ? raw.verified : null,
     isUserDefined: typeof raw.is_user_defined === "boolean" ? raw.is_user_defined : null,
     source: asString(raw.source) || "unknown",
     // `total_models` is the dashboard's count; after seeding it would understate
     // what we actually offer, so report the list we return.
-    total: id === CLAWAI_PROVIDER || id === HERMES_LOCAL_PROVIDER
+    total: id === CLAWAI_PROVIDER || id === HERMES_LOCAL_PROVIDER || isExternal
       ? models.length
       : (typeof raw.total_models === "number" ? raw.total_models : models.length),
     models,
@@ -642,9 +680,9 @@ async function fetchFromDashboard(refresh: boolean): Promise<ModelOptionsPayload
 
   const providers: HermesProviderRow[] = [];
   const moaReady = await isMoaConfigured();
-  const localModelId = await configuredLocalModelId();
+  const [localModelId, external] = await Promise.all([configuredLocalModelId(), externalEngineSeed()]);
   for (const raw of body.providers) {
-    const row = normalizeRow((raw ?? {}) as DashboardProviderRow, localModelId);
+    const row = normalizeRow((raw ?? {}) as DashboardProviderRow, localModelId, external);
     if (!row) continue;
     // Mixture of Agents is a VIRTUAL provider: the dashboard always reports it
     // as authenticated with a single placeholder model called "default",
@@ -708,6 +746,8 @@ async function readDiskCatalog(): Promise<HermesProviderRow[] | null> {
     for (const m of entry?.models ?? []) {
       const id = asString(m?.id);
       if (!isSafeModelId(id) || seen.has(id)) continue;
+      // Same rule as the live row: a retired ClawBox AI id is never offered.
+      if (slug === CLAWAI_PROVIDER && isRetiredClawboxAiModel(id, { bare: true })) continue;
       seen.add(id);
       models.push({ id, description: asString(m?.description) });
     }
@@ -1282,8 +1322,8 @@ function rowFor(payload: ModelOptionsPayload, provider: string): HermesProviderR
  * This used to union EVERY authenticated row's ids, which re-opened the exact
  * cross-vendor mismatch this module exists to close: on this device that union
  * is OpenRouter's vendor-prefixed slugs ("anthropic/claude-opus-5") next to
- * clawai's BARE "deepseek-v4-pro" and moa's literal "default". `isPairAllowed`
- * blessed any member, so `{provider:"auto", model:"deepseek-v4-pro"}` was
+ * clawai's BARE "deepseek-v4-flash" and moa's literal "default". `isPairAllowed`
+ * blessed any member, so `{provider:"auto", model:"deepseek-v4-flash"}` was
  * persistable — and whichever concrete provider hermes then resolved "auto" to
  * could not serve the other namespace's id.
  *

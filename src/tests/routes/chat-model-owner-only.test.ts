@@ -82,7 +82,7 @@ describe("POST /setup-api/chat/model — the owner's to change", () => {
 
   it("lets the owner through", async () => {
     who.current = { username: "clawbox", isOwner: true };
-    const res = await POST(post({ model: "deepseek/deepseek-v4-pro" }));
+    const res = await POST(post({ model: "deepseek/deepseek-v4-flash" }));
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("wrong_store");
   });

@@ -282,6 +282,83 @@ else
   browser_reset_session_prefs() { echo "the clean-start rule is not installed"; }
 fi
 
+# --force-gpu-mem-available-mb, sized to the row on screen, is added at every
+# start (tile_mem_mb below).
+TILE_MEM=()
+
+# The most tile memory the GPU can spare, in MB: half a card's own memory
+# where it can be read cheaply — amdgpu names it in one file
+# (mem_info_vram_total), an NVIDIA card (vendor 0x10de) through the
+# proprietary driver's nvidia-smi, asked once under a 2 s timeout (the
+# largest card's MiB; failing, timing out or printing anything but a number
+# counts as unread, and nouveau has no nvidia-smi); a quarter of the box's
+# memory for an Intel GPU, which has none of its own and draws from that;
+# else 2048, twice what Chrome takes for a 4K screen.
+# CLAWBOX_DESKTOP_SYS_ROOT is the root /sys and /proc are read under, and
+# nvidia-smi is the one on PATH (tests).
+gpu_mem_cap_mb() {
+  local root="${CLAWBOX_DESKTOP_SYS_ROOT:-}" card v vram=0 intel=0 nvidia=0 kb out
+  for card in "$root"/sys/class/drm/card*; do
+    case "${card##*/}" in *-*) continue ;; esac # a connector, not a card
+    if { read -r v < "$card/device/mem_info_vram_total"; } 2>/dev/null && [[ $v =~ ^[0-9]+$ ]] && [ ${#v} -le 15 ] && [ $((10#$v >> 20)) -gt "$vram" ]; then
+      vram=$((10#$v >> 20))
+    fi
+    { read -r v < "$card/device/vendor"; } 2>/dev/null || continue
+    [ "$v" = 0x8086 ] && intel=1
+    [ "$v" = 0x10de ] && nvidia=1
+  done
+  if [ "$nvidia" -eq 1 ] && command -v nvidia-smi >/dev/null 2>&1 \
+    && out="$(timeout -k 1 2 nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null)"; then
+    while read -r v; do
+      [[ $v =~ ^[0-9]+$ ]] && [ ${#v} -le 7 ] && [ $((10#$v)) -gt "$vram" ] && vram=$((10#$v))
+    done <<< "$out"
+  fi
+  if [ "$vram" -gt 0 ]; then
+    echo $((vram / 2))
+  elif [ "$intel" -eq 1 ] && kb="$(awk '$1 == "MemTotal:" { print $2 }' "$root/proc/meminfo" 2>/dev/null)" && [[ $kb =~ ^[0-9]+$ ]] && [ ${#kb} -le 12 ]; then
+    echo $((10#$kb / 1024 / 4))
+  else
+    echo 2048
+  fi
+}
+
+# Chrome's tile memory for the desktop, in MB; nothing leaves Chrome its own.
+# Chrome gives a page the tile memory of ONE screen (512 MB; 1 GB where the
+# screen is 4K wide), and the desktop is one page over the whole row: two 4K
+# monitors are 7680x2160 device px, and the log repeated "tile memory limits
+# exceeded, some content may not draw" while windows flickered and lost parts.
+# So a row beyond one monitor of up to 4K gets 256 bytes a device pixel —
+# Chrome's own share for a 1080p screen — in whole 256 MB (4096 for two 4K
+# monitors), at least the 1 GB Chrome gives a 4K screen, and never more than
+# the GPU can spare (gpu_mem_cap_mb); a GPU that cannot spare more than the
+# 512 MB Chrome takes anyway gets no flag, which would only lower it. The row
+# (`--device-row`) is read as Chrome starts: a monitor added later counts from
+# the next start. CLAWBOX_DESKTOP_TILE_MEM_MB in kiosk.env fixes it (0: no flag).
+tile_mem_mb() {
+  local fixed="${CLAWBOX_DESKTOP_TILE_MEM_MB:-}" w h n mb cap
+  if [ -n "$fixed" ]; then
+    if [[ $fixed =~ ^[0-9]+$ ]] && [ ${#fixed} -le 6 ]; then
+      fixed=$((10#$fixed))
+      [ "$fixed" -gt 0 ] && echo "$fixed"
+      return 0
+    fi
+    echo "$(date -Is) CLAWBOX_DESKTOP_TILE_MEM_MB=$fixed is not a whole number of MB; ignored" >&2
+  fi
+  read -r w h n < <("$NODE" "$SPAN" --device-row 2>/dev/null) || return 0
+  [[ "$w $h $n" =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]] && [ ${#w} -le 6 ] && [ ${#h} -le 6 ] && [ ${#n} -le 3 ] || return 0
+  [ "$n" -le 1 ] && [ $((w * h)) -le $((3840 * 2160)) ] && return 0
+  mb=$(( (w * h + 1048575) / 1048576 * 256 ))
+  [ "$mb" -lt 1024 ] && mb=1024
+  cap="$(gpu_mem_cap_mb)"
+  [ "$mb" -gt "$cap" ] && mb=$cap
+  if [ "$mb" -le 512 ]; then
+    echo "$(date -Is) tile memory: Chrome's own for a ${w}x${h} device px row (the GPU can spare $cap MB)" >&2
+    return 0
+  fi
+  echo "$(date -Is) tile memory: $mb MB for a ${w}x${h} device px row of $n monitors" >&2
+  echo "$mb"
+}
+
 desktop_window_up() { wlrctl toplevel find "app_id:$APP_ID" >/dev/null 2>&1; }
 # The desktop window spans the row of monitors, whatever Chrome restored it
 # as and whatever F11 did to it since: a long-running watcher asks Chrome over
@@ -317,7 +394,7 @@ watch_desktop() {
       misses=$((misses + 1))
       if [ "$misses" -ge 2 ]; then
         echo "$(date -Is) desktop window gone, reopening it"
-        "$CHROME" "${FLAGS[@]}" --app="$URL" >/dev/null 2>&1
+        "$CHROME" "${FLAGS[@]}" "${TILE_MEM[@]}" --app="$URL" >/dev/null 2>&1
         misses=0
         seen=0
         since=$SECONDS
@@ -386,7 +463,12 @@ while :; do
   # profile a running Chrome holds to that Chrome.
   echo "$(date -Is) session: $(browser_reset_session_prefs "$PROFILE")"
   started=$SECONDS
-  "$CHROME" "${FLAGS[@]}" --app="$URL" &
+  TILE_MEM=()
+  mb="$(tile_mem_mb)"
+  [ -n "$mb" ] && TILE_MEM=(--force-gpu-mem-available-mb="$mb")
+  # Sizing can take seconds (nvidia-smi's timeout): labwc may have gone since.
+  compositor_alive || session_over
+  "$CHROME" "${FLAGS[@]}" "${TILE_MEM[@]}" --app="$URL" &
   chrome_pid=$!
   watch_desktop "$chrome_pid" &
   watch_pid=$!

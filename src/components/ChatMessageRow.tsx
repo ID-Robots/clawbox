@@ -9,6 +9,8 @@ import { mediaFileName } from '@/lib/chat-media'
 import ChatFileCard from '@/components/ChatFileCard'
 import { splitEmailRefs, streamingEmailRefsText } from '@/lib/chat-email-refs'
 import { EmailCard } from '@/lib/chat-email'
+import { splitDraftRefs, streamingDraftRefsText } from '@/lib/chat-email-draft-refs'
+import { EmailDraftCard } from '@/lib/chat-email-draft'
 import { renderText, audioLabel } from '@/lib/chat-markdown'
 import SpokenReplyPlayer from '@/components/SpokenReplyPlayer'
 import ChatNoticeActions from '@/components/ChatNoticeActions'
@@ -106,7 +108,11 @@ function ChatMessageRowImpl({
   // owner's mail out of the cached transcript, which is where it very
   // deliberately does not belong.
   const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null;
-  const bodyText = isStopped ? t('chat.stopped') : emailRefs ? emailRefs.text : msg.text;
+  // Drafts waiting for the person's Send, as `EMAIL_DRAFT:<id>` lines — the
+  // same derive-at-render rule, so a replayed turn shows its card again (the
+  // server remembers whether it was already answered).
+  const draftRefs = emailRefs ? splitDraftRefs(emailRefs.text) : null;
+  const bodyText = isStopped ? t('chat.stopped') : draftRefs ? draftRefs.text : msg.text;
   // A long paste folds behind "Show more": the paste is the owner's
   // own text, and the answer should not sit a page of it away.
   const isLongUser = isUser && bodyText.length > USER_CLAMP_CHARS;
@@ -307,6 +313,16 @@ function ChatMessageRowImpl({
             ))}
           </div>
         )}
+        {/* An e-mail draft the assistant prepared: Send, keep it, or say
+            what to change. Only the person's press sends it — see
+            lib/chat-email-draft.tsx and lib/mail-draft-approval.ts. */}
+        {draftRefs && draftRefs.draftIds.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {draftRefs.draftIds.map(id => (
+              <EmailDraftCard key={id} draftId={id} t={t} />
+            ))}
+          </div>
+        )}
         {/* What the agent DID and what it was thinking, under the
             answer and never inside it. Both come off the stored
             message, so a replayed turn shows exactly what the live one
@@ -367,7 +383,7 @@ export const StreamingReplyBubble = memo(function StreamingReplyBubble({ text, t
       }}>
         {/* Lifted out HERE, not on the way into state, so an interrupted
             turn keeps the directive and can still become cards. */}
-        {renderText(streamingEmailRefsText(text), t("chat.table"), t("chat.detailsSummary"))}
+        {renderText(streamingDraftRefsText(streamingEmailRefsText(text)), t("chat.table"), t("chat.detailsSummary"))}
         <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
         <style>{`@keyframes blink { 50% { opacity: 0 } }`}</style>
       </div>

@@ -41,7 +41,7 @@ function stubBox(runs: unknown[] = []) {
       return json({
         enabled: true, ready: true, readiness: READY, running: 0, harnessCommand: "claude-ds", maxTaskChars: 4000,
         defaultDirectory: "/home/clawbox/Projects", setupComplete: true,
-        effort: "ultracode", effortLevels: ["low", "xhigh", "max", "ultracode"], reviewPass: false,
+        effort: "ultracode", effortLevels: ["low", "medium", "high", "xhigh", "max", "ultracode"], reviewPass: false,
       });
     }
     if (url.startsWith("/setup-api/coding-agent/runs")) return json({ runs });

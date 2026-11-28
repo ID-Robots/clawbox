@@ -396,13 +396,13 @@ describe("effort", () => {
   });
 
   it("refuses a level this box does not offer with 400, a code and the list, before the runner is asked", async () => {
-    for (const effort of ["medium", "ULTRACODE", "turbo", 3, true]) {
+    for (const effort of ["MEDIUM", "ULTRACODE", "turbo", 3, true]) {
       startRun.mockClear();
       const res = await POST(req({ body: { task: "t", projectId: "site", effort } }));
       expect(res.status, String(effort)).toBe(400);
       const body = await res.json();
       expect(body).toMatchObject({ kind: "invalid", code: "effort" });
-      expect(body.error).toMatch(/low, xhigh, max, ultracode/);
+      expect(body.error).toMatch(/low, medium, high, xhigh, max, ultracode/);
       expect(startRun).not.toHaveBeenCalled();
     }
   });

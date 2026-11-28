@@ -2,6 +2,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import nodePath from "node:path";
+import { screensFromStatus } from "@/lib/desktop-screens";
+import { parseViewerScreens } from "@/lib/use-monitor-layout";
 
 /**
  * kiosk/extension, RUN rather than read (kiosk-extension.test.ts pins the
@@ -32,7 +34,7 @@ const g = globalThis as Globals;
 
 // Promise callbacks and MutationObserver deliveries (both microtasks).
 async function flushMicrotasks() {
-  for (let i = 0; i < 10; i++) await Promise.resolve();
+  for (let i = 0; i < 30; i++) await Promise.resolve();
 }
 
 describe("offset.js", () => {
@@ -462,5 +464,1133 @@ describe("desktop.js", () => {
       expect(mount, href).toHaveBeenCalledWith({ startPage: false });
       expect(start, href).toHaveBeenCalledWith(BAR_H);
     }
+  });
+});
+
+describe("workspaces.js", () => {
+  // The linked-box switcher's page side (TASK-2519): the keys on every page,
+  // the indicator, and on the kiosk's own desktop the list it hands the worker.
+  type Listener = (e: unknown) => void;
+
+  // `flag`: what the box says of the experiment's switch (pref ui_linked_boxes),
+  // or `heldFlags` to answer each ask of it by hand; `on`: the switch as the
+  // page's copy of the script has it kept. The second switch (TASK-2771): `screensFlag`
+  // is what the box says of it (ui_linked_boxes_screens), `screens` how the page's
+  // copy has it kept; `viewer` answers the worker's { type: "viewerScreens" } and
+  // `monitors` is the box's /setup-api/monitors.
+  function load(href: string, opts: { pending?: unknown; list?: unknown; listStatus?: number; flag?: boolean; screensFlag?: boolean; heldFlags?: Array<(r: Response) => void>; on?: boolean; screens?: boolean; viewer?: () => unknown; monitors?: unknown; fetch?: (url: string, init: RequestInit) => Promise<Response> } = {}) {
+    const url = new URL(href);
+    const keydown: Listener[] = [];
+    const winEvents: Record<string, Listener[]> = {};
+    const win = {
+      top: null as unknown,
+      addEventListener: (type: string, fn: Listener, capture?: boolean) => {
+        if (type === "keydown") {
+          expect(capture).toBe(true);
+          keydown.push(fn);
+        } else (winEvents[type] ??= []).push(fn);
+      },
+    };
+    win.top = win;
+    const onMessage: Array<(msg: unknown, sender: unknown, respond: (r: unknown) => void) => unknown> = [];
+    const sendMessage = vi.fn(async (msg: { type: string }) => {
+      if (msg.type === "viewerScreens") return opts.viewer ? opts.viewer() : { ok: true };
+      return msg.type === "pendingIndicator" ? opts.pending ?? null : { ok: true };
+    });
+    const kept: Record<string, unknown> = { ...(opts.on === false ? {} : { linkedBoxesOn: true }), ...(opts.screens ? { linkedBoxScreensOn: true } : {}) };
+    const changed: Array<(changes: Record<string, { newValue: unknown }>, area: string) => void> = [];
+    const local = {
+      get: vi.fn(async (name: string | string[]) => Object.fromEntries([name].flat().map((n) => [n, kept[n]]))),
+      set: vi.fn(async (items: Record<string, unknown>) => {
+        for (const [name, value] of Object.entries(items)) {
+          kept[name] = value;
+          for (const fn of changed) fn({ [name]: { newValue: value } }, "local");
+        }
+      }),
+    };
+    const chrome = {
+      runtime: { sendMessage, onMessage: { addListener: (fn: (typeof onMessage)[number]) => onMessage.push(fn) } },
+      storage: { local, onChanged: { addListener: (fn: (typeof changed)[number]) => changed.push(fn) } },
+    };
+    const listFetch = opts.fetch ?? (async () => new Response(JSON.stringify(opts.list ?? { self: { name: "laptop" }, boxes: [] }), { status: opts.listStatus ?? 200 }));
+    const fetchMock = vi.fn(async (path: string, init: RequestInit) => {
+      if (path === "/setup-api/monitors") return new Response(JSON.stringify(opts.monitors ?? { available: false }), { status: opts.listStatus ?? 200 });
+      if (path !== "/setup-api/preferences?keys=ui_linked_boxes,ui_linked_boxes_screens") return listFetch(path, init);
+      if (opts.heldFlags) return new Promise<Response>((resolve) => { opts.heldFlags!.push(resolve); });
+      return new Response(JSON.stringify({ ...(opts.flag === false ? {} : { ui_linked_boxes: true }), ...(opts.screensFlag ? { ui_linked_boxes_screens: true } : {}) }), { status: opts.listStatus ?? 200 });
+    });
+    const scope: Record<string, unknown> = {};
+    new Function("chrome", "window", "location", "fetch", "globalThis", source("workspaces.js"))(
+      chrome, win, { origin: url.origin, pathname: url.pathname }, fetchMock, scope,
+    );
+    const key = (code: string, extra: Record<string, unknown> = {}) => {
+      const ev = {
+        code, ctrlKey: true, shiftKey: true, altKey: false, metaKey: false, isTrusted: true, repeat: false,
+        preventDefault: vi.fn(), stopImmediatePropagation: vi.fn(), ...extra,
+      };
+      for (const fn of keydown) fn(ev);
+      return ev;
+    };
+    const message = (msg: unknown) => {
+      let answer: unknown;
+      let async = false;
+      for (const fn of onMessage) if (fn(msg, {}, (r) => { answer = r; }) === true) async = true;
+      return { answer: () => answer, async };
+    };
+    return { key, message, sendMessage, fetchMock, winEvents, scope, local, kept };
+  }
+
+  const sent = (m: ReturnType<typeof load>) => m.sendMessage.mock.calls.map((c) => c[0] as { type: string });
+
+  afterEach(() => {
+    document.documentElement.removeAttribute("data-clawbox-box-switcher");
+    document.documentElement.removeAttribute("data-clawbox-viewer-screens");
+    document.getElementById("clawbox-kiosk-workspaces")?.remove();
+  });
+
+  it("marks the page, so the desktop's own handler stands down", () => {
+    load("https://main.example.com/");
+    expect(document.documentElement.getAttribute("data-clawbox-box-switcher")).toBe("kiosk");
+  });
+
+  it("Ctrl+Shift+<digit> asks the worker for that box, ahead of the page, by code whatever the layout", async () => {
+    const w = load("https://main.example.com/");
+    await flushMicrotasks();
+    for (const [code, slot] of [["Digit1", 1], ["Digit2", 2], ["Digit9", 9]] as const) {
+      const ev = w.key(code, { key: slot === 2 ? "ě" : "!" });
+      expect(ev.preventDefault).toHaveBeenCalled();
+      expect(ev.stopImmediatePropagation).toHaveBeenCalled();
+      expect(sent(w)).toContainEqual({ type: "switchBox", slot });
+    }
+  });
+
+  it("leaves every other key, a key the page made up and a held key's repeats alone", async () => {
+    const w = load("https://main.example.com/");
+    await flushMicrotasks();
+    const before = sent(w).length;
+    for (const [code, extra] of [
+      ["Digit0", {}], ["Numpad2", {}], ["KeyS", {}], ["Digit2", { shiftKey: false }], ["Digit2", { ctrlKey: false }],
+      ["Digit2", { altKey: true }], ["Digit2", { metaKey: true }], ["Digit2", { isComposing: true }],
+    ] as const) {
+      const ev = w.key(code, extra);
+      expect(ev.preventDefault, `${code} ${JSON.stringify(extra)}`).not.toHaveBeenCalled();
+    }
+    // A page's own dispatchEvent is not the owner's key press.
+    const forged = w.key("Digit2", { isTrusted: false });
+    expect(forged.preventDefault).not.toHaveBeenCalled();
+    const held = w.key("Digit2", { repeat: true });
+    expect(held.preventDefault).toHaveBeenCalled();
+    expect(sent(w).slice(before).filter((m) => m.type === "switchBox")).toEqual([]);
+  });
+
+  it("draws the indicator the worker sends, the name as text, and takes it down", async () => {
+    vi.useFakeTimers();
+    try {
+      const w = load("https://laptop.example.com/");
+      const reply = w.message({ type: "boxIndicator", slot: 2, kind: "stay", name: "<img src=x onerror=alert(1)>", names: ["main", "x", "NAS"] });
+      expect(reply.answer()).toEqual({ ok: true });
+      const host = document.getElementById("clawbox-kiosk-workspaces")!;
+      const root = host.shadowRoot!;
+      expect(root.querySelectorAll(".dot")).toHaveLength(3);
+      expect(root.querySelector(".dot.lit")?.textContent).toBe("2");
+      expect(root.querySelector(".text")?.textContent).toBe("2 · <img src=x onerror=alert(1)>");
+      expect(root.querySelector("img")).toBeNull();
+      w.message({ type: "boxIndicator", slot: 5, kind: "empty", name: null, names: ["main"] });
+      expect(root.querySelectorAll(".dot")).toHaveLength(5);
+      expect(root.querySelectorAll(".dot.empty")).toHaveLength(3);
+      expect(root.querySelector(".text")?.textContent).toContain("Nothing on Ctrl+Shift+5 yet");
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(document.getElementById("clawbox-kiosk-workspaces")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows the indicator a switch left for a tab it had to open", async () => {
+    load("https://laptop.example.com/", { pending: { type: "boxIndicator", slot: 2, kind: "stay", name: "Laptop", names: ["main", "Laptop"] } });
+    await flushMicrotasks();
+    const root = document.getElementById("clawbox-kiosk-workspaces")?.shadowRoot;
+    expect(root?.querySelector(".text")?.textContent).toBe("2 · Laptop");
+  });
+
+  it("never draws into a page still being parsed: the indicator waits for DOMContentLoaded", async () => {
+    // A node put among the server's HTML before the page hydrates it left the
+    // other box's desktop (a React page) never hydrated, blank, on the lab boards.
+    Object.defineProperty(document, "readyState", { configurable: true, get: () => "loading" });
+    try {
+      const w = load("https://laptop.example.com/", { pending: { type: "boxIndicator", slot: 2, kind: "stay", name: "Laptop", names: ["main", "Laptop"] } });
+      await flushMicrotasks();
+      expect(document.getElementById("clawbox-kiosk-workspaces")).toBeNull();
+      // One the worker sends while the page loads waits the same way, still answered.
+      expect(w.message({ type: "boxIndicator", slot: 2, kind: "stay", name: "Laptop", names: ["main", "Laptop"] }).answer()).toEqual({ ok: true });
+      expect(document.getElementById("clawbox-kiosk-workspaces")).toBeNull();
+    } finally {
+      delete (document as unknown as { readyState?: string }).readyState;
+    }
+    document.dispatchEvent(new Event("DOMContentLoaded"));
+    const host = document.getElementById("clawbox-kiosk-workspaces");
+    expect(host?.parentElement).toBe(document.body);
+    expect(host?.shadowRoot?.querySelector(".text")?.textContent).toBe("2 · Laptop");
+  });
+
+  it("on the kiosk's own desktop, reads the list and hands it to the worker — again when Settings saves it", async () => {
+    const list = {
+      self: { name: "laptop" },
+      boxes: [{ name: "Main", url: "https://main.example.com/" }],
+      labels: { empty: "Leer auf Ctrl+Shift+{n}." },
+      sessionExpiresAt: 1_900_000_000_000,
+    };
+    const w = load("http://localhost:3005/", { list });
+    await flushMicrotasks();
+    expect(w.fetchMock).toHaveBeenCalledWith("/setup-api/linked-boxes", expect.objectContaining({ credentials: "same-origin" }));
+    expect(sent(w)).toContainEqual({ type: "boxes", selfName: "laptop", boxes: list.boxes, emptyText: "Leer auf Ctrl+Shift+{n}.", validUntil: 1_900_000_000_000 });
+    for (const fn of w.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    expect(w.fetchMock).toHaveBeenCalledTimes(4);
+    // …and answers the worker's own ask.
+    const ask = w.message({ type: "readBoxes" });
+    expect(ask.async).toBe(true);
+    await flushMicrotasks();
+    expect(ask.answer()).toEqual({ selfName: "laptop", boxes: list.boxes, emptyText: "Leer auf Ctrl+Shift+{n}.", validUntil: 1_900_000_000_000 });
+  });
+
+  it("never reads the list anywhere else, and hands the worker nothing when the box refuses", async () => {
+    for (const href of ["https://main.example.com/", "http://localhost:3005/app/settings", "http://localhost:8090/"]) {
+      const w = load(href);
+      await flushMicrotasks();
+      expect(w.fetchMock, href).not.toHaveBeenCalled();
+      expect(w.message({ type: "readBoxes" }).async, href).toBe(false);
+    }
+    const refused = load("http://127.0.0.1:3005/", { listStatus: 403 });
+    await flushMicrotasks();
+    expect(sent(refused).filter((m) => m.type === "boxes")).toEqual([]);
+    // Refused is not "could not ask": the worker is told to forget the list.
+    expect(sent(refused)).toContainEqual({ type: "boxesRevoked" });
+    const down = load("http://127.0.0.1:3005/", { listStatus: 502 });
+    await flushMicrotasks();
+    expect(sent(down).filter((m) => m.type === "boxes" || m.type === "boxesRevoked")).toEqual([]);
+  });
+
+  it("takes no key while the experiment's switch is off, and takes it the moment it is switched on", async () => {
+    const w = load("https://main.example.com/", { on: false });
+    await flushMicrotasks();
+    const off = w.key("Digit2");
+    expect(off.preventDefault).not.toHaveBeenCalled();
+    expect(off.stopImmediatePropagation).not.toHaveBeenCalled();
+    expect(sent(w).filter((m) => m.type === "switchBox")).toEqual([]);
+    // The kiosk's desktop keeps the switch where every page's copy sees it change.
+    await w.local.set({ linkedBoxesOn: true });
+    expect(w.key("Digit2").preventDefault).toHaveBeenCalled();
+    expect(sent(w)).toContainEqual({ type: "switchBox", slot: 2 });
+    await w.local.set({ linkedBoxesOn: false });
+    expect(w.key("Digit3").preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("on the kiosk's own desktop, asks for the switch before the list: off, the list is never read and the worker forgets it", async () => {
+    const w = load("http://localhost:3005/", { flag: false, on: false });
+    await flushMicrotasks();
+    expect(w.fetchMock).toHaveBeenCalledWith("/setup-api/preferences?keys=ui_linked_boxes,ui_linked_boxes_screens", expect.objectContaining({ credentials: "same-origin" }));
+    expect(w.fetchMock).not.toHaveBeenCalledWith("/setup-api/linked-boxes", expect.anything());
+    expect(sent(w).filter((m) => m.type === "boxes")).toEqual([]);
+    expect(sent(w)).toContainEqual({ type: "boxesRevoked" });
+    expect(w.kept.linkedBoxesOn).toBe(false);
+    // The worker's own ask is answered the same way.
+    const ask = w.message({ type: "readBoxes" });
+    await flushMicrotasks();
+    expect(ask.answer()).toEqual({ revoked: true });
+    expect(w.fetchMock).not.toHaveBeenCalledWith("/setup-api/linked-boxes", expect.anything());
+  });
+
+  it("reads the switch again when Settings changes it: switched on, the list goes to the worker and the keys are taken", async () => {
+    const opts = { flag: false, on: false };
+    const w = load("http://localhost:3005/", opts);
+    await flushMicrotasks();
+    expect(w.key("Digit2").preventDefault).not.toHaveBeenCalled();
+    opts.flag = true;
+    for (const fn of w.winEvents["clawbox:linked-boxes-flag"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    expect(w.kept.linkedBoxesOn).toBe(true);
+    expect(sent(w)).toContainEqual(expect.objectContaining({ type: "boxes" }));
+    expect(w.key("Digit2").preventDefault).toHaveBeenCalled();
+  });
+
+  it("a refused read of the switch is off, and one that got no answer leaves it where it was", async () => {
+    const refused = load("http://localhost:3005/", { listStatus: 403 });
+    await flushMicrotasks();
+    expect(refused.kept.linkedBoxesOn).toBe(false);
+    const down = load("http://localhost:3005/", { listStatus: 502 });
+    await flushMicrotasks();
+    expect(down.kept.linkedBoxesOn).toBe(true);
+  });
+
+  it("keeps the switch from the newest read only: an older answer that comes back last cannot turn the keys back on", async () => {
+    const held: Array<(r: Response) => void> = [];
+    const w = load("http://localhost:3005/", { heldFlags: held, on: false });
+    for (const fn of w.winEvents["clawbox:linked-boxes-flag"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    expect(held).toHaveLength(2);
+    held[1](new Response("{}", { status: 200 }));
+    await flushMicrotasks();
+    held[0](new Response(JSON.stringify({ ui_linked_boxes: true }), { status: 200 }));
+    await flushMicrotasks();
+    expect(w.kept.linkedBoxesOn).toBe(false);
+    expect(w.key("Digit2").preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("an older 'off' that comes back after a newer 'on' and its list is ignored: the list is not revoked and the keys stay taken", async () => {
+    const held: Array<(r: Response) => void> = [];
+    const w = load("http://localhost:3005/", { heldFlags: held, on: false });
+    for (const fn of w.winEvents["clawbox:linked-boxes-flag"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    expect(held).toHaveLength(2);
+    // The newer read says on and its list is handed over before the older one answers.
+    held[1](new Response(JSON.stringify({ ui_linked_boxes: true }), { status: 200 }));
+    await flushMicrotasks();
+    expect(sent(w)).toContainEqual(expect.objectContaining({ type: "boxes" }));
+    const fetched = w.fetchMock.mock.calls.length;
+    held[0](new Response("{}", { status: 200 }));
+    await flushMicrotasks();
+    expect(sent(w).filter((m) => m.type === "boxesRevoked")).toEqual([]);
+    expect(w.fetchMock).toHaveBeenCalledTimes(fetched);
+    expect(w.kept.linkedBoxesOn).toBe(true);
+    expect(w.key("Digit2").preventDefault).toHaveBeenCalled();
+  });
+
+  it("a refusal of the switch is never too old: it has the list revoked even after a newer 'on'", async () => {
+    const held: Array<(r: Response) => void> = [];
+    const w = load("http://localhost:3005/", { heldFlags: held, on: false });
+    for (const fn of w.winEvents["clawbox:linked-boxes-flag"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    held[1](new Response(JSON.stringify({ ui_linked_boxes: true }), { status: 200 }));
+    await flushMicrotasks();
+    held[0](new Response("{}", { status: 403 }));
+    await flushMicrotasks();
+    expect(sent(w)).toContainEqual({ type: "boxesRevoked" });
+    expect(w.kept.linkedBoxesOn).toBe(false);
+    expect(w.key("Digit2").preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("hands the worker only the newest read: an older answer that comes back last is dropped", async () => {
+    const answers: Array<(r: Response) => void> = [];
+    const reply = (boxes: unknown[]) => new Response(JSON.stringify({ self: { name: "laptop" }, boxes, sessionExpiresAt: 1_900_000_000_000 }), { status: 200 });
+    const OLD = { name: "Old", url: "https://old.example.com/" };
+    const NEW = { name: "New", url: "https://new.example.com/" };
+    const pushed = (m: ReturnType<typeof load>) => sent(m).filter((x) => x.type === "boxes" || x.type === "boxesRevoked");
+
+    // The page opened (read 1), then Settings saved (read 2); read 2 answers first.
+    const w = load("http://localhost:3005/", { fetch: () => new Promise((resolve) => { answers.push(resolve); }) });
+    for (const fn of w.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    expect(answers).toHaveLength(2);
+    answers[1](reply([NEW]));
+    await flushMicrotasks();
+    answers[0](reply([OLD]));
+    await flushMicrotasks();
+    expect(pushed(w)).toEqual([expect.objectContaining({ type: "boxes", boxes: [NEW] })]);
+
+    // An older list that comes back after a newer refusal does not put the list back…
+    answers.length = 0;
+    const r = load("http://localhost:3005/", { fetch: () => new Promise((resolve) => { answers.push(resolve); }) });
+    for (const fn of r.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
+    await flushMicrotasks();
+    answers[1](new Response("{}", { status: 401 }));
+    await flushMicrotasks();
+    answers[0](reply([OLD]));
+    await flushMicrotasks();
+    expect(pushed(r)).toEqual([{ type: "boxesRevoked" }]);
+
+    // …while a refusal always goes through, however old: after a newer list, or
+    // when the newer read got no answer at all.
+    for (const newer of [() => reply([NEW]), () => new Response("", { status: 502 })]) {
+      answers.length = 0;
+      const o = load("http://localhost:3005/", { fetch: () => new Promise((resolve) => { answers.push(resolve); }) });
+      for (const fn of o.winEvents["clawbox:linked-boxes-changed"] ?? []) fn(new Event("x"));
+      await flushMicrotasks();
+      answers[1](newer());
+      await flushMicrotasks();
+      answers[0](new Response("{}", { status: 403 }));
+      await flushMicrotasks();
+      expect(pushed(o).at(-1)).toEqual({ type: "boxesRevoked" });
+    }
+
+    // The worker's own ask is a read too: a push still out from before it stays quiet.
+    answers.length = 0;
+    const a = load("http://localhost:3005/", { fetch: () => new Promise((resolve) => { answers.push(resolve); }) });
+    const ask = a.message({ type: "readBoxes" });
+    await flushMicrotasks();
+    answers[1](reply([NEW]));
+    await flushMicrotasks();
+    expect(ask.answer()).toMatchObject({ boxes: [NEW] });
+    answers[0](reply([OLD]));
+    await flushMicrotasks();
+    expect(pushed(a)).toEqual([]);
+  });
+
+  it("gives up a read that hangs before the worker's deadline, so an ask is answered", async () => {
+    vi.useFakeTimers();
+    try {
+      const hung = (_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      });
+      const w = load("http://localhost:3005/", { fetch: hung });
+      const ask = w.message({ type: "readBoxes" });
+      await vi.advanceTimersByTimeAsync(1999);
+      expect(ask.answer()).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ask.answer()).toBeNull();
+      expect(sent(w).filter((m) => m.type === "boxes" || m.type === "boxesRevoked")).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("on the kiosk's own sign-in page, has the worker forget the owner's list; never on another site's", async () => {
+    const own = load("http://localhost:3005/login?next=%2F");
+    await flushMicrotasks();
+    expect(sent(own)).toContainEqual({ type: "boxesRevoked" });
+    const other = load("https://main.example.com/login");
+    await flushMicrotasks();
+    expect(sent(other).filter((m) => m.type === "boxesRevoked")).toEqual([]);
+  });
+
+  // ── A linked box's page on this kiosk's monitors (TASK-2771) ──
+  describe("on the kiosk's monitors", () => {
+    const MARK = "data-clawbox-viewer-screens";
+    const mark = () => document.documentElement.getAttribute(MARK);
+    const row = (width: number) => ({
+      available: true, main: "DP-1", box: { width, height: 1080 }, mirror: false,
+      monitors: [
+        { id: "DP-1", enabled: true, rect: { x: 0, y: 0, width: 1920, height: 1080 } },
+        { id: "HDMI-A-1", enabled: true, rect: { x: 1920, y: 0, width: width - 1920, height: 1080 } },
+      ],
+    });
+    const asked = (m: ReturnType<typeof load>) => sent(m).filter((x) => x.type === "viewerScreens");
+    let visible = true;
+    beforeEach(() => {
+      vi.useFakeTimers();
+      visible = true;
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (visible ? "visible" : "hidden") });
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      delete (document as unknown as { visibilityState?: string }).visibilityState;
+    });
+
+    it("keeps the kiosk's monitors on <html> for a linked box's page, and asks again every few seconds while it is shown", async () => {
+      const answers = [row(3840), row(3600)];
+      const w = load("https://main.example.com/", { screens: true, viewer: () => ({ ok: true, screens: answers.shift() ?? row(3600) }) });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked(w)).toHaveLength(1);
+      expect(JSON.parse(mark()!)).toEqual(row(3840));
+      await vi.advanceTimersByTimeAsync(2999);
+      expect(asked(w)).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(asked(w)).toHaveLength(2);
+      // Follows a change, and writes nothing again for an answer that did not change.
+      expect(JSON.parse(mark()!)).toEqual(row(3600));
+      const writes = vi.spyOn(document.documentElement, "setAttribute");
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(asked(w)).toHaveLength(3);
+      expect(writes.mock.calls.filter(([name]) => name === MARK)).toEqual([]);
+      writes.mockRestore();
+    });
+
+    it("waits while the page is hidden, asks the moment it is shown, and one read at a time", async () => {
+      const w = load("https://main.example.com/", { screens: true, viewer: () => ({ ok: true, screens: row(3840) }) });
+      await vi.advanceTimersByTimeAsync(0);
+      visible = false;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(asked(w)).toHaveLength(1);
+      visible = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked(w)).toHaveLength(2);
+    });
+
+    it("asks nothing and marks nothing while either switch is off; switched on it asks, switched off the mark is gone", async () => {
+      for (const kept of [{ on: false, screens: true }, { on: true, screens: false }]) {
+        const off = load("https://main.example.com/", kept);
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(asked(off)).toEqual([]);
+        expect(mark()).toBeNull();
+      }
+      const w = load("https://main.example.com/", { screens: false, viewer: () => ({ ok: true, screens: row(3840) }) });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked(w)).toEqual([]);
+      await w.local.set({ linkedBoxScreensOn: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked(w)).toHaveLength(1);
+      expect(mark()).not.toBeNull();
+      await w.local.set({ linkedBoxScreensOn: false });
+      expect(mark()).toBeNull();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(asked(w)).toHaveLength(1);
+      // The first switch off takes the second's mark with it.
+      await w.local.set({ linkedBoxScreensOn: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mark()).not.toBeNull();
+      await w.local.set({ linkedBoxesOn: false });
+      expect(mark()).toBeNull();
+    });
+
+    it("an answer that comes back after a switch went off marks nothing", async () => {
+      let answer: (v: unknown) => void = () => {};
+      const w = load("https://main.example.com/", { screens: true, viewer: () => new Promise((resolve) => { answer = resolve; }) as unknown as object });
+      await vi.advanceTimersByTimeAsync(0);
+      await w.local.set({ linkedBoxScreensOn: false });
+      answer({ ok: true, screens: row(3840) });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mark()).toBeNull();
+    });
+
+    it("stops asking, and takes the mark off, once the worker says the page is not a linked box; shown again, it asks again", async () => {
+      let linked = true;
+      const w = load("https://main.example.com/", { screens: true, viewer: () => (linked ? { ok: true, screens: row(3840) } : { ok: false, error: "not a linked box" }) });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mark()).not.toBeNull();
+      linked = false;
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(asked(w)).toHaveLength(2);
+      expect(mark()).toBeNull();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(asked(w)).toHaveLength(2);
+      linked = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(asked(w)).toHaveLength(3);
+      expect(mark()).not.toBeNull();
+    });
+
+    it("leaves the mark as it was when the desktop could not read the monitors, and keeps asking", async () => {
+      let answer: unknown = { ok: true, screens: row(3840) };
+      const w = load("https://main.example.com/", { screens: true, viewer: () => answer });
+      await vi.advanceTimersByTimeAsync(0);
+      const before = mark();
+      expect(before).not.toBeNull();
+      answer = { ok: true };
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(asked(w)).toHaveLength(2);
+      expect(mark()).toBe(before);
+      // A kiosk with no monitor session is an answer too: the page is told, it is not left to its own.
+      answer = { ok: true, screens: { available: false } };
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(JSON.parse(mark()!)).toEqual({ available: false });
+    });
+
+    it("is for the pages of other boxes only: never the kiosk's own pages, the extension's, or a frame", async () => {
+      for (const href of ["http://localhost:3005/", "http://127.0.0.1/app/files", "chrome-extension://kiosk/newtab.html"]) {
+        const w = load(href, { screens: true, viewer: () => ({ ok: true, screens: row(3840) }) });
+        await vi.advanceTimersByTimeAsync(10_000);
+        expect(asked(w), href).toEqual([]);
+        expect(mark(), href).toBeNull();
+      }
+    });
+
+    it("on the kiosk's own desktop, reads its box's monitors for the worker — nowhere else, and nothing when the box does not answer", async () => {
+      const body = { available: true, main: "id|a|1", box: { width: 3840, height: 1080 }, monitors: [] };
+      const w = load("http://localhost:3005/", { monitors: body });
+      const ask = w.message({ type: "readMonitors" });
+      expect(ask.async).toBe(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(ask.answer()).toEqual(body);
+      expect(w.fetchMock).toHaveBeenCalledWith("/setup-api/monitors", expect.objectContaining({ credentials: "same-origin", cache: "no-store" }));
+      for (const href of ["https://main.example.com/", "http://localhost:3005/app/files"]) {
+        expect(load(href).message({ type: "readMonitors" }).async, href).toBe(false);
+      }
+      const refused = load("http://localhost:3005/", { listStatus: 403, monitors: body });
+      const no = refused.message({ type: "readMonitors" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(no.answer()).toBeNull();
+    });
+
+    it("keeps the second switch from the same read as the first, true only while the first is on, and reads again when Settings saves it", async () => {
+      const opts = { screensFlag: true, on: false, screens: false };
+      const w = load("http://localhost:3005/", opts);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(w.kept).toMatchObject({ linkedBoxesOn: true, linkedBoxScreensOn: true });
+      // The first off: the second is off with it, whatever the box says of it.
+      const off = load("http://localhost:3005/", { flag: false, screensFlag: true, on: false, screens: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(off.kept).toMatchObject({ linkedBoxesOn: false, linkedBoxScreensOn: false });
+      // Switched on in Settings later.
+      const later = { screensFlag: false };
+      const l = load("http://localhost:3005/", later);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(l.kept.linkedBoxScreensOn).toBe(false);
+      later.screensFlag = true;
+      for (const fn of l.winEvents["clawbox:linked-boxes-screens-flag"] ?? []) fn(new Event("x"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(l.kept.linkedBoxScreensOn).toBe(true);
+      // A refusal is off for both.
+      const refused = load("http://localhost:3005/", { listStatus: 403, screensFlag: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(refused.kept).toMatchObject({ linkedBoxesOn: false, linkedBoxScreensOn: false });
+    });
+  });
+});
+
+describe("background.js: switching linked ClawBoxes", () => {
+  type Tab = { id: number; url: string; active?: boolean; pendingUrl?: string };
+
+  function loadWorker(start: Tab[], opts: { listening?: number[]; stored?: unknown; desktopList?: unknown; ask?: () => Promise<unknown>; screensOn?: boolean; monitors?: () => unknown } = {}) {
+    let tabs = start.map((t) => ({ ...t }));
+    let nextId = 100;
+    const listening = new Set(opts.listening ?? start.map((t) => t.id));
+    // The list lives in session storage (memory), never in local storage.
+    const local: Record<string, unknown> = opts.screensOn ? { linkedBoxScreensOn: true } : {};
+    const session: Record<string, unknown> = opts.stored ? { linkedBoxes: opts.stored } : {};
+    const area = (data: Record<string, unknown>) => ({
+      get: vi.fn(async (key: string) => (key in data ? { [key]: JSON.parse(JSON.stringify(data[key])) } : {})),
+      set: vi.fn(async (items: Record<string, unknown>) => { Object.assign(data, JSON.parse(JSON.stringify(items))); }),
+      remove: vi.fn(async (key: string) => { delete data[key]; }),
+    });
+    let onMessage: ((msg: unknown, sender: unknown, respond: (r: unknown) => void) => unknown) | null = null;
+    const event = () => ({ addListener: () => {} });
+    const delivered: [number, unknown][] = [];
+    const sendMessage = vi.fn(async (id: number, msg: { type: string }) => {
+      if (!listening.has(id)) throw new Error("Could not establish connection. Receiving end does not exist.");
+      if (msg.type === "readBoxes") return opts.ask ? opts.ask() : opts.desktopList ?? null;
+      if (msg.type === "readMonitors") return opts.monitors ? opts.monitors() : null;
+      if (msg.type === "boxIndicator") delivered.push([id, msg]);
+      return { ok: true };
+    });
+    const chrome = {
+      runtime: {
+        getURL: (p: string) => `chrome-extension://kiosk/${p}`,
+        onMessage: { addListener: (fn: typeof onMessage) => { onMessage = fn; } },
+        onStartup: event(),
+        onInstalled: event(),
+      },
+      storage: { local: area(local), session: area(session) },
+      tabs: {
+        query: vi.fn(async () => tabs.map((t) => ({ ...t }))),
+        sendMessage,
+        update: vi.fn(async (id: number, props: { active?: boolean }) => {
+          tabs = tabs.map((t) => ({ ...t, active: props.active ? t.id === id : t.active }));
+          return tabs.find((t) => t.id === id);
+        }),
+        create: vi.fn(async (props: { url: string }) => {
+          const tab = { id: nextId++, url: "", pendingUrl: props.url, active: true };
+          tabs = [...tabs.map((t) => ({ ...t, active: false })), tab];
+          return { ...tab };
+        }),
+        remove: vi.fn(async () => undefined),
+        onCreated: event(),
+        onRemoved: event(),
+        onUpdated: event(),
+        onActivated: event(),
+      },
+    };
+    new Function("chrome", source("background.js"))(chrome);
+    const call = (msg: unknown, tabId = 1, extra: Record<string, unknown> = {}) => {
+      const sender = { tab: tabs.find((t) => t.id === tabId) ?? { id: tabId, url: "chrome-extension://kiosk/newtab.html" }, ...extra };
+      return new Promise((resolve) => {
+        expect(onMessage!(msg, sender, resolve)).toBe(true);
+      });
+    };
+    return {
+      call,
+      chrome,
+      local,
+      session,
+      tabs: () => tabs,
+      active: () => tabs.find((t) => t.active)?.id,
+      listen: (id: number) => listening.add(id),
+      indicators: () => delivered,
+    };
+  }
+
+  const DESK = { id: 1, url: "http://localhost:3005/", active: true };
+  // Read under an owner session that lasts another hour.
+  const list = {
+    selfName: "laptop",
+    boxes: [{ name: "Main", url: "https://main.example.com/" }, { name: "NAS", url: "http://nas.example.net:3005/" }],
+    validUntil: Date.now() + 3_600_000,
+  };
+
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("opens a box in a tab of its own on first use, then only activates that tab", async () => {
+    const w = loadWorker([DESK], { stored: list });
+    await w.call({ type: "switchBox", slot: 2 });
+    expect(w.chrome.tabs.create).toHaveBeenCalledWith({ url: "https://main.example.com/", active: true });
+    const opened = w.active()!;
+    expect(opened).not.toBe(1);
+
+    // Back home with 1, then 2 again: the same tab, nothing reloaded.
+    await w.call({ type: "switchBox", slot: 1 }, opened);
+    expect(w.active()).toBe(1);
+    await w.call({ type: "switchBox", slot: 2 }, 1);
+    expect(w.active()).toBe(opened);
+    expect(w.chrome.tabs.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses a tab already on the box, the box's desktop before its other pages", async () => {
+    const w = loadWorker([DESK, { id: 2, url: "https://main.example.com/app/files" }, { id: 3, url: "https://main.example.com/" }], { stored: list });
+    await w.call({ type: "switchBox", slot: 2 });
+    expect(w.active()).toBe(3);
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+  });
+
+  it("does not take a tab that has wandered off to another site for the box", async () => {
+    const w = loadWorker([DESK], { stored: list });
+    await w.call({ type: "switchBox", slot: 2 });
+    const opened = w.active()!;
+    // The owner navigated that tab elsewhere.
+    for (const t of w.tabs()) if (t.id === opened) { t.url = "https://news.example.org/"; delete t.pendingUrl; }
+    await w.call({ type: "switchBox", slot: 2 }, 1);
+    expect(w.chrome.tabs.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("tells the tab it showed which box it is; a tab still loading gets it when it asks", async () => {
+    const w = loadWorker([DESK], { stored: list, listening: [1] });
+    await w.call({ type: "switchBox", slot: 3 });
+    const opened = w.active()!;
+    // Nobody listening there yet: kept for it.
+    expect(w.indicators()).toEqual([]);
+    const pending = await w.call({ type: "pendingIndicator" }, opened);
+    expect(pending).toMatchObject({ type: "boxIndicator", slot: 3, kind: "stay", name: "NAS", names: ["laptop", "Main", "NAS"] });
+    // Once.
+    expect(await w.call({ type: "pendingIndicator" }, opened)).toBeNull();
+
+    await w.call({ type: "switchBox", slot: 1 }, opened);
+    expect(w.indicators().at(-1)).toEqual([1, expect.objectContaining({ slot: 1, kind: "stay", name: "laptop" })]);
+  });
+
+  it("hands a kept indicator, with the owner's names, to nobody once the list is forgotten or its session ended", async () => {
+    // Forgotten (signed out) while the opened tab is still loading.
+    const w = loadWorker([DESK], { stored: list, listening: [1] });
+    await w.call({ type: "switchBox", slot: 3 });
+    const opened = w.active()!;
+    expect(Object.keys(w.session.linkedBoxIndicators as object)).toEqual([String(opened)]);
+    expect(await w.call({ type: "boxesRevoked" }, 1)).toEqual({ ok: true });
+    expect(w.session.linkedBoxIndicators).toEqual({});
+    expect(await w.call({ type: "pendingIndicator" }, opened)).toBeNull();
+
+    // The session that read the list ends before the tab asks (inside the 15 s a kept one lasts).
+    const e = loadWorker([DESK], { stored: { ...list, validUntil: Date.now() + 5_000 }, listening: [1] });
+    await e.call({ type: "switchBox", slot: 3 });
+    const tab = e.active()!;
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(await e.call({ type: "pendingIndicator" }, tab)).toBeNull();
+
+    // Forgotten while the send to the loading tab is still out: nothing is kept when it fails.
+    const s = loadWorker([DESK], { stored: list, listening: [1] });
+    const send = s.chrome.tabs.sendMessage.getMockImplementation()!;
+    let fail!: () => void;
+    s.chrome.tabs.sendMessage.mockImplementation(async (id: number, msg: { type: string }) => {
+      if (msg.type !== "boxIndicator" || id === 1) return send(id, msg);
+      await new Promise<void>((resolve) => { fail = resolve; });
+      throw new Error("Could not establish connection. Receiving end does not exist.");
+    });
+    const sending = s.call({ type: "switchBox", slot: 3 });
+    await vi.waitFor(() => expect(fail).toBeTypeOf("function"));
+    expect(await s.call({ type: "boxesRevoked" }, 1)).toEqual({ ok: true });
+    fail();
+    await sending;
+    expect(s.session.linkedBoxIndicators ?? {}).toEqual({});
+    expect(await s.call({ type: "pendingIndicator" }, s.active()!)).toBeNull();
+
+    // Inside both, it is handed over as it was drawn — nothing of the bookkeeping with it.
+    const ok = loadWorker([DESK], { stored: list, listening: [1] });
+    await ok.call({ type: "switchBox", slot: 3 });
+    expect(await ok.call({ type: "pendingIndicator" }, ok.active()!)).toEqual({ type: "boxIndicator", slot: 3, kind: "stay", name: "NAS", names: ["laptop", "Main", "NAS"] });
+  });
+
+  it("an empty slot says so on the tab the key was pressed on, and opens nothing", async () => {
+    const w = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { stored: list });
+    await w.call({ type: "switchBox", slot: 6 }, 2);
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(w.chrome.tabs.update).not.toHaveBeenCalled();
+    expect(w.indicators()).toEqual([[2, expect.objectContaining({ slot: 6, kind: "empty" })]]);
+    expect(await w.call({ type: "switchBox", slot: 10 }, 2)).toEqual({ ok: false, error: "no such slot" });
+  });
+
+  it("with no copy of the list yet, asks the desktop for it and keeps it", async () => {
+    const w = loadWorker([DESK], { desktopList: list });
+    await w.call({ type: "switchBox", slot: 2 });
+    expect(w.chrome.tabs.create).toHaveBeenCalledWith({ url: "https://main.example.com/", active: true });
+    expect(w.session.linkedBoxes).toEqual({ ...list, emptyText: "" });
+  });
+
+  it("says an empty slot in the box's own words when the desktop gave them", async () => {
+    const w = loadWorker([DESK], { stored: { ...list, emptyText: "Rien sur Ctrl+Shift+{n}." } });
+    await w.call({ type: "switchBox", slot: 7 }, 1);
+    expect(w.indicators()).toEqual([[1, expect.objectContaining({ slot: 7, kind: "empty", text: "Rien sur Ctrl+Shift+7." })]]);
+  });
+
+  it("never takes the kiosk's own desktop for a box of the list", async () => {
+    const w = loadWorker([DESK]);
+    await w.call({ type: "boxes", selfName: "laptop", boxes: [{ name: "Me", url: "http://localhost:3005/" }, list.boxes[0]] }, 1);
+    expect((w.session.linkedBoxes as { boxes: unknown[] }).boxes).toEqual([list.boxes[0]]);
+  });
+
+  it("keeps the owner's list no longer than their session: the kiosk's sign-in page or a refused read forgets it", async () => {
+    const w = loadWorker([{ id: 1, url: "http://localhost:3005/login" }, { id: 2, url: "https://main.example.com/" }], { stored: list });
+    // Not from a web page…
+    expect(await w.call({ type: "boxesRevoked" }, 2)).toEqual({ ok: false, error: "not from the desktop" });
+    expect(w.session.linkedBoxes).toEqual(list);
+    // …but from the kiosk's own /login.
+    expect(await w.call({ type: "boxesRevoked" }, 1)).toEqual({ ok: true });
+    expect(w.session.linkedBoxes).toBeUndefined();
+    expect(w.local.linkedBoxes).toBeUndefined();
+    await w.call({ type: "switchBox", slot: 2 }, 2);
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+
+    // The desktop asked for the list and the box refused it: nothing kept, nothing opened.
+    const r = loadWorker([DESK], { desktopList: { revoked: true } });
+    await r.call({ type: "switchBox", slot: 2 });
+    expect(r.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(r.session.linkedBoxes).toBeUndefined();
+  });
+
+  it("uses its copy of the list no longer than the session that read it", async () => {
+    // The session ran out with the desktop tab closed: neither /login nor a
+    // refused read ever told the worker.
+    const w = loadWorker([{ id: 2, url: "https://main.example.com/" }], { stored: { ...list, validUntil: Date.now() - 1 } });
+    await w.call({ type: "switchBox", slot: 3 }, 2);
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(w.session.linkedBoxes).toBeUndefined();
+    expect(w.indicators()).toEqual([[2, expect.objectContaining({ slot: 3, kind: "empty" })]]);
+
+    // A copy with no session end given is good for nothing past now, too.
+    const n = loadWorker([DESK]);
+    await n.call({ type: "boxes", selfName: "laptop", boxes: list.boxes }, 1);
+    expect((n.session.linkedBoxes as { validUntil: number }).validUntil).toBe(0);
+    await n.call({ type: "switchBox", slot: 2 }, 1);
+    expect(n.chrome.tabs.create).not.toHaveBeenCalled();
+
+    // Asked of the desktop, an answer with no session end, or one that comes
+    // back after it, opens and activates nothing either.
+    for (const answer of [{ selfName: "laptop", boxes: list.boxes }, { ...list, validUntil: Date.now() - 1 }]) {
+      const a = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { desktopList: answer });
+      await a.call({ type: "switchBox", slot: 2 }, 1);
+      expect(a.chrome.tabs.create).not.toHaveBeenCalled();
+      expect(a.chrome.tabs.update).not.toHaveBeenCalled();
+      expect(a.session.linkedBoxes).toBeUndefined();
+    }
+
+    // Still inside the session: used as it is, without asking the desktop.
+    const ok = loadWorker([DESK], { stored: list });
+    await ok.call({ type: "switchBox", slot: 2 });
+    expect(ok.chrome.tabs.create).toHaveBeenCalledWith({ url: "https://main.example.com/", active: true });
+  });
+
+  it("uses no desktop answer asked for before the list was forgotten, and opens nothing for it", async () => {
+    let answer!: (v: unknown) => void;
+    const w = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { ask: () => new Promise((resolve) => { answer = resolve; }) });
+    const switching = w.call({ type: "switchBox", slot: 2 }, 1);
+    await vi.waitFor(() => expect(answer).toBeTypeOf("function"));
+    // The owner signs out while the desktop is still reading the list.
+    expect(await w.call({ type: "boxesRevoked" }, 1)).toEqual({ ok: true });
+    answer(list);
+    expect(await switching).toEqual({ ok: true });
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(w.chrome.tabs.update).not.toHaveBeenCalled();
+    expect(w.session.linkedBoxes).toBeUndefined();
+    // Nothing of the owner's list reaches the indicator either.
+    expect(w.indicators()).toEqual([[1, expect.objectContaining({ slot: 2, kind: "empty", names: ["ClawBox"] })]]);
+  });
+
+  it("takes a newer list from the desktop over an older answer it was still waiting for", async () => {
+    let answer!: (v: unknown) => void;
+    const w = loadWorker([DESK], { ask: () => new Promise((resolve) => { answer = resolve; }) });
+    const switching = w.call({ type: "switchBox", slot: 2 }, 1);
+    await vi.waitFor(() => expect(answer).toBeTypeOf("function"));
+    const newer = { ...list, boxes: [list.boxes[1]] };
+    await w.call({ type: "boxes", ...newer }, 1);
+    answer(list);
+    await switching;
+    expect(w.chrome.tabs.create).toHaveBeenCalledWith({ url: "http://nas.example.net:3005/", active: true });
+    expect((w.session.linkedBoxes as { boxes: unknown[] }).boxes).toEqual(newer.boxes);
+
+    // A refusal, though, is applied whatever came in while it was out.
+    let refuse!: (v: unknown) => void;
+    const r = loadWorker([DESK], { ask: () => new Promise((resolve) => { refuse = resolve; }) });
+    const refused = r.call({ type: "switchBox", slot: 2 }, 1);
+    await vi.waitFor(() => expect(refuse).toBeTypeOf("function"));
+    await r.call({ type: "boxes", ...list }, 1);
+    refuse({ revoked: true });
+    await refused;
+    expect(r.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(r.session.linkedBoxes).toBeUndefined();
+  });
+
+  it("opens and activates no box when the list is forgotten while the switch is under way", async () => {
+    const w = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { stored: list });
+    const query = w.chrome.tabs.query.getMockImplementation()!;
+    let release!: () => void;
+    // Hold the switch at its look for the box's tab.
+    w.chrome.tabs.query.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return query();
+    });
+    const switching = w.call({ type: "switchBox", slot: 2 }, 1);
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    expect(await w.call({ type: "boxesRevoked" }, 1)).toEqual({ ok: true });
+    release();
+    expect(await switching).toEqual({ ok: false, error: "the list was forgotten" });
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(w.chrome.tabs.update).not.toHaveBeenCalled();
+    expect(w.active()).toBe(1);
+  });
+
+  it("opens nothing, and sends the owner's names nowhere, once the session that read the list ends mid-switch", async () => {
+    const soon = { ...list, validUntil: Date.now() + 60_000 };
+
+    // The session ends while the switch looks up the box's tab: nothing opened or activated.
+    const w = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { stored: soon });
+    const query = w.chrome.tabs.query.getMockImplementation()!;
+    let release!: () => void;
+    w.chrome.tabs.query.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return query();
+    });
+    const switching = w.call({ type: "switchBox", slot: 2 }, 1);
+    await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+    await vi.advanceTimersByTimeAsync(61_000);
+    release();
+    expect(await switching).toEqual({ ok: false, error: "the list was forgotten" });
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+    expect(w.chrome.tabs.update).not.toHaveBeenCalled();
+
+    // It ends after the tab was brought up but before the indicator: no names go out.
+    const n = loadWorker([DESK, { id: 2, url: "https://main.example.com/" }], { stored: { ...list, validUntil: Date.now() + 60_000 } });
+    const set = n.chrome.storage.session.set.getMockImplementation()!;
+    let go!: () => void;
+    // Hold the switch where it records the box's tab, just before the indicator.
+    n.chrome.storage.session.set.mockImplementationOnce(async (items: Record<string, unknown>) => {
+      await new Promise<void>((resolve) => { go = resolve; });
+      return set(items);
+    });
+    const late = n.call({ type: "switchBox", slot: 2 }, 1);
+    await vi.waitFor(() => expect(go).toBeTypeOf("function"));
+    expect(n.active()).toBe(2);
+    await vi.advanceTimersByTimeAsync(61_000);
+    go();
+    expect(await late).toEqual({ ok: false, error: "the list was forgotten" });
+    expect(n.indicators()).toEqual([]);
+    expect(await n.call({ type: "pendingIndicator" }, 2)).toBeNull();
+  });
+
+  it("waits for a desktop that never answers no longer than its deadline; home does not wait for it", async () => {
+    const w = loadWorker([{ ...DESK, active: false }, { id: 2, url: "https://main.example.com/", active: true }], { ask: () => new Promise(() => {}) });
+    const two = w.call({ type: "switchBox", slot: 2 }, 2);
+    const one = w.call({ type: "switchBox", slot: 1 }, 2);
+    await flushMicrotasks();
+    // Ctrl+Shift+1 waits behind Ctrl+Shift+2, whose ask has not answered yet…
+    expect(w.active()).toBe(2);
+    // …until the deadline: then 2 goes on with no list, and 1 goes home at once.
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(await two).toEqual({ ok: true });
+    expect(w.chrome.tabs.create).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(w.active()).toBe(1));
+    // Its indicator, which needs the list, waits for the deadline in turn.
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(await one).toEqual({ ok: true });
+    expect(w.indicators().at(-1)).toEqual([1, expect.objectContaining({ slot: 1, kind: "stay" })]);
+  });
+
+  it("runs quick presses one after the other: one tab per box, the last key wins", async () => {
+    const w = loadWorker([DESK], { stored: list });
+    await Promise.all([w.call({ type: "switchBox", slot: 2 }), w.call({ type: "switchBox", slot: 2 })]);
+    expect(w.chrome.tabs.create).toHaveBeenCalledTimes(1);
+    await Promise.all([w.call({ type: "switchBox", slot: 2 }), w.call({ type: "switchBox", slot: 1 })]);
+    expect(w.active()).toBe(1);
+  });
+
+  it("keeps the session maps whole under quick presses", async () => {
+    const w = loadWorker([DESK], { stored: list, listening: [1] });
+    await Promise.all([w.call({ type: "switchBox", slot: 2 }), w.call({ type: "switchBox", slot: 3 })]);
+    const opened = w.tabs().filter((t) => t.id !== 1).map((t) => t.id);
+    expect(opened).toHaveLength(2);
+    // Both tabs' indicators were kept, neither lost to the other's write.
+    for (const id of opened) expect(await w.call({ type: "pendingIndicator" }, id)).toMatchObject({ type: "boxIndicator" });
+  });
+
+  it("takes the list from the kiosk's own desktop only, rebuilt from its rules", async () => {
+    const w = loadWorker([DESK, { id: 2, url: "https://evil.example/" }]);
+    expect(await w.call({ type: "boxes", selfName: "x", boxes: [{ name: "Evil", url: "https://evil.example/" }] }, 2))
+      .toEqual({ ok: false, error: "not from the desktop" });
+    expect(w.session.linkedBoxes).toBeUndefined();
+    await w.call({
+      type: "boxes",
+      selfName: "laptop",
+      boxes: [
+        { name: "Main", url: "https://main.example.com/login" },
+        { name: "Script", url: "javascript:alert(1)" },
+        { name: "Creds", url: "https://user:pw@nas.example.net/" },
+        { name: "Again", url: "https://main.example.com/" },
+        { name: "", url: "https://blank.example/" },
+        ...Array.from({ length: 10 }, (_, i) => ({ name: `B${i}`, url: `https://b${i}.example/` })),
+      ],
+    }, 1);
+    const kept = w.session.linkedBoxes as { selfName: string; boxes: { name: string; url: string }[] };
+    expect(kept.selfName).toBe("laptop");
+    expect(kept.boxes[0]).toEqual({ name: "Main", url: "https://main.example.com/" });
+    expect(kept.boxes).toHaveLength(8);
+    expect(kept.boxes.map((b) => b.name)).not.toEqual(expect.arrayContaining(["Script", "Creds", "Again", ""]));
+  });
+
+  describe("the kiosk's monitors for a linked box's page (TASK-2771)", () => {
+    const LINKED = { id: 2, url: "https://main.example.com/" };
+    // What the kiosk's own box answers the owner: ids with make, model and serial, modes, brightness…
+    const boxAnswer = () => ({
+      available: true,
+      main: "AOC|Q27B3MA|SERIAL-1",
+      box: { width: 3840, height: 1080 },
+      mirror: false,
+      pending: { deadline: 1 },
+      order: ["AOC|Q27B3MA|SERIAL-1", "DEL|U2415|SERIAL-2"],
+      monitors: [
+        { id: "AOC|Q27B3MA|SERIAL-1", name: "DP-1", label: "AOC Q27B3MA", enabled: true, builtIn: false, rect: { x: 0, y: 0, width: 1920, height: 1080 }, modes: [{ width: 1920, height: 1080, refresh: 60 }], physicalSize: { width: 600, height: 340 } },
+        { id: "DEL|U2415|SERIAL-2", name: "HDMI-A-1", label: "DEL U2415", enabled: true, rect: { x: 1920, y: 0, width: 1920, height: 1080 }, current: { width: 1920, height: 1080, refresh: 60 } },
+        { id: "LG|OFF|SERIAL-3", name: "DP-2", label: "LG Off", enabled: false, rect: null },
+      ],
+    });
+    const cleaned = {
+      available: true,
+      main: "DP-1",
+      box: { width: 3840, height: 1080 },
+      monitors: [
+        { id: "DP-1", enabled: true, rect: { x: 0, y: 0, width: 1920, height: 1080 } },
+        { id: "HDMI-A-1", enabled: true, rect: { x: 1920, y: 0, width: 1920, height: 1080 } },
+      ],
+      mirror: false,
+    };
+    const asksDesktop = (w: ReturnType<typeof loadWorker>) => w.chrome.tabs.sendMessage.mock.calls.filter(([, m]) => (m as { type: string }).type === "readMonitors");
+
+    it("asks the kiosk's own desktop for its monitors and hands a linked box's page the geometry only", async () => {
+      const w = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: boxAnswer });
+      const answer = await w.call({ type: "viewerScreens" }, 2);
+      expect(answer).toEqual({ ok: true, screens: cleaned });
+      expect(asksDesktop(w)).toHaveLength(1);
+      expect(asksDesktop(w)[0][0]).toBe(1);
+      // No make, model or serial, no modes, no sizes: nothing the geometry does not need.
+      expect(JSON.stringify(answer)).not.toMatch(/SERIAL|AOC|Q27B3MA|label|modes|physical|pending|order/);
+    });
+
+    it("hands over what the page accepts: through the page's own reading, the kiosk's two monitors come out as two screens", async () => {
+      const w = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: boxAnswer });
+      const { screens } = (await w.call({ type: "viewerScreens" }, 2)) as { screens: unknown };
+      const read = parseViewerScreens(JSON.stringify(screens));
+      expect(read).toMatchObject({ available: true, main: "DP-1" });
+      expect(screensFromStatus(read ?? null, 3840, 1080)?.map((m) => [m.id, m.main, m.x, m.width])).toEqual([["DP-1", true, 0, 1920], ["HDMI-A-1", false, 1920, 1920]]);
+      // A kiosk with no layout is no layout for the page too, never "no mark".
+      const none = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => ({ available: false }) });
+      const { screens: off } = (await none.call({ type: "viewerScreens" }, 2)) as { screens: unknown };
+      expect(parseViewerScreens(JSON.stringify(off))).toBeNull();
+    });
+
+    it("keeps a built-in panel's mark, drops a monitor that is off, and says a session with nothing on has no layout", async () => {
+      const built = boxAnswer();
+      (built.monitors[0] as { builtIn?: boolean }).builtIn = true;
+      const w = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => built });
+      expect(await w.call({ type: "viewerScreens" }, 2)).toMatchObject({ ok: true, screens: { monitors: [expect.objectContaining({ id: "DP-1", builtIn: true }), expect.objectContaining({ id: "HDMI-A-1" })] } });
+      const none = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => ({ ...boxAnswer(), monitors: [{ id: "x", name: "DP-9", enabled: false, rect: null }] }) });
+      expect(await none.call({ type: "viewerScreens" }, 2)).toEqual({ ok: true, screens: { available: false } });
+      const noSession = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => ({ available: false, monitors: [] }) });
+      expect(await noSession.call({ type: "viewerScreens" }, 2)).toEqual({ ok: true, screens: { available: false } });
+    });
+
+    it("uses the connector name for a monitor's id, or its place in the row when there is none, and keeps ids apart", async () => {
+      const odd = boxAnswer();
+      (odd.monitors[0] as { name?: unknown }).name = "has a space";
+      (odd.monitors[1] as { name?: unknown }).name = 7;
+      const w = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => odd });
+      const { screens } = (await w.call({ type: "viewerScreens" }, 2)) as { screens: { main: string; monitors: { id: string }[] } };
+      expect(screens.monitors.map((m) => m.id)).toEqual(["monitor-1", "monitor-2"]);
+      expect(screens.main).toBe("monitor-1");
+      const twin = boxAnswer();
+      (twin.monitors[1] as { name?: string }).name = "DP-1";
+      const t = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => twin });
+      expect(((await t.call({ type: "viewerScreens" }, 2)) as { screens: { monitors: unknown[] } }).screens.monitors).toHaveLength(1);
+    });
+
+    it("answers nothing for a monitor list it cannot trust: sizes, places and boxes that are not plain numbers", async () => {
+      const bad: Array<(a: ReturnType<typeof boxAnswer>) => unknown> = [
+        () => null,
+        () => "available",
+        (a) => ({ ...a, box: { width: 0, height: 1080 } }),
+        (a) => ({ ...a, box: { width: 3840, height: Infinity } }),
+        (a) => ({ ...a, box: { width: 1e9, height: 1080 } }),
+        (a) => ({ ...a, box: null }),
+        (a) => ({ ...a, monitors: "none" }),
+        (a) => ({ ...a, available: "yes" }),
+      ];
+      for (const make of bad) {
+        const w = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => make(boxAnswer()) });
+        expect(await w.call({ type: "viewerScreens" }, 2)).toEqual({ ok: true });
+      }
+      // One monitor with a rect that is not a rect is left out of the row.
+      const skewed = boxAnswer();
+      (skewed.monitors[1] as { rect: unknown }).rect = { x: "1920", y: 0, width: 1920, height: NaN };
+      const w = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => skewed });
+      expect(((await w.call({ type: "viewerScreens" }, 2)) as { screens: { monitors: unknown[] } }).screens.monitors).toHaveLength(1);
+    });
+
+    it("answers a page that is not on the origin of one of the owner's linked boxes nothing — and never reads the monitors for it", async () => {
+      const w = loadWorker([DESK, LINKED, { id: 3, url: "https://evil.example.org/" }, { id: 4, url: "http://localhost:3005/app/x" }, { id: 5, url: "http://localhost:3005/login" }], { stored: list, screensOn: true, monitors: boxAnswer });
+      for (const id of [3, 4, 5, 6]) expect(await w.call({ type: "viewerScreens" }, id), String(id)).toMatchObject({ ok: false });
+      expect(asksDesktop(w)).toEqual([]);
+      // The address Chrome gives for the frame decides, not the tab's.
+      expect(await w.call({ type: "viewerScreens" }, 2, { url: "https://evil.example.org/" })).toMatchObject({ ok: false });
+      expect(asksDesktop(w)).toEqual([]);
+      // Another port is another origin.
+      const other = loadWorker([DESK, { id: 2, url: "https://main.example.com:8443/" }], { stored: list, screensOn: true, monitors: boxAnswer });
+      expect(await other.call({ type: "viewerScreens" }, 2)).toMatchObject({ ok: false });
+      expect(asksDesktop(other)).toEqual([]);
+    });
+
+    it("answers nothing while the experiment's second switch is off, or the owner's list is gone or out of date", async () => {
+      const off = loadWorker([DESK, LINKED], { stored: list, monitors: boxAnswer });
+      expect(await off.call({ type: "viewerScreens" }, 2)).toMatchObject({ ok: false });
+      const noList = loadWorker([DESK, LINKED], { screensOn: true, monitors: boxAnswer });
+      expect(await noList.call({ type: "viewerScreens" }, 2)).toMatchObject({ ok: false });
+      const old = loadWorker([DESK, LINKED], { stored: { ...list, validUntil: Date.now() - 1 }, screensOn: true, monitors: boxAnswer });
+      expect(await old.call({ type: "viewerScreens" }, 2)).toMatchObject({ ok: false });
+      for (const w of [off, noList, old]) expect(asksDesktop(w)).toEqual([]);
+    });
+
+    it("answers nothing when the list is forgotten, or its session ends, while the desktop is reading", async () => {
+      let release: (v: unknown) => void = () => {};
+      const w = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => new Promise((resolve) => { release = resolve; }) });
+      const pending = w.call({ type: "viewerScreens" }, 2);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await w.call({ type: "boxesRevoked" }, 1)).toEqual({ ok: true });
+      release(boxAnswer());
+      expect(await pending).toMatchObject({ ok: false });
+
+      const e = loadWorker([DESK, LINKED], { stored: { ...list, validUntil: Date.now() + 1_000 }, screensOn: true, monitors: () => new Promise((resolve) => { release = resolve; }) });
+      const ending = e.call({ type: "viewerScreens" }, 2);
+      await vi.advanceTimersByTimeAsync(2_000);
+      release(boxAnswer());
+      expect(await ending).toMatchObject({ ok: false });
+    });
+
+    it("answers nothing when this box is taken off the list while the desktop is reading", async () => {
+      let release: (v: unknown) => void = () => {};
+      const w = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => new Promise((resolve) => { release = resolve; }) });
+      const pending = w.call({ type: "viewerScreens" }, 2);
+      await vi.advanceTimersByTimeAsync(0);
+      // Settings saved a list without it; the desktop hands the worker the new one.
+      await w.call({ type: "boxes", selfName: "laptop", boxes: [{ name: "NAS", url: "http://nas.example.net:3005/" }], validUntil: Date.now() + 3_600_000 }, 1);
+      release(boxAnswer());
+      expect(await pending).toMatchObject({ ok: false });
+    });
+
+    it("says nothing about the monitors when the desktop tab is gone or does not answer in time", async () => {
+      const gone = loadWorker([LINKED], { stored: list, screensOn: true, monitors: boxAnswer });
+      expect(await gone.call({ type: "viewerScreens" }, 2)).toEqual({ ok: true });
+      const deaf = loadWorker([DESK, LINKED], { stored: list, screensOn: true, listening: [2] });
+      expect(await deaf.call({ type: "viewerScreens" }, 2)).toEqual({ ok: true });
+      const slow = loadWorker([DESK, LINKED], { stored: list, screensOn: true, monitors: () => new Promise(() => {}) });
+      const pending = slow.call({ type: "viewerScreens" }, 2);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(await pending).toEqual({ ok: true });
+    });
   });
 });

@@ -80,6 +80,12 @@ export interface HarnessCapabilities {
    */
   readonly reasoningScope: "session" | "per-turn";
   readonly canAttachImages: boolean;
+  /**
+   * The chat model cannot see an attached picture itself and must look at it
+   * through a tool (OpenClaw's `view_image`); the turn says so beside the
+   * picture. Absent is "it sees, or this harness routes pictures itself".
+   */
+  readonly picturesViaTool?: boolean;
   readonly canAttachDocuments: boolean;
   readonly maxAttachmentsPerTurn: number;
   /** The composer's microphone. */
@@ -265,6 +271,12 @@ export interface TurnRequest {
   readonly model?: string;
   readonly reasoning?: string;
   readonly signal?: AbortSignal;
+  /**
+   * The conversation the turn goes to; the link's current one when absent. A
+   * send retried after the owner moved to another conversation (a gateway
+   * still starting refuses it) must still reach the one it was typed in.
+   */
+  readonly sessionKey?: string;
 }
 
 /**
@@ -352,6 +364,8 @@ export interface TurnResult {
   readonly media?: readonly string[];
   /** Spoken-reply refs, kept apart from pictures — different affordances. */
   readonly audio?: readonly string[];
+  /** Download refs for every other file the reply named (a document, a zip), or absent. */
+  readonly files?: readonly string[];
   /**
    * The model's internal monologue for this turn, SEPARATE from `text`.
    *

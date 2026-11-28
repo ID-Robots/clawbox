@@ -408,6 +408,30 @@ describe("golden questions: the nightly score", () => {
     expect(Object.keys(readLatestVerdicts())).toHaveLength(judged);
   });
 
+  it("leaves the questions the local-only AI lock stopped their turn, like a spent allowance (TASK-2501)", async () => {
+    await seedPages();
+    for (let i = 0; i < 18; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    const answering = createStubFlashClient();
+    let calls = 0;
+    const lockedHalfway: FlashClient = {
+      model: answering.model,
+      async complete(req) {
+        calls++;
+        if (calls > 1) throw new FlashCallError("no_engine", "Local-only AI is on.");
+        return answering.complete(req);
+      },
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000f4", client: lockedHalfway, online: true, now: () => NOW });
+    expect(calls).toBe(2);
+    const judged = r.tally.asked;
+    expect(judged).toBeGreaterThan(0);
+    expect(judged).toBeLessThan(18);
+    expect(r.tally.failed).toBe(0);
+    expect(r.notes.join(" ")).toMatch(new RegExp(`The ${18 - judged} question\\(s\\) not judged wait for a night the lock is off`));
+    // Only the judged questions were stored: the others keep their turn.
+    expect(Object.keys(readLatestVerdicts())).toHaveLength(judged);
+  });
+
   it("stores no score when no call judged anything, and stops after two calls in a row the provider failed", async () => {
     await seedPages();
     for (let i = 0; i < 18; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });

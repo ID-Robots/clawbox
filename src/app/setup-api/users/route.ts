@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
+import { recordAudit } from "@/lib/audit-log";
 import { getSystemUsername } from "@/lib/auth";
 import { UserAdminError, createUser, listUsers, removeUser, userHelperAvailable } from "@/lib/clawbox-users";
 import { rootStepRepairCommand } from "@/lib/root-step-runner";
 import { isolateUserChats } from "@/lib/user-chats";
+import { syncStaffAgents } from "@/lib/org-staff-agents";
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { sessionIdentity } from "@/lib/route-auth";
+import { forgetChatRequests } from "@/lib/user-limits";
 
 export const dynamic = "force-dynamic";
 
@@ -82,11 +85,17 @@ export async function POST(request: Request) {
   }
   try {
     const created = await createUser(body?.username, body?.password);
+    await recordAudit({ event: "user_create", actor: (await sessionIdentity(request))?.username ?? null, target: created.username }, request);
     // The box now has more than one person: keep the assistant's own session
-    // tools to each person's conversations (src/lib/user-chats.ts). Not
-    // awaited — the account exists either way, and the native config write
-    // can take a few seconds when the gateway is not up to take it.
-    void isolateUserChats();
+    // tools to each person's conversations (src/lib/user-chats.ts). Awaited
+    // (it never throws): the config write makes OpenClaw 2026.11.3 reload, and
+    // a reload that lands during a turn retires that turn's skills ("Skills
+    // discovery was retired before publication") — so it lands before the new
+    // person can send one. A box already narrowed writes nothing.
+    await isolateUserChats();
+    // On an organisation box the new member of staff gets their own agent
+    // (src/lib/org-staff-agents.ts); a home box's sync changes nothing.
+    void syncStaffAgents();
     return NextResponse.json(
       { user: { username: created.username, createdAt: created.createdAt }, ...(await listing(request)) },
       { status: 201 },
@@ -111,6 +120,9 @@ export async function DELETE(request: Request) {
   try {
     const me = await sessionIdentity(request);
     await removeUser(body.username, { currentUser: me?.username ?? getSystemUsername() });
+    await recordAudit({ event: "user_remove", actor: me?.username ?? null, target: body.username }, request);
+    // A name created again later starts with no chat turns counted against it.
+    forgetChatRequests(body.username);
     return NextResponse.json({ removed: body.username, ...(await listing(request)) });
   } catch (err) {
     return refusal(err);

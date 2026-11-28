@@ -40,7 +40,8 @@ async function fakeProbes(answer: (path: string, attempt: number) => number): Pr
   return (probeServer!.address() as AddressInfo).port;
 }
 
-async function fakeGateway(handler: (method: string, params: Record<string, unknown>) => { ok: boolean; payload?: unknown; error?: unknown }): Promise<number> {
+/** A handler answering `null` sends nothing back: a gateway that never answers the call. */
+async function fakeGateway(handler: (method: string, params: Record<string, unknown>) => { ok: boolean; payload?: unknown; error?: unknown } | null): Promise<number> {
   server = new WebSocketServer({ port: 0, host: "127.0.0.1" });
   await new Promise<void>((r) => server!.once("listening", () => r()));
   server.on("connection", (ws: WebSocket) => {
@@ -58,6 +59,7 @@ async function fakeGateway(handler: (method: string, params: Record<string, unkn
       }
       seen.push({ method: f.method, params: f.params });
       const r = handler(f.method, f.params ?? {});
+      if (!r) return;
       ws.send(JSON.stringify(r.ok ? { type: "res", id: f.id, ok: true, payload: r.payload } : { type: "res", id: f.id, ok: false, error: r.error }));
     });
   });
@@ -112,6 +114,55 @@ describe("gatewayWsCall", () => {
     const proxy = await import("@/lib/gateway-proxy");
     vi.mocked(proxy.getGatewayToken).mockResolvedValueOnce("wrong");
     await expect(lib.gatewayWsCall("sessions.list", {})).rejects.toMatchObject({ name: "GatewayWsUnavailableError", message: "bad token" });
+  });
+
+  // The pinned CLI checks `hello.features.capabilities` before it sends a
+  // request whose fields an older gateway would not understand
+  // (`requiredCapabilities: ["published-model-catalog"]` on `models.list`).
+  // A gateway without it is one the CLI path has to answer for.
+  it("is unavailable, and sends nothing, when the hello lacks a required capability", async () => {
+    helloExtra = { features: { capabilities: ["model-catalog-snapshot"] } };
+    const port = await fakeGateway(() => ({ ok: true, payload: { models: [] } }));
+    await load(port);
+    await expect(lib.gatewayWsCall("models.list", { view: "all" }, { requiredCapabilities: ["published-model-catalog"] }))
+      .rejects.toMatchObject({ name: "GatewayWsUnavailableError", message: "gateway does not advertise published-model-catalog" });
+    expect(seen.map((s) => s.method)).toEqual(["connect"]);
+
+    // A hello with no features at all is the same answer.
+    helloExtra = {};
+    seen = [];
+    await expect(lib.gatewayWsCall("models.list", {}, { requiredCapabilities: ["published-model-catalog"] }))
+      .rejects.toMatchObject({ name: "GatewayWsUnavailableError" });
+    expect(seen.map((s) => s.method)).toEqual(["connect"]);
+  });
+
+  it("sends the request when the hello advertises every required capability", async () => {
+    helloExtra = { features: { capabilities: [" published-model-catalog ", "model-catalog-snapshot"] } };
+    const port = await fakeGateway((method) => (method === "models.list" ? { ok: true, payload: { models: [] } } : { ok: false, error: { code: "NOT_FOUND" } }));
+    await load(port);
+    await expect(lib.gatewayWsCall("models.list", { view: "all" }, { requiredCapabilities: ["published-model-catalog"] }))
+      .resolves.toEqual({ models: [] });
+    expect(seen.map((s) => s.method)).toEqual(["connect", "models.list"]);
+  });
+
+  it("checks no capability for a caller that names none, as before", async () => {
+    const port = await fakeGateway(() => ({ ok: true, payload: { ok: true } }));
+    await load(port);
+    await expect(lib.gatewayWsCall("sessions.list", {})).resolves.toEqual({ ok: true });
+    expect(seen.map((s) => s.method)).toEqual(["connect", "sessions.list"]);
+  });
+
+  // A call the gateway accepted and never answered is NOT a gateway that is
+  // down: the CLI would ask the same slow gateway again. Its own class, so a
+  // caller can tell it from any other throw — and not a subclass of the
+  // unavailable one, so `callGatewayRpc` still does not fall back on it.
+  it("rejects a call that is never answered with its own timeout error, same message as before", async () => {
+    const port = await fakeGateway(() => null);
+    await load(port);
+    const err = await lib.gatewayWsCall("models.list", {}, { timeoutMs: 50 }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ name: "GatewayWsCallTimeoutError", message: "models.list timed out after 50ms" });
+    expect(err).toBeInstanceOf(lib.GatewayWsCallTimeoutError);
+    expect(err).not.toBeInstanceOf(lib.GatewayWsUnavailableError);
   });
 });
 

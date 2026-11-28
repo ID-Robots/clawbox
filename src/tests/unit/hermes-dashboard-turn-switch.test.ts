@@ -361,7 +361,7 @@ describe("carrying the picked model onto a conversation already in progress", ()
     // fallback that cannot resume the conversation (`permission_denied`).
     const { turn, socket } = await connect(
       { sessionId: "20261104_090334_5e1f0a", model: "deepseek-v4-flash", provider: "clawai" },
-      { model: "deepseek-v4-pro", provider: "custom" },
+      { model: "deepseek-v5", provider: "custom" },
       "noted",
     );
     expect(socket.method("slash.exec")).toBeDefined();
@@ -377,10 +377,10 @@ describe("carrying the picked model onto a conversation already in progress", ()
     // running; the conversation's own model is what answers.
     const { turn } = await connect(
       { sessionId: "20261104_090334_5e1f0a", model: "deepseek-v4-flash", provider: "clawai" },
-      { model: "deepseek-v4-pro", provider: "custom" },
+      { model: "deepseek-v5", provider: "custom" },
       "confirm",
     );
-    expect(turn?.model).toBe("deepseek-v4-pro");
+    expect(turn?.model).toBe("deepseek-v5");
     expect(turn?.refusedModel).toBe("deepseek-v4-flash");
   });
 

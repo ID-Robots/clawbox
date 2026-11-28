@@ -1,6 +1,7 @@
 import { readFileSync } from "fs";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { answerJournalctl, numberedEntries, type JournalctlGeneration } from "@/tests/helpers/journalctl-model";
 
 /**
  * `watchRootStepProgress` — what a long root step is DOING, for a label that
@@ -41,7 +42,11 @@ const JOURNAL = [
   "  Installing Kokoro TTS...",
   "WARNING: Defaulting repo_id to hexgrad/Kokoro-82M.",
   "  Building CTranslate2 with CUDA for sm_87...",
-].join("\n");
+];
+
+/** journalctl over `entries`, answered by what each read asked for (helpers/journalctl-model.ts). */
+const journal = (entries: readonly string[], generation: JournalctlGeneration = 249) =>
+  (_cmd: string, args: string[]) => answerJournalctl(entries, args, generation);
 
 async function load() {
   const mod = await import("@/lib/root-step-follow");
@@ -96,7 +101,7 @@ describe("install.sh's side of the contract", () => {
 
 describe("watchRootStepProgress", () => {
   it("reports the installer's own headline, not the tool output under it", async () => {
-    execFileMock.mockReturnValue({ stdout: JOURNAL });
+    execFileMock.mockImplementation(journal(JOURNAL));
     const watch = await load();
     const seen: string[] = [];
     const stop = watch("post_update", 1_000, (h) => seen.push(h));
@@ -110,8 +115,26 @@ describe("watchRootStepProgress", () => {
     expect(seen.join(" ")).not.toContain("Installing collected packages");
   });
 
+  it.each([249, 255] as const)("follows a run longer than its window to its NEWEST headline (journalctl %i)", async (generation) => {
+    // On systemd up to 253 `--since T -n 60` is the run's FIRST 60 entries:
+    // the headline froze on the first sub-phase for the rest of the step.
+    execFileMock.mockImplementation(journal([
+      "  Installing CUDA-enabled PyTorch for Jetson (~300 MB)...",
+      ...numberedEntries(88, (i) => `Collecting wheel ${i} of 88`),
+      "  Building CTranslate2 with CUDA for sm_87...",
+      ...numberedEntries(10, (i) => `[${i}/10] cc1plus: compiling translator.cc`),
+    ], generation));
+    const watch = await load();
+    const seen: string[] = [];
+    const stop = watch("post_update", 1_000, (h) => seen.push(h));
+    await vi.advanceTimersByTimeAsync(0);
+    stop();
+
+    expect(seen).toEqual(["Building CTranslate2 with CUDA for sm_87..."]);
+  });
+
   it("reads only THIS run of the step", async () => {
-    execFileMock.mockReturnValue({ stdout: JOURNAL });
+    execFileMock.mockImplementation(journal(JOURNAL));
     const watch = await load();
     const stop = watch("post_update", 4_242, () => {});
     await vi.advanceTimersByTimeAsync(0);
@@ -152,7 +175,7 @@ describe("watchRootStepProgress", () => {
   });
 
   it("does not let a throwing listener end the watch", async () => {
-    execFileMock.mockReturnValue({ stdout: JOURNAL });
+    execFileMock.mockImplementation(journal(JOURNAL));
     const watch = await load();
     const stop = watch("post_update", 1_000, () => { throw new Error("listener gone"); });
     await vi.advanceTimersByTimeAsync(0);

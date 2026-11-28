@@ -2,7 +2,7 @@
  * The run page's timeline (src/components/CodingRunTimeline.tsx).
  *
  * Its steps come from the runner, which writes them in English: a German
- * desktop read "Started with deepseek-v4-pro[1m]", "Thinking…" and "Automatic
+ * desktop read "Started with deepseek-v4-flash[1m]", "Thinking…" and "Automatic
  * review pass of run-gywqvpbg" between chips that were properly translated
  * ("Liest store.ts"). Each of those lines now carries a key
  * (coding-agent-progress.ts), and this pins that the card asks for the key and
@@ -46,7 +46,7 @@ vi.mock("@/lib/i18n", () => ({
 const { default: CodingRunTimeline } = await import("@/components/CodingRunTimeline");
 
 const LINES = [
-  RUNNER_STEP.started("deepseek-v4-pro[1m]"),
+  RUNNER_STEP.started("deepseek-v4-flash[1m]"),
   RUNNER_STEP.reviewPass("run-gywqvpbg"),
   RUNNER_STEP.thinking,
   RUNNER_STEP.dropped(41),
@@ -67,7 +67,7 @@ describe("CodingRunTimeline", () => {
     draw();
     const steps = screen.getAllByTestId("coding-agent-run-activity-step");
     const said = steps.map((s) => s.textContent ?? "");
-    expect(said[0]).toContain("Gestartet mit deepseek-v4-pro[1m]");
+    expect(said[0]).toContain("Gestartet mit deepseek-v4-flash[1m]");
     expect(said[1]).toContain("Automatische Überprüfung von run-gywqvpbg");
     expect(said[2]).toContain("Denkt nach …");
     expect(said[3]).toContain("41 frühere Schritte sind nicht aufbewahrt");
@@ -88,7 +88,7 @@ describe("CodingRunTimeline", () => {
     pack = { "codingAgent.timelineTitle": "Zeitleiste" };
     draw();
     const all = screen.getAllByTestId("coding-agent-run-activity-step").map((s) => s.textContent ?? "").join(" ");
-    expect(all).toContain("Started with deepseek-v4-pro[1m]");
+    expect(all).toContain("Started with deepseek-v4-flash[1m]");
     expect(all).toContain("Automatic review pass of run-gywqvpbg");
     expect(all).toContain("Finished: completed");
     expect(all).not.toContain("codingAgent.step");
@@ -99,10 +99,10 @@ describe("CodingRunTimeline", () => {
     draw();
     const step = screen.getAllByTestId("coding-agent-run-activity-step")[0];
     fireEvent.click(step);
-    expect(step.textContent).toContain("Gestartet mit deepseek-v4-pro[1m]");
+    expect(step.textContent).toContain("Gestartet mit deepseek-v4-flash[1m]");
     expect(step.textContent).not.toContain("Started with");
     const detail = screen.getByTestId("coding-agent-run-activity-detail");
-    expect(within(detail).getByText(RUNNER_STEP.started("deepseek-v4-pro[1m]"))).toBeTruthy();
+    expect(within(detail).getByText(RUNNER_STEP.started("deepseek-v4-flash[1m]"))).toBeTruthy();
   });
 
   /**
@@ -197,8 +197,8 @@ describe("the model a run started with, and its account", () => {
 
   it("says no more than the line on a record from before the account was kept", () => {
     pack = ON;
-    render(<CodingRunTimeline lines={[RUNNER_STEP.started("deepseek-v4-pro[1m]")]} live={false} />);
-    expect(first()).toContain("Gestartet mit deepseek-v4-pro[1m]");
+    render(<CodingRunTimeline lines={[RUNNER_STEP.started("deepseek-v4-flash[1m]")]} live={false} />);
+    expect(first()).toContain("Gestartet mit deepseek-v4-flash[1m]");
     expect(first()).not.toContain("bei");
   });
 });

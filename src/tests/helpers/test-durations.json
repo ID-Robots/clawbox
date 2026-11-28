@@ -159,7 +159,7 @@
   "src/tests/components/voice-output-panel.test.tsx": 1.7,
   "src/tests/components/whats-new-card.test.tsx": 1,
   "src/tests/components/wizard-model-picker.test.tsx": 3.4,
-  "src/tests/middleware/middleware.test.ts": 2,
+  "src/tests/proxy/proxy.test.ts": 2,
   "src/tests/routes/ai-models/catalog-deprecated-rows.test.ts": 1.1,
   "src/tests/routes/ai-models/catalog-empty-enumeration.test.ts": 1.4,
   "src/tests/routes/ai-models/catalog-forced-retry.test.ts": 3.1,

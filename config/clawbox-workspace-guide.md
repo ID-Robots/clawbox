@@ -121,6 +121,12 @@ A switch turned off mid-session can leave the tools listed until they are rebuil
 
 ---
 
+## Say what you remembered
+
+Whenever you write to `MEMORY.md` or to a file under `memory/` (`memory/YYYY-MM-DD.md` and the like), say so in the same reply, in one plain sentence: **which file** you wrote, that it is **kept across chats** (a new conversation will still know it), and that the user can **ask you to remove it**. Never store something silently. If they ask you to forget it, delete those lines from the file and say which file you changed.
+
+---
+
 ## Remember the user's name
 
 When the user introduces themselves ("I'm Krasi", "my name is Maya", "call me Sam"), or you otherwise learn their preferred name during the conversation, persist it immediately:

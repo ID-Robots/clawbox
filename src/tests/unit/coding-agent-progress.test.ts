@@ -210,7 +210,7 @@ describe("estimateRunProgress", () => {
  * The runner's own sentences.
  *
  * They reached the run page as the English the runner wrote — "Started with
- * deepseek-v4-pro[1m]", "Thinking…", "Automatic review pass of run-xyz" —
+ * deepseek-v4-flash[1m]", "Thinking…", "Automatic review pass of run-xyz" —
  * between chips that were properly translated. The only handle a surface has
  * on a line is its text, so the writer (RUNNER_STEP, used by coding-agent.ts)
  * and the reader (describeProgressLine) live in one module and are pinned
@@ -236,7 +236,7 @@ describe("the runner's own sentences are keyed", () => {
     [RUNNER_STEP.endedLeftovers, "endedLeftovers"],
     [RUNNER_STEP.ownerEndedLeftovers, "ownerEndedLeftovers"],
     [RUNNER_STEP.started(null), "started"],
-    [RUNNER_STEP.started("deepseek-v4-pro[1m]"), "startedWith"],
+    [RUNNER_STEP.started("deepseek-v4-flash[1m]"), "startedWith"],
     [RUNNER_STEP.reviewPass("run-gywqvpbg"), "reviewPass"],
     [RUNNER_STEP.startingFresh("run-abc"), "startingFresh"],
     [RUNNER_STEP.workingOnBranch("clawbox/run-1", "main"), "workingOnBranch"],
@@ -269,9 +269,9 @@ describe("the runner's own sentences are keyed", () => {
   });
 
   it("carries the values the translation needs, and keeps the English as the floor", () => {
-    const started = describeProgressLine(RUNNER_STEP.started("deepseek-v4-pro[1m]"));
-    expect(started.params).toEqual({ model: "deepseek-v4-pro[1m]" });
-    expect(started.label).toBe("Started with deepseek-v4-pro[1m]");
+    const started = describeProgressLine(RUNNER_STEP.started("deepseek-v4-flash[1m]"));
+    expect(started.params).toEqual({ model: "deepseek-v4-flash[1m]" });
+    expect(started.label).toBe("Started with deepseek-v4-flash[1m]");
     expect(describeProgressLine(RUNNER_STEP.reviewPass("run-abc")).params).toEqual({ id: "run-abc" });
     expect(describeProgressLine(RUNNER_STEP.committed("4f21ab9", true)).params).toEqual({ sha: "4f21ab9" });
     expect(describeProgressLine(RUNNER_STEP.pullRequestOpened(12, "beta")).params).toEqual({ number: 12, base: "beta" });

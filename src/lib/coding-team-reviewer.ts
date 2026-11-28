@@ -18,7 +18,7 @@
  * for once more, in the reviewer's own session (`REVIEWER_NUDGE`, TASK-1323).
  */
 
-import { TEAM_TASK_CHARS } from "@/lib/coding-agent";
+import { MAX_TASK_CHARS, TEAM_TASK_CHARS } from "@/lib/coding-agent";
 
 export interface Verdict {
   verdict: "accepted" | "rejected";
@@ -79,8 +79,17 @@ export const SHELL_REVIEWER_BRIEF = [
 export const MAX_NOTES_CHARS = 2_000;
 /** How many changed files the reviewer is told about by name; the rest are counted. */
 export const MAX_REVIEW_FILES = 40;
-/** How much of the goal the final reviewer is quoted; the board's digest takes the room after it. */
-const FINAL_GOAL_CHARS = 1_200;
+/**
+ * How much of the goal the final reviewer is quoted: ALL of it — a goal is at
+ * most MAX_TASK_CHARS as the route takes it, and the review of the merged
+ * result is the one judgement of "is the goal met" a team in review mode
+ * `final` gets. It was 1,200 characters: the reviewer of a 3,000-character
+ * goal wrote "the goal text was cut off at item 5, so I reviewed against the
+ * visible part" and accepted work it could not check against the other half
+ * (team-0pwzmnjs, 2026-11-09). The head and the board's digest
+ * (MAX_DIGEST_CHARS) still fit inside TEAM_TASK_CHARS with room to spare.
+ */
+export const FINAL_GOAL_CHARS = MAX_TASK_CHARS;
 
 /** Where a shell reviewer stands: its throwaway checkout, the branch it holds, and the project it was cut from. */
 export interface ReviewCheckout {

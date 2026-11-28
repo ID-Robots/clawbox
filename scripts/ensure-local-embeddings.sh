@@ -73,9 +73,31 @@ EMBED_PROVIDER="openai-compatible"
 EMBED_MODEL_DIR="${EMBED_MODEL_DIR:-/home/clawbox/clawbox/data/embed/models}"
 EMBED_HF_REPO="${EMBED_HF_REPO:-Qwen/Qwen3-Embedding-0.6B-GGUF}"
 EMBED_HF_FILE="${EMBED_HF_FILE:-Qwen3-Embedding-0.6B-Q8_0.gguf}"
-HF_BIN="${HF_BIN:-/home/clawbox/.local/bin/hf}"
+# Where the Hugging Face CLI is, when HF_BIN does not say. PATH first: pipx's
+# ~/.local/bin is only one of the places `hf` lands — apt, an active venv, a
+# pyenv shim and /usr/local/bin all put it elsewhere — and a home path that
+# holds nothing made the `-x` check below log "not installed" for a CLI this
+# shell could run. The home fallback stays for the appliance, whose PATH at
+# gateway start is systemd's bare default: nothing to find, and the WARN still
+# names the path to install into. An explicit HF_BIN wins over both.
+HF_BIN="${HF_BIN:-$(command -v hf 2>/dev/null || true)}"
+HF_BIN="${HF_BIN:-${HOME:-/home/clawbox}/.local/bin/hf}"
 LOCAL_AI_TOKEN_FILE="${LOCAL_AI_TOKEN_FILE:-/home/clawbox/clawbox/data/.local-ai-token}"
 EMBED_STATE_FILE="${EMBED_STATE_FILE:-/home/clawbox/clawbox/data/local-embeddings.state}"
+# WHICH model the unit serves (TASK-2411): the owner's pick in
+# data/config.json, through the same catalog the unit's start script reads
+# (scripts/embed-model-select.sh). This script must name exactly that model:
+# naming the 0.6B over a box set to the 4B would "repair" memory.search.model
+# at every gateway start and throw the index away each time. The default slot
+# (the 0.6B) keeps the EMBED_* values above.
+EMBED_SHA256=""
+EMBED_BYTES=""
+EMBED_SELECT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/embed-model-select.sh"
+if [ -f "$EMBED_SELECT_LIB" ]; then
+  # shellcheck source=scripts/embed-model-select.sh
+  . "$EMBED_SELECT_LIB"
+  embed_apply_selection "${CLAWBOX_CONFIG_JSON:-$(dirname "$EMBED_STATE_FILE")/config.json}"
+fi
 FLOCK_BIN="${FLOCK_BIN:-flock}"
 # Don't retry a failed ~640MB download on every gateway restart.
 EMBED_RETRY_SECONDS="${EMBED_RETRY_SECONDS:-21600}"
@@ -144,7 +166,7 @@ fi
 # Read straight from openclaw.json rather than `openclaw config get`: this runs
 # before/around the gateway and a CLI round-trip costs ~10s on a Jetson.
 read_path() {
-  python3 - "$OPENCLAW_CONFIG" "$1" <<'PY' 2>/dev/null || true
+  python3 -I - "$OPENCLAW_CONFIG" "$1" <<'PY' 2>/dev/null || true
 import json, sys
 try:
     node = json.load(open(sys.argv[1]))
@@ -285,9 +307,17 @@ if [ ! -f "$MODEL_PATH" ]; then
   state_write "$NOW" "$FAILURES"
   log "downloading $EMBED_HF_REPO/$EMBED_HF_FILE (local embeddings, no API key needed) — this can take a few minutes"
   mkdir -p "$EMBED_MODEL_DIR" 2>/dev/null || true
-  if ! "$HF_BIN" download "$EMBED_HF_REPO" "$EMBED_HF_FILE" --local-dir "$EMBED_MODEL_DIR" >/dev/null 2>&1; then
+  # Disk checked first, a partial file resumed by the CLI, and a file the
+  # catalog knows hashed before it is trusted (embed-model-select.sh).
+  FETCH_WHY=""
+  if declare -F embed_fetch_verified >/dev/null; then
+    FETCH_WHY="$(embed_fetch_verified "$HF_BIN" "$EMBED_HF_REPO" "$EMBED_HF_FILE" "$EMBED_MODEL_DIR" "$EMBED_BYTES" "$EMBED_SHA256")" || FETCH_WHY="${FETCH_WHY:-download failed}"
+  elif ! "$HF_BIN" download "$EMBED_HF_REPO" "$EMBED_HF_FILE" --local-dir "$EMBED_MODEL_DIR" >/dev/null 2>&1; then
+    FETCH_WHY="download failed"
+  fi
+  if [ -n "$FETCH_WHY" ]; then
     state_write "$NOW" "$((FAILURES + 1))"
-    log "WARN: could not download $EMBED_HF_FILE (attempt $((FAILURES + 1))); semantic memory stays on lexical FTS"
+    log "WARN: could not download $EMBED_HF_FILE (attempt $((FAILURES + 1)): $FETCH_WHY); semantic memory stays on lexical FTS"
     exit 0
   fi
   state_write "$NOW" 0
@@ -309,8 +339,17 @@ if [ "${#TOKEN}" -lt 16 ]; then
   log "no local-AI token at $LOCAL_AI_TOKEN_FILE yet (the web server writes it at first start) — trying again on the next gateway start"
   exit 0
 fi
+# The bearer reaches curl on its stdin, as a line of curl's own config format,
+# never as an argument: every local account can read a running process's
+# arguments. Inside the quotes curl turns \\ \" \n \r back into the bytes they
+# stand for, so it sends the very header the argument named, and the value is
+# left no quote to close early and no line break to start a second option.
+TOKEN_CFG=${TOKEN//\\/\\\\}
+TOKEN_CFG=${TOKEN_CFG//\"/\\\"}
+TOKEN_CFG=${TOKEN_CFG//$'\n'/\\n}
+TOKEN_CFG=${TOKEN_CFG//$'\r'/\\r}
 embed_ready() {
-  curl -fsS --max-time 200 -H "Authorization: Bearer $TOKEN" "$EMBED_PROXY_URL/models" >/dev/null 2>&1
+  printf 'header = "Authorization: Bearer %s"\n' "$TOKEN_CFG" 2>/dev/null | curl -fsS --max-time 200 -K - "$EMBED_PROXY_URL/models" >/dev/null 2>&1
 }
 # The budget is wall-clock, not a count of naps: one probe can itself hold the
 # line for its whole --max-time when the proxy accepts and then stalls, so

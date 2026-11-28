@@ -1,8 +1,10 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { getEmbedProvisioningStatus, EMBED_UNIT } from "@/lib/embed-server";
+import { getEmbedProvisioningStatus, readActiveLocalEmbeddingModel, EMBED_UNIT } from "@/lib/embed-server";
 import { readUnitState } from "@/lib/local-models";
+import { localEmbeddingModelOptions } from "@/lib/local-embedding-model";
+import { DEFAULT_LOCAL_EMBEDDING_MODEL_ID } from "@/lib/embed-runtime-ids";
 import { LOCAL_EMBEDDING_ENGINE, LOCAL_EMBEDDING_MODEL } from "@/lib/memory-shard-state";
 
 /**
@@ -20,10 +22,13 @@ export async function GET() {
   // OpenClaw's; ClawBox owns one on that edition too, so the embedder is real
   // on every box. The field stays in the shape — the wizard reads it, and an
   // older client would take its absence for `false`.
-  const [provisioning, unit] = await Promise.all([
+  const [provisioning, unit, active, models] = await Promise.all([
     getEmbedProvisioningStatus().catch(() => null),
     readUnitState(EMBED_UNIT, "system").catch(() => null),
+    readActiveLocalEmbeddingModel().catch(() => null),
+    localEmbeddingModelOptions().catch(() => []),
   ]);
+  const activeId = active?.id ?? DEFAULT_LOCAL_EMBEDDING_MODEL_ID;
   return NextResponse.json(
     {
       supported: true,
@@ -31,7 +36,13 @@ export async function GET() {
       binaryAvailable: !!provisioning?.binaryAvailable,
       modelAvailable: !!provisioning?.modelAvailable,
       modelBytes: provisioning?.modelBytes ?? null,
-      model: LOCAL_EMBEDDING_MODEL,
+      // The model the embedder runs (TASK-2411): the default slot's name as
+      // it always was, or the catalog id the owner picked.
+      model: activeId === DEFAULT_LOCAL_EMBEDDING_MODEL_ID ? LOCAL_EMBEDDING_MODEL : activeId,
+      modelId: activeId,
+      quant: active?.quant ?? null,
+      // Every catalog model, with whether this box can run it and why not.
+      models,
       engine: LOCAL_EMBEDDING_ENGINE,
       unit: {
         present: !!unit?.present,

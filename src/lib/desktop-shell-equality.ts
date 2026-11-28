@@ -16,8 +16,8 @@ export interface PairingRequestCard {
 /**
  * The same requests, in the same order, with everything the card draws — the
  * name, the id line and the code its buttons act on. The pairing poll answers
- * every 20 s, nearly always with what it answered last time (on a box with no
- * bot, an empty list every time).
+ * every 3 s with a bot and 20 s without, nearly always with what it answered
+ * last time (on a box with no bot, an empty list every time).
  */
 export function samePairingRequests(a: readonly PairingRequestCard[], b: readonly PairingRequestCard[]): boolean {
   if (a === b) return true;

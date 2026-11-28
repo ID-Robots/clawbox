@@ -19,6 +19,9 @@ beforeAll(async () => {
 beforeEach(async () => {
   // Clean config file before each test
   await fs.rm(CONFIG_PATH, { force: true });
+  // A good read wipes the slate an unreadable store is logged once against,
+  // so every case starts as a fresh process would.
+  await configStore.getKnown("any_key");
 });
 
 afterAll(async () => {
@@ -548,6 +551,19 @@ describe("config-store", () => {
       await expect(configStore.getKnown("present")).resolves.toEqual({ value: undefined, known: false });
     });
 
+    it("says known:false for a store that is there but cannot be read — only ENOENT is absent", async () => {
+      // A directory where the file should be: readFile fails with EISDIR, which
+      // the old existsSync test read as "no store" and answered `{}`.
+      await fs.mkdir(CONFIG_PATH, { recursive: true });
+      try {
+        await expect(configStore.getKnown("org_mode")).resolves.toEqual({ value: undefined, known: false });
+        // The forgiving read still answers its empty store, as it always has.
+        await expect(configStore.get("org_mode")).resolves.toBeUndefined();
+      } finally {
+        await fs.rm(CONFIG_PATH, { recursive: true, force: true });
+      }
+    });
+
     it("never logs a window of the file it failed to parse", async () => {
       // A SyntaxError from JSON.parse quotes a slice of its INPUT in its own
       // message, and the input here holds the mailbox password and both bot
@@ -569,6 +585,41 @@ describe("config-store", () => {
       // Not a single character of it, either: the quoted window is a substring.
       expect(said).not.toMatch(/s3cret|app-password/);
       expect(said).toContain("invalid JSON");
+    });
+  });
+
+  // The desktop's pairing poll reaches `getKnown` every 3 s on a
+  // licensed dual box, and a store that stays unreadable printed its line on
+  // every poll. The three tri-state readers print the same line, so they keep
+  // one slate: logged when the failure first appears or changes, and again
+  // after any good read.
+  describe("an unreadable store, read again and again", () => {
+    it("is logged once, again after a good read, and at once when the failure changes", async () => {
+      const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+      const said = () => logged.mock.calls.filter(([line]) => String(line).includes("data/config.json could not be read")).length;
+      try {
+        await fs.writeFile(CONFIG_PATH, "{ half written", "utf-8");
+        await configStore.getKnown("a");
+        await configStore.getKnown("a");
+        configStore.getKnownSync("a");
+        await configStore.getKnownMany(["a"]);
+        expect(said()).toBe(1);
+
+        await fs.writeFile(CONFIG_PATH, JSON.stringify({ a: 1 }), "utf-8");
+        expect(await configStore.getKnown("a")).toEqual({ value: 1, known: true });
+        await fs.writeFile(CONFIG_PATH, "{ half written", "utf-8");
+        await configStore.getKnown("a");
+        expect(said()).toBe(2);
+
+        // EISDIR where the last failure was invalid JSON.
+        await fs.rm(CONFIG_PATH);
+        await fs.mkdir(CONFIG_PATH);
+        await configStore.getKnown("a");
+        expect(said()).toBe(3);
+      } finally {
+        logged.mockRestore();
+        await fs.rm(CONFIG_PATH, { recursive: true, force: true });
+      }
     });
   });
 

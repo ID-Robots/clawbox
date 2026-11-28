@@ -30,11 +30,28 @@ vi.mock("@/lib/voice-output-store", () => ({
   readLocalVoice: async () => null,
 }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: (...a: unknown[]) => harnessMock(...a) }));
-vi.mock("@/lib/hermes-tts", () => ({ speakWithHermes: (...a: unknown[]) => hermesSpeakMock(...a) }));
+vi.mock("@/lib/hermes-tts", () => ({
+  speakWithHermes: (...a: unknown[]) => hermesSpeakMock(...a),
+  // What Hermes' config.yaml holds for speech: a cloud provider picked, and the
+  // box's own command registered beside it.
+  // Hermes keeps the box's voice as a command TEMPLATE, not a bare path.
+  readHermesVoice: async () => ({ provider: "openai", localRegistered: true, localCommand: "/opt/clawbox-tts.sh --text-file={input_path} -- {output_path}" }),
+  speechEntitledTier: async () => false,
+  hermesVoiceConfigView: (probe: { provider: string; localCommand: string }) => ({
+    tts: { provider: probe.provider, providers: { "tts-local-cli": { command: probe.localCommand }, openai: { apiKey: "sk-live-abc" } } },
+  }),
+}));
 vi.mock("@/lib/tts-compress", () => ({ compressSpeech: (...a: unknown[]) => compressMock(...a) }));
 // data/config.json — only the ClawBox AI plan on record is read through it here.
 const storeMock = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/config-store", () => ({ get: (...a: unknown[]) => storeMock(...a), set: vi.fn() }));
+const lockValue = vi.hoisted(() => ({ value: undefined as unknown }));
+vi.mock("@/lib/config-store", () => ({
+  get: (...a: unknown[]) => storeMock(...a),
+  set: vi.fn(),
+  // The local-only AI lock reads the store failing closed; off unless a case
+  // puts it on (TASK-2501).
+  getKnown: async (key: string) => ({ value: key === "ai_cloud_lock" ? lockValue.value : undefined, known: true }),
+}));
 // The local engine's script is "present" as far as the probe can tell.
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
@@ -76,6 +93,7 @@ beforeEach(() => {
   hermesSpeakMock.mockReset();
   compressMock.mockReset();
   storeMock.mockReset().mockResolvedValue(undefined);
+  lockValue.value = undefined;
 });
 
 describe("speakReply", () => {
@@ -146,6 +164,51 @@ describe("speakReply", () => {
     expect(body.reason).toBe("short of memory");
   });
 
+  it("says Kokoro's memory guard out of Hermes' answer with its numbers, not as a refusal (TASK-2649)", async () => {
+    harnessMock.mockResolvedValue("hermes");
+    hermesSpeakMock.mockResolvedValue({ ok: false, code: "local_memory", status: 502, shortfall: { available: "2.6", needed: "3" } });
+    const res = await speakReply("Hello");
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body).toMatchObject({ code: "local_memory", available: "2.6", needed: "3" });
+    expect(body.error).toBe("The box is short of memory for its voice right now (2.6 GB free, needs 3 GB) — try again when less is running.");
+  });
+
+  it("speaks with the box's own voice when the local-only AI lock refuses Hermes' cloud voice (TASK-2501)", async () => {
+    harnessMock.mockResolvedValue("hermes");
+    storeMock.mockImplementation(async (key: string) => (key === "ai_cloud_lock" ? true : undefined));
+    hermesSpeakMock.mockResolvedValue({ ok: false, code: "cloud_ai_locked", status: 409, reason: "Local-only AI is on" });
+    const order: string[] = [];
+    const seen: unknown[] = [];
+    const res = await speakReply("Hello", {
+      local: async (config) => { seen.push(config); return speaks("local", order)(); },
+      cloud: speaks("cloud", order),
+    });
+    expect(res.status).toBe(200);
+    expect(order).toEqual(["local"]);
+    // The view it spoke from names the script itself — not Hermes' template,
+    // which no process can be started from — and no cloud voice.
+    expect(seen[0]).toEqual({ tts: { provider: "tts-local-cli", providers: { "tts-local-cli": { command: "/opt/clawbox-tts.sh" } } } });
+  });
+
+  it("keeps only an absolute script path from Hermes' voice command", async () => {
+    const { boxVoiceFromHermes } = await import("@/lib/voice-speak");
+    const view = (command: string) => ({ tts: { providers: { "tts-local-cli": { command } } } });
+    expect(boxVoiceFromHermes(view("/opt/clawbox-tts.sh --text-file={input_path} -- {output_path}")))
+      .toEqual({ tts: { provider: "tts-local-cli", providers: { "tts-local-cli": { command: "/opt/clawbox-tts.sh" } } } });
+    expect(boxVoiceFromHermes(view("clawbox-tts.sh --text-file={input_path}"))).toEqual({});
+    expect(boxVoiceFromHermes({})).toEqual({});
+  });
+
+  it("relays any other Hermes refusal as before, without trying the box's voice", async () => {
+    harnessMock.mockResolvedValue("hermes");
+    hermesSpeakMock.mockResolvedValue({ ok: false, code: "cloud_refused", status: 502 });
+    const order: string[] = [];
+    const res = await speakReply("Hello", { local: speaks("local", order), cloud: speaks("cloud", order) });
+    expect(res.status).toBe(502);
+    expect(order).toEqual([]);
+  });
+
   it("answers a refusal rather than throwing when the box cannot be read at all", async () => {
     // Its callers are a route and a file write; neither may see an exception.
     readConfigMock.mockRejectedValue(new Error("config gone"));
@@ -206,5 +269,25 @@ describe("speakReply in the reply's format", () => {
     expect(order).toEqual(["local:wav"]);
     expect(compressMock).not.toHaveBeenCalled();
     expect(res.headers.get("Content-Type")).toBe("audio/wav");
+  });
+});
+
+// TASK-2501 PR-D: under the local-only AI lock the box speaks with Kokoro only.
+describe("speakReply under the local-only AI lock", () => {
+  it("speaks from the box and never tries a cloud voice, whatever the Voice tab chose", async () => {
+    lockValue.value = true;
+    stateMock.mockResolvedValue({ choice: "cloud" });
+    const order: string[] = [];
+    const res = await speakReply("Hello", { local: speaks("local", order), cloud: speaks("cloud", order) });
+    expect(res.headers.get("X-ClawBox-Voice-Engine")).toBe("local");
+    expect(order).toEqual(["local"]);
+  });
+
+  it("does not fall through to the cloud when the box's voice fails", async () => {
+    lockValue.value = "pinned";
+    const order: string[] = [];
+    const res = await speakReply("Hello", { local: cannot("local", order), cloud: speaks("cloud", order) });
+    expect(res.ok).toBe(false);
+    expect(order).toEqual(["local"]);
   });
 });

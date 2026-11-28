@@ -10,7 +10,14 @@
 //   { type: "create" } — a new active tab on the extension's own start page
 //     (newtab.html, also chrome_url_overrides.newtab), the bar's "+";
 //   { type: "devtools" } — Chrome's DevTools on the asking tab (see
-//     openDevTools below).
+//     openDevTools below);
+//   { type: "switchBox", slot } — Ctrl+Shift+<slot> from workspaces.js: show
+//     linked ClawBox <slot>, each in a tab of its own (see switchBox below);
+//   { type: "boxes", selfName, boxes, emptyText } — the desktop's copy of
+//     the list; { type: "boxesRevoked" } — forget it (see below);
+//   { type: "pendingIndicator" } — the indicator a switch left for this tab;
+//   { type: "viewerScreens" } — a linked box's page asks for the monitors of
+//     THIS kiosk, to be laid out by them (see viewerScreens below).
 //
 // The desktop is found by URL prefix: the origin of DESKTOP_ORIGINS, which is
 // what the launcher's CLAWBOX_KIOSK_URL is on a laptop (a different URL means
@@ -107,11 +114,381 @@ async function goHome() {
   const home = all.find((t) => isDesktop(t.url));
   if (home) {
     await chrome.tabs.update(home.id, { active: true });
-  } else {
-    // The desktop tab is gone (closed by hand): bring it back rather than
-    // leave the owner on a page with no way out.
-    await chrome.tabs.create({ url: DESKTOP_ORIGINS[0], active: true });
+    return home;
   }
+  // The desktop tab is gone (closed by hand): bring it back rather than
+  // leave the owner on a page with no way out.
+  return chrome.tabs.create({ url: DESKTOP_ORIGINS[0], active: true });
+}
+
+// ─── Linked ClawBoxes (TASK-2519) ───
+//
+// Ctrl+Shift+1 … Ctrl+Shift+9 (workspaces.js, on every page) lands here as
+// { type: "switchBox", slot }. Slot 1 is this box — the desktop tab, goHome —
+// and 2–9 Settings → Linked ClawBoxes in order (src/lib/linked-boxes-shape.ts
+// holds the same rules for the box's side). Each box is a tab of its own: the
+// one this worker opened for it while that tab still shows the box, else any
+// tab on the box's origin (the box's desktop first), else a new one. Activated,
+// never navigated, so a box's desktop stays loaded and switching back is
+// instant. The list is the desktop's: workspaces.js reads it there (the
+// owner's session, same origin) and sends it in; the worker keeps the last
+// copy in chrome.storage.session (memory: gone with the browser) so a switch
+// never waits for the desktop, and asks the desktop tab for it while it has
+// none. The copy is the OWNER'S and lives no longer than their session: the
+// kiosk's own /login (signed out, the session ran out, another person signing
+// in) and a list read the box refuses (401/403) forget it ("boxesRevoked"),
+// so the next person at the kiosk cannot reach the owner's boxes by the keys.
+// And it is used no longer than the session that read it lasts (`validUntil`,
+// the route's `sessionExpiresAt`): a session that runs out with the desktop tab
+// closed reaches neither of those, so past that time the copy is dropped and
+// the desktop is asked again — which, signed out, answers nothing. A list the
+// desktop answers that was asked for before the list was forgotten (or before
+// a newer list came in) is stale: it is neither kept nor used (a refusal is
+// always applied), and a switch under way when the list is forgotten opens and
+// activates no box. The desktop gets
+// ASK_DESKTOP_MS to answer, so a read that hangs cannot hold up the keys after
+// it, and Ctrl+Shift+1 goes home before it reads the list at all.
+const MAX_BOXES = 8;
+const MAX_BOX_NAME = 40;
+const BOXES_KEY = "linkedBoxes";
+const BOX_TABS_KEY = "linkedBoxTabs";
+const PENDING_KEY = "linkedBoxIndicators";
+const PENDING_TTL_MS = 15000;
+const MAX_LABEL = 300;
+const ASK_DESKTOP_MS = 3000;
+// chrome.storage.local, kept by workspaces.js: the experiment's second switch.
+const SCREENS_FLAG_KEY = "linkedBoxScreensOn";
+const MAX_SCREENS = 16;
+const MAX_SCREEN_PX = 100000;
+
+// Moves on with every change of the kept list (a newer one saved, or the list
+// forgotten): a desktop answer asked for before it is stale.
+let listGeneration = 0;
+// Moves on when the owner's list is forgotten (/login, a refused read): a
+// switch that began before it reaches no box, whatever it had already read.
+let revocations = 0;
+
+function boxName(raw) {
+  if (typeof raw !== "string") return null;
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(raw)) return null;
+  const name = raw.replace(/\s+/g, " ").trim();
+  return name && [...name].length <= MAX_BOX_NAME ? name : null;
+}
+
+function webOrigin(raw) {
+  try {
+    const u = new URL(raw);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A box's desktop, `<origin>/`: http(s) only, no user name or password. */
+function boxUrl(raw) {
+  if (typeof raw !== "string" || raw.length > 300) return null;
+  try {
+    const u = new URL(raw);
+    if ((u.protocol !== "http:" && u.protocol !== "https:") || u.username || u.password || !u.hostname) return null;
+    return `${u.origin}/`;
+  } catch {
+    return null;
+  }
+}
+
+function cleanBoxes(raw) {
+  const out = [];
+  const seen = new Set();
+  for (const entry of Array.isArray(raw) ? raw : []) {
+    if (out.length >= MAX_BOXES) break;
+    const name = boxName(entry && entry.name);
+    const url = boxUrl(entry && entry.url);
+    // The kiosk's own desktop is slot 1, never a box of its own.
+    if (!name || !url || seen.has(url) || DESKTOP_ORIGINS.includes(url)) continue;
+    seen.add(url);
+    out.push({ name, url });
+  }
+  return out;
+}
+
+function tabUrl(t) {
+  return t.url || t.pendingUrl || "";
+}
+
+/** The kept copy of the list while the session that read it lasts, else null (and the copy dropped). */
+async function storedBoxes() {
+  const got = await chrome.storage.session.get(BOXES_KEY);
+  const list = got[BOXES_KEY] || null;
+  if (list && !(Number.isFinite(list.validUntil) && list.validUntil > Date.now())) {
+    await forgetBoxes();
+    return null;
+  }
+  return list;
+}
+
+/** The box's words for an empty slot (`{n}` for the number), or "". */
+function cleanLabel(raw) {
+  if (typeof raw !== "string" || raw.length > MAX_LABEL || /[\u0000-\u001f\u007f-\u009f]/.test(raw)) return "";
+  return raw.trim();
+}
+
+async function saveBoxes(list) {
+  const clean = {
+    selfName: boxName(list && list.selfName) || "",
+    boxes: cleanBoxes(list && list.boxes),
+    emptyText: cleanLabel(list && list.emptyText),
+    // No session end given is no promise at all: a copy good for nothing past now.
+    validUntil: list && Number.isFinite(list.validUntil) ? list.validUntil : 0,
+  };
+  listGeneration++;
+  await chrome.storage.session.set({ [BOXES_KEY]: clean });
+  return clean;
+}
+
+function forgetBoxes() {
+  listGeneration++;
+  // Nor are any of the owner's box names kept for a tab still loading.
+  return Promise.all([chrome.storage.session.remove(BOXES_KEY), sessionUpdate(PENDING_KEY, () => ({}))]);
+}
+
+/** The owner's list forgotten: no switch under way and no answer still out may use it. */
+function revokeBoxes() {
+  revocations++;
+  return forgetBoxes();
+}
+
+/** `promise`'s answer, or null when it has none within `ms` (a rejection still rejects). */
+function withDeadline(promise, ms) {
+  let timer = 0;
+  const late = new Promise((resolve) => { timer = setTimeout(() => resolve(null), ms); });
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer));
+}
+
+/** The kiosk's own desktop tab ("/" of a desktop origin), if it is open. */
+async function desktopTab() {
+  const all = await normalTabs();
+  return all.find((t) => t.id != null && isDesktop(t.url) && webOrigin(t.url) && new URL(t.url).pathname === "/");
+}
+
+async function askDesktopForBoxes() {
+  const asked = listGeneration;
+  const desk = await desktopTab();
+  if (!desk) return null;
+  try {
+    const list = await withDeadline(chrome.tabs.sendMessage(desk.id, { type: "readBoxes" }), ASK_DESKTOP_MS);
+    // A refusal is applied whatever came in meanwhile: forgetting is always the
+    // safe way round (at worst the desktop is asked once more).
+    if (list && list.revoked) {
+      await revokeBoxes();
+      return null;
+    }
+    // The list changed while the desktop was reading it — forgotten, or a newer
+    // one came in: this answer is stale, and what is kept now stands.
+    if (listGeneration !== asked) return await storedBoxes();
+    if (!list) return null;
+    const clean = await saveBoxes(list);
+    // The same rule as a kept copy: an answer with no session end, or one that
+    // arrives after it, is used for nothing.
+    if (!(clean.validUntil > Date.now())) {
+      await forgetBoxes();
+      return null;
+    }
+    return clean;
+  } catch {
+    return null;
+  }
+}
+
+// ─── A linked box's page on this kiosk's monitors (TASK-2771) ───
+//
+// A linked box serves its desktop from ITS box, which knows only its own
+// monitors; laid out by those, the desktop is stretched over this kiosk's row
+// as one screen. The page asks here ({ type: "viewerScreens" }, from
+// workspaces.js, every few seconds while it is shown) for the monitors of THIS
+// kiosk, and the worker asks the kiosk's own desktop to read them — its box,
+// same origin, the owner's session — rather than reading them itself.
+//
+// Only for a page on the origin of one of the owner's linked boxes (the list
+// kept above, session-bound and forgotten like everything else), only while
+// the experiment's switch is on, and only the GEOMETRY: the connector name for
+// an id (a monitor's own id carries its make, model and serial), where each
+// monitor that is on sits and how big it is, which is the main one, the
+// row's size and whether they mirror — rebuilt here value by value, nothing of
+// the box's answer passed through. A page can ask but cannot tell the worker
+// what the monitors are: the desktop tab's own script reads them.
+
+const sizedPx = (n) => typeof n === "number" && Number.isFinite(n) && n > 0 && n <= MAX_SCREEN_PX;
+const placedPx = (n) => typeof n === "number" && Number.isFinite(n) && Math.abs(n) <= MAX_SCREEN_PX;
+
+/** The box's monitor status as geometry only, `{ available: false }` when it has no layout to give, or undefined when it is not an answer. */
+function cleanScreens(raw) {
+  if (!raw || typeof raw !== "object") return undefined;
+  if (raw.available === false) return { available: false };
+  const box = raw.box;
+  if (raw.available !== true || !box || !sizedPx(box.width) || !sizedPx(box.height) || !Array.isArray(raw.monitors)) return undefined;
+  const monitors = [];
+  let main = null;
+  for (const m of raw.monitors.slice(0, MAX_SCREENS)) {
+    const r = m && m.enabled === true ? m.rect : null;
+    if (!r || !placedPx(r.x) || !placedPx(r.y) || !sizedPx(r.width) || !sizedPx(r.height)) continue;
+    const id = typeof m.name === "string" && /^[\x21-\x7e]{1,64}$/.test(m.name) ? m.name : `monitor-${monitors.length + 1}`;
+    if (monitors.some((x) => x.id === id)) continue;
+    if (m.id === raw.main) main = id;
+    monitors.push({ id, enabled: true, rect: { x: r.x, y: r.y, width: r.width, height: r.height }, ...(m.builtIn === true ? { builtIn: true } : {}) });
+  }
+  if (!monitors.length) return { available: false };
+  return { available: true, main, box: { width: box.width, height: box.height }, monitors, mirror: raw.mirror === true };
+}
+
+/** The kiosk's monitors from its own desktop tab, or undefined when that tab did not answer in time. */
+async function askDesktopForScreens() {
+  const desk = await desktopTab();
+  if (!desk) return undefined;
+  try {
+    return cleanScreens(await withDeadline(chrome.tabs.sendMessage(desk.id, { type: "readMonitors" }), ASK_DESKTOP_MS));
+  } catch {
+    return undefined;
+  }
+}
+
+async function viewerScreens(sender) {
+  // The page that asks, by the address Chrome says it is at, never by anything it sent.
+  const url = sender.url || (sender.tab && sender.tab.url);
+  const origin = url && !isDesktop(url) ? webOrigin(url) : null;
+  if (!origin) return { ok: false, error: "not a web page" };
+  const switchedOn = (await chrome.storage.local.get(SCREENS_FLAG_KEY))[SCREENS_FLAG_KEY] === true;
+  const linked = async () => {
+    const list = switchedOn ? await storedBoxes() : null;
+    return !!list && cleanBoxes(list.boxes).some((b) => webOrigin(b.url) === origin);
+  };
+  if (!(await linked())) return { ok: false, error: "not a linked box" };
+  const revoked = revocations;
+  const screens = await askDesktopForScreens();
+  // The list forgotten, its session ended or this box taken off it while the
+  // desktop read the monitors: nothing leaves.
+  if (revocations !== revoked || !(await linked())) return { ok: false, error: "the list was forgotten" };
+  return screens ? { ok: true, screens } : { ok: true };
+}
+
+async function sessionGet(key) {
+  return (await chrome.storage.session.get(key))[key] || {};
+}
+
+// Every read-change-write of the session maps runs one after the other, so
+// two quick key presses cannot each read the map and lose the other's entry.
+let sessionQueue = Promise.resolve();
+function sessionUpdate(key, change) {
+  const run = sessionQueue.then(async () => {
+    const next = change(await sessionGet(key));
+    await chrome.storage.session.set({ [key]: next });
+    return next;
+  });
+  sessionQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function tabForBox(box) {
+  const origin = webOrigin(box.url);
+  const all = await normalTabs();
+  const remembered = (await sessionGet(BOX_TABS_KEY))[origin];
+  // Never the desktop's own tab, whatever the list says.
+  const boxTabs = all.filter((t) => t.id != null && !isDesktop(tabUrl(t)) && webOrigin(tabUrl(t)) === origin);
+  const mine = boxTabs.find((t) => t.id === remembered);
+  if (mine) return mine;
+  // Else one already on the box, its desktop before its other pages.
+  return boxTabs.find((t) => new URL(tabUrl(t)).pathname === "/") || boxTabs[0] || null;
+}
+
+function rememberBoxTab(origin, tabId) {
+  return sessionUpdate(BOX_TABS_KEY, (tabs) => ({ ...tabs, [origin]: tabId }));
+}
+
+// The indicator goes to the tab now on screen; one that is still loading has
+// nobody listening yet, so it is kept for that tab to ask for. It names the
+// owner's boxes, so a kept one is handed out only while the list it came from
+// was not forgotten since (`revocations`) and its session (`validUntil`, when
+// it came from the owner's list) has not ended; forgetting the list drops
+// every kept one (forgetBoxes).
+async function indicate(tabId, indicator, validUntil) {
+  if (tabId == null) return;
+  // Taken before the send: a list forgotten while it is out is not outlived by what it keeps.
+  const rev = revocations;
+  const until = Number.isFinite(validUntil) ? validUntil : null;
+  try {
+    await chrome.tabs.sendMessage(tabId, indicator);
+  } catch {
+    const now = Date.now();
+    await sessionUpdate(PENDING_KEY, (pending) => {
+      // Only what is still fresh: a tab that never loaded leaves nothing behind.
+      const kept = Object.fromEntries(Object.entries(pending).filter(([, ind]) => ind && now - (ind.at || 0) <= PENDING_TTL_MS));
+      // Forgotten, or the session ended, since the send began: nothing of it is kept.
+      if (rev === revocations && (until === null || until > Date.now())) kept[String(tabId)] = { ...indicator, at: now, rev, validUntil: until };
+      return kept;
+    });
+  }
+}
+
+async function takePendingIndicator(tabId) {
+  if (tabId == null) return null;
+  let ind = null;
+  await sessionUpdate(PENDING_KEY, (pending) => {
+    ind = pending[String(tabId)] || null;
+    return Object.fromEntries(Object.entries(pending).filter(([id]) => id !== String(tabId)));
+  });
+  if (!ind || Date.now() - (ind.at || 0) > PENDING_TTL_MS) return null;
+  if (ind.rev !== revocations || (ind.validUntil !== null && !(ind.validUntil > Date.now()))) return null;
+  const shown = { ...ind };
+  delete shown.at;
+  delete shown.rev;
+  delete shown.validUntil;
+  return shown;
+}
+
+// One switch at a time, in the order the keys were pressed: two quick presses
+// of the same number must not each find no tab and open two, and a slower
+// earlier switch must not finish after a later one and leave its tab in front.
+let switchQueue = Promise.resolve();
+function queueSwitch(task) {
+  const run = switchQueue.then(task, task);
+  switchQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function switchBox(slot, sender) {
+  if (!Number.isInteger(slot) || slot < 1 || slot > MAX_BOXES + 1) return { ok: false, error: "no such slot" };
+  const revoked = revocations;
+  // Home first: going home never waits on the list, only its indicator does.
+  const home = slot === 1 ? await goHome() : null;
+  const list = (await storedBoxes()) || (await askDesktopForBoxes()) || { selfName: "", boxes: [] };
+  // The owner's list may be used only while it was not forgotten since this
+  // switch began AND the session that read it has not ended; asked again
+  // after every await that comes before acting on it.
+  const usable = () => revocations === revoked && Number.isFinite(list.validUntil) && list.validUntil > Date.now();
+  // Forgotten (or run out) while this switch read it: none of the owner's boxes.
+  const boxes = usable() ? cleanBoxes(list.boxes) : [];
+  const selfName = boxName(list.selfName) || "ClawBox";
+  const names = [selfName, ...boxes.map((b) => b.name)];
+  if (slot === 1) {
+    await indicate(home && home.id, { type: "boxIndicator", slot, kind: "stay", name: selfName, names }, list.validUntil);
+    return { ok: true };
+  }
+  const box = boxes[slot - 2];
+  if (!box) {
+    const text = cleanLabel(list.emptyText).replace("{n}", String(slot));
+    await indicate(sender.tab && sender.tab.id, { type: "boxIndicator", slot, kind: "empty", name: null, names, ...(text ? { text } : {}) }, list.validUntil);
+    return { ok: true };
+  }
+  let tab = await tabForBox(box);
+  // Forgotten, or the session ended, while the box's tab was looked up:
+  // nothing opened or activated.
+  if (!usable()) return { ok: false, error: "the list was forgotten" };
+  if (tab) await chrome.tabs.update(tab.id, { active: true });
+  else tab = await chrome.tabs.create({ url: box.url, active: true });
+  await rememberBoxTab(webOrigin(box.url), tab.id);
+  // …and the owner's names go to no indicator past that point either.
+  if (!usable()) return { ok: false, error: "the list was forgotten" };
+  await indicate(tab.id, { type: "boxIndicator", slot, kind: "stay", name: box.name, names }, list.validUntil);
+  return { ok: true };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -141,6 +518,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "create":
         await chrome.tabs.create({ url: START_PAGE, active: true });
         return { ok: true };
+      case "switchBox":
+        return queueSwitch(() => switchBox(msg.slot, sender));
+      case "boxes":
+        // The kiosk's own desktop only: no other page speaks for the list.
+        if (!sender.tab || !isDesktop(sender.tab.url) || new URL(sender.tab.url).pathname !== "/") return { ok: false, error: "not from the desktop" };
+        await saveBoxes(msg);
+        return { ok: true };
+      case "boxesRevoked":
+        // The kiosk's own pages only (its /login included): a web page's
+        // content script never sends it, and nothing else may clear the list.
+        if (!sender.tab || !isDesktop(sender.tab.url)) return { ok: false, error: "not from the desktop" };
+        await revokeBoxes();
+        return { ok: true };
+      case "pendingIndicator":
+        return takePendingIndicator(sender.tab && sender.tab.id);
+      case "viewerScreens":
+        return viewerScreens(sender);
       default:
         return { ok: false, error: "unknown message" };
     }

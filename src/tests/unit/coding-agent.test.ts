@@ -277,6 +277,21 @@ describe("the owner's switch", () => {
     expect(await lib.isCodingAgentEnabled()).toBe(true);
   });
 
+  it("refuses every cloud run under the local-only AI lock, before anything of it is touched (TASK-2501)", async () => {
+    readyDevice();
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, ai_cloud_lock: true });
+    await expect(lib.startRun({ task: "do it", projectId: "no-such-project", source: "agent", provider: "clawbox-ai" }))
+      .rejects.toMatchObject({ kind: "not_ready", code: "cloud_ai_locked" });
+    expect(fs.existsSync(argvFile())).toBe(false);
+    // With no provider named the box's own engine answers under the lock
+    // (PR-E), and this box has none set up: not ready, and nothing spawned.
+    await expect(lib.startRun({ task: "do it", projectId: "no-such-project", source: "agent" }))
+      .rejects.toMatchObject({ kind: "not_ready" });
+    expect(fs.existsSync(argvFile())).toBe(false);
+    const readiness = await lib.checkReadiness();
+    expect(readiness.ready).toBe(false);
+  });
+
   it("refuses before spawning when the harness is not ready", async () => {
     writeConfig({ coding_agent_enabled: true });
     installFakeWrapper(HAPPY_BODY);
@@ -895,6 +910,34 @@ describe("a run", () => {
       await vi.waitFor(() => { expect(lib.getRun(done.id)?.worktree?.removed).toBe(true); }, { timeout: 10_000 });
     });
 
+    it("counts the files a run's own commit changed when no tool confirmed them — and reviews that run", async () => {
+      // run-8lmn0l4c (Opus 5.5 at low effort, 2026-11-10) wrote twelve files
+      // through `python3 - <<EOF` and committed them itself: no Edit or Write
+      // call, so the record said it changed nothing and the automatic review
+      // pass was skipped for a 578-line change.
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_review_pass: true });
+      const dir = makeProject("site");
+      const g = (...args: string[]) => execFileSync("git", ["-C", dir, "-c", "user.name=T", "-c", "user.email=t@example.com", ...args], { encoding: "utf-8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: home } }).trim();
+      g("init", "--quiet"); g("add", "-A"); g("commit", "--quiet", "-m", "before");
+      installFakeWrapper([
+        `echo '${INIT}'`,
+        // Written through the shell: no tool_use event names either file.
+        'if [ ! -f "$PWD/lib/calc.ts" ]; then mkdir -p "$PWD/lib" && echo "export const a = 1;" > "$PWD/lib/calc.ts" && echo "# docs" > "$PWD/NOTES.md"',
+        '  git -C "$PWD" -c user.name=Run -c user.email=run@example.com add -A && git -C "$PWD" -c user.name=Run -c user.email=run@example.com commit -q -m "written through the shell"',
+        "fi",
+        `echo '{"type":"result","subtype":"success","num_turns":2,"result":"Done."}'`,
+        "exit 0",
+      ].join("\n"));
+      const done = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
+      expect(done.status).toBe("completed");
+      await vi.waitFor(() => { expect([...(lib.getRun(done.id)?.filesTouched ?? [])].sort()).toEqual(["NOTES.md", "lib/calc.ts"]); }, { timeout: 10_000 });
+      // A run that changed files is a run to review.
+      await vi.waitFor(() => { expect(allRuns().some((r) => r.reviewOf === done.id)).toBe(true); }, { timeout: 10_000 });
+      const pass = allRuns().find((r) => r.reviewOf === done.id)!;
+      await finished(pass.id);
+      expect(await lib.waitForRunSettled(pass.id, 10_000)).toBe(true);
+    });
+
     it("does nothing while the owner's review switch is off", async () => {
       readyDevice();
       makeProject("site");
@@ -1024,6 +1067,19 @@ describe("a run", () => {
       expect(done.status).toBe("completed");
       expect(done.progress.join("\n")).toContain("Started from a draft");
       expect(stdinText()).toContain("later please");
+    });
+
+    it("keeps a draft under the local-only AI lock, but refuses to start it with the lock's code (TASK-2501)", async () => {
+      readyDevice();
+      makeProject("site");
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
+      const draft = await lib.createDraftRun({ task: "later please", projectId: "site", source: "owner", provider: "clawbox-ai" });
+      expect(draft.status).toBe("draft");
+      // The lock goes on after the draft was made on a cloud provider.
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, ai_cloud_lock: true });
+      await expect(lib.startDraftRun(draft.id)).rejects.toMatchObject({ kind: "not_ready", code: "cloud_ai_locked" });
+      expect(lib.getRun(draft.id)?.status).toBe("draft");
+      expect(fs.existsSync(argvFile())).toBe(false);
     });
 
     it("starts a draft exactly once when two starts arrive together", async () => {
@@ -1306,6 +1362,19 @@ describe("retrying a transient upstream failure", () => {
     expect(run.progress.join("\n")).toContain("starting over in a fresh session");
     // A resume would have replayed the failure; the retry must not use one.
     expect(fs.readFileSync(argvFile(), "utf-8")).not.toContain("--resume");
+  });
+
+  it("does not start the retry once the local-only AI lock has gone on during the run (TASK-2501)", async () => {
+    // The first attempt turns the lock on before it fails: the box's exit
+    // handler must not start a second cloud process for it.
+    const locked = JSON.stringify({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, ai_cloud_lock: true });
+    flakyWrapper(`printf '%s' '${locked}' > "${path.join(root, "data", "config.json")}"`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(0);
+    expect(fs.readFileSync(counter(), "utf-8").trim()).toBe("1");
   });
 
   it("retries at most once — a second failure is reported, not looped", async () => {
@@ -1938,7 +2007,7 @@ describe("counting sub-agents", () => {
     const A = JSON.stringify({ type: "assistant", message: { id: "m1", usage: { input_tokens: 1_000, output_tokens: 0 }, content: [{ type: "text", text: "hi" }] } });
     const RESULT_HIGH = JSON.stringify({
       type: "result", subtype: "success", num_turns: 1, result: "done",
-      modelUsage: { "deepseek-v4-pro[1m]": { inputTokens: 1_000, outputTokens: 50, cacheReadInputTokens: 20_000 }, "deepseek-v4-flash": { inputTokens: 3_000, outputTokens: 200, cacheReadInputTokens: 9_000 } },
+      modelUsage: { "deepseek-v4-flash[1m]": { inputTokens: 1_000, outputTokens: 50, cacheReadInputTokens: 20_000 }, "deepseek-v4-flash": { inputTokens: 3_000, outputTokens: 200, cacheReadInputTokens: 9_000 } },
     });
     installFakeWrapper([`echo '${INIT}'`, `echo '${A}'`, `echo '${RESULT_HIGH}'`, "exit 0"].join("\n"));
     makeProject("site");
@@ -1946,9 +2015,9 @@ describe("counting sub-agents", () => {
     expect(run.tokensUsed).toBe(33_250);
     // Raised by category to the process's modelUsage, every model summed.
     expect(run.tokenBreakdown).toEqual({ input: 4_000, output: 250, cacheCreation: 0, cacheRead: 29_000 });
-    expect(run.modelsUsed).toEqual(["deepseek-v4-flash", "deepseek-v4-pro[1m]"]);
+    expect(run.modelsUsed).toEqual(["deepseek-v4-flash", "deepseek-v4-flash[1m]"]);
 
-    const RESULT_LOW = JSON.stringify({ type: "result", subtype: "success", num_turns: 1, result: "done", modelUsage: { "deepseek-v4-pro[1m]": { inputTokens: 10 } } });
+    const RESULT_LOW = JSON.stringify({ type: "result", subtype: "success", num_turns: 1, result: "done", modelUsage: { "deepseek-v4-flash[1m]": { inputTokens: 10 } } });
     installFakeWrapper([`echo '${INIT}'`, `echo '${A}'`, `echo '${RESULT_LOW}'`, "exit 0"].join("\n"));
     run = await finished((await lib.startRun({ task: "bill", projectId: "site", source: "agent" })).id);
     expect(run.tokensUsed).toBe(1_000);
@@ -2320,7 +2389,8 @@ describe("the report", () => {
     expect(done.status).toBe("completed");
     expect(fs.readFileSync(reportOf(run.id), "utf-8")).toBe(`${done.summary}\n`);
     // Renamed into place: nothing half-written is left beside it.
-    expect(fs.readdirSync(path.dirname(reportOf(run.id)))).toEqual(["report.md"]);
+    // The report, beside the box's stop for package installs (ensureArtifactsDir) and nothing else.
+    expect(fs.readdirSync(path.dirname(reportOf(run.id))).sort()).toEqual(["package.json", "report.md"]);
     // The listing the app reads carries it as markdown, which is what opens
     // it rendered rather than as plain text.
     const artifactsLib = await import("@/lib/coding-agent-artifacts");
@@ -2394,7 +2464,8 @@ describe("the report", () => {
     // must still say what the run did.
     installFakeWrapper([
       `echo '${INIT}'`,
-      `rmdir "$CLAWBOX_RUN_ARTIFACTS_DIR" && touch "$CLAWBOX_RUN_ARTIFACTS_DIR"`,
+      // rm -rf, not rmdir: the folder holds the box's stop for package installs (ensureArtifactsDir).
+      `rm -rf "$CLAWBOX_RUN_ARTIFACTS_DIR" && touch "$CLAWBOX_RUN_ARTIFACTS_DIR"`,
       `echo '${RESULT}'`,
       "exit 0",
     ].join("\n"));
@@ -2441,7 +2512,8 @@ describe("the evidence folder at settle", () => {
 
     expect(done.status).toBe("completed");
     const dir = evidenceOf(run.id);
-    expect(fs.readdirSync(dir).sort()).toEqual(["report.md", "tests.txt", "venv-attempt"]);
+    // …beside the box's own stop for package installs (ensureArtifactsDir), which is not the run's and stays.
+    expect(fs.readdirSync(dir).sort()).toEqual(["package.json", "report.md", "tests.txt", "venv-attempt"]);
     expect(fs.readdirSync(path.join(dir, "venv-attempt"))).toEqual([]);
     const line = done.progress.find((l) => l.startsWith("Removed from the evidence folder"));
     expect(line).toBe(RUNNER_STEP.evidencePruned("latest.txt, venv-attempt/venv/"));

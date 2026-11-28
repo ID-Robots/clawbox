@@ -10,15 +10,19 @@
  * keep their width.
  *
  * jsdom does no layout, so these are assertions about the CLASS CONTRACT that
- * produces the clipping rather than about measured pixels: in a narrow pane the
- * name must not be `truncate`d, and the controls must not share its line. That
- * is the half a unit test can hold; the pixels are the screenshot on the card.
+ * produces the clipping rather than about measured pixels: the name must not be
+ * `truncate`d, and the controls must leave it room or leave its line. That is
+ * the half a unit test can hold; the pixels are the screenshot on the card.
  *
- * The queries must be the CONTAINER's, not the viewport's, and that is pinned
- * here rather than left to a comment: Settings caps this pane at `max-w-xl`
- * (576 px) and draws it inside a window the owner can drag to 300 px, so a
- * `sm:` breakpoint is answered "wide" on a desktop whose provider rows are
- * 300 px across — the reported clipping, at a width no phone is involved in.
+ * No query may ask the VIEWPORT: Settings caps this pane at `max-w-xl` (576 px)
+ * and draws it inside a window the owner can drag to 300 px, so a `sm:`
+ * breakpoint is answered "wide" on a desktop whose provider rows are 300 px
+ * across — the reported clipping, at a width no phone is involved in. The
+ * provider rows ask nothing at all since TASK-2246: with the sign-out among
+ * the controls, the Anthropic row's four do not fit beside its name even at
+ * 576 px while ClawBox AI's three do, so each row wraps by its own content —
+ * the name's column keeps a basis, and the controls take a line of their own
+ * under it when they would eat into that.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@/tests/helpers/test-utils";
@@ -109,26 +113,39 @@ describe("provider rows at phone widths", () => {
       // `overflow-wrap: break-word` does not reduce a flex item's min-content
       // width, so `break-words` without `min-w-0` still overflows the pane.
       expect(hasClass(name!, "min-w-0"), `${row.label} must be able to shrink`).toBe(true);
-      // Still one line where the PANE has room for one.
-      expect(hasClass(name!, "@md:truncate"), `${row.label} should truncate in a wide pane`).toBe(true);
+      // Not clipped in a wide pane either: the column keeps room for a name,
+      // and a longer one wraps rather than losing its end.
+      expect(name!.className, `${row.label} is truncated in some pane`).not.toMatch(/(^|\s|:)truncate(\s|$)/);
       expect(viewportQueries(name!), `${row.label} must not ask the viewport`).toEqual([]);
-      expect(containerAncestor(name!), `${row.label} has no query container`).not.toBeNull();
     }
   });
 
-  it("stacks the row's controls under the name in a narrow pane", async () => {
+  it("gives the name a column of its own and moves the controls under it when they do not fit beside it", async () => {
     stubFetch();
     render(<I18nProvider><AiProviderList /></I18nProvider>);
 
-    const li = await screen.findByTestId("ai-provider-anthropic");
-    expect(hasClass(li, "flex-col"), "the row stacks in a narrow pane").toBe(true);
-    expect(hasClass(li, "@md:flex-row"), "and is one line in a wide one").toBe(true);
-    expect(viewportQueries(li), "the row must not ask the viewport").toEqual([]);
-    expect(containerAncestor(li), "the row has no query container").not.toBeNull();
-    // The switch and Make-default travel together, off the name's line.
-    const controls = await screen.findByTestId("ai-provider-controls-anthropic");
-    expect(controls).toContainElement(screen.getByTestId("ai-provider-switch-anthropic"));
-    expect(controls).toContainElement(screen.getByTestId("ai-provider-make-default-anthropic"));
+    for (const row of ROWS) {
+      const li = await screen.findByTestId(`ai-provider-${row.id}`);
+      expect(hasClass(li, "flex-wrap"), `${row.label}: the row wraps rather than squeezing the name`).toBe(true);
+      expect(viewportQueries(li), `${row.label}: the row must not ask the viewport`).toEqual([]);
+      // The name's column: grows into what the controls leave, and its basis
+      // is what decides when they no longer fit beside it.
+      const identity = screen.getByTestId(`ai-provider-identity-${row.id}`);
+      expect(identity).toContainElement(screen.getByTestId(`ai-provider-name-${row.id}`));
+      for (const cls of ["grow", "basis-40", "min-w-0"]) {
+        expect(hasClass(identity, cls), `${row.label}: name column lacks ${cls}`).toBe(true);
+      }
+      // The controls: right-aligned on a line of their own, and wrapping
+      // inside it in a 300 px window rather than being clipped.
+      const controls = screen.getByTestId(`ai-provider-controls-${row.id}`);
+      for (const cls of ["ml-auto", "flex-wrap", "justify-end", "max-w-full"]) {
+        expect(hasClass(controls, cls), `${row.label}: controls lack ${cls}`).toBe(true);
+      }
+      expect(controls).toContainElement(screen.getByTestId(`ai-provider-switch-${row.id}`));
+      expect(controls).toContainElement(screen.getByTestId(`ai-provider-sign-out-${row.id}`));
+      expect(identity).not.toContainElement(controls);
+    }
+    expect(screen.getByTestId("ai-provider-controls-anthropic")).toContainElement(screen.getByTestId("ai-provider-make-default-anthropic"));
   });
 
   it("does not clip the vendor or the model on the hero card", () => {

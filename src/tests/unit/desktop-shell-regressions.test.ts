@@ -63,7 +63,8 @@ describe("chat-first on a phone", () => {
 
   it("lets Android's Back take a phone from the chat to the desktop", () => {
     const handler = src.match(/const handleBack = [\s\S]*?window\.addEventListener\("popstate", handleBack\);/)?.[0] ?? "";
-    expect(handler).toMatch(/if \(isMobile && chatOpen\) \{ setChatOpen\(false\); return; \}/);
+    // The chat's own open menu or sheet goes first (TASK-2778), then the chat.
+    expect(handler).toMatch(/if \(isMobile && chatOpen\) \{ if \(!runMobileBack\(CHAT_MOBILE_BACK\)\) setChatOpen\(false\); return; \}/);
     // Before any window: on a phone the chat is drawn above all of them.
     expect(handler.indexOf("isMobile && chatOpen")).toBeLessThan(handler.indexOf("closeWindow(top.id)"));
     expect(src).toMatch(/\}, \[launcherOpen, trayOpen, openWindows, closeWindow, isMobile, chatOpen\]\);/);
@@ -103,8 +104,18 @@ describe("the always-on polls", () => {
   // (src/lib/visible-interval.ts, unit-tested beside it).
   it("waits behind a hidden tab, every one of them", () => {
     expect(src).not.toMatch(/\bsetInterval\(/);
-    expect(src).toMatch(/const stop = setVisibleInterval\(poll, 20000\);/);
+    expect(src).toMatch(/const stop = setVisibleInterval\(poll, PAIRING_POLL_MS\);/);
     expect(src).toMatch(/const stop = setVisibleInterval\(checkVersions, 30 \* 60 \* 1000\);/);
+  });
+
+  it("asks for Telegram access requests every few seconds while a bot can receive them", () => {
+    // At 20 s a request reached the owner's screen up to 20 s late.
+    // A box with no bot keeps the old 20 s: its answer cannot hold a request.
+    const fast = Number(src.match(/const PAIRING_POLL_MS = ([0-9_]+);/)?.[1].replace(/_/g, ""));
+    const noBot = Number(src.match(/const PAIRING_NO_BOT_POLL_MS = ([0-9_]+);/)?.[1].replace(/_/g, ""));
+    expect(fast).toBeGreaterThan(0);
+    expect(fast).toBeLessThanOrEqual(5000);
+    expect(noBot).toBe(20_000);
   });
 
   it("keeps reading the notice ring while hidden, inside the life of an entry", () => {

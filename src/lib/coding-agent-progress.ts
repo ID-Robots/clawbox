@@ -35,7 +35,7 @@ export type ProgressLabelKey =
   | "plan"
   // The runner's OWN sentences (RUNNER_STEP below). They used to reach the
   // timeline as the English the runner wrote, so a German run page read
-  // "Started with deepseek-v4-pro[1m]" and "Thinking…" beside the translated
+  // "Started with deepseek-v4-flash[1m]" and "Thinking…" beside the translated
   // "Liest store.ts". A key each, so the surface can word them.
   | "started"
   | "startedWith"
@@ -228,7 +228,7 @@ function shorten(s: string, max: number): string {
  *
  * They lived as English literals at their thirty-odd call sites, and the run
  * page drew them verbatim: a German desktop read "Started with
- * deepseek-v4-pro[1m]", "Thinking…" and "Committed as 4f21a…" beside chips
+ * deepseek-v4-flash[1m]", "Thinking…" and "Committed as 4f21a…" beside chips
  * that were properly translated. A surface can only word a step in the
  * owner's language if it can tell WHICH step it is, and the only handle on a
  * line is its text — so a reworded sentence here would silently stop matching
@@ -298,6 +298,11 @@ export const RUNNER_STEP = {
   workingOnBranch: (branch: string, base: string) => `Working on ${branch}, for a pull request into ${base}`,
   /** The run has a working tree of its own — which is what lets another run work in this project at the same time. */
   worktree: (branch: string, base: string) => `Working in its own copy of the project on ${branch}, forked from ${base}`,
+  /** One repository of a multi-folder project (TASK-2757): its copy, side by side with the others in the run's folder. */
+  folderWorktree: (folder: string, branch: string, base: string) => `Working in its own copy of ${folder} on ${branch}, forked from ${base}`,
+  folderCommitted: (folder: string, sha: string) => `${folder}: committed as ${sha}`,
+  folderPullRequest: (folder: string, url: string) => `${folder}: pull request ${url}`,
+  folderNoPullRequest: (folder: string, reason: string) => `${folder}: no pull request: ${reason}`,
   worktreeMerged: (base: string) => `Merged into ${base} and the run's copy of the project removed`,
   worktreeRemoved: "The run's copy of the project was removed; it left nothing on its branch",
   /** Why the copy is still on disk: it could not be removed, or git could not say what is on its branch. */
@@ -314,6 +319,9 @@ export const RUNNER_STEP = {
   committed: (sha: string, newRepository: boolean) => `Committed as ${sha}${newRepository ? " (new repository)" : ""}`,
   committedByRun: (sha: string) => `Committed by the run itself as ${sha}`,
   notCommitted: (reason: string) => `Not committed: ${reason}`,
+  /** A run in a worktree wrote that temporary folder's path into its files; the box said it in the project's folder (coding-worktree-heal.ts). */
+  pathsRewritten: (files: readonly string[]) =>
+    `Rewrote the run's temporary folder path to the project's own in ${files.slice(0, 3).join(", ")}${files.length > 3 ? ` and ${files.length - 3} more` : ""}`,
   faviconCommitted: (sha: string) => `Added the generated favicon, committed as ${sha}`,
   // `base` is the run record's, which the type allows to be null; rendered the
   // way the template literal it replaced rendered it, so a record already on
@@ -324,6 +332,15 @@ export const RUNNER_STEP = {
    *  the loop was ever going to watch it — see PrFoundBy. */
   pullRequestAdopted: (num: number, base: string | null) => `Picked up pull request #${num} into ${base}, opened by the run itself`,
   notMerged: (reason: string) => `Not merged: ${reason}`,
+  /** The project folder sat on a finished coding team's branch; the box put it back on the base to bring the run's work home (mergeRunBranch). */
+  checkoutReturned: (from: string, base: string) => `The project folder was on ${from}, a coding team's branch; it is back on ${base} so this run's work could be merged`,
+  /** A pull request merged on GitHub was brought into the project folder, fast-forward only (bringBaseHome). */
+  baseHome: (base: string, sha: string) => `The project folder is on the merged ${base} now (${sha})`,
+  /** ...the folder is on another branch: only the base's own ref moved. */
+  baseRefHome: (base: string) => `${base} in the project folder is on the merged work now; the folder is on another branch and was left as it is`,
+  /** ...or could not be: the reason is git's, or the box's own (uncommitted changes, a base that went its own way). */
+  /** What to do comes BEFORE the reason: a feed line is cut at 160 characters, and git's own words can be long. */
+  baseNotHome: (base: string, reason: string) => `The merged ${base} is not in the project folder yet — run git pull there: ${reason}`,
   /** The box handed the merge to GitHub's auto-merge (reconcileAutoMerge). */
   autoMergeOn: (num: number) => `Turned on GitHub's auto-merge for pull request #${num}: it merges the moment its required checks pass`,
   /** ...and took it back; `reason` is the box's own words (decideAutoMerge). */
@@ -433,6 +450,10 @@ interface RunnerPattern {
 /**
  * The reader for RUNNER_STEP. Ordered: nothing here overlaps, but a pattern
  * that could swallow another must come after it.
+ *
+ * TODO(next release): `pathsRewritten`, `checkoutReturned`, `baseHome`,
+ * `baseRefHome` and `baseNotHome` have no row here and no label key yet, so
+ * the timeline shows them in English whatever language the desktop is in.
  */
 const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Started$/, labelKey: "started", icon: "play_arrow" },

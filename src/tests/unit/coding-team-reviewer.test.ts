@@ -143,3 +143,27 @@ describe("the shell reviewer — the first review on a team with a branch", () =
     expect(reviewerTask({ taskId: "t1", description: "d", files: [], report: "r", goal: "g" })).not.toContain("Your folder:");
   });
 });
+
+describe("the final reviewer's task", () => {
+  const where = { branch: "clawbox/team-abcd1234", base: "master", files: ["lib/calc.ts", "README.md"], tests: null };
+
+  it("quotes the WHOLE goal — a goal as long as the route takes — and still fits with the board's digest", async () => {
+    const { FINAL_GOAL_CHARS, finalReviewerTask, finalReviewRoom } = await import("@/lib/coding-team-reviewer");
+    const { MAX_TASK_CHARS } = await import("@/lib/coding-agent");
+    const { MAX_DIGEST_CHARS } = await import("@/lib/coding-team-board");
+    expect(FINAL_GOAL_CHARS).toBe(MAX_TASK_CHARS);
+    // Eight numbered rules, the last one at the very end: the reviewer of a
+    // 3,000-character goal was shown 1,200 and said so in its verdict.
+    const goal = `${Array.from({ length: 8 }, (_, i) => `${i + 1}. ${"rule ".repeat(95)}`).join("\n")}\nLAST RULE: never NaN.`;
+    expect(goal.length).toBeGreaterThan(3_000);
+    expect(goal.length).toBeLessThanOrEqual(MAX_TASK_CHARS);
+    const digest = "t1 [complete] — engine → done.";
+    const text = finalReviewerTask({ goal, ...where, digest });
+    expect(text).toContain(goal);
+    expect(text).toContain("LAST RULE: never NaN.");
+    expect(text).toContain(digest);
+    expect(text.length).toBeLessThanOrEqual(TEAM_TASK_CHARS);
+    // The digest keeps its full room beside the longest goal.
+    expect(finalReviewRoom({ goal: "g".repeat(MAX_TASK_CHARS), ...where })).toBeGreaterThanOrEqual(MAX_DIGEST_CHARS);
+  });
+});

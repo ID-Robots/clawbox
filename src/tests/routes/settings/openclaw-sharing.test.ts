@@ -131,11 +131,23 @@ describe("POST", () => {
   });
 });
 
+describe("mayHaveGatewayToken", () => {
+  it("is never a user's on an organisation box, even while OpenClaw is shared", async () => {
+    const { mayHaveGatewayToken } = await import("@/lib/openclaw-sharing");
+    fs.writeFileSync(storePath(), JSON.stringify({ openclaw_shared_with_users: true }));
+    expect(await mayHaveGatewayToken({ isOwner: false })).toBe(true);
+    fs.writeFileSync(storePath(), JSON.stringify({ openclaw_shared_with_users: true, org_mode: true }));
+    expect(await mayHaveGatewayToken({ isOwner: false })).toBe(false);
+    expect(await mayHaveGatewayToken({ isOwner: true })).toBe(true);
+    expect(await mayHaveGatewayToken(null)).toBe(false);
+  });
+});
+
 describe("/setup-api/users/me", () => {
   it("tells the desktop whether OpenClaw is shared, so a user's desktop shows its icon", async () => {
     as({ username: "alice", isOwner: false });
     expect(await (await me(new Request("http://box.local/setup-api/users/me"))).json()).toEqual({
-      username: "alice", isOwner: false, multiUser: true, openclawShared: false,
+      username: "alice", isOwner: false, multiUser: true, openclawShared: false, orgMode: false,
     });
     fs.writeFileSync(storePath(), JSON.stringify({ openclaw_shared_with_users: true }));
     expect((await (await me(new Request("http://box.local/setup-api/users/me"))).json()).openclawShared).toBe(true);

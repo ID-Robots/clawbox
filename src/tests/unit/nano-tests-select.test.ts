@@ -88,7 +88,7 @@ describe.skipIf(!canRun)("scripts/nano-tests/select-tests.sh", () => {
   });
 
   it("runs everything for a file no test's map covers", () => {
-    for (const p of ["install.sh", "package.json", "bun.lock", "src/lib/updater.ts", "src/middleware.ts", "config/clawbox-bootstrap-new.md"]) {
+    for (const p of ["install.sh", "package.json", "bun.lock", "src/lib/updater.ts", "src/proxy.ts", "config/clawbox-bootstrap-new.md"]) {
       const out = select(["src/lib/coding-agent.ts", p]);
       expect(out.all, p).toBe(true);
       expect(out.reason, p).toBe(`every test: ${p} is covered by no test's map`);

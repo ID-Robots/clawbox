@@ -62,7 +62,7 @@ test.beforeEach(async ({ page }) => {
       enabled: true, ready: true, running: 0, setupComplete: true,
       readiness: { ready: true, wrapperInstalled: true, claudeInstalled: true, clawaiConnected: true, problems: [] },
       harnessCommand: "claude-ds", maxTaskChars: 4000, defaultDirectory: "/home/clawbox/projects",
-      effort: "ultracode", effortLevels: ["low", "xhigh", "max", "ultracode"], reviewPass: false,
+      effort: "ultracode", effortLevels: ["low", "medium", "high", "xhigh", "max", "ultracode"], reviewPass: false,
     } }));
   await page.route("**/setup-api/coding-agent/projects*", (route) =>
     route.fulfill({ json: { directory: "/home/clawbox/projects", projects: [PROJECT] } }));

@@ -1,14 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+
+// The panel streams from the box and draws with xterm; its own suite
+// (update-raw-log.test.tsx) covers that. Here: where it opens, and when.
+vi.mock("@/components/UpdateRawLog", () => ({
+  default: ({ id, label, live }: { id: string; label: string; live: boolean }) => (
+    <section id={id} aria-label={label} data-live={String(live)} data-testid="update-raw-log" />
+  ),
+}));
+import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import UpdatingPage from "@/app/updating/page";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
+import { UpdateRunView } from "@/components/UpdateRunView";
 import UpdateStep, { describeUpdateFailure, HIDDEN_UPDATE_STEP_IDS } from "@/components/UpdateStep";
 import UpdateWhatsNewPanel, {
   pickHighlights,
   UPDATE_COMPACT_PICKS,
 } from "@/components/UpdateWhatsNewPanel";
 import { whatsNewEn } from "@/lib/edition-translations/en-whats-new";
-import { RESTART_STEP_ID } from "@/lib/update-constants";
+import { HARNESS_DOWNGRADE_BACKUP_FAILED_CODE, HARNESS_DOWNGRADE_CODE } from "@/lib/harness-downgrade";
+import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID } from "@/lib/update-constants";
 import { releasePageUrl, updateWhatsNewPanel, type UpdateWhatsNew } from "@/lib/update-whats-new";
 import type { StepState, UpdateState } from "@/lib/updater";
 import { WHATS_NEW_HIGHLIGHTS, WHATS_NEW_RELEASE } from "@/lib/whats-new";
@@ -233,8 +243,9 @@ describe("SystemUpdateApp — a failed run", () => {
     expect(within(panel).getByRole("heading", { name: "Updating OpenClaw" })).toBeInTheDocument();
     expect(within(panel).getByTestId("update-error-reason")).toHaveTextContent(reason);
     expect(document.body.textContent).not.toContain("Unknown error");
-    // An ordinary failure starts over on a fresh run, so it is not a "resume".
+    // An ordinary failure starts over on a fresh run: Try again, never a "resume".
     expect(within(panel).queryByRole("button", { name: "Resume update" })).toBeNull();
+    expect(within(panel).getByRole("button", { name: "Try again" })).toBeInTheDocument();
     expect(within(panel).getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
 
     const stepsPanel = screen.getByTestId("update-steps-panel");
@@ -295,6 +306,89 @@ describe("SystemUpdateApp — a failed run", () => {
     const [feature] = pickHighlights(UPDATE_COMPACT_PICKS, 1);
     expect(within(region).getByText(whatsNewEn[feature.title])).toBeInTheDocument();
     expect(within(region).getByTestId("update-whats-new-image")).toHaveAttribute("src", feature.image);
+  });
+});
+
+/**
+ * A failed full update with a cause of its own is run again by Try again, beside
+ * Dismiss. It is read from the run's own verdict — never on an interrupted run
+ * (Resume), a refused harness downgrade (its own override), a Dismiss the box did
+ * not take, whose sentence says "Try again in a moment", or the OpenClaw-only run.
+ */
+describe("UpdateRunView — Try again on a failed run", () => {
+  const OWN_CAUSE: Partial<UpdateState> = {
+    error: "openclaw_install exited with code 1",
+    steps: steps(4, { status: "failed", error: "npm could not reach the registry" }),
+  };
+  const READABLE = { branch: "main", downgrades: [{ harness: "openclaw" as const, installed: "2026.11.5", target: "2026.9.1" }] };
+
+  function draw(state: Partial<UpdateState>, props: { onResume?: () => void; dismissError?: string | null } = {}) {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(WHATS_NEW)));
+    const onTryAgain = vi.fn();
+    render(
+      <UpdateRunView
+        status="failed"
+        state={{ phase: "failed", currentStepIndex: -1, steps: [], ...state }}
+        error={null}
+        versions={null}
+        channel={null}
+        heading="h2"
+        headline="Update failed"
+        lede="One step couldn't complete. See the steps below."
+        onDismiss={vi.fn()}
+        onTryAgain={onTryAgain}
+        {...props}
+      />,
+    );
+    return { onTryAgain, panel: screen.getByTestId("update-error-panel") };
+  }
+
+  it("offers Try again beside Dismiss, and no Resume, on a failure with a cause of its own", () => {
+    const { onTryAgain, panel } = draw(OWN_CAUSE);
+    expect(within(panel).queryByRole("button", { name: "Resume update" })).toBeNull();
+    expect(within(panel).getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole("button", { name: "Try again" }));
+    expect(onTryAgain).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Resume alone on an interrupted run", () => {
+    const { panel } = draw(
+      { error: `${INTERRUPTED_MESSAGE_PREFIX} the box restarted while "Updating OpenClaw" was running.`, steps: steps(4, { status: "failed" }) },
+      { onResume: vi.fn() },
+    );
+    expect(within(panel).getByRole("button", { name: "Resume update" })).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it.each<[UpdateState["errorCode"], UpdateState["downgrade"]]>([
+    [HARNESS_DOWNGRADE_CODE, READABLE],
+    [HARNESS_DOWNGRADE_CODE, undefined],
+    [HARNESS_DOWNGRADE_BACKUP_FAILED_CODE, { ...READABLE, backupFailure: "the backup could not be written" }],
+    [HARNESS_DOWNGRADE_BACKUP_FAILED_CODE, undefined],
+  ])("offers no Try again on a refused harness downgrade (%s, detail %#)", (errorCode, downgrade) => {
+    const { panel } = draw({ ...OWN_CAUSE, errorCode, downgrade });
+    expect(within(panel).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(within(panel).getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
+  });
+
+  it("offers no Try again beside a Dismiss the box did not take", () => {
+    const { panel } = draw(OWN_CAUSE, { dismissError: "The device could not clear that result. Try again in a moment." });
+    expect(within(panel).getByTestId("update-dismiss-error")).toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: "Try again" })).toBeNull();
+  });
+
+  it("offers no Try again under a failed OpenClaw-only run: the press would start the full update", () => {
+    // The OpenClaw-only flow shares this state and has no restart step.
+    const { panel } = draw({
+      error: "openclaw_install exited with code 1",
+      steps: [
+        { id: "openclaw_install", label: "Updating OpenClaw", status: "failed", error: "npm could not reach the registry" },
+        { id: "openclaw_patch", label: "Patching OpenClaw gateway", status: "pending" },
+        { id: "gateway_restart", label: "Restarting OpenClaw gateway", status: "pending" },
+      ],
+    });
+    expect(within(panel).queryByRole("button", { name: "Try again" })).toBeNull();
+    expect(within(panel).getByRole("button", { name: "Dismiss" })).toBeInTheDocument();
   });
 });
 
@@ -508,5 +602,48 @@ describe("Chromium and VNC — run by the updater, never listed on the screen", 
     for (const label of HIDDEN) expect(list.textContent).not.toContain(label);
     // Chromium completed before VNC failed: done, but not counted.
     expect(screen.getByTestId("update-step-count")).toHaveTextContent("2 / 8 steps complete");
+  });
+});
+
+/**
+ * The owner's x64 laptop test (2026-11-10): the update screen showed the
+ * steps and nothing of what was going on inside them. A small terminal button
+ * in the steps panel's header opens the update's RAW log — every byte the
+ * steps printed, in a read-only terminal (TASK-2428; UpdateRawLog has its own
+ * suite) — and closes it again. Closed until it is asked for, and the step
+ * list is the same with it open.
+ */
+describe("the raw update log behind the terminal button", () => {
+  it("is not there at first, is there after a click, and is gone after the next — on a stopped run in the window", async () => {
+    const reason = "npm could not reach the registry";
+    mount({
+      phase: "failed",
+      steps: steps(4, { status: "failed", error: reason }),
+      warnings: [{ code: "update_pin_written", message: "The update pin was missing; ClawBox wrote one." }],
+    });
+
+    const panel = await screen.findByTestId("update-steps-panel");
+    const toggle = within(panel).getByRole("button", { name: "Full update log" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle.textContent).toBe("terminal");
+    expect(screen.queryByTestId("update-raw-log")).toBeNull();
+    // The failed view's own log stays where it was, always on screen.
+    expect(screen.getByTestId("update-log")).toBeInTheDocument();
+    const listed = within(panel).getByTestId("update-step-list").textContent;
+
+    fireEvent.click(toggle);
+    const log = screen.getByTestId("update-raw-log");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle.getAttribute("aria-controls")).toBe(log.id);
+    expect(log).toHaveAccessibleName("Full update log");
+    expect(panel.contains(log)).toBe(true);
+    // A stopped run: the stream is read to its end, not followed for a new one.
+    expect(log).toHaveAttribute("data-live", "false");
+    expect(within(panel).getByTestId("update-step-list").textContent).toBe(listed);
+
+    fireEvent.click(toggle);
+    expect(screen.queryByTestId("update-raw-log")).toBeNull();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByTestId("update-log")).toBeInTheDocument();
   });
 });

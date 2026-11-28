@@ -231,6 +231,45 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.policy.read_text().strip(), 'no')
 
+    # A refused radio command must say why in one line: the web routes show its
+    # last stderr line to the owner. Nothing private (a path) goes into it.
+    def assert_one_line_refusal(self, result, words):
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, '')
+        lines = result.stderr.splitlines()
+        self.assertEqual(len(lines), 1, result.stderr)
+        self.assertIn(words, lines[0])
+        self.assertNotIn(str(self.root), lines[0])
+        self.assertFalse((self.root / 'calls').exists(), 'refused before any radio tool ran')
+
+    def run_stop_ap(self):
+        iptables = self.root / 'bin/iptables'
+        iptables.write_text('#!/bin/bash\nprintf "%s\\n" "$*" >> "$TEST_ROOT/calls"\n')
+        iptables.chmod(0o755)
+        return subprocess.run(['bash', str(HELPER.parent / 'stop-ap.sh')], env=self.env,
+                              capture_output=True, text=True, timeout=5)
+
+    def test_unusable_lock_folder_is_refused_aloud(self):
+        # The web account cannot create the root-owned lock folder, which the AP
+        # unit makes at boot. A path under a regular file fails for root too.
+        (self.root / 'plain-file').write_text('')
+        self.env['CLAWBOX_RADIO_RUN_DIR'] = str(self.root / 'plain-file' / 'run')
+        self.assert_one_line_refusal(self.shell('true'), 'Radio lock folder')
+
+    @unittest.skipIf(os.geteuid() == 0, 'root recovers the snapshot instead of refusing it')
+    def test_unprivileged_stop_refuses_pending_recovery_aloud(self):
+        run = self.root / 'run'
+        run.mkdir(mode=0o755)
+        (run / 'wlan-test.policy').write_text('yes\n')
+        self.assert_one_line_refusal(self.run_stop_ap(), 'Recovery pending')
+
+    def test_invalid_interface_name_is_refused_aloud(self):
+        self.env['NETWORK_INTERFACE'] = 'bad iface'
+        self.assert_one_line_refusal(self.run_stop_ap(), 'interface name')
+        result = subprocess.run(['bash', str(HELPER), '--nmcli', 'general', 'status'], env=self.env,
+                                capture_output=True, text=True, timeout=5)
+        self.assert_one_line_refusal(result, 'interface name')
+
     def test_second_owner_cannot_enter_until_first_releases(self):
         p = self.shell('wifi_recover; wifi_inhibit; touch "$TEST_ROOT/ready"; sleep 30', True)
         self.await_file('ready')

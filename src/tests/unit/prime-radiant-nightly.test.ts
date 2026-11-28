@@ -241,7 +241,7 @@ describe("nightly pass", () => {
     const summary = run!.summary as unknown as NightlySummary;
     expect(summary.ingest).toEqual({ skipped: "offline" });
     expect(summary.contradictions.skipped).toBe("offline");
-    expect(summary.notes.join(" ")).toMatch(/not reachable/);
+    expect(summary.notes.join(" ")).toMatch(/No model can write from this box/);
   });
 
   it("a page whose summary the lint refuses is left as it was; every other summary is still saved and merged", async () => {

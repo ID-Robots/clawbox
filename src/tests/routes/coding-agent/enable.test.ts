@@ -52,6 +52,10 @@ vi.mock("@/lib/hermes-mcp-reload", async (importOriginal) => ({
 }));
 
 import { get as configGet, set as configSet, setMany as configSetMany } from "@/lib/config-store";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a box not yet migrated still names (TASK-2261). */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 
 const SESSION_SECRET = "a".repeat(64);
 const STATUS = { enabled: true, ready: false, readiness: { ready: false, wrapperInstalled: true, claudeInstalled: true, clawaiConnected: false, problems: ["ClawBox AI is not connected."] }, running: 0, harnessCommand: "claude-ds", maxTaskChars: 4000 };
@@ -622,7 +626,7 @@ describe("a team's model and effort per role", () => {
   it("refuses a provider and model that do not go together, WHOLE and before anything is written", async () => {
     for (const roleModels of [
       { planner: { provider: "clawbox-ai", model: "claude-fable-5-1" } },
-      { reviewer: { provider: "clawbox-ai", model: "deepseek-v4-pro" } },
+      { reviewer: { provider: "clawbox-ai", model: RETIRED_CHAT_ID } },
       // A role until 2026-10-30, unknown since.
       { bulk: { provider: "clawbox-ai" } },
       { worker: { model: "claude-fable-5-1" } },

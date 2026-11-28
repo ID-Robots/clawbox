@@ -371,7 +371,7 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
         deepseek: { apiKey: "claw_box_token" },
         openai: { apiKey: "claw_box_token", models: [{ id: "gpt-image-1-mini", baseUrl: "https://clawbox.com/api/ai" }] },
       } },
-      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
     });
     const body = await (await GET()).json();
 
@@ -405,6 +405,58 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
     // them on a panel that cannot change it.
     expect(rowFor(body, "llamacpp")!.section).toBe("localAi");
     expect(rowFor(body, "anthropic")!.section).toBe("ai");
+  });
+
+  it("names the local engine's row after the model the box runs", async () => {
+    // A DGX Spark runs Qwen through llama.cpp; the row said "Gemma 4", the
+    // model every Jetson ships, while the Local AI card beside it said Qwen.
+    readConfig.mockResolvedValue({ agents: { defaults: { model: { primary: "llamacpp/qwen3.6-35b-a3b-mtp" } } } });
+    getConfigValue.mockImplementation(async (key: string) => ({
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/qwen3.6-35b-a3b-mtp",
+    } as Record<string, string>)[key] ?? null);
+    const body = await (await GET()).json();
+    expect(rowFor(body, "llamacpp")!.label).toBe("Qwen 3.6 (on-device)");
+
+    getConfigValue.mockImplementation(async (key: string) => ({
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+    } as Record<string, string>)[key] ?? null);
+    const jetson = await (await GET()).json();
+    expect(rowFor(jetson, "llamacpp")!.label).toBe("Gemma 4 (on-device)");
+  });
+
+  it("shows an external AI engine as the Local AI row, named for its model (TASK-2376)", async () => {
+    readConfig.mockResolvedValue({ agents: { defaults: { model: { primary: "clawext/Qwen/Qwen3-32B" } } } });
+    getConfigValue.mockImplementation(async (key: string) => ({
+      local_ai_provider: "clawext",
+      local_ai_model: "clawext/Qwen/Qwen3-32B",
+    } as Record<string, string>)[key] ?? null);
+    const body = await (await GET()).json();
+    const row = rowFor(body, "clawext")!;
+    expect(row).toMatchObject({ label: "Qwen3-32B (external engine)", section: "localAi", state: "connected", isDefault: true });
+    expect(rowFor(body, "llamacpp")).toBeUndefined();
+  });
+
+  it("names the local row after the primary when no local engine is stored", async () => {
+    // The setup wizard's scope "primary" writes no local_ai_* keys: the row
+    // comes from the primary alone, and said "Gemma 4" over a Qwen primary.
+    readConfig.mockResolvedValue({ agents: { defaults: { model: { primary: "llamacpp/qwen3.6-35b-a3b-mtp" } } } });
+    getConfigValue.mockResolvedValue(null);
+    const body = await (await GET()).json();
+    expect(rowFor(body, "llamacpp")!.label).toBe("Qwen 3.6 (on-device)");
+  });
+
+  it("reads a doubled llamacpp/ prefix as the model, not as the Llama family", async () => {
+    // configure could save `llamacpp/llamacpp/<id>` before TASK-1076, and
+    // nothing rewrites the config store.
+    readConfig.mockResolvedValue({ agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } } });
+    getConfigValue.mockImplementation(async (key: string) => ({
+      local_ai_provider: "llamacpp",
+      local_ai_model: "llamacpp/llamacpp/gemma4-e2b-it-q4_0",
+    } as Record<string, string>)[key] ?? null);
+    const body = await (await GET()).json();
+    expect(rowFor(body, "llamacpp")!.label).toBe("Gemma 4 (on-device)");
   });
 
   // TASK-663, the OpenClaw leg. This path reads `openclaw.json` off disk and

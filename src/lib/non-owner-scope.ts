@@ -37,9 +37,24 @@
 //      polls `/setup-api/ai-models/status`, and the box follows it exactly as
 //      it would for the owner's own poll (src/lib/clawai-plan-follow.ts).
 //
+// THE OWNER'S CLUSTER is the owner's too (TASK-2670): Settings → System →
+// Cluster, which reads a Workstation's other Sparks over ssh, answers a user 403
+// on every method (`OWNER_CLUSTER_API`) and is not drawn for them.
+//
 // A DENY-list now, where it used to be an allow-list of the four per-user
 // surfaces a non-owner had: the exceptions are what is named, and a route
 // added later is the owner's desktop for every user, like everything else.
+//
+// UPDATES ARE THE OWNER'S. "Update available", the update itself and every
+// action around it (the dismissal, the OpenClaw-only update, the weekly
+// check, the update branch, the System Update app) answer a user 403 on every
+// box: an update rebuilds and reboots the whole box as root. The one read left
+// to them is `update/status`, which the lock screen every user is sent to
+// during an update polls (src/app/updating).
+//
+// AN ORGANISATION BOX (`org_mode`, src/lib/org-mode.ts) narrows all of this to
+// an ALLOW-list: a member of staff gets Chat, Files and their own Settings,
+// and nothing the owner shares (OpenClaw included) reaches them.
 //
 // THE OWNER MAY SHARE OPENCLAW. "Share OpenClaw with all users" (Settings →
 // Users, `OPENCLAW_SHARED_KEY`, off unless the owner turns it on) hands the
@@ -54,13 +69,25 @@
 // judge exactly the table middleware uses.
 
 import { mayUseChatKey } from "./chat-scope";
+import { orgMemberVerdict } from "./org-mode";
 
 /**
  * Desktop apps that are the owner's alone: the harnesses' own consoles, which
- * list (and open) every conversation on the box. Every other app is every
- * signed-in user's.
+ * list (and open) every conversation on the box, System Update (updating the
+ * box is the owner's call) and ClawBox Vault (the owner's passwords). Every
+ * other app is every signed-in user's — on a home box; an organisation box
+ * narrows that (src/lib/org-mode.ts).
  */
-export const OWNER_ONLY_APP_IDS: readonly string[] = ["openclaw", "hermes"];
+export const OWNER_ONLY_APP_IDS: readonly string[] = ["openclaw", "hermes", "system_update", "vault"];
+
+/**
+ * Where the web server proxies ClawBox Vault's own app (src/lib/vault-proxy.ts,
+ * src/app/apps/clawbox-vault). The owner's on every box, page and API alike:
+ * `/apps` is otherwise every user's, so this tree is named before that rule.
+ * The route refuses anyone but the owner as well; this is the same answer one
+ * step earlier, with the desktop's notice for a person who typed the address.
+ */
+export const VAULT_APP_TREE = "/apps/clawbox-vault";
 
 /** The one owner-only app the owner can share (see the header). */
 export const SHAREABLE_OPENCLAW_APP_ID = "openclaw";
@@ -89,12 +116,27 @@ export function ownerOnlyAppIds(openclawShared: boolean): readonly string[] {
   return openclawShared ? OWNER_ONLY_APP_IDS.filter((id) => id !== SHAREABLE_OPENCLAW_APP_ID) : OWNER_ONLY_APP_IDS;
 }
 
+/** Every update action is the owner's (the header): this tree and the update branch it pulls from. */
+const UPDATE_API_TREE = "/setup-api/update";
+const UPDATE_API_PATHS: ReadonlySet<string> = new Set(["/setup-api/system/update-branch"]);
+/** The one update read left to a user: the lock screen's progress poll. */
+const UPDATE_STATUS_API = "/setup-api/update/status";
+
 /** The owner's account: its password, and the factory reset that wipes it. */
 const OWNER_ACCOUNT_API: ReadonlySet<string> = new Set([
   "/setup-api/system/credentials",
   "/setup-api/system/credentials/verify",
   "/setup-api/setup/reset",
 ]);
+
+/**
+ * The owner's cluster (TASK-2670): Settings → System → Cluster reads a
+ * Workstation's other Sparks over ssh. Not a secret and not an AI setting — the
+ * owner's view of THEIR hardware, which a user's System page does not draw —
+ * and refused to a user on every method, so a user's browser never makes the
+ * request and a hand-typed one is not answered.
+ */
+const OWNER_CLUSTER_API: ReadonlySet<string> = new Set(["/setup-api/system/cluster"]);
 
 /** Routes whose answer IS a secret only the owner holds: the Control UI page with the gateway token in it. */
 const OWNER_SECRET_API: ReadonlySet<string> = new Set([
@@ -127,6 +169,7 @@ const BOX_AI_SETTINGS_API: ReadonlySet<string> = new Set([
   "/setup-api/tts",
   "/setup-api/tts/install",
   "/setup-api/stt",
+  "/setup-api/stt/endpoint",
 ]);
 
 /** Trees where every write is one of the box's AI settings: model and provider config, sign-ins, account pools. */
@@ -202,6 +245,8 @@ export interface NonOwnerRequest {
   username: string;
   /** The owner shares OpenClaw (`OPENCLAW_SHARED_KEY`); absent is not shared. */
   openclawShared?: boolean;
+  /** An organisation box (`ORG_MODE_KEY`, src/lib/org-mode.ts); absent is a home box. */
+  orgMode?: boolean;
 }
 
 const SHARED_OPENCLAW_PAGE = `/app/${SHAREABLE_OPENCLAW_APP_ID}`;
@@ -258,6 +303,30 @@ function canonicalPath(pathname: string): string | null {
   return path.length > 1 ? path.replace(/\/+$/, "") || "/" : path;
 }
 
+/** A path with a `.` or `..` segment once decoded: never one the allow-list grants. */
+function hasDotSegment(canon: string): boolean {
+  return canon.split("/").some((seg) => seg === "." || seg === "..");
+}
+
+/**
+ * A member of staff on an organisation box (src/lib/org-mode.ts), after the
+ * exceptions every user is held to. Nothing is shared with them: the
+ * gateway's trees give them their own chat's pictures and nothing else.
+ */
+function orgMember(req: NonOwnerRequest, canon: string, method: string, isRead: boolean): NonOwnerVerdict {
+  // An allow-list must not be reached by spelling: `files%2f..%2fterminal`
+  // decodes under an allowed tree, so a dot segment is refused outright.
+  if (hasDotSegment(canon)) return "deny";
+  if (GATEWAY_PREFIXES.some((p) => underPrefix(canon, p))) {
+    return isRead && isOwnChatMedia(req.pathname, req.username) ? "allow" : "deny";
+  }
+  if (underPrefix(canon, "/setup-api")) return orgMemberVerdict(canon, method) === "allow" ? "allow" : "deny";
+  if (STATIC_MEDIA_RE.test(req.pathname) || CLAWBOX_PUBLIC_FILES.has(req.pathname)) return isRead ? "allow" : "deny";
+  if (orgMemberVerdict(canon, method) === "allow") return "allow";
+  if (!looksLikePage(req.pathname)) return "deny";
+  return ownerPage(req);
+}
+
 export function nonOwnerVerdict(req: NonOwnerRequest): NonOwnerVerdict {
   const { pathname } = req;
   const method = req.method.toUpperCase();
@@ -267,10 +336,17 @@ export function nonOwnerVerdict(req: NonOwnerRequest): NonOwnerVerdict {
   const shared = req.openclawShared === true;
 
   // The exceptions first, on the canonical path.
-  if (OWNER_ACCOUNT_API.has(canon)) return "deny";
+  if (OWNER_ACCOUNT_API.has(canon) || OWNER_CLUSTER_API.has(canon)) return "deny";
   if (!isRead && (BOX_AI_SETTINGS_API.has(canon) || BOX_AI_SETTINGS_PREFIXES.some((p) => underPrefix(canon, p)))) {
     return "deny";
   }
+  if ((underPrefix(canon, UPDATE_API_TREE) || UPDATE_API_PATHS.has(canon)) && !(isRead && canon === UPDATE_STATUS_API)) {
+    return "deny";
+  }
+  // The owner's passwords: before the org split and before `/apps` is opened
+  // to every user below. The page sends a person home; anything else is 403.
+  if (underPrefix(canon, VAULT_APP_TREE)) return canon === VAULT_APP_TREE ? ownerPage(req) : "deny";
+  if (req.orgMode === true) return orgMember(req, canon, method, isRead);
   // The Control UI page with the token in it: shared with the rest of OpenClaw.
   if (OWNER_SECRET_API.has(canon)) return shared ? "allow" : "deny";
   // API trees answer code, so they answer 403 JSON however they are asked.

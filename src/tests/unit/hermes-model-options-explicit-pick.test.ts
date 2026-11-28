@@ -37,12 +37,12 @@ vi.mock("fs/promises", () => ({
 }));
 
 // Env-overridable ids (clawbox-ai-models.ts): imported, never retyped.
-import { CLAWBOX_AI_FLASH_MODEL_ID, CLAWBOX_AI_PRO_MODEL_ID } from "@/lib/clawbox-ai-models";
+import { CLAWBOX_AI_FLASH_MODEL_ID } from "@/lib/clawbox-ai-models";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
 
 /**
- * A device saved on Anthropic, with a ClawBox AI row offering both tiers in
- * the order the seed writes them — Flash first, which is what made the
- * downgrade silent.
+ * A device saved on Anthropic, with a ClawBox AI row offering the one model
+ * (TASK-2261) and an id a live catalogue may add beside it, Flash first.
  */
 function payloadSavedOnAnthropic(): import("@/lib/hermes-model-options").ModelOptionsPayload {
   return {
@@ -53,7 +53,7 @@ function payloadSavedOnAnthropic(): import("@/lib/hermes-model-options").ModelOp
         authenticated: true,
         models: [
           { id: CLAWBOX_AI_FLASH_MODEL_ID, description: "" },
-          { id: CLAWBOX_AI_PRO_MODEL_ID, description: "" },
+          { id: "deepseek-v5", description: "" },
         ],
       },
       {
@@ -88,28 +88,39 @@ describe("the ClawBox AI scope while the device is saved elsewhere", () => {
     mod = await import("@/lib/hermes-model-options");
   });
 
-  it("lands on the model the owner picked, not the first one listed", async () => {
+  it("lands on the model the owner picked", async () => {
     getKnownMock.mockResolvedValue({
-      value: { clawai: CLAWBOX_AI_PRO_MODEL_ID },
+      value: { clawai: CLAWBOX_AI_FLASH_MODEL_ID },
       known: true,
     });
 
     const scope = await mod.scopeFromPayload(payloadSavedOnAnthropic(), "clawai");
 
-    expect(scope.defaultModel).toBe(CLAWBOX_AI_PRO_MODEL_ID);
+    expect(scope.defaultModel).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
   });
 
   it("honours a pick recorded with the OpenClaw picker's prefixed spelling", async () => {
     // One map, two surfaces: the OpenClaw picker records
-    // `deepseek/deepseek-v4-pro`, Hermes' own config takes the bare id.
+    // `deepseek/deepseek-v4-flash`, Hermes' own config takes the bare id.
     getKnownMock.mockResolvedValue({
-      value: { clawai: `deepseek/${CLAWBOX_AI_PRO_MODEL_ID}` },
+      value: { clawai: `deepseek/${CLAWBOX_AI_FLASH_MODEL_ID}` },
       known: true,
     });
 
     const scope = await mod.scopeFromPayload(payloadSavedOnAnthropic(), "clawai");
 
-    expect(scope.defaultModel).toBe(CLAWBOX_AI_PRO_MODEL_ID);
+    expect(scope.defaultModel).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
+  });
+
+  it("runs a pick of the retired Max-plan id on Flash (TASK-2261)", async () => {
+    getKnownMock.mockResolvedValue({
+      value: { clawai: RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0] },
+      known: true,
+    });
+
+    const scope = await mod.scopeFromPayload(payloadSavedOnAnthropic(), "clawai");
+
+    expect(scope.defaultModel).toBe(CLAWBOX_AI_FLASH_MODEL_ID);
   });
 
   it("still falls to the provider's own default when nothing was picked", async () => {

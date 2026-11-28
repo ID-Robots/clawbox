@@ -24,6 +24,7 @@ import {
   HEADLESS_BRIEF,
   headlessBrief,
   LEAN_VISUAL_BRIEF,
+  LEAN_VISUAL_BRIEF_SIGHTED,
   leanHelpersBrief,
   MCP_BROWSER_TOOLS,
   MCP_SOLO_TOOL,
@@ -105,6 +106,31 @@ describe("the brief", () => {
     expect(LEAN_VISUAL_BRIEF).toMatch(/You cannot see images/);
     expect(LEAN_VISUAL_BRIEF).toMatch(/key by key/);
     expect(LEAN_VISUAL_BRIEF).toMatch(/ONE pass, one screenshot per state/);
+  });
+
+  it("tells a run on a model that sees to look at the picture itself — an Anthropic run, and only one", () => {
+    const sighted = headlessBrief({ reviewedSeparately: false, visual: true, seesImages: true });
+    expect(sighted).toContain(LEAN_VISUAL_BRIEF_SIGHTED);
+    expect(sighted).not.toMatch(/You cannot see images/);
+    expect(LEAN_VISUAL_BRIEF_SIGHTED).toMatch(/answer with the picture itself and a short description/);
+    expect(LEAN_VISUAL_BRIEF_SIGHTED).toMatch(/You can see images: judge layout, spacing, colour and exact text by the picture/);
+    // The serving and driving sentences are the same two in both.
+    for (const shared of [/\$CLAWBOX_PREVIEW/, /browser_fill/, /key by key/, /ONE pass, one screenshot per state/]) {
+      expect(LEAN_VISUAL_BRIEF_SIGHTED).toMatch(shared);
+    }
+    // A run without the tools hears neither, whatever its model sees.
+    expect(headlessBrief({ reviewedSeparately: false, visual: false, seesImages: true })).toBe(PLAIN_BRIEF);
+    const anthropic = systemPrompt(buildRunArgs({ effort: "xhigh", run: RUN, provider: "anthropic" }));
+    expect(anthropic).toContain(LEAN_VISUAL_BRIEF_SIGHTED);
+    for (const provider of ["clawbox-ai", undefined] as const) {
+      const prompt = systemPrompt(buildRunArgs({ effort: "xhigh", run: RUN, ...(provider ? { provider } : {}) }));
+      expect(prompt).toContain(LEAN_VISUAL_BRIEF);
+      expect(prompt).not.toContain(LEAN_VISUAL_BRIEF_SIGHTED);
+    }
+    // The run's own MCP server is told the same, so its words agree with the brief.
+    const mcpOf = (args: string[]) => JSON.parse(args[args.indexOf("--mcp-config") + 1]).mcpServers.clawbox.env as Record<string, string>;
+    expect(mcpOf(buildRunArgs({ effort: "xhigh", run: RUN, provider: "anthropic" })).CLAWBOX_RUN_SEES_IMAGES).toBe("1");
+    expect(mcpOf(buildRunArgs({ effort: "xhigh", run: RUN, provider: "clawbox-ai" }))).not.toHaveProperty("CLAWBOX_RUN_SEES_IMAGES");
   });
 
   it("carries the auto-merge sentence only when a pull request is in sight", () => {

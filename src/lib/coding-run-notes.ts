@@ -265,6 +265,20 @@ export function _writeNotesFileForTests(dir: string, text: string | null, scratc
  */
 export const LESSON_CHANNEL_BRIEF = `To leave a lesson for the next run in this project — a command that worked, a flag the build needed, a gotcha that cost you turns — write {"lessons": ["…"]} to $CLAWBOX_RUN_ARTIFACTS_DIR/${LESSONS_FILE} before your final message: at most ${MAX_LESSONS_PER_RUN} one-line lessons of at most ${MAX_LESSON_CHARS} characters, facts only, nothing already in the project's run notes. Never a secret, token, password, e-mail address or link — a lesson holding one is dropped.`;
 
+/** Less room than this left under the cap and a run is not asked for lessons: a typical one would not fit. */
+export const LESSON_ROOM_CHARS = 120;
+
+/**
+ * Is there room in a project's notes for one more lesson? A project whose
+ * notes sit at the cap refuses every lesson as `full`, and its runs were still
+ * told to write up to five each time — output tokens spent on a file the
+ * settle threw away, run after run (four of the owner's apps, 2026-11-10).
+ * The owner makes room by editing the notes in the project's settings.
+ */
+export function runNotesHaveRoom(notes: string): boolean {
+  return notes.trim().length + LESSON_ROOM_CHARS <= MAX_RUN_NOTES_CHARS;
+}
+
 /**
  * The block a run's system prompt carries: the notes, framed as facts about
  * the project rather than orders, delimited so the run can tell them from the

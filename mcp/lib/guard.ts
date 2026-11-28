@@ -167,7 +167,7 @@ export function isAllowedPath(abs: string, real: string | null = canonicalPath(a
  * the files inside it, whichever folder they turn up in.
  */
 export const SECRET_NAME_RE =
-  /(^|[^\w.-])\.(ssh|hermes|clawkeep|codex|gnupg|aws|kube|env|envrc|netrc|npmrc|pypirc|pgpass|git-credentials|session-secret|mcp-token|local-ai-token|hermes-dashboard-pw)(?![\w-])|(^|[^\w-])id_(rsa|ecdsa|ed25519)(?![\w-])/i;
+  /(^|[^\w.-])\.(ssh|hermes|clawkeep|clawbox-vault|codex|gnupg|aws|kube|env|envrc|netrc|npmrc|pypirc|pgpass|git-credentials|session-secret|mcp-token|local-ai-token|hermes-dashboard-pw)(?![\w-])|(^|[^\w-])id_(rsa|ecdsa|ed25519)(?![\w-])/i;
 
 /**
  * Every `.openclaw` mention in a shell string, with whatever path follows it.
@@ -919,6 +919,10 @@ export function fitRows(
 /** Cap a string at the tool boundary and say what to do about the truncation. */
 export function capText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
-  const omitted = text.length - maxChars;
-  return `${text.slice(0, maxChars)}\n…[truncated, ${omitted} chars omitted — narrow the query]`;
+  return `${text.slice(0, maxChars)}${truncationNote(text.length - maxChars)}`;
+}
+
+/** The line capText puts after what it kept: how much it dropped, and what to do about it. */
+export function truncationNote(omitted: number): string {
+  return `\n…[truncated, ${omitted} chars omitted — narrow the query]`;
 }

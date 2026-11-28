@@ -626,6 +626,16 @@ describe("what a failed start printed, as one line", () => {
       .toBe("error when starting preview server: Error: listen EADDRINUSE: address already in use 127.0.0.1:4176");
   });
 
+  it("names the file and the reason when a build stops a `next build && next start` (TASK-2323)", () => {
+    // What the Store's Audiobook Player 1.2.1 printed on a board: the first
+    // error line alone, "> Build error occurred", was the whole answer.
+    const log = fs.readFileSync(path.join(__dirname, "..", "fixtures", "next-build-favicon-rgb.txt"), "utf-8");
+    expect(start.startOutputLine(log))
+      .toBe("Build error occurred Error: Turbopack build failed with 1 error: ./app/favicon.ico Error: Processing image failed (The PNG is not in RGBA format!)");
+    const webpack = ["Creating an optimized production build ...", "Failed to compile.", "", "./app/page.tsx:12:3", "Type error: Property 'title' does not exist on type 'Book'.", "", "Next.js build worker exited with code: 1"].join("\n");
+    expect(start.startOutputLine(webpack)).toBe("Failed to compile. ./app/page.tsx:12:3 Type error: Property 'title' does not exist on type 'Book'.");
+  });
+
   it("is the last line when nothing reads like an error, and nothing when there was no output", () => {
     expect(start.startOutputLine("> app@1.0.0 start\n> node server.js\n\nbye\n")).toBe("bye");
     expect(start.startOutputLine("\n  \n")).toBeNull();

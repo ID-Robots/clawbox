@@ -34,7 +34,8 @@ const PowerApprovalPrompt = memo(function PowerApprovalPrompt() {
   const { t } = useT();
   const [prompt, setPrompt] = useState<Prompt | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(false);
+  // true: the generic failure; a string: a refusal the box named in its own words.
+  const [error, setError] = useState<boolean | string>(false);
   const decisionPending = useRef(false);
   const denyButton = useRef<HTMLButtonElement>(null);
   useEffect(() => { if (prompt?.id) denyButton.current?.focus(); }, [prompt?.id]);
@@ -90,7 +91,11 @@ const PowerApprovalPrompt = memo(function PowerApprovalPrompt() {
       });
       if (!res.ok) {
         if (res.status === 409 || res.status === 500) setPrompt(null);
-        throw new Error("Confirmation failed");
+        // A refusal the box names — an update already running — is shown as it
+        // is: nothing failed, and asking again would not help.
+        const said: unknown = res.status === 409 ? (await res.json().catch(() => null))?.error : null;
+        setError(typeof said === "string" && said ? said : true);
+        return;
       }
       setPrompt(null);
     } catch { setError(true); }
@@ -104,7 +109,7 @@ const PowerApprovalPrompt = memo(function PowerApprovalPrompt() {
     {prompt && <p className="mt-2 text-lg">{t(prompt.action === "restart" ? "tray.restart" : prompt.action === "update" ? "settings.systemUpdate" : "tray.shutDown")}</p>}
     <p className="mt-2 text-sm text-white/70">{t("chat.approval.summary")}</p>
     {prompt && <blockquote className="my-3 max-h-24 overflow-auto whitespace-pre-wrap break-words border-l-2 border-white/30 pl-3 text-sm">{prompt.reason}</blockquote>}
-    {error && <p role="alert" className="mb-2 text-sm text-red-300">{t("chat.approval.failed")}</p>}
+    {error && <p role="alert" className={`mb-2 text-sm ${typeof error === "string" ? "text-white/80" : "text-red-300"}`}>{typeof error === "string" ? error : t("chat.approval.failed")}</p>}
     {!prompt && error && <button onClick={() => setError(false)} className="rounded-lg border border-white/20 px-3 py-2">{t("window.close")}</button>}
     {prompt && <div className="flex gap-3">
       <button ref={denyButton} disabled={busy || !prompt} onClick={() => void decide(false)} className="rounded-lg border border-white/20 px-3 py-2">{t("chat.approval.deny")}</button>

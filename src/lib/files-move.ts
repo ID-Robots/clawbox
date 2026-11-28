@@ -106,11 +106,18 @@ function moveErrorOf(err: unknown): { code: string; error: string } {
  * `conflict` deciding what a name clash does. `destAbs` is the route's
  * `safePath` answer for the destination (null when it refused it).
  */
-export function moveEntries({ root, sources, destAbs, conflict }: {
+export function moveEntries({ root, sources, destAbs, conflict, isRoot, relOfTarget }: {
   root: string;
   sources: readonly MoveSource[];
   destAbs: string | null;
   conflict: MoveConflictPolicy;
+  /**
+   * A view with more than one root (a member of staff's Home and Shared,
+   * src/lib/files-scope.ts) names them all here: none of them is ever moved.
+   */
+  isRoot?: (abs: string) => boolean;
+  /** The browse-relative path a moved item answers with; `root`-relative by default. */
+  relOfTarget?: (abs: string) => string;
 }): MoveResult {
   const base = path.resolve(root);
   if (!destAbs) return refuse(400, "invalid_destination", "Invalid destination");
@@ -136,7 +143,7 @@ export function moveEntries({ root, sources, destAbs, conflict }: {
     if (!abs) return refuse(400, "invalid_path", "Invalid path", { path: rel });
     if (seen.has(abs)) continue;
     seen.add(abs);
-    if (abs === base || isProtectedContainer(abs)) {
+    if (abs === base || isRoot?.(abs) || isProtectedContainer(abs)) {
       return refuse(400, "protected_container", "This folder holds the box's own state and cannot be moved or deleted here", { path: rel });
     }
     let stat: fs.Stats;
@@ -202,7 +209,7 @@ export function moveEntries({ root, sources, destAbs, conflict }: {
       failed.push({ path: item.rel, ...moveErrorOf(err) });
       continue;
     }
-    moved.push({ from: item.rel, to: relOf(base, target), name: path.basename(target) });
+    moved.push({ from: item.rel, to: relOfTarget ? relOfTarget(target) : relOf(base, target), name: path.basename(target) });
   }
   return { ok: true, outcome: { moved, skipped, failed } };
 }

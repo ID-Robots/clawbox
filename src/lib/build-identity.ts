@@ -23,6 +23,7 @@ import { promisify } from "util";
 import { readFile, stat } from "fs/promises";
 import path from "./runtime-path";
 import { isSafeBranch } from "./update-branch";
+import { probeUpdateHost, resolveUpdateChannel, UpdateChannelError } from "./update-channel";
 import {
   DRIFT_ACTION_REALIGN,
   DRIFT_ACTION_REBUILD,
@@ -71,11 +72,19 @@ export interface CheckoutInfo {
 export interface PinInfo {
   /** The branch recorded in `.update-branch`, or null when the device carries no pin. */
   branch: string | null;
-  /** Where the branch came from: the pin file, or (unpinned) whatever the updater would resolve today. */
-  source: "pin-file" | "checkout-branch" | "default" | "unknown";
+  /**
+   * Where the branch came from: the pin file, or (unpinned) whatever the
+   * updater would resolve today — on a ClawBox Workstation its own channel
+   * (src/lib/update-channel.ts), ahead of the pin.
+   */
+  source: "pin-file" | "checkout-branch" | "default" | "workstation-channel" | "unknown";
   /** Locally-known tip of `origin/<branch>` — resolved without fetching, so it can lag origin. */
   commit: string | null;
-  /** False when `.update-branch` is missing or unusable — the case AUTO-REPIN repairs. */
+  /**
+   * False when `.update-branch` is missing or unusable — the case AUTO-REPIN
+   * repairs. True on the Workstation channel (and when the channel cannot be
+   * decided): there AUTO-REPIN writes nothing, and the update says why.
+   */
   pinned: boolean;
 }
 
@@ -304,6 +313,22 @@ async function readPin(projectDir: string): Promise<PinInfo> {
   let branch: string | null = null;
   let source: PinInfo["source"] = "unknown";
   let pinned = false;
+
+  // The updater's rule 0 (resolveUpdateBranch): a ClawBox Workstation's tested
+  // commit is the tip of its channel's branch, not of the branch install-x64.sh
+  // recorded — compared against the pin, every Workstation would be reported
+  // as "not the tested commit for beta". A channel that cannot be decided
+  // reports nothing: the update refuses with its own sentence.
+  try {
+    const channel = resolveUpdateChannel(probeUpdateHost(projectDir));
+    if (channel.kind === "workstation") {
+      const commit = await gitValue(projectDir, "rev-parse", "--verify", "--quiet", `origin/${channel.ref}`);
+      return { branch: channel.ref, source: "workstation-channel", commit, pinned: true };
+    }
+  } catch (err) {
+    if (err instanceof UpdateChannelError) return { branch: null, source: "unknown", commit: null, pinned: true };
+    // Anything else is not an answer about the channel: the branch rules below.
+  }
 
   try {
     const raw = (await readFile(path.join(projectDir, ".update-branch"), "utf-8")).trim();

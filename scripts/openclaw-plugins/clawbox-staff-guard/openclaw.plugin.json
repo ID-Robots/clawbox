@@ -1,0 +1,7 @@
+{
+  "id": "clawbox-staff-guard",
+  "name": "ClawBox staff guard",
+  "description": "On an organisation ClawBox, holds a member of staff's agent to the staff tool allow-list and its file tools to that member's own folder.",
+  "activation": { "onStartup": true },
+  "configSchema": { "type": "object", "additionalProperties": false }
+}

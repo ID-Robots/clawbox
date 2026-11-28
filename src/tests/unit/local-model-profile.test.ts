@@ -32,7 +32,7 @@ describe("reading a model's size out of its id", () => {
   });
 
   it("is not fooled by a quantisation tag or a version number", () => {
-    expect(parseModelParamBillions("deepseek-v4-pro")).toBeNull();
+    expect(parseModelParamBillions("deepseek-v4-flash")).toBeNull();
     expect(parseModelParamBillions("claude-sonnet-4-5")).toBeNull();
     expect(parseModelParamBillions("")).toBeNull();
     // `q4_0` and `qwen2.5` must not read as "4B" / "2.5B".

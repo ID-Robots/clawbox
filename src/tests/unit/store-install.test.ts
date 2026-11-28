@@ -16,13 +16,15 @@ import { saveEnv } from "@/tests/helpers/env";
 const getDefaultDirectory = vi.hoisted(() => vi.fn());
 const ensureProjectFolder = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", () => ({ getDefaultDirectory, ensureProjectFolder }));
-const resolveClawaiToken = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/harness/credentials", () => ({ resolveClawaiToken, CLAWBOX_AI_PROXY_URL: "https://clawbox.com/api/ai" }));
+const resolveClawaiEntitlementToken = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/harness/credentials", () => ({ resolveClawaiEntitlementToken, CLAWBOX_AI_PROXY_URL: "https://clawbox.com/api/ai" }));
 const ensureRepository = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/project-import", () => ({ ensureRepository, freeBytes: vi.fn(async () => null), IMPORT_FREE_RESERVE_BYTES: 0 }));
 const registerOrStartServerApp = vi.hoisted(() => vi.fn());
 const installAppDependencies = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/app-server-start", () => ({ registerOrStartServerApp, installAppDependencies }));
+const recordAppStartFailure = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("@/lib/app-start-failure", () => ({ recordAppStartFailure }));
 const deployWebapp = vi.hoisted(() => vi.fn());
 // Where deployed web apps live, per test — never the box's own data folder.
 const desk = vi.hoisted(() => ({ webapps: "", prefs: {} as Record<string, unknown> }));
@@ -99,7 +101,7 @@ beforeEach(() => {
   desk.prefs = {};
   getDefaultDirectory.mockResolvedValue(projectsRoot);
   ensureProjectFolder.mockResolvedValue(projectsRoot);
-  resolveClawaiToken.mockResolvedValue("claw_test_0123456789abcdef");
+  resolveClawaiEntitlementToken.mockResolvedValue("claw_test_0123456789abcdef");
   ensureRepository.mockResolvedValue({ initialized: true, detail: null });
   deployWebapp.mockResolvedValue(undefined);
   registerOrStartServerApp.mockResolvedValue({ ok: true });
@@ -275,6 +277,11 @@ describe("installClawboxApp", () => {
     expect(out.ok && out.detail).toContain("bun install failed: error: GET https://registry.example/next - 404");
     expect(out.ok && out.detail).not.toContain("exit code 127");
     expect(registerOrStartServerApp).not.toHaveBeenCalled();
+    // Written down for the app's window, which would otherwise answer 404 (TASK-2323).
+    expect(recordAppStartFailure).toHaveBeenCalledWith(expect.objectContaining({
+      id: "hello-app", stage: "dependencies", exitCode: null, directory: path.join(projectsRoot, "hello-app"),
+      detail: "bun install failed: error: GET https://registry.example/next - 404",
+    }));
     // The files stay, so Install again retries over them.
     expect(fs.existsSync(path.join(projectsRoot, "hello-app", "package.json"))).toBe(true);
   });

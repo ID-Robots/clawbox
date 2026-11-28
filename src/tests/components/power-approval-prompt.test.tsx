@@ -32,6 +32,23 @@ describe("desktop power confirmation", () => {
     fireEvent.click(screen.getByRole("button", { name: "window.close" }));
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
+  it("shows the box's own sentence, not a failure, when the Update meets an update already running", async () => {
+    const said = "An update is already running; the desktop shows how it ends.";
+    const update = { ...prompt, action: "update" };
+    fetchMock.mockImplementation(async (_url, init) => new Response(JSON.stringify(init?.method === "POST" ? { error: said } : { pending: update }), { status: init?.method === "POST" ? 409 : 200 }));
+    render(<PowerApprovalPrompt />);
+    await screen.findByText(prompt.reason);
+    fireEvent.click(screen.getByRole("button", { name: "chat.approval.allowOnce" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(said);
+    expect(screen.queryByText("chat.approval.failed")).not.toBeInTheDocument();
+  });
+  it("still says the confirmation failed for a request that was already answered", async () => {
+    fetchMock.mockImplementation(async (_url, init) => new Response(JSON.stringify(init?.method === "POST" ? { applied: false } : { pending: prompt }), { status: init?.method === "POST" ? 409 : 200 }));
+    render(<PowerApprovalPrompt />);
+    await screen.findByText(prompt.reason);
+    fireEvent.click(screen.getByRole("button", { name: "chat.approval.allowOnce" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("chat.approval.failed");
+  });
 
   // The prompt used to ask the box every 5 s, on every owner desktop, all day,
   // for a request that almost never exists. It now asks when the desktop's

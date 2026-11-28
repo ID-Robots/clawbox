@@ -31,6 +31,12 @@ const inventoryMock = vi.hoisted(() => vi.fn());
 /** What `hermes config get <key>` answers; a missing key is unset. */
 const box = vi.hoisted(() => ({ config: {} as Record<string, string> }));
 
+// The link runs the vision check (src/lib/clawbox-ai-vision.ts), which SHOWS
+// the proxy a picture — network I/O no unit test may do. Here Flash sees.
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  probeClawboxAiVision: vi.fn(async () => ({ verdict: "flash", model: "deepseek-v4-flash", flash: "sees", fallback: null })),
+}));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/hermes-config-cache", () => ({
   hermesConfigGet: async (key: string) => box.config[key] ?? "",
@@ -56,12 +62,7 @@ vi.mock("@/lib/harness/credentials", () => ({
   // proxy gave the token being replaced says nothing about the new one.
   forgetClawaiCredentialRefusal: vi.fn(),
 }));
-// The link path's neighbours, none of which this file is about. The vision
-// resolver is mocked because it performs network I/O against the proxy.
-vi.mock("@/lib/clawbox-ai-vision", () => ({
-  resolveVisionModelId: vi.fn(async () => ({ id: null, reason: "unset" })),
-  isClawboxAiVisionId: () => false,
-}));
+// The link path's neighbours, none of which this file is about.
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: vi.fn(async () => false) }));
 vi.mock("@/lib/hermes-image-refresh", () => ({ refreshHermesImageTools: vi.fn() }));
 vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn(async () => ({ ready: false })) }));

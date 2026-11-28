@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import BackgroundJobsPanel from "@/components/BackgroundJobsPanel";
+import en from "@/lib/translations-generated/en";
 
 // The panel that says what the box does without being asked (TASK-609).
 //
@@ -60,6 +61,30 @@ describe("BackgroundJobsPanel", () => {
     render(<BackgroundJobsPanel />);
     await waitFor(() => expect(screen.getByTestId("bg-job-unsupported-checkIns")).toBeTruthy());
     expect(screen.queryByTestId("bg-job-switch-checkIns")).toBeNull();
+  });
+
+  // TASK-2387: on a box whose chats share one engine, dreaming and the
+  // background review start off — and the row says why, so an owner who finds
+  // them off does not have to guess whether something is broken.
+  it("says why dreaming and self-learning are off on a single-engine box", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ...STATUS, singleEngine: true }), { status: 200 })));
+    render(<BackgroundJobsPanel />);
+    const note = await screen.findByTestId("bg-job-single-engine-memoryReview");
+    // No I18nProvider here, so `t` answers the key; the English table is the text.
+    expect(note.textContent).toBe("settings.bgSingleEngine");
+    expect(en["settings.bgSingleEngine"]).toBe("Off by default on this box: it shares one AI engine with all users.");
+    expect(screen.getByTestId("bg-job-single-engine-skillLearning")).toBeTruthy();
+    // Check-ins are not this flag's business.
+    expect(screen.queryByTestId("bg-job-single-engine-checkIns")).toBeNull();
+    // A note, not a lock: the owner can still switch them on.
+    expect(screen.getByTestId("bg-job-switch-memoryReview")).toBeTruthy();
+  });
+
+  it("says nothing of it on any other box, or from a server that does not say", async () => {
+    render(<BackgroundJobsPanel />);
+    await screen.findByTestId("bg-job-switch-memoryReview");
+    expect(screen.queryByTestId("bg-job-single-engine-memoryReview")).toBeNull();
+    expect(screen.queryByTestId("bg-job-single-engine-skillLearning")).toBeNull();
   });
 
   it("draws nothing, and throws nothing, for a body with no jobs in it", async () => {

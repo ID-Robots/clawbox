@@ -30,6 +30,43 @@ import { writeRunMarker } from "./coding-folder-kind";
 const CALL_TIMEOUT_MS = 60_000;
 export const WORKTREES_DIR = path.join(".clawbox", "worktrees");
 
+/** The characters an app id is made of on this box (`safeAppId`, webapp-icon.ts), restated so this module stays free of that one's imports. */
+const APP_ID_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+const MAX_WORKTREE_APP_ID_CHARS = 64;
+
+/**
+ * The app a folder is a COPY of: for `<project>/.clawbox/worktrees/<name>` —
+ * a run's worktree or a team task's, or anything under one — the project
+ * folder's name, which is the id the box serves that app under
+ * (`/apps/<id>/`). Null for any other folder, and for a project folder whose
+ * name is not an app id.
+ *
+ * Why a run is told it (`CLAWBOX_APP_ID`, buildRunEnv): an app that mounts
+ * itself by its folder's name (`basePath: /apps/${basename(cwd)}`) mounts at
+ * `/apps/run-3mnuu230` in a run's worktree, and its own smoke test and mobile
+ * gate — which ask for `/apps/notes` — answer 404 there. Runs copied the whole
+ * project to a temporary folder named like the app to get round it, or
+ * reviewed a stale build (run-3mnuu230 and its review pass, 2026-11-10). The
+ * id is REBUILT from the alphabet, never passed through: it goes into a
+ * process environment and from there into a path.
+ */
+export function worktreeAppId(directory: string): string | null {
+  const parts = path.resolve(directory).split(path.sep);
+  for (let i = parts.length - 2; i >= 2; i--) {
+    if (parts[i - 1] !== ".clawbox" || parts[i] !== "worktrees") continue;
+    const name = parts[i - 2];
+    if (!name || name.length > MAX_WORKTREE_APP_ID_CHARS) return null;
+    let safe = "";
+    for (const ch of name) {
+      const at = APP_ID_CHARS.indexOf(ch);
+      if (at < 0) return null;
+      safe += APP_ID_CHARS[at];
+    }
+    return safe;
+  }
+  return null;
+}
+
 /**
  * One `git -C <dir>` with the coding agent's own environment. Exported
  * because the RUN worktrees (coding-run-worktree.ts) are the same plumbing on

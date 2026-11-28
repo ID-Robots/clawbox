@@ -95,6 +95,19 @@ export function contextLengthFromShow(payload: unknown): number | null {
   return null;
 }
 
+/**
+ * The window a request to this model is SERVED with, or null when the model
+ * sets none of its own: only a `num_ctx` in its parameters. Unlike
+ * {@link contextLengthFromShow} it never falls back to the GGUF's training
+ * maximum — without a `num_ctx`, Ollama allocates its own default
+ * (`OLLAMA_CONTEXT_LENGTH`), which is what a server-side caller sizing one
+ * request has to fit in (local-engine.ts).
+ */
+export function ollamaServedContext(payload: unknown): number | null {
+  if (!payload || typeof payload !== "object") return null;
+  return numCtxFromParameters((payload as ShowPayload).parameters);
+}
+
 /** Ask Ollama about one model. Never throws — the caller decides what a
  *  failed question means, and "we could not ask" is not "the model is bad".
  *  The transport is ollama-capabilities' `fetchOllamaShow`, shared with the

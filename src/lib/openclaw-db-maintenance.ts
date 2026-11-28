@@ -32,6 +32,7 @@ import { execFile, spawn } from "child_process";
 import fs from "fs";
 import path from "./runtime-path";
 import { CONFIG_ROOT, DATA_DIR, get, set } from "./config-store";
+import { x64IntegrationNpmPrefix } from "./x64-integration";
 
 /** Where the owner's schedule lives in the device store. */
 export const DB_MAINTENANCE_KEY = "openclaw_db_maintenance";
@@ -159,9 +160,27 @@ async function helperPaths(): Promise<string[]> {
   ];
   const bin = findOpenclawBin();
   if (path.isAbsolute(bin)) {
-    args.push("--openclaw-bin", bin, "--core-pkg", path.join(path.dirname(bin), "..", "lib", "node_modules", "openclaw", "package.json"));
+    args.push("--openclaw-bin", bin, "--core-pkg", corePackageJson(bin));
   }
   return args;
+}
+
+/**
+ * The installed core's package.json, which the helper reads the version and
+ * schema from. Next to the binary's npm prefix — `<bin>/../lib/node_modules/
+ * openclaw/package.json`, the appliance's and install-x64.sh's layout — and
+ * only when nothing is there, the desktop integration's: its `openclaw` is a
+ * wrapper script that runs the core from the `NPM_PREFIX` its host file names.
+ */
+function corePackageJson(bin: string): string {
+  const derived = path.join(path.dirname(bin), "..", "lib", "node_modules", "openclaw", "package.json");
+  if (fs.existsSync(/* turbopackIgnore: true */ derived)) return derived;
+  const prefix = x64IntegrationNpmPrefix();
+  if (prefix) {
+    const integrated = path.join(prefix, "lib", "node_modules", "openclaw", "package.json");
+    if (fs.existsSync(/* turbopackIgnore: true */ integrated)) return integrated;
+  }
+  return derived;
 }
 
 async function noOpenclaw(): Promise<boolean> {
@@ -253,6 +272,62 @@ export async function readDbMaintenanceStatus(): Promise<DbMaintenanceStatus> {
     schedule,
     nextRunAt: await nextRunAt(schedule),
   };
+}
+
+/**
+ * The helper's record of doctor's run, written the way install.sh writes its
+ * own (`openclaw_db_maintenance record-doctor`): the same script, the same
+ * account, the same places. Nothing is written where the core cannot be named
+ * — no absolute binary to find its package beside — since a verdict for no
+ * core would close the fast path the record opens. Answers whether the helper
+ * wrote it; never throws.
+ */
+async function writeDoctorRecord(command: string[]): Promise<boolean> {
+  try {
+    if (await noOpenclaw()) return false;
+    const { CONFIG_PATH, OPENCLAW_HOME, findOpenclawBin } = await import("./openclaw-config");
+    const { openclawStateDir } = await import("./openclaw-state-store");
+    const bin = findOpenclawBin();
+    if (!path.isAbsolute(bin)) return false;
+    const args = [
+      "-I", helperScript(), ...command,
+      "--state-dir", openclawStateDir(OPENCLAW_HOME),
+      "--config", CONFIG_PATH,
+      "--data-dir", DATA_DIR,
+      "--core-pkg", corePackageJson(bin),
+    ];
+    return await new Promise<boolean>((resolve) => {
+      execFile("python3", args, { timeout: STATUS_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (err, _out, errOut) => {
+        if (err) console.warn(`[db-maintenance] could not record doctor's run: ${String(errOut || err.message).trim().slice(-300)}`);
+        resolve(!err);
+      });
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Record that `openclaw doctor --fix` completed for the installed core:
+ * `record-doctor --verdict complete`, which stamps the record's `doctor` with
+ * the core's version and the time and recomputes the status from the
+ * databases. Run by the update's gateway check, with the gateway stopped, only
+ * after a run it saw complete. It never records `incomplete`: that closes
+ * install.sh's fast path, and install.sh fails a whole update on that verdict
+ * where the update's own check carries on (`markOpenclawDoctorDue` instead).
+ */
+export async function recordOpenclawDoctorComplete(): Promise<boolean> {
+  return writeDoctorRecord(["record-doctor", "--verdict", "complete", "--source", "update"]);
+}
+
+/**
+ * Mark doctor's recorded run as due again after the update's own `doctor
+ * --fix` did not complete: `doctor-due` keeps the verdict and core install.sh's
+ * fast path reads and drops the time, so the next update's gateway check runs
+ * doctor again instead of trusting a run from before this one.
+ */
+export async function markOpenclawDoctorDue(): Promise<boolean> {
+  return writeDoctorRecord(["doctor-due"]);
 }
 
 export type DbMaintenanceStart =

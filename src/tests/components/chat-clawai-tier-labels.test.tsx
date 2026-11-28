@@ -5,6 +5,10 @@ import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { _resetSessionUserForTest } from "@/lib/use-session-user";
 import { translations } from "@/lib/translations";
+import { RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS } from "@/lib/clawbox-ai-retired-models";
+
+/** The former Max-plan chat id a box not yet migrated still names (TASK-2261). */
+const RETIRED_CHAT_ID = RETIRED_CLAWBOX_AI_CHAT_MODEL_IDS[0];
 
 // A jsdom mount of `ChatPopup` — the fake gateway handshake, the model seed,
 // the transcript — costs seconds under a full parallel run, and a case does it
@@ -37,7 +41,7 @@ const CLAWAI_CATALOG = {
   provider: "clawai",
   models: [
     { id: "deepseek-v4-flash", label: "Free/Pro Tier", contextWindow: 1_000_000, input: "text", hint: "DeepSeek V4 Flash. Default." },
-    { id: "deepseek-v4-pro", label: "Max Tier", contextWindow: 1_000_000, input: "text", hint: "DeepSeek V4 Flash. Max plan only." },
+    { id: RETIRED_CHAT_ID, label: "Max Tier", contextWindow: 1_000_000, input: "text", hint: "DeepSeek V4 Flash. Max plan only." },
   ],
   defaultModelId: "deepseek-v4-flash",
   allowCustom: false,
@@ -68,7 +72,7 @@ function chatModelState(activeModel: string) {
   };
 }
 
-const ON_PRO = "deepseek/deepseek-v4-pro";
+const ON_PRO = `deepseek/${RETIRED_CHAT_ID}`;
 const ON_FLASH = "deepseek/deepseek-v4-flash";
 
 const ENTITLED_STATUS = {
@@ -79,7 +83,7 @@ const ENTITLED_STATUS = {
   model: ON_PRO,
   clawaiTier: "pro",
   clawaiAccountTier: "pro",
-  clawaiAllowedModels: ["deepseek-v4-flash", "deepseek-v4-pro"],
+  clawaiAllowedModels: ["deepseek-v4-flash", RETIRED_CHAT_ID],
   clawaiConfigured: true,
   tierSource: "portal",
 };
@@ -233,7 +237,7 @@ describe("the automatic switch to Flash on a German desktop", () => {
     expect(JSON.parse(String(write?.init?.body))).toEqual({ model: ON_FLASH, automatic: true });
     expect(screen.queryByRole("button", { name: /ClawBox AI-Modell/ })).toBeNull();
     expect(document.body.textContent).not.toContain(DE["ai.planNameMax"]);
-    expect(document.body.textContent).not.toContain("deepseek-v4-pro");
+    expect(document.body.textContent).not.toContain(RETIRED_CHAT_ID);
     expect(document.body.textContent).not.toMatch(/requires a Max subscription|Staying on the current model/);
     expect(modelWrites(calls)).toBe(1);
   });

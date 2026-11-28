@@ -15,6 +15,6 @@ describe("WifiHandoffOverlay", () => {
     render(<WifiHandoffOverlay ssid="Home WiFi" targetUrl="http://clawbox.local" />);
 
     expect(screen.getByRole("link", { name: "wifi.openUrl:clawbox.local" }))
-      .toHaveAttribute("href", "http://clawbox.local/setup");
+      .toHaveAttribute("href", "http://clawbox.local/setup?wifi=connected");
   });
 });

@@ -345,7 +345,9 @@ export async function register() {
     // that leaves a box reporting one thing and doing another. It is one
     // config read on a box that is up to date, which is every boot but one.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { runBootMigrations, dropRemovedConsentMigration, dropRemovedProjectsMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration, legacyWebappStorageMigration } = require('./lib/boot-migrations')
+    const { runBootMigrations, dropRemovedConsentMigration, dropRemovedProjectsMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration, legacyWebappStorageMigration, clawboxAiOneModelMigration } = require('./lib/boot-migrations')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { EXPLICIT_MODEL_PICKS_KEY } = require('./lib/explicit-model-pick')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { migrateLegacyWebappStorage } = require('./lib/webapp-legacy-storage-migration')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -401,6 +403,16 @@ export async function register() {
         // Before any webapp is served: the record it writes is what lets the
         // webapps route put the legacy-storage layer in front of an old app.
         legacyWebappStorageMigration({ migrate: () => migrateLegacyWebappStorage() }),
+        // ClawBox AI is one model (TASK-2261): the owner's remembered pick and
+        // Hermes' config.yaml move off the retired ids. openclaw.json is moved
+        // by scripts/gateway-pre-start.sh on every gateway start.
+        clawboxAiOneModelMigration({
+          get,
+          set,
+          picksKey: EXPLICIT_MODEL_PICKS_KEY,
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          migrateHermes: () => require('./lib/hermes-clawai').migrateRetiredClawaiModelsInHermes(),
+        }),
         // One browser profile for the owner and the assistant. BEFORE the
         // keeper below starts the browser: which profile survives depends on
         // whether the desktop one exists yet, and starting the browser is
@@ -412,6 +424,18 @@ export async function register() {
     if (ran.length > 0) console.log(`[instrumentation] Ran ${ran.length} one-shot migration(s): ${ran.join(', ')}`)
   } catch (err) {
     console.error('[instrumentation] Could not run the one-shot migrations:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // Can ClawBox AI's model still look at a picture? (TASK-2261) Upstream can
+    // take vision away from Flash, so a Hermes box asks at every start and
+    // moves `auxiliary.vision` to Flash, the fallback, or nothing. NOT awaited:
+    // it is a network round trip, and nothing on the box waits for it. The
+    // OpenClaw side is asked by scripts/gateway-pre-start.sh at gateway start.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { refreshClawaiVisionOnHermes } = require('./lib/hermes-clawai')
+    void refreshClawaiVisionOnHermes()
+  } catch (err) {
+    console.error('[instrumentation] Could not start the ClawBox AI vision check:', err instanceof Error ? err.message : err)
   }
   if (onDeviceAccount) {
     try {
@@ -635,6 +659,19 @@ export async function register() {
     console.error('[instrumentation] Could not resume email chat approvals:', err instanceof Error ? err.message : err)
   }
   try {
+    // A mail send backend auth value an older ClawBox kept in config.json,
+    // where the assistant's shell can read it, leaves it on the first read
+    // (TASK-2714, src/lib/mail-draft-approval-config.ts) — read once now, so
+    // an update moves it without anyone opening Settings.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { readDraftApprovalConfig } = require('./lib/mail-draft-approval-config')
+    void readDraftApprovalConfig().catch((err: unknown) => {
+      console.error('[instrumentation] Could not move the mail send auth value:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not move the mail send auth value:', err instanceof Error ? err.message : err)
+  }
+  try {
     // A Hermes plugin the owner installs after boot never reaches the chat on
     // its own: Hermes scans for plugins once per process, and the process
     // serving chat is a long-lived service. Nothing else on the box notices, so
@@ -652,6 +689,18 @@ export async function register() {
     startHermesPluginWatcher()
   } catch (err) {
     console.error('[instrumentation] Could not start the Hermes plugin watcher:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // OpenClaw 2026.11.3 indexes memory only with the gateway stopped; a web
+    // server that exited during such a pass left the gateway stopped and a
+    // hold on disk saying so (src/lib/openclaw-auth-ops.ts).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { restoreOpenclawGatewayAfterCrash } = require('./lib/openclaw-auth-ops')
+    void restoreOpenclawGatewayAfterCrash().catch((err: unknown) => {
+      console.error('[instrumentation] Could not start the gateway after an interrupted offline hold:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not check for an interrupted offline hold:', err instanceof Error ? err.message : err)
   }
   try {
     // On the OpenClaw arm the memory-status probe boots a whole OpenClaw
@@ -699,6 +748,29 @@ export async function register() {
       })
     }, 15_000)
     rearm.unref?.()
+    // An external AI engine as Local AI (TASK-2376): the on-device chat
+    // runtimes stay down while it is selected — systemd starts ollama.service
+    // at boot and an update's post step restarts it later, so this looks again
+    // every few minutes. Nothing happens on a box with no engine.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { standDownChatRuntimesForExternalEngine, EXTERNAL_ENGINE_STAND_DOWN_MS } = require('./lib/local-ai-runtime')
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { withLocalAiTransitionLock } = require('./lib/local-ai-transition-lock')
+    const standDown = () => {
+      // Under the engine's own transition lock: a Remove that starts Ollama
+      // again must not be undone by a check that read "selected" before it.
+      void withLocalAiTransitionLock(() => standDownChatRuntimesForExternalEngine()).then((stopped: { ollama: boolean; llamacpp: boolean }) => {
+        if (stopped.ollama || stopped.llamacpp) {
+          console.log(`[instrumentation] external AI engine selected: stopped ${[stopped.ollama && 'ollama', stopped.llamacpp && 'llama.cpp'].filter(Boolean).join(' and ')}`)
+        }
+      }).catch((err: unknown) => {
+        console.warn('[instrumentation] external engine stand-down failed:', err instanceof Error ? err.message : err)
+      })
+    }
+    const firstStandDown = setTimeout(standDown, 30_000)
+    firstStandDown.unref?.()
+    const standDownTimer = setInterval(standDown, EXTERNAL_ENGINE_STAND_DOWN_MS)
+    standDownTimer.unref?.()
   } catch (err) {
     console.error('[instrumentation] Could not load the local AI runtime:', err instanceof Error ? err.message : err)
   }
@@ -787,6 +859,20 @@ export async function register() {
     console.error('[instrumentation] Could not arm the scheduled-job alerts:', err instanceof Error ? err.message : err)
   }
   try {
+    // The weekly update check (src/lib/update-notice.ts): Monday ~10:00 on the
+    // box's clock, the updater's own check, and ONE notice per new version —
+    // Telegram with an Update button, or the desktop when no bot is connected.
+    // A box that was off on Monday checks once at this start, a few minutes in.
+    // The owner's switch is in Settings → Update and is read when the slot fires.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const updateNoticeScheduler = require('./lib/update-notice-scheduler')
+    void updateNoticeScheduler.start().catch((err: unknown) => {
+      console.error('[instrumentation] Weekly update check scheduler boot failed:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not load the weekly update check scheduler:', err instanceof Error ? err.message : err)
+  }
+  try {
     // The app servers that were on the desktop before the reboot (see
     // restartServerAppsAtBoot). They used to be restarted by a
     // `clawbox-app-<id>.service` the OWNER hand-wrote, uncapped and outside
@@ -834,6 +920,27 @@ export async function register() {
     }
   } catch (err) {
     console.error('[instrumentation] Could not load the app unit caps:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The codex app-servers the gateway keeps after an agent's turn, one per
+    // agent and 130-260 MB each, are never closed by the pinned Codex plugin
+    // (src/lib/codex-app-server-reaper.ts). Every CODEX_REAP_SWEEP_MS, one that
+    // has been quiet for 30 min is stopped while the gateway reports no agent
+    // work; the agent's next turn starts a fresh one. CLAWBOX_CODEX_REAP=0
+    // turns it off. Starts nothing on a box with no gateway running.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { reapIdleCodexAppServers, CODEX_REAP_SWEEP_MS } = require('./lib/codex-app-server-reaper')
+    const pass = () => {
+      void (reapIdleCodexAppServers() as Promise<unknown[]>).catch((err: unknown) => {
+        console.error('[instrumentation] Could not look for idle codex app-servers:', err instanceof Error ? err.message : err)
+      })
+    }
+    if (process.env.CLAWBOX_CODEX_REAP !== '0') {
+      setTimeout(pass, 120_000).unref()
+      setInterval(pass, CODEX_REAP_SWEEP_MS as number).unref()
+    }
+  } catch (err) {
+    console.error('[instrumentation] Could not load the codex app-server reaper:', err instanceof Error ? err.message : err)
   }
   try {
     // The long work Settings started (src/lib/background-tasks.ts) is read at

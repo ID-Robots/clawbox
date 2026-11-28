@@ -109,6 +109,8 @@ function runStep(env: Record<string, string> = {}) {
     `TTS_STATUS_FILE="${path.join(dir, "tts-status")}"`,
     // as_clawbox drops privileges on a device; here it just runs the command.
     "as_clawbox() { env \"$@\"; }",
+    // The hand-over walks the real home; this run has none.
+    "hand_over_voice_paths() { :; }",
     "is_hermes_edition() { return 1; }",
     // Recorded by the step when Kokoro was requested and did not install, so
     // the failure reaches the provisioning summary. A no-op here.
@@ -333,5 +335,71 @@ describe.skipIf(!hasBash)("step_openclaw_tts picks the first voice for an unset 
     expect(res.status).toBe(0);
     expect(calls()).toContain("config set messages.tts.provider tts-local-cli");
     expect(res.stderr).toMatch(/fell back to the on-device voice/i);
+  });
+});
+
+/**
+ * Two copies of clawbox-tts.sh reach the provider definition: $2, the tree's,
+ * is what the harness is pointed at; $3, the copy root holds, is what root runs
+ * for the timeout. Root never runs $2, so a caller that hands no $3 gets a
+ * refusal, not a probe of the tree's copy.
+ */
+describe.skipIf(!hasBash)("tts_write_local_provider_definition probes only the copy root holds", () => {
+  let fnDir: string;
+  let tree: string;
+  let mirror: string;
+
+  beforeEach(() => {
+    fnDir = mkdtempSync(path.join(tmpdir(), "tts-probe-copy-"));
+    // The tree's copy answers a different number, and leaves a mark if run.
+    tree = path.join(fnDir, "tree-clawbox-tts.sh");
+    writeFileSync(tree, `#!/usr/bin/env bash\ntouch ${JSON.stringify(path.join(fnDir, "tree-ran"))}\necho 222222\n`, { mode: 0o755 });
+    mirror = path.join(fnDir, "mirror-clawbox-tts.sh");
+    writeFileSync(mirror, "#!/usr/bin/env bash\n[ \"${1:-}\" = \"--provider-timeout-ms\" ] && echo 100000\nexit 0\n", { mode: 0o755 });
+  });
+  afterEach(() => rmSync(fnDir, { recursive: true, force: true }));
+
+  /** The shipped function alone, under the installer's own shell options. */
+  function define(...args: string[]) {
+    const program = [
+      "set -euo pipefail",
+      `RUNS=${JSON.stringify(path.join(fnDir, "bash-runs"))}`,
+      `SETS=${JSON.stringify(path.join(fnDir, "config-sets"))}`,
+      'bash() { printf "bash %s\\n" "$*" >> "$RUNS"; command bash "$@"; }',
+      'oc_config_set() { printf "%s\\n" "$*" >> "$SETS"; }',
+      extractShellFn(INSTALL_SH, "tts_write_local_provider_definition"),
+      `tts_write_local_provider_definition ${args.map((a) => JSON.stringify(a)).join(" ")}`,
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", program], { encoding: "utf-8" });
+    const read = (name: string) => {
+      const file = path.join(fnDir, name);
+      return existsSync(file) ? readFileSync(file, "utf-8").split("\n").filter(Boolean) : [];
+    };
+    return {
+      status: r.status,
+      stderr: r.stderr,
+      bashRuns: read("bash-runs"),
+      sets: read("config-sets"),
+      treeRan: existsSync(path.join(fnDir, "tree-ran")),
+    };
+  }
+
+  it("refuses, and runs nothing, when it is not handed the copy root holds", () => {
+    const r = define("messages.tts", tree);
+    expect(r.bashRuns).toEqual([]);
+    expect(r.treeRan).toBe(false);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("ERROR: no root-held copy of clawbox-tts.sh was given to probe for the provider timeout");
+    expect(r.sets).toEqual([]);
+  });
+
+  it("probes the copy root holds and registers the tree's, the entry byte for byte as before", () => {
+    const r = define("messages.tts", tree, mirror);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.bashRuns).toEqual([`bash ${mirror} --provider-timeout-ms`]);
+    expect(r.treeRan).toBe(false);
+    expect(r.sets).toEqual([
+      `messages.tts.providers.tts-local-cli {"command":"${tree}","args":["--","{{Text}}","{{OutputPath}}"],"outputFormat":"wav","timeoutMs":100000} --json`,
+    ]);
   });
 });

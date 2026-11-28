@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
-import { describeChatFailure, describeFallbackReply, isAccountQuotaFailure } from "@/lib/chat-error-text";
+import { describeChatFailure, describeFallbackReply, isAccountQuotaFailure, isPictureRefused } from "@/lib/chat-error-text";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { translations } from "@/lib/translations";
 
@@ -24,6 +24,20 @@ function leaks(text: string): boolean {
 }
 
 describe("describeChatFailure", () => {
+  it("does not answer a requested model's failure with the reload note a fallback attempt carried", () => {
+    const shown = describeChatFailure("All models failed (2): anthropic/claude-opus-5-5: No API key found for provider \"anthropic\" (auth) | deepseek/deepseek-v4-flash: Error: Skills discovery was retired before publication");
+    expect(shown).not.toMatch(/reloading its settings/);
+  });
+
+  it("tells a turn OpenClaw 2026.11.3 lost to a settings reload to send it again, and leaks nothing", () => {
+    const raw = "Error: Skills discovery was retired before publication";
+    const shown = describeChatFailure(raw);
+    expect(shown).toMatch(/reloading its settings/);
+    expect(shown).toMatch(/Send it again/);
+    expect(leaks(shown)).toBe(false);
+    expect(shown).not.toContain("Skills discovery");
+  });
+
   it("never renders the session-takeover error a customer actually saw", () => {
     for (const raw of [TAKEOVER_RAW, FOLLOWUP_RAW]) {
       const shown = describeChatFailure(raw);
@@ -510,6 +524,23 @@ describe("the provider's own words, scrubbed with the repo's one inventory", () 
     }
   });
 
+  it("keeps the mark that says the quoted sentence was cut, where the cut falls inside a quoted value", () => {
+    const shown = detailWith(`Login refused for {"password": "${"word ".repeat(80)}"} on the proxy`);
+    expect(shown).not.toMatch(/word word/);
+    expect(shown).toMatch(/"…”/);
+  });
+
+  it("takes a quoted value under a credential name out of the quoted sentence", () => {
+    const shown = detailWith('Login refused for {"password": "correct horse battery staple"} on the proxy');
+    expect(shown).not.toMatch(/correct|horse|battery|staple/);
+    expect(shown).toMatch(/gpt-5\.5/);
+  });
+
+  it("still falls back to its own sentence where the provider's words are refused whole", () => {
+    // The whole-message check reads the sentence before the quoted-value pass.
+    expect(detailWith('Key check failed: api_key: "see /srv/keys/api.txt" for org acme')).not.toMatch(/acme|api\.txt/);
+  });
+
   it("strips a bearer token whole and keeps what the provider said around it", () => {
     // The inventory takes the entire `Bearer sk-…` shape out BEFORE the
     // whole-message reject list runs, so this never reaches GENERIC: the
@@ -650,5 +681,40 @@ describe("describeChatFailure — a zero rate limit", () => {
     expect(isAccountQuotaFailure("No API key found for provider \"xai\". Auth store: /x. limit: 0", context)).toBe(false);
     expect(isAccountQuotaFailure("", undefined)).toBe(false);
     expect(isAccountQuotaFailure(undefined, undefined)).toBe(false);
+  });
+});
+
+describe("a turn refused because of the picture on it (TASK-2261)", () => {
+  it.each([
+    "400 Failed to deserialize the JSON body into the target type: messages[0]: unknown variant `image_url`, expected `text`",
+    "Model does not support images",
+    "No image model configured",
+    "HTTP 400: image input is not supported for this model",
+    "This model does not support vision",
+  ])("says what to do instead of relaying %j", (raw) => {
+    expect(isPictureRefused(raw)).toBe(true);
+    const text = describeChatFailure(raw);
+    expect(text).toMatch(/cannot look at pictures right now/);
+    expect(text).toMatch(/without the picture/);
+    expect(text).not.toContain("image_url");
+  });
+
+  it("reads OpenClaw's markdown-escaped rendering of the same error", () => {
+    const stored = "LLM request rejected: Failed to deserialize the JSON body into the target type\\: messages\\[0\\]\\: unknown variant \\`image\\_url\\`, expected \\`text\\`";
+    expect(isPictureRefused(stored)).toBe(true);
+    expect(describeChatFailure(stored)).toMatch(/cannot look at pictures right now/);
+  });
+
+  it("reads the provider's detail line too", () => {
+    expect(describeChatFailure("LLM request failed", { detail: "unknown variant `image_url`" } as never))
+      .toMatch(/cannot look at pictures right now/);
+  });
+
+  it("does not claim a picture where the failure has nothing to do with one", () => {
+    expect(isPictureRefused("Request exceeds the size limit")).toBe(false);
+    expect(isPictureRefused("image generation is not available on this plan")).toBe(false);
+    expect(isPictureRefused("image generation is not supported by this provider")).toBe(false);
+    expect(isPictureRefused("This model does not support image generation")).toBe(false);
+    expect(isPictureRefused("Provider does not support image generation.")).toBe(false);
   });
 });

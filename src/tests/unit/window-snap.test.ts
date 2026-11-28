@@ -10,9 +10,11 @@ import {
   fitWindowSize,
   getSnapRect,
   getSnapZone,
+  maximizedRect,
   shelfHeight,
   SNAP_THRESHOLD,
   desktopTop,
+  devicePx,
 } from "@/lib/window-snap";
 import { KIOSK_BAR_VAR } from "@/lib/kiosk-bar-inset";
 
@@ -181,6 +183,100 @@ describe("fitWindowSize", () => {
 
   it("leaves a window that fits the strip at its own size", () => {
     expect(fitWindowSize({ width: 400, height: 600 }, 400 + DESKTOP_GAP)).toEqual({ width: 400, height: 600 });
+  });
+});
+
+/**
+ * Window geometry on a LATTICE of points that are a whole CSS pixel AND a
+ * whole device pixel. Measured in Chrome at devicePixelRatio 1.5: a window at
+ * a whole device pixel that is not a whole CSS pixel (400.6667) drew its
+ * content differently from one at 400 or 402 (thousands of pixels apart), on
+ * the drag's layer and back in the page after the drop; only points that are
+ * both drew the same everywhere.
+ */
+describe("on the CSS-and-device pixel lattice", () => {
+  const DPR = 1.5;
+  /** At 1.5, 2 CSS px is the smallest whole number that is 3 whole device px. */
+  const STEP = 2;
+  const onLattice = (v: number, step = STEP) => Math.abs(v / step - Math.round(v / step)) < 1e-9;
+  const ZONES = ["left", "right", "top", "top-left", "top-right", "bottom-left", "bottom-right"] as const;
+  beforeEach(() => {
+    Object.defineProperty(window, "devicePixelRatio", { value: DPR, configurable: true });
+    // Odd sizes: halves and centres fall between lattice points.
+    Object.defineProperty(window, "innerWidth", { value: 1365, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: 767, configurable: true });
+  });
+  afterEach(() => {
+    Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
+  });
+
+  const wholeDevicePx = (v: number, dpr: number) => Math.abs(v * dpr - Math.round(v * dpr)) < 1e-6;
+  it.each([
+    [1, 1, true], [2, 1, true], [3, 1, true], [0.5, 2, true], [1.5, 2, true], [2.5, 2, true], [1.25, 4, true], [1.75, 4, true],
+    // No whole number up to 4 is a whole number of device pixels: whole CSS pixels.
+    [1.1, 1, false], [1.125, 1, false], [1.331, 1, false],
+  ])("steps by whole CSS pixels that are whole device pixels: at %s, %s", (dpr, step, device) => {
+    Object.defineProperty(window, "devicePixelRatio", { value: dpr, configurable: true });
+    expect(wholeDevicePx(step, dpr)).toBe(device);
+    for (const v of [0, 101, 347.5, 400 + 2 / 3, 402, 1365, -99]) {
+      const nearest = devicePx(v);
+      expect(onLattice(nearest, step), `${v} -> ${nearest}`).toBe(true);
+      expect(Number.isInteger(nearest) && (!device || wholeDevicePx(nearest, dpr)), `${v} -> ${nearest}`).toBe(true);
+      expect(Math.abs(nearest - v)).toBeLessThanOrEqual(step / 2);
+      const up = devicePx(v, true);
+      expect(onLattice(up, step) && up >= v && up - v < step, `${v} -> ${up} (at least)`).toBe(true);
+    }
+  });
+
+  it("takes a whole device pixel that is not a whole CSS pixel (400.6667) to the lattice, and keeps 402", () => {
+    expect(clampWindowPosition({ x: 400 + 2 / 3, y: 202, width: 600, height: 400 })).toEqual({ x: 400, y: 202 });
+    expect(clampWindowPosition({ x: 402, y: 200 + 2 / 3, width: 600, height: 400 })).toEqual({ x: 402, y: 200 });
+  });
+
+  it("lays every snap zone's left and top on the lattice, its halves meeting, its far edges the desktop's own", () => {
+    for (const zone of ZONES) {
+      const r = getSnapRect(zone)!;
+      expect(onLattice(r.x) && onLattice(r.y), `${zone} ${JSON.stringify(r)}`).toBe(true);
+    }
+    const left = getSnapRect("left")!;
+    const right = getSnapRect("right")!;
+    expect(onLattice(left.width)).toBe(true);
+    expect(left.x + left.width).toBe(right.x);
+    // Never rounded short of the desktop's edge (1365 is not on the lattice).
+    expect(right.x + right.width).toBe(1365);
+    const tl = getSnapRect("top-left")!;
+    const bl = getSnapRect("bottom-left")!;
+    expect(onLattice(tl.height)).toBe(true);
+    expect(tl.y + tl.height).toBe(bl.y);
+    expect(bl.y + bl.height).toBe(767 - SHELF);
+  });
+
+  it("lays a maximized window's left and top on the lattice, reaching the desktop's far edges", () => {
+    const m = maximizedRect(301);
+    expect(onLattice(m.x) && onLattice(m.y), JSON.stringify(m)).toBe(true);
+    expect(m.x + m.width).toBe(1365 - 301);
+    expect(m.y + m.height).toBe(767 - SHELF);
+  });
+
+  it("clamps and fits a window onto the lattice: even CSS pixels at 1.5", () => {
+    expect(clampWindowPosition({ x: 347.5, y: 101, width: 600, height: 400 })).toEqual({ x: 348, y: 102 });
+    expect(fitWindowSize({ width: 801, height: 601 })).toEqual({ width: 802, height: 602 });
+    // Fitted to the desktop: its edge, to the nearest lattice point.
+    const big = fitWindowSize({ width: 2000, height: 2000 });
+    expect(onLattice(big.width) && onLattice(big.height), JSON.stringify(big)).toBe(true);
+    expect(Math.abs(big.width - 1365)).toBeLessThanOrEqual(STEP / 2);
+    expect(Math.abs(big.height - (767 - SHELF))).toBeLessThanOrEqual(STEP / 2);
+    // The minimums stay 300 x 200, which are on every lattice.
+    expect(fitWindowSize({ width: 10, height: 10 })).toEqual({ width: MIN_WINDOW_WIDTH, height: MIN_WINDOW_HEIGHT });
+  });
+
+  it("changes nothing that is already on the lattice, and nothing at all at devicePixelRatio 1", () => {
+    expect(clampWindowPosition({ x: 100, y: 50, width: 800, height: 600 })).toEqual({ x: 100, y: 50 });
+    expect(fitWindowSize({ width: 800, height: 600 })).toEqual({ width: 800, height: 600 });
+    Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
+    Object.defineProperty(window, "innerWidth", { value: W, configurable: true });
+    Object.defineProperty(window, "innerHeight", { value: H, configurable: true });
+    expect(getSnapRect("right")).toEqual({ x: W / 2, y: 0, width: W / 2, height: H - SHELF });
   });
 });
 

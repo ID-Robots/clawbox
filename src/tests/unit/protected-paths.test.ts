@@ -105,7 +105,7 @@ beforeAll(() => {
   }
   fs.mkdirSync(path.join(home, ".hermes"), { recursive: true });
   const configPath = path.join(home, ".hermes", "config.yaml");
-  fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-pro\n");
+  fs.writeFileSync(configPath, "model:\n  default: deepseek-v4-flash\n");
   fs.writeFileSync(path.join(home, "edition.env"), "CLAWBOX_EDITION=hermes\n");
 
   const r = spawnSync("bash", [SCRIPT], {

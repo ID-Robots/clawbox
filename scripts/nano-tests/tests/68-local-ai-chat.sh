@@ -38,13 +38,27 @@
 # Two attempts, each on a session of its own: the turn passes when one does,
 # and a miss is noted. Afterwards the box is put back — the primary model and
 # tools.toolSearch as they were, the web apps the turn made uninstalled, Local
-# AI turned off again when this test turned it on. Skips when OpenClaw, the
-# llama.cpp runtime or the Gemma GGUF is not on the board (a download is up
-# to 3.4 GB, which is the installer's job, not this test's).
+# AI turned off again when this test turned it on. The primary is the model
+# active before the test; when its provider is no longer connected (no key or
+# sign-in, a dead account) the pick back would be refused, so that one step is
+# skipped with the reason and the chat stays on the local model. Skips when
+# OpenClaw, the llama.cpp runtime or the Gemma GGUF is not on the board (a
+# download is up to 3.4 GB, which is the installer's job, not this test's).
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 openclaw_only "Local AI as the OpenClaw chat model"
+
+# The gateway up first. The test before can leave it restarting on its way
+# out (66 puts memory search back in the cloud: an offline config write that
+# stops and starts the gateway), and Local AI's Install refuses its configure
+# step on a gateway that is not up yet ("the gateway is held stopped for other
+# offline work").
+if ! wait_gateway_health 240; then
+  not_ok "the gateway was not up within 240 s before the test: $(api_error)"
+  finish
+fi
+[ "$WAITED" -gt 0 ] && note "waited ${WAITED}s for the gateway to be up before the test"
 
 PROMPT="направи ми проста todo страница"
 # Seconds one attempt may take, model load included (a cold start reads a
@@ -223,7 +237,7 @@ SWITCHED=0 CONFIGURED_HERE=0 RESTORED=0 NEW_APPS=""
 restore() {
   [ "$RESTORED" = 1 ] && return 0
   RESTORED=1
-  local id body after back
+  local id body after back disabled_warning unusable=""
   for id in $NEW_APPS; do
     board_api POST /setup-api/apps/uninstall "{\"appId\":\"$id\"}"
     if [ "$API_STATUS" = 200 ]; then
@@ -234,14 +248,36 @@ restore() {
   done
   if [ "$SWITCHED" = 1 ]; then
     if [ -n "$BEFORE_MODEL" ] && [[ $BEFORE_MODEL != llamacpp/* ]]; then
+      # The model active before the test can only be picked again while its
+      # provider is connected: a box whose credential for it is gone (a lab
+      # board's dead stand-in Anthropic accounts) answers the pick 400
+      # provider_credential_missing. Asked now, not at the start: that is
+      # what the pick below will be judged on. Every ClawBox AI id is its one
+      # row (canonicalChatModel), so a deepseek/* model matches that row.
+      board_api GET /setup-api/chat/model
+      # shellcheck disable=SC2016  # jq's own variables
+      [ "$API_STATUS" = 200 ] && unusable=$(api_json --arg m "$BEFORE_MODEL" --arg p "$BEFORE_PROVIDER" '
+        [(.options // [])[] | select((.model == $m or ($m | startswith("deepseek/")) and ((.model // "") | startswith("deepseek/")))
+          and ($p == "" or .provider == $p))] | first
+        | if . == null or .available != false then empty
+          elif .disabledByOwner then "\(.provider // "its provider") is switched off in Settings"
+          elif .reauthRequired then "\(.provider // "its provider") needs a new sign-in"
+          else "\(.provider // "its provider") is not connected (no API key or sign-in)" end')
+    fi
+    if [ -n "$unusable" ]; then
+      skip "the chat model is not put back on $BEFORE_MODEL, the model active before the test: $unusable on this board, so the pick would be refused; it stays on $LOCAL_MODEL"
+    elif [ -n "$BEFORE_MODEL" ] && [[ $BEFORE_MODEL != llamacpp/* ]]; then
       body=$(jq -cn --arg m "$BEFORE_MODEL" --arg p "$BEFORE_PROVIDER" '{model: $m} + (if $p == "" then {} else {provider: $p} end)')
       board_api POST /setup-api/chat/model "$body"
       back=$(api_json '.activeModel // empty')
-      if [ "$API_STATUS" = 200 ] && [ "$back" = "$BEFORE_MODEL" ]; then
+      if [ "$API_STATUS" = 400 ] && [ "$(api_json '.kind // empty')" = provider_credential_missing ]; then
+        unusable="its provider $(api_json '.provider // empty') is not connected"
+        skip "the chat model is not put back on $BEFORE_MODEL, the model active before the test: $(api_error) It stays on $LOCAL_MODEL"
+      elif [ "$API_STATUS" = 200 ] && [ "$back" = "$BEFORE_MODEL" ]; then
         ok "the chat model is back on $BEFORE_MODEL"
       elif [ "$API_STATUS" = 200 ] && [[ $BEFORE_MODEL == deepseek/* && $back == deepseek/* ]]; then
         # chat/model writes every ClawBox AI pick as its one chat id
-        # (canonicalChatModel: the proxy serves Flash under the Pro id too).
+        # (canonicalChatModel: ClawBox AI has one model, TASK-2261).
         ok "the chat model is back on ClawBox AI ($back; it was $BEFORE_MODEL, which a pick writes as $back)"
       else
         not_ok "could not put the chat model back on $BEFORE_MODEL: $(api_error)"
@@ -252,8 +288,14 @@ restore() {
   fi
   if [ "$CONFIGURED_HERE" = 1 ]; then
     board_api POST /setup-api/local-ai '{"action":"disable"}'
-    if [ "$API_STATUS" = 200 ]; then
+    # A 200 can carry a warning: Local AI stopped, but a step after the stop
+    # did not land (local-ai/route.ts) — most of all a chat left on the
+    # stopped local model when the model before the test was not put back.
+    disabled_warning=$(api_json '.warning // empty')
+    if [ "$API_STATUS" = 200 ] && [ -z "$disabled_warning" ]; then
       note "Local AI turned off again (this test turned it on)"
+    elif [ "$API_STATUS" = 200 ]; then
+      not_ok "Local AI turned off again, but the box is not as it was: $disabled_warning"
     else
       not_ok "could not turn Local AI off again: $(api_error)"
     fi
@@ -263,6 +305,8 @@ restore() {
     after=$(jq -c '.toolSearch' <<<"$(cfg_snapshot)" 2>/dev/null)
     if [ "$after" = "$TOOLSEARCH_BEFORE" ]; then
       ok "tools.toolSearch is back to ${TOOLSEARCH_BEFORE}"
+    elif [ -n "$unusable" ]; then
+      note "tools.toolSearch is ${after:-unreadable} (was ${TOOLSEARCH_BEFORE}): the chat was not put back on $BEFORE_MODEL, and Tool Search stays as the on-device primary has it"
     else
       not_ok "tools.toolSearch is ${after:-unreadable} after the switch back, was ${TOOLSEARCH_BEFORE}"
     fi
@@ -318,6 +362,12 @@ else
 fi
 
 # ---- the turn ------------------------------------------------------------------
+# The processes the turn must leave alone, read once the box has settled: on
+# OpenClaw 2026.11.3 the Install above saves the first `llamacpp:default` key
+# offline (its gateway refuses `--profile-id`), so the gateway is started
+# again during the Install, not during the turn.
+wait_gateway_settled 180 || note "the gateway had not settled before the turn: ${SETTLE_STATE:-unknown}"
+read -r _ GW_PID ST_PID _ <<<"$(box_snapshot)"
 
 # One turn on the board: the CLI's JSON is kept in a file while the lowest
 # MemAvailable is sampled every second, then come a TURN line, one PAGE line
@@ -530,8 +580,16 @@ think_turn() {
   note "thinking ${1:-at the default level}: ${line:-no answer from the board}; answered by ${T_PROVIDER:-?}, ${T_OUT:-?} output tokens; reply: ${reply:-none}"
 }
 
+# The chat model is the box's, not this test's: whatever else picks one (a
+# person, another suite on this board putting its own pick back) moves these
+# turns onto that model. Seen on a lab board (TASK-2633): a second copy of the
+# suite ended this test first, and the thinking turns here ran on the cloud
+# model. Name that instead of blaming the turns.
+THINK_PRIMARY=$(jq -r '.primary // empty' <<<"$(cfg_snapshot)" 2>/dev/null)
 if [ "$SECONDS" -gt "$THINK_START_BY" ]; then
   not_ok "no time left for the thinking check: $SECONDS s spent, its two turns may take $((2 * THINK_TURN_SECONDS)) s"
+elif [ -n "$THINK_PRIMARY" ] && [ "$THINK_PRIMARY" != "$LOCAL_MODEL" ]; then
+  not_ok "the chat model was changed outside this test before the thinking check: openclaw.json names $THINK_PRIMARY, not $LOCAL_MODEL (another suite or a person using this board?)"
 else
   think_turn ""
   OFF_RC=$T_RC OFF_SECS=$T_SECS OFF_PROVIDER=$T_PROVIDER OFF_OUT=$T_OUT

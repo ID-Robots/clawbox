@@ -49,7 +49,7 @@ import { hermesHome } from "@/lib/hermes-env";
  * (`hermes_cli/plugins.py:5-18`) — and it lives OUTSIDE the `hermes-agent` git
  * checkout, so a nightly update replaces the agent without touching it.
  *
- * PROVEN ON THE LIVE BOX (2026-08-24, linked device, deepseek-v4-pro): one
+ * PROVEN ON THE LIVE BOX (2026-08-24, linked device, ClawBox AI chat): one
  * `hermes chat -q "Draw a picture of a blue robot crab waving…"` turn produced
  * `~/.hermes/cache/images/clawai_20260824_212225_23c1c095.png`, 944,172 bytes,
  * 1024×1024, with `gpt-image-1-mini` — the id every plan is entitled to.

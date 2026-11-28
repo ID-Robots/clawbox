@@ -14,6 +14,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { apiGet, apiTry } = vi.hoisted(() => ({ apiGet: vi.fn(), apiTry: vi.fn() }));
+// The install edition the memory tools read, set by the test that needs another one.
+const { installed } = vi.hoisted(() => ({ installed: { edition: "openclaw" as "openclaw" | "hermes" | "dual" } }));
+vi.mock("../../../mcp/lib/edition", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../mcp/lib/edition")>(),
+  installEdition: () => installed.edition,
+}));
 
 vi.mock("../../../mcp/lib/api", async () => ({
   apiGet: (...a: unknown[]) => apiGet(...a),
@@ -119,6 +125,27 @@ describe("memory_shard_status", () => {
     expect(String(s.guidance)).not.toMatch(/memory_shard_search/);
   });
 
+  it("says in plain words why the last pass failed, beside its code", async () => {
+    // TASK-2431: a pass the stall watchdog ended. The code alone ("stalled")
+    // left the assistant to guess what had happened to it.
+    apiGet.mockResolvedValue({
+      ...MEMORY,
+      run: {
+        ...MEMORY.run, status: "failed", mode: "full",
+        error: "Indexing made no progress for a long time and was stopped. Run it again.", errorCode: "stalled",
+      },
+    });
+    const out = await harness("hermes").call("memory_shard_status", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect((JSON.parse(out.text) as Record<string, unknown>).indexing).toMatchObject({
+      last_pass: "failed",
+      mode: "full",
+      problem: "stalled",
+      problem_text: "Indexing made no progress for a long time and was stopped. Run it again.",
+    });
+  });
+
   it("gives a running pass's progress as files, chunks and a percentage", async () => {
     apiGet.mockResolvedValue({
       ...MEMORY,
@@ -177,6 +204,24 @@ describe("memory_shard_status", () => {
     if (unknown.isError) throw new Error("expected a status");
     expect(unknown.text).not.toMatch(/memory_shard_search/);
   });
+
+  it("does not point Hermes on a dual box at memory_shard_search, whose route answers only where there is no OpenClaw", async () => {
+    installed.edition = "dual";
+    try {
+      const dual = harness("hermes");
+      expect(dual.get("memory_shard_status").description).not.toMatch(/memory_shard_search/);
+      for (const semanticAvailable of [true, false]) {
+        apiGet.mockResolvedValue({ ...MEMORY, semanticAvailable });
+        const out = await dual.call("memory_shard_status", {});
+        if (out.isError) throw new Error("expected a status");
+        const s = JSON.parse(out.text) as { searchable: unknown; guidance: string };
+        expect(s.searchable).toBe(semanticAvailable);
+        expect(s.guidance).not.toMatch(/memory_shard_search/);
+      }
+    } finally {
+      installed.edition = "openclaw";
+    }
+  });
 });
 
 describe("local_ai_status", () => {
@@ -207,6 +252,23 @@ describe("local_ai_status", () => {
     expect(s.transcription).toMatchObject({ first_choice: "on the box (Whisper)", tried_in_order: ["local", "cloud"] });
     expect(s.guidance).toMatch(/Not installed here: Kokoro/);
     expect(s.guidance).toMatch(/Settings → Local AI/);
+  });
+
+  it("names the owner's own speech server and the local-only AI lock (TASK-2501)", async () => {
+    apiGet.mockResolvedValue(INVENTORY);
+    apiTry.mockImplementation(async (path: string) => {
+      if (path === "/setup-api/stt") return { primary: "endpoint", chain: ["endpoint"], localOnly: true };
+      return null;
+    });
+    const out = await harness("openclaw").call("local_ai_status", { engine: "whisper" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const s = JSON.parse(out.text) as { transcription: Record<string, unknown> };
+    expect(s.transcription).toMatchObject({
+      first_choice: "the owner's own speech server on the local network",
+      tried_in_order: ["endpoint"],
+      local_only: expect.stringMatching(/never go to the cloud/),
+    });
   });
 
   it("says the embeddings row is not read yet instead of leaving it out silently", async () => {

@@ -32,7 +32,7 @@ const UI_PICKUP_DELAY_MS = 2500; // Time for the desktop UI to poll and pick up 
 // these in seconds — and finite, which is the whole point.
 const API_TIMEOUT_MS = 30_000;
 
-// MCP bearer token. /setup-api/* is session-gated by src/middleware.ts once
+// MCP bearer token. /setup-api/* is session-gated by src/proxy.ts once
 // setup completes, but it also accepts this per-install bearer (see
 // src/lib/mcp-token.ts) in lieu of a session cookie. Without it every call is
 // 307'd to /login and we'd JSON.parse the login HTML — the classic

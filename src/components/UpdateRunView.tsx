@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTr } from "@/lib/i18n-floor";
 import {
   describeUpdateFailure,
@@ -11,6 +11,7 @@ import {
   UpdateStepMeter,
   visibleUpdateSteps,
 } from "@/components/UpdateStep";
+import UpdateRawLog from "@/components/UpdateRawLog";
 import UpdateWhatsNewPanel from "@/components/UpdateWhatsNewPanel";
 import { SHOWCASE_NARROW_PX } from "@/components/UpdateWhatsNewShowcase";
 import type { RemoteReachability, UpdatePhase, UpdateState } from "@/lib/updater";
@@ -147,11 +148,18 @@ export const UPDATE_COMPACT_MEDIA = [
  * screen, so a stopped run keeps the window's layout. Below the media query
  * none of it applies.
  */
-const UPDATE_SCREEN_CSS = `
-@media ${UPDATE_SCREEN_MEDIA}{
-[data-update-screen]{--update-px:clamp(1px,min(.078125vw,.138889dvh),3px)}
-[data-update-screen="completed"]{--update-px:clamp(1px,min(.078125vw,calc((100dvh - 220px) / 748)),3px)}
-[data-update-screen] .us-page{flex-direction:column;align-items:center;padding:calc(20*var(--update-px)) calc(${SCREEN_GUTTER_PX}*var(--update-px)) calc(16*var(--update-px))}
+/**
+ * `--update-px` for a screen: `perWidth` is its width over 1280, `perHeight`
+ * its height over 720 and `height` its height — of the viewport in a media
+ * query, of the main monitor where /updating is laid over a row of them.
+ */
+function screenScale(perWidth: string, perHeight: string, height: string): string {
+  return `[data-update-screen]{--update-px:clamp(1px,min(${perWidth},${perHeight}),3px)}
+[data-update-screen="completed"]{--update-px:clamp(1px,min(${perWidth},calc((${height} - 220px) / 748)),3px)}`;
+}
+
+/** Every full-screen rule but the scale, which is the screen's. */
+const SCREEN_RULES = `[data-update-screen] .us-page{flex-direction:column;align-items:center;padding:calc(20*var(--update-px)) calc(${SCREEN_GUTTER_PX}*var(--update-px)) calc(16*var(--update-px))}
 [data-update-screen] .us-frame{flex:1 1 auto;display:flex;flex-direction:column;max-width:calc(1440*var(--update-px))}
 [data-update-screen] .us-run{flex:1 1 auto;display:flex;flex-direction:column}
 [data-update-screen] .us-grid{flex:1 1 auto;grid-template-columns:minmax(0,calc(${SCREEN_STEPS_PX}*var(--update-px))) minmax(0,1fr);grid-template-rows:auto 1fr;column-gap:calc(${SCREEN_GUTTER_PX}*var(--update-px))}
@@ -180,6 +188,9 @@ const UPDATE_SCREEN_CSS = `
 [data-update-screen] .us-list li>span:last-child,[data-update-screen] .us-list [data-testid=update-step-detail]{font-size:calc(11.5*var(--update-px))}
 [data-update-screen] .us-bar{bottom:calc(16*var(--update-px));margin-top:calc(14*var(--update-px));gap:calc(12*var(--update-px));border-radius:calc(10*var(--update-px));padding:calc(12*var(--update-px)) calc(20*var(--update-px));font-size:calc(13*var(--update-px))}
 [data-update-screen] .us-bar-note{margin-top:calc(2*var(--update-px));font-size:calc(11.5*var(--update-px))}
+[data-update-screen] .us-full-log{flex:none;margin-top:calc(14*var(--update-px))}
+[data-update-screen] .us-raw-head{padding:calc(6*var(--update-px)) calc(12*var(--update-px));font-size:calc(11*var(--update-px))}
+[data-update-screen] .us-raw-term{height:calc(240*var(--update-px))}
 [data-update-screen] .wns[data-layout="wide"] .wns-logo{gap:calc(8*var(--update-px));padding:calc(20*var(--update-px)) calc(30*var(--update-px)) 0}
 [data-update-screen] .wns[data-layout="wide"] .wns-logo img{width:calc(28*var(--update-px));height:calc(28*var(--update-px))}
 [data-update-screen] .wns[data-layout="wide"] .wns-logo span{font-size:calc(18*var(--update-px))}
@@ -194,7 +205,12 @@ const UPDATE_SCREEN_CSS = `
 [data-update-screen] .wns[data-layout="wide"] .wns-chip{gap:calc(5*var(--update-px));padding:calc(4*var(--update-px)) calc(9*var(--update-px));font-size:calc(11*var(--update-px))}
 [data-update-screen] .wns[data-layout="wide"]+.wns-more{margin-top:calc(10*var(--update-px))}
 [data-update-screen] .wns[data-layout="wide"]+.wns-more a{font-size:calc(12.5*var(--update-px))}
-[data-update-screen] .wns[data-layout="wide"]+.wns-more svg{width:1em;height:1em}
+[data-update-screen] .wns[data-layout="wide"]+.wns-more svg{width:1em;height:1em}`;
+
+const UPDATE_SCREEN_CSS = `
+@media ${UPDATE_SCREEN_MEDIA}{
+${screenScale(".078125vw", ".138889dvh", "100dvh")}
+${SCREEN_RULES}
 }`;
 
 /**
@@ -210,9 +226,7 @@ const UPDATE_SCREEN_CSS = `
  * What's new is the part to drop: it is the one thing on the page the owner
  * does not need to follow the update. Same marks as UPDATE_SCREEN_CSS, at 1 px.
  */
-const UPDATE_COMPACT_CSS = `
-@media ${UPDATE_COMPACT_MEDIA}{
-[data-update-screen] .us-page{flex-direction:column;align-items:center;justify-content:center;padding:20px 24px 16px}
+const COMPACT_RULES = `[data-update-screen] .us-page{flex-direction:column;align-items:center;justify-content:center;padding:20px 24px 16px}
 [data-update-screen] .us-frame{flex:1 1 auto;display:flex;flex-direction:column;max-width:760px}
 [data-update-screen="updating"] .us-frame{max-height:740px}
 [data-update-screen] .us-run{flex:1 1 auto;display:flex;flex-direction:column}
@@ -227,8 +241,49 @@ const UPDATE_COMPACT_CSS = `
 [data-update-screen] .us-list{flex:1 1 auto;display:flex;flex-direction:column;margin-top:12px}
 [data-update-screen] .us-list>ol{flex:1 1 auto;display:flex;flex-direction:column}
 [data-update-screen] .us-list li{flex:1 1 auto;min-height:28px;max-height:46px;padding-block:2px}
-[data-update-screen] .us-bar{margin-top:14px;padding:12px 20px}
+[data-update-screen] .us-bar{margin-top:14px;padding:12px 20px}`;
+
+const UPDATE_COMPACT_CSS = `
+@media ${UPDATE_COMPACT_MEDIA}{
+${COMPACT_RULES}
 }`;
+
+/** The least a screen must measure for the full-screen layout (UPDATE_SCREEN_MEDIA). */
+const SCREEN_MIN_WIDTH_PX = SHOWCASE_NARROW_PX + SCREEN_STEPS_PX + 3 * SCREEN_GUTTER_PX;
+
+/**
+ * Which of /updating's layouts a screen of `width`×`height` CSS pixels takes —
+ * the same answer UPDATE_SCREEN_MEDIA and UPDATE_COMPACT_MEDIA give for a
+ * viewport that size: "full", "compact", or null (a phone: the window's
+ * layout, scrolled).
+ */
+export function updateScreenFit(width: number, height: number): "full" | "compact" | null {
+  if (width >= SCREEN_MIN_WIDTH_PX && height >= SCREEN_HEIGHT_PX) return "full";
+  if (width >= 768 && height >= 501) return "compact";
+  return null;
+}
+
+/** A number of CSS pixels, short. */
+const px = (n: number) => `${Number(n.toFixed(5))}px`;
+
+/**
+ * The CSS /updating draws for the run (TASK-2137, TASK-2146): with no `screen`
+ * the two media-query layouts, chosen and scaled by the viewport, exactly as
+ * before monitors were known. With `screen` — the main monitor's size, where
+ * the window is laid over a row of monitors — the layout that monitor takes,
+ * scaled by it, with no media query: the viewport is the whole row there, and
+ * its width would choose and scale for monitors the run is not drawn on.
+ */
+export function updateScreenCss(screen: { width: number; height: number } | null | undefined): { full: string | null; compact: string | null } {
+  if (!screen) return { full: UPDATE_SCREEN_CSS, compact: UPDATE_COMPACT_CSS };
+  const fit = updateScreenFit(screen.width, screen.height);
+  return {
+    full: fit === "full"
+      ? `\n${screenScale(px(screen.width / 1280), px(screen.height / SCREEN_HEIGHT_PX), px(screen.height))}\n${SCREEN_RULES}\n`
+      : null,
+    compact: fit === "compact" ? `\n${COMPACT_RULES}\n` : null,
+  };
+}
 
 /** The line across the bottom of a live or finished run: "don't power off", or what the screen around it has to say. */
 export interface RunNotice {
@@ -250,8 +305,8 @@ export function runStatus(state: UpdateState | null, error: string | null): RunS
 /**
  * A run the box lost (a restart, a power cut, a replaced web server) is
  * RESUMED from the step it died on by a fresh run — the verdict's own sentence
- * says so. Any other failure starts over from step 1, so it is not offered as
- * a "resume": Dismiss, then update again.
+ * says so. Any other failure is not offered as a "resume": its card offers Try
+ * again (`onTryAgain`), which runs the update again.
  */
 export function canResume(state: UpdateState | null): boolean {
   return !!state?.error?.startsWith(INTERRUPTED_MESSAGE_PREFIX);
@@ -323,7 +378,7 @@ export interface UpdateRun {
   busy: { coding: number; agents: number; total: number } | null;
   clearBusy: () => void;
   /**
-   * Start a run (Update, Resume); `allowDowngrade` is the owner's "Back up and
+   * Start a run (Update, Resume, Try again); `allowDowngrade` is the owner's "Back up and
    * update anyway", `ignoreBusy` their "Update anyway" over running agent work.
    */
   trigger: (allowDowngrade?: boolean, ignoreBusy?: boolean) => Promise<void>;
@@ -869,8 +924,10 @@ export function UpdateRunView({
   dismissError,
   onDismiss,
   onResume,
+  onTryAgain,
   onOverrideDowngrade,
   fill = false,
+  screen = null,
 }: {
   status: RunStatus;
   state: UpdateState | null;
@@ -893,13 +950,31 @@ export function UpdateRunView({
   onDismiss: () => void;
   /** Present only for an interrupted run: starts the fresh run that resumes it. */
   onResume?: () => void;
+  /**
+   * Runs the full update again over a failed, non-interrupted run of it: from
+   * step 1, or, when the box still holds a lost run's position (a Resume refused
+   * for want of a network), from where that run stopped. Drawn from the run's own
+   * verdict only: never beside Resume, over a refused harness downgrade (its
+   * notice has the override), beside a Dismiss the box did not take, or under the
+   * OpenClaw-only run.
+   */
+  onTryAgain?: () => void;
   /** "Back up and update anyway", offered on a run refused for installing an older harness. */
   onOverrideDowngrade?: () => void;
   /** /updating: a live or finished run fills a computer's screen (see UPDATE_SCREEN_CSS). */
   fill?: boolean;
+  /**
+   * With `fill`: the size of the screen the run is drawn on when that is not
+   * the viewport — the main monitor of a row of them (`updateScreenCss`).
+   */
+  screen?: { width: number; height: number } | null;
 }) {
   const tr = useTr();
   const SubHeading = Heading === "h1" ? "h2" : "h3";
+  // The raw log behind the terminal button (UpdateRawLog): closed until it is
+  // asked for, and connected only while it is open.
+  const [logOpen, setLogOpen] = useState(false);
+  const logId = useId();
   // Asked only while a run is on screen: the route reads the target's notes,
   // and an idle System Update window has no target to ask about. Asked again
   // after an outage: the first answer can predate the updater's own fetch,
@@ -924,6 +999,15 @@ export function UpdateRunView({
     && (state?.errorCode === HARNESS_DOWNGRADE_CODE || state?.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE)
     ? readHarnessDowngradeDetail(state.downgrade)
     : null;
+  // Read from the run's own verdict, never from `failed`: that is this screen's
+  // own refused start or Dismiss too, whose card says "Try again in a moment".
+  // Keyed on the code, not on `downgrade`, which is null when the detail is unreadable.
+  // Only over the full update (its steps have the restart step): the press starts
+  // that, never the much smaller OpenClaw-only run, which shares this state.
+  const tryAgain = !!onTryAgain && !onResume && state?.phase === "failed"
+    && state.steps.some((s) => s.id === RESTART_STEP_ID)
+    && state.errorCode !== HARNESS_DOWNGRADE_CODE && state.errorCode !== HARNESS_DOWNGRADE_BACKUP_FAILED_CODE
+    && !dismissError;
   // Non-fatal problems the update found and worked around — build drift, a
   // missing update pin it wrote for the owner. The ruling is that these
   // warn rather than block, which only means anything if they are visible;
@@ -1000,6 +1084,7 @@ export function UpdateRunView({
         ? tr("update.notAnswering", "Restarting — not answering yet")
         : running?.label ?? (state ? tr("update.progressRunning", "In progress") : tr("update.connecting", "Connecting…"));
   const listedSteps = waiting ? steps.map((s) => (s.detail ? { ...s, detail: undefined } : s)) : steps;
+  const logLabel = tr("update.fullLog", "Full update log");
 
   const stepsPanel = (
     <section
@@ -1014,7 +1099,25 @@ export function UpdateRunView({
           )}
           <span className="truncate">{countHeadline}</span>
         </span>
-        {steps.length > 0 && <UpdateStepCount steps={steps} />}
+        {steps.length > 0 && (
+          <span className="inline-flex shrink-0 items-center gap-2">
+            <UpdateStepCount steps={steps} />
+            {/* Sized in em on the header's text, and pulled into its line
+                height, so the header is no taller for it at any scale. */}
+            <button
+              type="button"
+              onClick={() => setLogOpen((open) => !open)}
+              aria-label={logLabel}
+              title={logLabel}
+              aria-expanded={logOpen}
+              aria-controls={logId}
+              className="-my-[0.3333em] grid h-[2em] w-[2em] shrink-0 cursor-pointer place-items-center rounded-[var(--r-1)] text-[var(--text-muted)] hover:bg-[var(--fill-2)] hover:text-[var(--text-primary)] aria-expanded:bg-[var(--fill-2)] aria-expanded:text-[var(--text-primary)]"
+              data-testid="update-log-toggle"
+            >
+              <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: "calc(16em / 12)" }}>terminal</span>
+            </button>
+          </span>
+        )}
       </div>
       {steps.length > 0 && (
         <>
@@ -1024,6 +1127,7 @@ export function UpdateRunView({
           <div className="us-list mt-[18px]">
             <UpdateStepList steps={listedSteps} phase={phase} />
           </div>
+          {logOpen && <UpdateRawLog id={logId} label={logLabel} live={status === "updating"} />}
         </>
       )}
     </section>
@@ -1145,6 +1249,16 @@ export function UpdateRunView({
                       : tr("update.startAgain", "Start the update again")}
                   </button>
                 )}
+                {tryAgain && (
+                  <button
+                    type="button"
+                    onClick={onTryAgain}
+                    className="inline-flex items-center gap-2 rounded-[var(--r-1)] bg-[var(--coral-bright)] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[var(--coral-mid)] cursor-pointer"
+                  >
+                    <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18 }}>refresh</span>
+                    {tr("update.tryAgain", "Try again")}
+                  </button>
+                )}
                 {dismissButton}
               </div>
               {dismissRefusal}
@@ -1222,12 +1336,13 @@ export function UpdateRunView({
     </>
   );
   const showcase = whatsNew.settled && <UpdateWhatsNewPanel panel={panel} variant="grid" headingLevel={SubHeading} />;
+  const screenCss = updateScreenCss(screen);
 
   return (
     <>
       {/* Beside the view, not in it: its text is the window's, word for word. */}
-      {fill && <style>{UPDATE_SCREEN_CSS}</style>}
-      {fill && <style data-update-compact="">{UPDATE_COMPACT_CSS}</style>}
+      {fill && screenCss.full && <style data-update-full="">{screenCss.full}</style>}
+      {fill && screenCss.compact && <style data-update-compact="">{screenCss.compact}</style>}
       <div className={`${fill ? "us-run " : ""}@container w-full`} data-testid="update-run" data-status={status} data-fill={fill ? "true" : undefined}>
         {fill ? (
           // The same view placed for a whole screen: the header and version row

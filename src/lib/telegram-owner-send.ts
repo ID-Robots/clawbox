@@ -27,7 +27,7 @@
 // already succeeded, and a Telegram outage must not turn a queued draft or a
 // finished run into a failure. The boolean is the whole report.
 
-import { getActiveHarness } from "@/lib/harness";
+import { getActiveHarness, getActiveHarnessSource } from "@/lib/harness";
 import { notifyHermesTelegramUser } from "@/lib/hermes-telegram";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 
@@ -61,6 +61,37 @@ export const TELEGRAM_CHAT_ID_RE = /^(-?)(\d{1,20})$/;
  */
 const BOT_TOKEN_RE = /^(\d{1,20}):([A-Za-z0-9_-]{1,200})$/;
 
+/** Where the Bot API lives, unless a lab board points the box at a local one. */
+export const TELEGRAM_API_ROOT = "https://api.telegram.org";
+
+/**
+ * A LOOPBACK Bot API root, for a lab board only (`CLAWBOX_TELEGRAM_API_ROOT`).
+ *
+ * Both harnesses can be pointed at a local Bot API — OpenClaw's
+ * `channels.telegram.apiRoot`, Hermes' `platforms.telegram.extra.base_url` —
+ * and that is how a board proves a Telegram flow end to end with no phone in
+ * the loop: a stub server plays Telegram for the harness's poller AND for the
+ * sends below. Only `http://127.0.0.1:<port>`, `http://localhost:<port>` or
+ * `http://[::1]:<port>` is honoured, rebuilt from the match: the token rides
+ * in the request path, so a value that could name another host would be a
+ * way to post it there. Anything else is the real API, silently — a typo on a
+ * box must not take its notices off the air.
+ */
+export function telegramApiRoot(): string {
+  const raw = (process.env.CLAWBOX_TELEGRAM_API_ROOT ?? "").trim();
+  if (!raw) return TELEGRAM_API_ROOT;
+  const matched = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):(\d{2,5})$/.exec(raw);
+  if (!matched || Number(matched[2]) > 65_535) return TELEGRAM_API_ROOT;
+  return `http://${matched[1]}:${matched[2]}`;
+}
+
+/** One inline button. Callback buttons only — never a URL the box would be vouching for. */
+export interface TelegramCallbackButton {
+  text: string;
+  /** Telegram's limit is 64 bytes; the callers' values are fixed and short. */
+  callback_data: string;
+}
+
 /**
  * Is this the shape Telegram issues?
  *
@@ -92,6 +123,13 @@ export async function sendTelegramBotMessage(
    * 8 s too many inside a request whose caller gives up at 60.
    */
   timeoutMs?: number,
+  /**
+   * One row of callback buttons under the text (the weekly update notice's
+   * "Update"). A tap goes to whoever polls this bot — the HARNESS — and comes
+   * back to ClawBox only through the plugin hooks, so a button sent here may
+   * only ever ASK for something the owner still confirms elsewhere.
+   */
+  buttons?: TelegramCallbackButton[],
 ): Promise<boolean> {
   const matched = BOT_TOKEN_RE.exec(token.trim());
   if (!matched) return false;
@@ -112,12 +150,20 @@ export async function sendTelegramBotMessage(
     // Interpolated raw, not encoded: Telegram wants the literal
     // "<bot id>:<secret>", and encodeURIComponent turns the colon into %3A,
     // which the API rejects.
-    const res = await fetch(`https://api.telegram.org/bot${safeToken}/sendMessage`, {
+    const row = (buttons ?? [])
+      .filter((b) => typeof b?.text === "string" && b.text && typeof b.callback_data === "string" && b.callback_data)
+      .map((b) => ({ text: b.text.slice(0, 64), callback_data: b.callback_data }));
+    const res = await fetch(`${telegramApiRoot()}/bot${safeToken}/sendMessage`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       // No parse_mode: the text is plain, and a stray underscore must not turn
       // into a Markdown error that swallows the whole message.
-      body: JSON.stringify({ chat_id: safeChatId, text, disable_web_page_preview: true }),
+      body: JSON.stringify({
+        chat_id: safeChatId,
+        text,
+        disable_web_page_preview: true,
+        ...(row.length ? { reply_markup: { inline_keyboard: [row] } } : {}),
+      }),
       signal: AbortSignal.timeout(budget),
     });
     return res.ok;
@@ -169,6 +215,45 @@ export async function sendOwnerTelegramText(
     const { token } = await readActiveTelegramBot("openclaw");
     if (typeof token !== "string" || !token.trim()) return false;
     return await sendTelegramBotMessage(token, chatId, body, opts.timeoutMs);
+  } catch (err) {
+    console.error("[telegram] could not resolve this device's bot:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+/**
+ * Say `text` with a row of callback buttons under it, on the bot `harness`
+ * chats with — the one message here that `hermes send` cannot carry.
+ *
+ * So BOTH editions take the Bot API, with the harness's OWN token
+ * (`readActiveTelegramBot` for that harness: `channels.telegram` on OpenClaw,
+ * ~/.hermes/.env on Hermes — never ClawBox's mirror on a dual box). Sending is
+ * not receiving: nothing here touches the update stream the harness polls.
+ * `false` when there is no usable token, which the caller turns into its own
+ * plain-text or desktop fallback. Never throws.
+ */
+export async function sendOwnerTelegramButtons(
+  chatId: string,
+  text: string,
+  buttons: TelegramCallbackButton[],
+  opts: { harness?: "openclaw" | "hermes"; timeoutMs?: number } = {},
+): Promise<boolean> {
+  if (!TELEGRAM_CHAT_ID_RE.test(chatId)) return false;
+  const body = text.slice(0, MAX_TELEGRAM_CHARS);
+  if (!body) return false;
+  try {
+    // A NAMED harness is passed as its literal; the active one as the whole
+    // resolution, so the dual-box guard in readActiveTelegramBot judges the
+    // edition from the same read as the harness.
+    let token: string | null;
+    if (opts.harness === "hermes") ({ token } = await readActiveTelegramBot("hermes"));
+    else if (opts.harness === "openclaw") ({ token } = await readActiveTelegramBot("openclaw"));
+    else {
+      const source = await getActiveHarnessSource();
+      ({ token } = await readActiveTelegramBot(source));
+    }
+    if (typeof token !== "string" || !token.trim()) return false;
+    return await sendTelegramBotMessage(token, chatId, body, opts.timeoutMs, buttons);
   } catch (err) {
     console.error("[telegram] could not resolve this device's bot:", err instanceof Error ? err.message : err);
     return false;

@@ -42,6 +42,7 @@
  * SERVER ONLY.
  */
 
+import { logoutOpenclawAuthProfiles, providerOfProfileId } from "@/lib/openclaw-auth-ops";
 import path from "@/lib/runtime-path";
 import { profileProviderId } from "@/lib/chatgpt-subscription";
 import { isClawboxAiToken } from "@/lib/clawai-token";
@@ -56,7 +57,6 @@ import {
   readConfig,
   readConfigStrict,
   runOpenclawConfigUnset,
-  spawnOpenclawCli,
   type OpenClawConfig,
 } from "@/lib/openclaw-config";
 import { credentialedProviders, normalizeProviderId } from "@/lib/provider-status";
@@ -230,16 +230,24 @@ export async function prepareOpenclawSignOut(rowId: string, token: string | null
     held,
     async remove() {
       // 1. The gateway's auth profiles, natively.
+      // Per provider, through the running gateway's `models.authLogout`
+      // (OpenClaw 2026.11.3 refuses the CLI's logout while the gateway owns
+      // the state); the CLI only when no gateway answers. Unpinned, like the
+      // configure route's paste and its take-over: the core resolves the same
+      // agent store for both.
+      const byProvider = new Map<string, string[]>();
       for (const profileId of profileIds) {
         // Never an argument the CLI could read as a flag; what is left is read back.
         if (!SAFE_PROFILE_ID.test(profileId)) continue;
+        const provider = providerOfProfileId(profileId);
+        byProvider.set(provider, [...(byProvider.get(provider) ?? []), profileId]);
+      }
+      for (const [provider, ids] of byProvider) {
         try {
-          // Unpinned, like the configure route's paste and its take-over: the
-          // core resolves the same agent store for both.
-          await spawnOpenclawCli(["models", "auth", "logout", profileId, "--yes"], { timeoutMs: 60_000 });
+          await logoutOpenclawAuthProfiles(provider, ids);
         } catch (err) {
           // Not the answer: what is still there is removed below, and read back.
-          console.warn(`[provider-sign-out] models auth logout ${profileId} failed:`, err instanceof Error ? logSafe(err.message) : err);
+          console.warn(`[provider-sign-out] signing ${ids.join(", ")} out failed:`, err instanceof Error ? logSafe(err.message) : err);
         }
       }
       // 2. What logout leaves behind.

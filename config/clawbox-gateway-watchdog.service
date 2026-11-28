@@ -1,0 +1,18 @@
+[Unit]
+Description=ClawBox gateway liveness watchdog (restarts an OpenClaw gateway that stopped answering HTTP)
+# Ordered after the gateway so a boot-time run never races its start; the
+# script itself stands down on anything but an active, running gateway past
+# its start-up grace.
+After=clawbox-gateway.service
+
+[Service]
+Type=oneshot
+# Root, like clawbox-ap-watchdog.service: restarting clawbox-gateway.service
+# needs it. So the script is the ROOT-OWNED libexec copy install.sh installs,
+# never the clawbox-writable checkout, and the unit loads no environment file
+# clawbox can write. The script parses data/config.json; it never sources it.
+ExecStart=/usr/local/libexec/clawbox/gateway-watchdog.sh
+# Three probe attempts of at most five seconds each, plus systemctl calls. The
+# restart itself is queued with --no-block, so this never waits on the gateway.
+TimeoutStartSec=120
+Nice=5
