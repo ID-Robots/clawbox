@@ -487,6 +487,41 @@ describe("pages kept in memory (settings inMemory)", () => {
     expect(fm && Object.isFrozen(fm)).toBe(false);
   });
 
+  it("keeps nothing a switch turned off while a read was under way", async () => {
+    await seedPages();
+    writeSettings({ inMemory: { pages: true, pageBodies: true } });
+    settle();
+    const open = fsp.open.bind(fsp);
+    let switched = false;
+    // The first page file the snapshot opens: the switch goes off mid-read, as the settings route turns it off.
+    vi.spyOn(fsp, "open").mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+      if (!switched) {
+        switched = true;
+        releaseHeldPages(writeSettings({ inMemory: { pageBodies: false } }).inMemory);
+      }
+      return open(...args);
+    });
+    await readVaultSnapshot();
+    expect(switched).toBe(true);
+    expect(heldPageBytes().pageBodies).toBe(0);
+    expect(heldPageBytes().pages).toBeGreaterThan(0);
+  });
+
+  it("keeps no more than a quarter of the box's memory; past it a page is read as if the switches were off", async () => {
+    await seedPages();
+    writeSettings({ inMemory: { pages: true } });
+    const one = (await readPage(A))!;
+    const held = heldPageBytes().pages;
+    releaseHeldPages(off);
+    // Room for one page's parse, not two.
+    vi.spyOn(os, "totalmem").mockReturnValue(4 * (held + 100));
+    await readVaultSnapshot();
+    expect(heldPageBytes().pages).toBeLessThanOrEqual(held + 100);
+    expect(heldPageBytes().pages).toBeGreaterThan(0);
+    expect(JSON.stringify(await readPage(A))).toBe(JSON.stringify(one));
+    expect((await fmOf(B))!.title).toBe("Widget colours");
+  });
+
   it("keeps only the box's own vault: a vault read from elsewhere (a nightly worktree) is parsed every time", async () => {
     await seedPages();
     writeSettings({ inMemory: { pages: true } });

@@ -1034,6 +1034,8 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       }
     });
     if (wrote) dropVectorCache(vaultIndexPathFor(vault));
+    // inMemory.searchVectors: the new vectors loaded again now, not by the next search.
+    if (wrote && vectorsKeptLoaded()) void loadVaultVectors(vault).catch(() => undefined);
     return {
       mode: full ? "full" : "incremental",
       indexed,
@@ -1274,9 +1276,8 @@ function loadVectors(db: DatabaseSync, file: string): VectorCache | null {
   const stamp = metaGet(db, "generation") ?? "0";
   const arm = () => {
     if (slot.timer) clearTimeout(slot.timer);
-    // inMemory.searchVectors: kept loaded, never dropped when search is idle.
-    if (vectorsKeptLoaded()) return void (slot.timer = null);
-    slot.timer = setTimeout(() => dropVectorCache(file), VECTOR_CACHE_IDLE_MS);
+    // inMemory.searchVectors: kept loaded while it is on, never dropped when search is idle.
+    slot.timer = setTimeout(() => (vectorsKeptLoaded() ? arm() : dropVectorCache(file)), VECTOR_CACHE_IDLE_MS);
     slot.timer.unref?.();
   };
   if (slot.cache?.stamp === stamp) {
@@ -1352,8 +1353,9 @@ export function releaseVaultVectors(): void {
   for (const file of slots.keys()) dropVectorCache(file);
 }
 
-/** The switch went on: load the vault's vectors now, so the first search does not wait for them. Nothing when there is no usable index. */
+/** The switch went on (or an index run wrote): load the vault's vectors now, so a search does not wait for them. Nothing when search is off or there is no usable index. */
 export async function loadVaultVectors(vault: string = vaultDir()): Promise<void> {
+  if (!(await vaultIndexingAllowed(vault))) return;
   const file = vaultIndexPathFor(vault);
   const db = await openForRead(file);
   if (!db) return;

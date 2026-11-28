@@ -10,6 +10,7 @@
 
 import fs from "fs/promises";
 import { constants as fsConstants, type Stats } from "fs";
+import os from "os";
 import { createHash } from "crypto";
 import path, { untraced } from "@/lib/runtime-path";
 import { processStore } from "@/lib/process-store";
@@ -175,7 +176,15 @@ const ENTRY_BYTES = 160;
 interface HeldText { value: string; size: number; mtimeMs: number; ctimeMs: number; ino: number; bytes: number }
 interface HeldHead { hash: string; head: ParsedHead; bytes: number }
 interface HeldPage { text: HeldText | null; head: HeldHead | null }
-interface HeldVault { pages: Map<string, HeldPage>; headBytes: number; textBytes: number }
+interface HeldVault {
+  pages: Map<string, HeldPage>;
+  headBytes: number;
+  textBytes: number;
+  /** The switches as the last read or release saw them: a read already under way keeps nothing a switch turned off since. */
+  on: { pages: boolean; pageBodies: boolean };
+  /** The most both switches together keep, a quarter of the box's memory (2 GB on an 8 GB box): past it a page is read as if they were off. */
+  ceiling: number;
+}
 interface Hold { vault: HeldVault; pages: boolean; bodies: boolean }
 
 /** One per process, by vault (the routes and the boot layer are separate module copies). */
@@ -194,13 +203,15 @@ function holdFor(vault: string): Hold | null {
   releaseHeldPages(on);
   if (!on.pages && !on.pageBodies) return null;
   let held = heldVaults.get(key);
-  if (!held) heldVaults.set(key, (held = { pages: new Map(), headBytes: 0, textBytes: 0 }));
+  if (!held) heldVaults.set(key, (held = { pages: new Map(), headBytes: 0, textBytes: 0, on: { pages: on.pages, pageBodies: on.pageBodies }, ceiling: 0 }));
+  held.ceiling = Math.floor(os.totalmem() / 4);
   return { vault: held, pages: on.pages, bodies: on.pageBodies };
 }
 
 /** Free what the switches that are off still hold: at once from the settings route, and on every read. */
 export function releaseHeldPages(on: { pages: boolean; pageBodies: boolean }): void {
   for (const [key, held] of heldVaults) {
+    held.on = { pages: on.pages, pageBodies: on.pageBodies };
     if (!on.pages && !on.pageBodies) {
       heldVaults.delete(key);
       continue;
@@ -223,9 +234,11 @@ export function heldPageBytes(): { pages: number; pageBodies: number } {
 
 function keep(held: HeldVault, rel: string, part: "head", value: HeldHead | null): void;
 function keep(held: HeldVault, rel: string, part: "text", value: HeldText | null): void;
-function keep(held: HeldVault, rel: string, part: "head" | "text", value: HeldHead | HeldText | null): void {
+function keep(held: HeldVault, rel: string, part: "head" | "text", kept: HeldHead | HeldText | null): void {
   const entry = held.pages.get(rel) ?? { text: null, head: null };
   const was = entry[part]?.bytes ?? 0;
+  // Its switch turned off while this read ran, or the ceiling reached: nothing is kept (and what was is stale).
+  const value = kept && (part === "head" ? held.on.pages : held.on.pageBodies) && held.headBytes + held.textBytes - was + kept.bytes <= held.ceiling ? kept : null;
   if (part === "head") {
     entry.head = value as HeldHead | null;
     held.headBytes += (value?.bytes ?? 0) - was;

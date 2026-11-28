@@ -818,9 +818,38 @@ describe("inMemory.searchVectors", () => {
     expect(heldVectorBytes()).toBe(0);
   });
 
-  it("loads nothing when there is no index yet", async () => {
+  it("switched off in settings.json by hand: dropped at the next idle tick, as off always did", async () => {
+    await seed();
+    await reindexPrimeRadiantVault();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    writeSettings({ inMemory: { searchVectors: true } });
+    await loadVaultVectors();
+    vi.advanceTimersByTime(30 * 60 * 1000);
+    expect(heldVectorBytes()).toBeGreaterThan(0);
+    writeSettings({ inMemory: { searchVectors: false } });
+    vi.advanceTimersByTime(10 * 60 * 1000 + 1);
+    expect(heldVectorBytes()).toBe(0);
+  });
+
+  it("on, an index run that wrote loads the new vectors again without waiting for a search", async () => {
+    await seed();
+    await reindexPrimeRadiantVault();
+    writeSettings({ inMemory: { searchVectors: true } });
+    await loadVaultVectors();
+    const before = heldVectorBytes();
+    await commit({ "concepts/warranty.md": pageText({ title: "Warranty" }, "Warranty claims are answered within two days.\n") });
+    await reindexPrimeRadiantPaths(["concepts/warranty.md"]);
+    await vi.waitFor(() => expect(heldVectorBytes()).toBeGreaterThan(before));
+  });
+
+  it("loads nothing when there is no index yet, or while Memory Shard is off", async () => {
     await seed();
     writeSettings({ inMemory: { searchVectors: true } });
+    await loadVaultVectors();
+    expect(heldVectorBytes()).toBe(0);
+    await reindexPrimeRadiantVault();
+    _resetVaultIndexCacheForTests();
+    shardSwitch.on = false;
     await loadVaultVectors();
     expect(heldVectorBytes()).toBe(0);
   });

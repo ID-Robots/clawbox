@@ -77,9 +77,15 @@ async function answer() {
   return { settings: readSettings(), defaults: defaultSettings(), limits: LIMITS, nightly: { nextRunAt: nextRunAtMs() }, rates: effectiveCostRates(), memory: await heldMemory() };
 }
 
-/** What each `inMemory` switch holds right now, in bytes (about). */
+/**
+ * What each `inMemory` switch holds right now, in bytes (about). The vectors
+ * count only while their switch is on (off, what a search loaded is search's
+ * own ten-minute cache), and only then is the search index's module loaded.
+ */
 async function heldMemory(): Promise<{ pages: number; pageBodies: number; searchVectors: number }> {
-  const vectors = await import("@/lib/prime-radiant/shard-index").then((m) => m.heldVectorBytes()).catch(() => 0);
+  const vectors = readSettings().inMemory.searchVectors
+    ? await import("@/lib/prime-radiant/shard-index").then((m) => m.heldVectorBytes()).catch(() => 0)
+    : 0;
   return { ...heldPageBytes(), searchVectors: vectors };
 }
 
