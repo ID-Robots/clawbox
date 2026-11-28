@@ -54,6 +54,8 @@ export const MEMORY_SHARD_TOOLS = [
   "memory_shard_provider_set",
   "memory_shard_enable",
   "memory_shard_reset",
+  "memory_shard_ram_get",
+  "memory_shard_ram_set",
 ] as const;
 
 const BASE = "/setup-api/clawkeep/memory";
@@ -191,6 +193,8 @@ const NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
   edition: { code: "CONFLICT", next: "This box's memory index is OpenClaw's: answer from what you already know of the owner's documents." },
   search_failed: { code: "ENDPOINT_DOWN", next: "The embedding model may be busy or asleep. Answer without it, and say so." },
   full_reindex_required: { code: "CONFLICT", next: "The index needs a full pass first: memory_shard_reindex with mode full answers what it costs, for the owner to decide." },
+  too_big: { code: "CONFLICT", next: "Nothing was switched on: the index is more than half of the memory free now. Do not retry; tell the user, and that it can wait until more memory is free." },
+  memory_unknown: { code: "NOT_SUPPORTED_HERE", next: "This box could not say how much memory is free, so the index is not kept in RAM. Do not retry; tell the user." },
 };
 
 function refusalOf(err: ApiError): ToolError | null {
@@ -739,6 +743,51 @@ function registerSettingTools(reg: Registrar): void {
         kept: r.body.kept ?? ["the folder list", "the embedding model", "the index already built"],
         next: `Tell the user setup runs again the next time they open Memory Shard (${OPEN_APP}).`,
       });
+    },
+  );
+
+  registerRamTools(reg);
+}
+
+interface RamBody {
+  on?: boolean;
+  bytes?: number;
+  files?: number;
+  availableBytes?: number | null;
+  stopped?: { reason?: string; bytes?: number; availableBytes?: number | null; at?: string } | null;
+}
+
+const mb = (bytes: number | null | undefined) => (typeof bytes === "number" ? Math.round(bytes / 1_048_576) : "unknown");
+
+function ramOut(r: RamBody): Record<string, unknown> {
+  return {
+    kept_in_ram: r.on ?? "unknown",
+    index_mb: mb(r.bytes),
+    index_files: r.files ?? "unknown",
+    memory_free_mb: mb(r.availableBytes),
+    ...(r.stopped ? { switched_itself_off: { at: r.stopped.at ?? "unknown", because: r.stopped.reason === "too_big" ? "the index grew past half of the free memory" : "the free memory could not be measured", index_mb: mb(r.stopped.bytes), memory_free_mb: mb(r.stopped.availableBytes) } } : {}),
+  };
+}
+
+/** "Keep the Memory Shard index in RAM" (src/lib/memory-shard-ram.ts), off by default. */
+function registerRamTools(reg: Registrar): void {
+  reg.tool(
+    "memory_shard_ram_get",
+    "Read whether Memory Shard's index is kept in RAM (off by default) so a search does not wait on the disk: on or off, the index's size, the memory free now, and whether it switched itself off.",
+    {},
+    READ,
+    async () => json(ramOut(await call<RamBody>("GET", "/ram"))),
+  );
+
+  reg.tool(
+    "memory_shard_ram_set",
+    "Keep Memory Shard's index in RAM or stop, when the user asked. On is refused while the index is more than half of the free memory; off stops it, and the system frees that memory as other programs need it.",
+    { on: z.boolean().describe("true keeps the index in RAM, false stops.") },
+    WRITE,
+    async ({ on }: { on: boolean }) => {
+      if (typeof on !== "boolean") throw new ToolError("BAD_ARGUMENT", "Say on: true or on: false.", "Call again with on set.");
+      const r = await call<RamBody>("POST", "/ram", { body: { on } });
+      return json({ ...ramOut(r), result: on ? "The index is kept in RAM from now on." : "Stopped; the system frees that memory as it needs it." });
     },
   );
 }

@@ -53,6 +53,8 @@ const TOOL_ROWS: [wire: string, label: string, brand: ToolBrand][] = [
   ["clawbox__memory_shard_schedule_set", "Memory Shard Settings", "memory-shard"],
   ["clawbox__memory_shard_provider_get", "Memory Shard Settings", "memory-shard"],
   ["clawbox__memory_shard_provider_set", "Memory Shard Settings", "memory-shard"],
+  ["clawbox__memory_shard_ram_get", "Memory Shard Settings", "memory-shard"],
+  ["clawbox__memory_shard_ram_set", "Memory Shard Settings", "memory-shard"],
   ["clawbox__memory_shard_enable", "Memory Shard Settings", "memory-shard"],
   ["clawbox__memory_shard_reset", "Memory Shard Settings", "memory-shard"],
   // Prime Radiant

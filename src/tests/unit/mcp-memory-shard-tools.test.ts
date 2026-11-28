@@ -607,3 +607,33 @@ describe("memory_shard_status explains why a reindex is wanted", () => {
     expect(out.text).toMatch(/3 of 12 files \(25%\)/);
   });
 });
+
+describe("the index in RAM", () => {
+  it("reads it in MB, with why it switched itself off", async () => {
+    routes({ [`GET ${BASE}/ram`]: { on: false, bytes: 300 * 1_048_576, files: 2, availableBytes: 500 * 1_048_576, stopped: { reason: "too_big", bytes: 300 * 1_048_576, availableBytes: 500 * 1_048_576, at: "2026-11-28T12:00:00.000Z" } } });
+    const out = await harness("openclaw").call("memory_shard_ram_get", {});
+    if (out.isError) throw new Error(JSON.stringify(out.error));
+    expect(JSON.parse(out.text)).toEqual({
+      kept_in_ram: false,
+      index_mb: 300,
+      index_files: 2,
+      memory_free_mb: 500,
+      switched_itself_off: { at: "2026-11-28T12:00:00.000Z", because: "the index grew past half of the free memory", index_mb: 300, memory_free_mb: 500 },
+    });
+  });
+
+  it("switches it on and off, and passes the over-limit refusal on as what to tell the user", async () => {
+    routes({ [`POST ${BASE}/ram`]: { on: true, bytes: 10 * 1_048_576, files: 1, availableBytes: 4096 * 1_048_576, stopped: null } });
+    const on = await harness().call("memory_shard_ram_set", { on: true });
+    if (on.isError) throw new Error(JSON.stringify(on.error));
+    expect(sent(0)).toEqual([`${BASE}/ram`, expect.objectContaining({ method: "POST", body: { on: true } })]);
+    expect(JSON.parse(on.text)).toMatchObject({ kept_in_ram: true, index_mb: 10, result: "The index is kept in RAM from now on." });
+    routes({ [`POST ${BASE}/ram`]: refusal(409, { error: "The index is more than half of the memory available now, so it is not kept in RAM.", code: "too_big", on: false }) });
+    const refused = await harness().call("memory_shard_ram_set", { on: true });
+    expect(refused.isError).toBe(true);
+    if (!refused.isError) return;
+    expect(refused.error.code).toBe("CONFLICT");
+    expect(refused.error.message).toMatch(/more than half of the memory available/);
+    expect(JSON.stringify(refused.error)).toMatch(/Do not retry/);
+  });
+});

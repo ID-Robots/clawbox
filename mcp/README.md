@@ -1286,7 +1286,12 @@ OpenClaw gateway's busy sessions).
 `memory_shard_reindex`, `memory_shard_reindex_stop`, `memory_shard_sources_list`
 / `_add` / `_remove`, `memory_shard_schedule_get` / `_set`,
 `memory_shard_provider_get` / `_set`, `memory_shard_enable`,
-`memory_shard_reset` (both editions)
+`memory_shard_reset`, `memory_shard_ram_get` / `_set` (both editions)
+
+`memory_shard_ram_get` / `_set` read and switch "Keep the index in RAM"
+(`GET`/`POST /setup-api/clawkeep/memory/ram`, off by default): the index size
+and free memory in MB, and why it switched itself off when it did; switching on
+over half of the free memory is refused (`too_big`, nothing written).
 
 `memory_shard_status` reads `GET /setup-api/clawkeep/memory` — the same status
 the Memory Shard app draws: switched on, set up, the paid-plan gate, health,

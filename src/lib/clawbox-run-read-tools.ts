@@ -72,6 +72,7 @@ export const CLAWBOX_READ_ONLY_TOOLS = [
   "local_ai_status",
   "logs_tail",
   "memory_shard_provider_get",
+  "memory_shard_ram_get",
   "memory_shard_schedule_get",
   "memory_shard_search",
   "memory_shard_sources_list",
