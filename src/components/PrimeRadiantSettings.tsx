@@ -144,7 +144,7 @@ export default function PrimeRadiantSettings({ revision = 0, onChanged }: { revi
         },
         ...(indexLimit ? { search: { indexLimitMb } } : {}),
         ...(answer.settings.structure ? { structure: { enabled: draft.structure, company: draft.company.trim() } } : {}),
-        ...(answer.limits.claudeModels ? { model: { provider: draft.modelProvider, anthropicModel: draft.claudeModel } } : {}),
+        ...(answer.limits.claudeModels ? { model: { provider: draft.modelProvider, anthropicModel: answer.limits.claudeModels.includes(draft.claudeModel) ? draft.claudeModel : answer.limits.claudeModels[0] } } : {}),
         domains,
       }));
       setAnswer(next);

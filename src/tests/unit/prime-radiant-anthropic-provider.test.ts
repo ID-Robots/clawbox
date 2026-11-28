@@ -308,7 +308,8 @@ describe("the pool: same accounts, API keys only, fallback to the next one", () 
     const fake = anthropic({ [KEY_A]: respond(403, { type: "error", error: { type: "permission_error", message: `denied for ${KEY_A}` } }) });
     const err = await flash.createAnthropicFlashClient({ model: "claude-haiku-5-5", fetchImpl: fake.fetchImpl }).complete(REQ).catch((e) => e);
     expect(err).toMatchObject({ kind: "refused" });
-    expect(JSON.stringify({ message: err.message, stack: String(err.stack).includes(KEY_A) })).not.toContain(KEY_A.slice(0, 20));
+    expect(String(err.message)).not.toContain(KEY_A.slice(0, 20));
+    expect(String(err.stack)).not.toContain(KEY_A.slice(0, 20));
     const config = fs.existsSync(path.join(root, "data", "config.json")) ? fs.readFileSync(path.join(root, "data", "config.json"), "utf-8") : "";
     expect(config).not.toContain(KEY_A);
     expect(fs.readFileSync(path.join(root, "prime-radiant", "settings.json"), "utf-8")).not.toContain("sk-ant");

@@ -366,7 +366,7 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
     result.notes.push(`The golden-question judge stopped part way: ${spentText}. The ${asked.length - scored.length} question(s) it did not judge wait for the next night.`);
   } else if (lockedPartWay) {
     result.notes.push(`Local-only AI went on part way through the golden-question check. The ${asked.length - scored.length} question(s) not judged wait for a night the lock is off.`);
-  } else if (refusal) result.notes.push(`${client.engine === "anthropic" ? "Anthropic" : "ClawBox AI"} refused the golden-question judge part way (${refusal}); the rest count as not judged.`);
+  } else if (refusal) result.notes.push(`${modelName} refused the golden-question judge part way (${refusal}); the rest count as not judged.`);
 
   result.tally = goldenTally(scored.map((q) => verdicts.get(q.id)?.verdict ?? null));
   const scoreId = options.runId ?? `gs-${crypto.randomBytes(6).toString("hex")}`;
