@@ -11,6 +11,9 @@ import path from "path";
 import { spawn as realSpawn, type ChildProcess } from "child_process";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// One case runs the real `nice ionice cat` child, so both ceilings are raised.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 const config = vi.hoisted(() => ({ values: new Map<string, unknown>() }));
 vi.mock("@/lib/config-store", () => ({
   get: async (key: string) => config.values.get(key),
