@@ -10,12 +10,16 @@ import {
 import { refreshHarnessToolsIfSwitched } from "@/lib/harness-mcp-refresh";
 import { CONFIG_ROOT } from "@/lib/config-store";
 import { retireOnboardingRitual } from "@/lib/language-persona";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 const exec = promisify(execFile);
 
 // Switch the active agent harness (openclaw | hermes) and refresh the shared
 // identity into it. Providers/OAuth are per-harness and untouched here.
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   // Locked device (single-harness edition, or dual without a valid premium
   // license): switching is disabled at the API too, not just hidden in the UI.
   // Read ONCE and threaded into the persist below: between this gate and that

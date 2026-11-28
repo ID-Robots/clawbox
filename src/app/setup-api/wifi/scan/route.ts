@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { NextRequest } from "next/server";
 import { triggerBackgroundScan, getScanStatus, getCachedScan, scanWifiLive } from "@/lib/network";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +10,9 @@ export const dynamic = "force-dynamic";
  *  default — background scan via nmcli (tears down AP)
  */
 export async function POST(request: NextRequest) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const live = request.nextUrl.searchParams.get("live");
   if (live) {
     const networks = await scanWifiLive();

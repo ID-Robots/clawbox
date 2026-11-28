@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { removeRunWorktreeFor } from "@/lib/coding-agent";
 import { runLifecycleRoute } from "@/lib/coding-agent-route";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -26,5 +27,10 @@ export const dynamic = "force-dynamic";
  */
 export const POST = runLifecycleRoute({
   verb: "remove the copy of the project for",
-  act: async (id) => NextResponse.json({ run: await removeRunWorktreeFor(id) }),
+  act: async (id, _body, request) => {
+    if (!isSameOriginRequest(request)) {
+      return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+    }
+    return NextResponse.json({ run: await removeRunWorktreeFor(id) });
+  },
 });

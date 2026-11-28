@@ -3,6 +3,7 @@ import { requireSession } from "@/lib/route-auth";
 import { UI_ROOT_STEPS } from "@/lib/root-steps";
 import { readRootStepJournalTail, rootStepUnit } from "@/lib/root-step-journal";
 import { startRootStep } from "@/lib/root-step-runner";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -48,6 +49,9 @@ async function getJournalTail(step: string, sinceMs: number): Promise<string> {
 }
 
 export async function POST(req: Request) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   // Starts clawbox-root-update@<step>.service, which runs install.sh as root.
   // Its only callers are VNCApp and RemoteControlPanel — desktop apps, always
   // post-setup — so it fails closed unconditionally. TASK-443/445.

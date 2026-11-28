@@ -3,6 +3,7 @@ import { requireSession } from "@/lib/route-auth";
 import { hasPersonSession } from "@/lib/owner-session";
 import { CodingAgentError, MAX_TASK_CHARS, ProviderChoiceError, createDraftRun, deleteDraftRun, httpStatusForCodingError } from "@/lib/coding-agent";
 import { runLifecycleRoute } from "@/lib/coding-agent-route";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,9 @@ export const dynamic = "force-dynamic";
  * the list already says which one it will use.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const unauthorized = await requireSession(request);
   if (unauthorized) return unauthorized;
 
@@ -75,7 +79,10 @@ export const DELETE = runLifecycleRoute({
   verb: "discard",
   noun: "draft",
   idFrom: "query",
-  act: (id) => {
+  act: (id, _body, request) => {
+    if (!isSameOriginRequest(request)) {
+      return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+    }
     deleteDraftRun(id);
     return NextResponse.json({ ok: true });
   },

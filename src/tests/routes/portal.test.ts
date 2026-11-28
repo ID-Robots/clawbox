@@ -138,7 +138,7 @@ describe("/setup-api/portal/start", () => {
     cloudflaredMock.isInstalled.mockResolvedValue(false);
 
     const mod = await import("@/app/setup-api/portal/start/route");
-    const res = await mod.POST();
+    const res = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(400);
     expect(cloudflaredMock.startTunnelService).not.toHaveBeenCalled();
     const body = await res.json();
@@ -153,7 +153,7 @@ describe("/setup-api/portal/start", () => {
     });
 
     const mod = await import("@/app/setup-api/portal/start/route");
-    const res = await mod.POST();
+    const res = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ success: true, bootPersisted: true });
@@ -168,7 +168,7 @@ describe("/setup-api/portal/start", () => {
     });
 
     const mod = await import("@/app/setup-api/portal/start/route");
-    const res = await mod.POST();
+    const res = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     // Still 200 — the tunnel IS up, and calling that a failure would be the
     // opposite lie. What changes is that the second fact travels with it.
     expect(res.status).toBe(200);
@@ -185,7 +185,7 @@ describe("/setup-api/portal/start", () => {
     );
 
     const mod = await import("@/app/setup-api/portal/start/route");
-    const res = await mod.POST();
+    const res = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.error).toMatch(/Unit failed/);
@@ -201,7 +201,7 @@ describe("/setup-api/portal/stop", () => {
     cloudflaredMock.getTunnelServiceState.mockResolvedValue("inactive");
 
     const mod = await import("@/app/setup-api/portal/stop/route");
-    const res = await mod.POST();
+    const res = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.success).toBe(true);
@@ -223,7 +223,7 @@ describe("/setup-api/portal/stop", () => {
     cloudflaredMock.getTunnelServiceState.mockResolvedValue("inactive");
 
     const mod = await import("@/app/setup-api/portal/stop/route");
-    const res = await mod.POST();
+    const res = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.bootPersisted).toBe(false);

@@ -83,7 +83,7 @@ async function finalise() {
     { status: 200 },
   )));
   const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-  const body = await (await POST()).json();
+  const body = await (await POST(new Request("http://localhost/", { method: "POST" }))).json();
   // The finalise runs off the request lifecycle, as the box's task: wait for
   // it to have saved.
   await vi.waitFor(() => expect(mockConfigure).toHaveBeenCalled());
@@ -237,7 +237,7 @@ describe("the device-code finaliser carries the configure's warning", () => {
     } as never);
 
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const res = await POST();
+    const res = await POST(new Request("http://localhost/", { method: "POST" }));
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: "configuring", taskId: started.task.id });
@@ -270,7 +270,7 @@ describe("the device-code finaliser carries the configure's warning", () => {
     mockReadSession.mockResolvedValueOnce({ ...session, status: "error", error: "The ClawBox web server restarted while this was running." } as never);
 
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const body = await (await POST()).json();
+    const body = await (await POST(new Request("http://localhost/", { method: "POST" }))).json();
 
     expect(body).toEqual({ status: "error", error: "The ClawBox web server restarted while this was running." });
     expect(mockWriteSession).toHaveBeenCalledWith(expect.objectContaining({ status: "error" }));
@@ -296,7 +296,7 @@ describe("the device-code finaliser carries the configure's warning", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", access_token: TOKEN }), { status: 200 })));
 
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const res = await POST();
+    const res = await POST(new Request("http://localhost/", { method: "POST" }));
 
     expect(res.status).toBe(409);
     expect(await res.json()).toMatchObject({ status: "error", error: expect.stringContaining("OpenAI is being signed out") });
@@ -316,7 +316,7 @@ describe("the device-code finaliser carries the configure's warning", () => {
     } as never);
 
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const body = await (await POST()).json();
+    const body = await (await POST(new Request("http://localhost/", { method: "POST" }))).json();
 
     expect(body).toEqual({ status: "complete", warning: SWEEP_WARNING });
   });
@@ -330,7 +330,7 @@ describe("the device-code finaliser carries the configure's warning", () => {
     } as never);
 
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const body = await (await POST()).json();
+    const body = await (await POST(new Request("http://localhost/", { method: "POST" }))).json();
 
     expect(body).toEqual({ status: "complete" });
   });

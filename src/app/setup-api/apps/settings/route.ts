@@ -5,6 +5,7 @@ import path from "@/lib/runtime-path";
 import { APP_ID_RE } from "@/lib/code-projects";
 import { setSkillEnabled } from "@/lib/openclaw-config";
 import { refreshSkillsCache } from "@/lib/openclaw-skill-info";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -55,6 +56,9 @@ const RESERVED_APP_IDS: ReadonlySet<string> = new Set([
 ]);
 
 export async function POST(req: Request) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   // The App Store is OpenClaw-only; refuse on a Hermes device (the UI hides
   // it, this makes HTTP agree). See src/lib/openclaw-apps-server.ts.
   const blocked = await openclawAppsGuard();

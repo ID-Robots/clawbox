@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server";
 import { getTunnelServiceState, stopTunnelService } from "@/lib/cloudflared";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
-export async function POST() {
+export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   try {
     // Both halves of "off": the unit down now, and the unit still down after a
     // reboot. A `disable` that failed leaves a box that starts publishing a

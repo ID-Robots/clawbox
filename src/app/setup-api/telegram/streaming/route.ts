@@ -8,6 +8,7 @@ import {
   setTelegramProgressStreaming,
   restartGateway,
 } from "@/lib/openclaw-config";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -63,6 +64,9 @@ export async function GET() {
 
 /** POST { enabled } — with `background: true` (Settings, TASK-2148) a job of the box (src/lib/settings-jobs.ts). */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const job = await routeAsSettingsJob(request, {
     path: "/setup-api/telegram/streaming",
   kind: CHANNEL_SETUP_KIND,

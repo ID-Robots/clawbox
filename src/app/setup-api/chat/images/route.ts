@@ -5,6 +5,7 @@ import { ClawaiImageError, generateClawaiImage } from "@/lib/harness/clawai-imag
 import { appendTranscript } from "@/lib/harness/transcript-store";
 import { transcriptKeyFor } from "@/lib/chat-scope-server";
 import { recordMediaOwner } from "@/lib/chat-media-owners";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -61,6 +62,9 @@ async function transcriptLivesHere(): Promise<boolean> {
 }
 
 export async function POST(req: NextRequest) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: unknown;
   try {
     body = await req.json();

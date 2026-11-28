@@ -7,6 +7,7 @@ import { requireSession } from "@/lib/route-auth";
 import { chatPrincipalOf, hermesSessionFor } from "@/lib/chat-scope-server";
 import { orgMemberStrictOf } from "@/lib/org-mode-server";
 import { staffHermesProfilePaths } from "@/lib/hermes-staff-profile";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * Shorten a Hermes conversation now — the chat's "Shorten this conversation
@@ -31,6 +32,9 @@ function count(value: unknown): number | undefined {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const unauthorized = await requireSession(request);
   if (unauthorized) return unauthorized;
   if ((await getActiveHarness()) !== "hermes") {

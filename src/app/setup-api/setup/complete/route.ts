@@ -5,8 +5,12 @@ import { setMany } from "@/lib/config-store";
 import { getSessionSigningSecret, createSessionCookie, getSessionGeneration } from "@/lib/auth";
 import { requireSession } from "@/lib/route-auth";
 import { applyDeferredLanguagePersona, retireOnboardingRitual } from "@/lib/language-persona";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   // Second line of defence, the same one setup/reset carries. Middleware's
   // bootstrap allow-list (src/lib/setup-api-gate.ts) already keeps this route
   // shut to an anonymous caller — but a handler that mints a 24 h owner

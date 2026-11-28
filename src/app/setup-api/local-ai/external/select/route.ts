@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { ExternalEngineRefusal, selectExternalEngine } from "@/lib/external-engine-ops";
 import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * POST /setup-api/local-ai/external/select (owner only, TASK-2376): make the
@@ -13,6 +14,9 @@ import { withLocalAiTransitionLock } from "@/lib/local-ai-transition-lock";
  * probed. 404 `not_configured` when there is no engine.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const unauthorized = await requireSession(request, { ownerOnly: true });
   if (unauthorized) return unauthorized;
   try {

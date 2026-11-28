@@ -108,7 +108,7 @@ describe("/setup-api/tunnel/enable", () => {
     tunnelMock.isCloudflaredInstalled.mockResolvedValue(false);
 
     const mod = await import("@/app/setup-api/tunnel/enable/route");
-    const res = await mod.POST();
+    const res = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.success).toBe(false);
@@ -125,7 +125,7 @@ describe("/setup-api/tunnel/enable", () => {
     });
 
     const mod = await import("@/app/setup-api/tunnel/enable/route");
-    const res = await mod.POST();
+    const res = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({
@@ -142,7 +142,7 @@ describe("/setup-api/tunnel/enable", () => {
     });
 
     const mod = await import("@/app/setup-api/tunnel/enable/route");
-    const res = await mod.POST();
+    const res = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body).toEqual({
@@ -157,7 +157,7 @@ describe("/setup-api/tunnel/disable", () => {
     tunnelMock.stopTunnel.mockResolvedValue({ success: true });
 
     const mod = await import("@/app/setup-api/tunnel/disable/route");
-    const res = await mod.POST();
+    const res = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ success: true });
@@ -170,7 +170,7 @@ describe("/setup-api/tunnel/disable", () => {
     });
 
     const mod = await import("@/app/setup-api/tunnel/disable/route");
-    const res = await mod.POST();
+    const res = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body.success).toBe(false);

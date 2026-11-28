@@ -25,6 +25,7 @@ import { NextResponse } from "next/server";
 import { getEmailCredentials, toSmtpConfig } from "@/lib/email-config";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { sendMail, SmtpError } from "@/lib/smtp-client";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -34,7 +35,10 @@ export const dynamic = "force-dynamic";
  *  bucket wearing a misleading name. */
 const TEST_BUDGET = { windowMs: 60 * 60 * 1000, max: 10 } as const;
 
-export async function POST() {
+export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   try {
     const settings = await getEmailCredentials();
     if (!settings) {

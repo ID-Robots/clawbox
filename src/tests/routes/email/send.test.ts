@@ -166,12 +166,12 @@ describe("POST /setup-api/email/send", () => {
     for (let i = 0; i < 5; i++) await POST(sendRequest(VALID_BODY));
     expect((await POST(sendRequest(VALID_BODY))).status).toBe(429);
     // The person at the keyboard must still be able to prove the account works.
-    expect((await TEST_POST()).status).toBe(200);
+    expect((await TEST_POST(new Request("http://localhost/", { method: "POST" }))).status).toBe(200);
     // ...but that route is not unbounded either: the agent holds the MCP
     // bearer and middleware admits it here too, so a budget-free test route
     // would be a way around the send budget.
-    for (let i = 0; i < 9; i++) expect((await TEST_POST()).status).toBe(200);
-    expect((await TEST_POST()).status).toBe(429);
+    for (let i = 0; i < 9; i++) expect((await TEST_POST(new Request("http://localhost/", { method: "POST" }))).status).toBe(200);
+    expect((await TEST_POST(new Request("http://localhost/", { method: "POST" }))).status).toBe(429);
     errorSpy.mockRestore();
   });
 
@@ -187,13 +187,13 @@ describe("POST /setup-api/email/send", () => {
 describe("POST /setup-api/email/test", () => {
   it("refuses when nothing is configured", async () => {
     storeWith({});
-    const res = await TEST_POST();
+    const res = await TEST_POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(400);
     expect((await res.json()).kind).toBe("unconfigured");
   });
 
   it("sends to the device's own address, never to a caller-supplied one", async () => {
-    const res = await TEST_POST();
+    const res = await TEST_POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(200);
     const message = mockSend.mock.calls[0][1];
     expect(message.to).toEqual(["box@example.com"]);
@@ -204,7 +204,7 @@ describe("POST /setup-api/email/test", () => {
     mockSend.mockRejectedValue(
       new SmtpError("auth", "The mail server rejected that address and password."),
     );
-    const res = await TEST_POST();
+    const res = await TEST_POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(400);
     const data = await res.json();
     expect(data.kind).toBe("auth");

@@ -8,6 +8,7 @@ import {
 import { refresh as refreshMemoryScheduler } from "@/lib/clawkeep-memory-scheduler";
 import { getMemoryShardEnabled } from "@/lib/memory-shard";
 import { memoryShardWriter, scheduledFullPassRefusal } from "@/lib/memory-shard-writer";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -20,6 +21,9 @@ export async function GET() {
 }
 
 export async function PUT(request: NextRequest) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   // A signed-in person or the box's assistant (`memoryShardWriter`), nobody
   // else: the schedule decides when the box spends an hour re-embedding. The
   // passes it starts are incremental — the same pass the assistant may start

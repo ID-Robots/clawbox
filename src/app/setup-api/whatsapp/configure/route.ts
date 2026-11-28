@@ -21,6 +21,7 @@ import {
   type WhatsappConfigResult,
   type WhatsappConfigUpdate,
 } from "@/lib/hermes-whatsapp";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -156,6 +157,9 @@ async function configureOpenclaw(body: ConfigureBody): Promise<NextResponse> {
 
 /** POST — enablement and access. With `background: true` (Settings, TASK-2148) a job of the box (src/lib/settings-jobs.ts). */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const job = await routeAsSettingsJob(request, {
     path: "/setup-api/whatsapp/configure",
   kind: CHANNEL_SETUP_KIND,

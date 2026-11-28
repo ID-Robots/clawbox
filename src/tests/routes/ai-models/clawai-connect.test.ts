@@ -194,7 +194,7 @@ describe("ClawBox AI device-auth routes", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const mod = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const response = await mod.POST();
+    const response = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -220,7 +220,7 @@ describe("ClawBox AI device-auth routes", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", access_token: "portal-token-123" }), { status: 200 })));
 
     const mod = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const response = await mod.POST();
+    const response = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     expect(response.status).toBe(410);
     expect(await response.json()).toMatchObject({ status: "error", error: expect.stringMatching(/cancelled/) });
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -260,7 +260,7 @@ describe("ClawBox AI device-auth routes", () => {
     mockConfigurePost.mockResolvedValueOnce(new Response(null, { status: 200 }) as unknown as Awaited<ReturnType<typeof mockConfigurePost>>);
 
     const mod = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const response = await mod.POST();
+    const response = await mod.POST(new Request("http://localhost/", { method: "POST" }));
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -318,7 +318,7 @@ describe("ClawBox AI device-auth routes", () => {
       vi.stubGlobal("fetch", fetchMock);
 
       const mod = await import("@/app/setup-api/ai-models/clawai/poll/route");
-      const response = await mod.POST();
+      const response = await mod.POST(new Request("http://localhost/", { method: "POST" }));
       const body = await response.json();
 
       expect(response.status).toBe(httpStatus);

@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { startOpenclawUpdate, startWouldOverlapUpdate } from "@/lib/updater";
 import { requireSession } from "@/lib/route-auth";
 import { hasPersonSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * Trigger an OpenClaw-only update — runs `openclaw_install` + `openclaw_patch`
@@ -15,6 +16,9 @@ import { hasPersonSession } from "@/lib/owner-session";
  * update/request and the owner's Confirm (4.3 bug 2).
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const unauthorized = await requireSession(request);
   if (unauthorized) return unauthorized;
   if (!(await hasPersonSession(request))) {

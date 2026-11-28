@@ -8,6 +8,7 @@ import {
   readClawKeepSession,
   writeClawKeepSession,
 } from "@/lib/clawkeep-connect";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -65,7 +66,10 @@ async function persistTokenInBackground(session: ClawKeepConnectSession, accessT
   }
 }
 
-export async function POST() {
+export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const session = await readClawKeepSession();
   if (!session) {
     return NextResponse.json(

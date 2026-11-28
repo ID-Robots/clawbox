@@ -30,6 +30,7 @@ import {
   getBrowserStartUrl,
   writeBrowserLaunchEnv,
 } from "@/lib/browser-setup";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 const exec = promisify(execFile);
 const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
@@ -353,6 +354,9 @@ export async function GET() {
 // ─── POST — actions ──────────────────────────────────────────────────────────
 
 export async function POST(req: Request) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   try {
     const { action } = await req.json();
 

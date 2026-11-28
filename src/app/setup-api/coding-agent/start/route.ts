@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { startDraftRun } from "@/lib/coding-agent";
 import { runLifecycleRoute } from "@/lib/coding-agent-route";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -12,7 +13,10 @@ export const dynamic = "force-dynamic";
 export const POST = runLifecycleRoute({
   verb: "start",
   noun: "draft",
-  act: async (id) => {
+  act: async (id, _body, request) => {
+    if (!isSameOriginRequest(request)) {
+      return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+    }
     const run = await startDraftRun(id);
     return NextResponse.json({ run, queued: run.status === "queued" }, { status: 202 });
   },

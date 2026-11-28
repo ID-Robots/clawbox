@@ -12,6 +12,7 @@ import {
   logoutOpenclawWhatsapp,
   setOpenclawWhatsappEnabled,
 } from "@/lib/openclaw-whatsapp";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,9 @@ export const dynamic = "force-dynamic";
  * which is the honest thing to tell them rather than implying a remote revoke.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   // `?background=1` (Settings, TASK-2148): the same unlink as a job of the box
   // (src/lib/settings-jobs.ts).
   const job = await routeAsSettingsJob(request, {

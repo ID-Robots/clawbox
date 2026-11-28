@@ -7,6 +7,7 @@ import { ExtraPathsUnreadableError, mutateExtraPaths, readExtraPaths } from "@/l
 import { invalidateMemoryStatusCache } from "@/lib/clawkeep-memory";
 import { countSourceFiles } from "@/lib/memory-extract";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -76,6 +77,9 @@ export async function GET(request: NextRequest) {
  * the way the pass walks it (the owner's picker does not wait for the walk).
  */
 export async function POST(request: NextRequest) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const writer = await memoryShardWriter(request, WHAT);
   if (!writer.ok) return writer.response;
 
@@ -131,6 +135,9 @@ export async function POST(request: NextRequest) {
 
 /** DELETE { path } → stop indexing one folder. The files are left alone. */
 export async function DELETE(request: NextRequest) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const writer = await memoryShardWriter(request, WHAT);
   if (!writer.ok) return writer.response;
 

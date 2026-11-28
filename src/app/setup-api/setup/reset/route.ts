@@ -24,6 +24,7 @@ import crypto from "crypto";
 import { startRootStep } from "@/lib/root-step-runner";
 import { readDesktopBrowserConfig } from "@/lib/desktop-browser-config";
 import { clientTimedOut, readUnitState, runUnitJob, unitIsStopped, type UnitState } from "@/lib/gateway-unit-job";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 const execFile = promisify(execFileCb);
 
@@ -788,6 +789,9 @@ function scheduleReboot(): void {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const startedAt = Date.now();
 
   // Factory reset wipes data/, ~/.openclaw, ~/.hermes and reboots. It has no

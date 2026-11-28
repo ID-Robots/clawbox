@@ -8,6 +8,7 @@ import {
   safePetSlug,
   selectPet,
 } from "@/lib/hermes-pets";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * POST /setup-api/pets/select  { slug: string }   — install if needed, activate
@@ -21,6 +22,9 @@ import {
  * would abort mid-download and leave a partial pet directory behind).
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
 
   let body: unknown;
   try {

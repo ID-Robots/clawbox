@@ -8,6 +8,7 @@ import { filesFenceFor } from "@/lib/files-scope-server";
 import { summarizeFolderForZip, zipFolderStream } from "@/lib/zip-stream";
 import { contentDisposition } from "@/lib/content-disposition";
 import { memberHomeChanged, noteLanded, uploadWritingUnder } from "@/lib/user-upload-guard";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -177,6 +178,9 @@ export async function GET(req: NextRequest, { params }: Params) {
 // PUT /setup-api/files/[...path] — rename/move
 // Body: { newName: string }  (renames within same directory)
 export async function PUT(req: NextRequest, { params }: Params) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const scoped = await filesFenceFor(req);
   if (!scoped.ok) return scoped.response;
   const { fence } = scoped;
@@ -248,6 +252,9 @@ export async function PUT(req: NextRequest, { params }: Params) {
 
 // DELETE /setup-api/files/[...path] — delete file or directory
 export async function DELETE(req: NextRequest, { params }: Params) {
+  if (!isSameOriginRequest(req)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const scoped = await filesFenceFor(req);
   if (!scoped.ok) return scoped.response;
   const { fence } = scoped;

@@ -14,6 +14,7 @@ import {
   readJsonBody,
   relayJson,
 } from "../shared";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 // Complete a PKCE session with the code the user pasted from the provider's
 // consent page (Anthropic redirects to console.anthropic.com/oauth/code/callback
@@ -28,6 +29,9 @@ const SUBMIT_KEYS = ["ok", "status", "message"] as const;
 const CODE_RE = /^[!-~]{4,2048}$/;
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const gate = await ownerGate(request);
   if (gate) return gate;
 

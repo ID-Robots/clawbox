@@ -62,7 +62,7 @@ const drop = vi.hoisted(() => ({ wrap: false, calls: [] as unknown[][] }));
 vi.mock("@/lib/capability-drop", async (importOriginal) =>
   (await import("@/tests/helpers/capability-drop")).realGate(await importOriginal(), drop));
 
-type Route = { GET?: () => Promise<Response>; POST?: () => Promise<Response> };
+type Route = { GET?: () => Promise<Response>; POST?: (request: Request) => Promise<Response> };
 let enable: Route;
 let status: Route;
 let disable: Route;
@@ -139,7 +139,7 @@ describe.each(LAYOUTS)("/setup-api/tunnel on the $layout", ({ env, target }) => 
   });
 
   it(`enable -> status -> disable forwards to ${target}`, async () => {
-    const enabled = await enable.POST!();
+    const enabled = await enable.POST!(new Request("http://localhost/", { method: "POST" }));
     expect(enabled.status).toBe(200);
     expect(await enabled.json()).toEqual({ success: true, tunnelUrl: PUBLIC_URL });
     expect(spawnMock).toHaveBeenCalledTimes(1);
@@ -156,7 +156,7 @@ describe.each(LAYOUTS)("/setup-api/tunnel on the $layout", ({ env, target }) => 
       cloudflaredInstalled: true,
     });
 
-    const disabled = await disable.POST!();
+    const disabled = await disable.POST!(new Request("http://localhost/", { method: "POST" }));
     expect(disabled.status).toBe(200);
     expect(await disabled.json()).toEqual({ success: true });
     expect(killed).toContainEqual([process.pid, "SIGTERM"]);
@@ -176,7 +176,7 @@ describe.each(LAYOUTS)("/setup-api/tunnel on the $layout", ({ env, target }) => 
       tunnelUrl: "https://unit-owned.trycloudflare.com",
       target,
     });
-    expect(await (await enable.POST!()).json()).toEqual({
+    expect(await (await enable.POST!(new Request("http://localhost/", { method: "POST" }))).json()).toEqual({
       success: true,
       tunnelUrl: "https://unit-owned.trycloudflare.com",
     });
@@ -201,7 +201,7 @@ describe.each(LAYOUTS)("/setup-api/tunnel on the $layout", ({ env, target }) => 
 
       expect(await (await status.GET!()).json()).toMatchObject({ running: false, tunnelUrl: null });
 
-      const enabled = await (await enable.POST!()).json();
+      const enabled = await (await enable.POST!(new Request("http://localhost/", { method: "POST" }))).json();
       expect(enabled).toEqual({ success: true, tunnelUrl: PUBLIC_URL });
       expect(spawnMock.mock.calls[0][1]).toEqual(argvFor(target));
       expect(killed).toEqual([]);

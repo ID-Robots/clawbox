@@ -159,6 +159,34 @@ describe("/setup-api/system/update-branch", () => {
       expect(mockInvalidate).toHaveBeenCalledTimes(1);
     });
 
+    it("refuses a change sent from another origin and records nothing", async () => {
+      // Another box's tunnel name is the same site: the browser attaches the
+      // owner's session cookie to this POST.
+      for (const branch of ["feature/test", null]) {
+        const res = await updateBranchPost(new Request("http://localhost/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Origin: "https://another-box.clawbox.tech" },
+          body: JSON.stringify({ branch, allowHarnessDowngrade: true }),
+        }));
+
+        expect(res.status).toBe(403);
+        expect(await res.json()).toMatchObject({ code: "cross_origin" });
+      }
+      expect(mockWriteFile).not.toHaveBeenCalled();
+      expect(mockUnlink).not.toHaveBeenCalled();
+    });
+
+    it("sets the branch from this box's own page", async () => {
+      const res = await updateBranchPost(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://localhost" },
+        body: JSON.stringify({ branch: "feature/test" }),
+      }));
+
+      expect(res.status).toBe(200);
+      expect(mockWriteFile).toHaveBeenCalledWith(expect.stringContaining(".update-branch"), "feature/test\n", "utf-8");
+    });
+
     it("clears branch when set to null", async () => {
       const res = await updateBranchPost(jsonRequest({ branch: null }));
       const body = await res.json();

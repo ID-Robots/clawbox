@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { readFile, writeFile, unlink } from "fs/promises";
 import path from "@/lib/runtime-path";
 import { isSafeBranch } from "@/lib/update-branch";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import {
   checkBranchHarnessDowngrade,
   invalidateVersionCache,
@@ -80,6 +81,16 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  // The session cookie is SameSite=Lax, so a page on another origin of the
+  // same site (another box's `*.clawbox.tech` name) gets it attached to its
+  // POST: it could pin the box to a branch of its choosing, older harness
+  // override included, for the next update to install as root.
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json(
+      { error: "The update branch can only be changed from this ClawBox's own pages.", code: "cross_origin" },
+      { status: 403 },
+    );
+  }
   try {
     const body = await request.json();
     const { branch } = body;

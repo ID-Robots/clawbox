@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import os from "os";
 import path from "@/lib/runtime-path";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 // Bridges the host browser's clipboard with the guest X CLIPBOARD via
 // `xclip`. Avoids the RFB ClientCutText Latin-1 limitation that mangles
@@ -150,6 +151,9 @@ export async function GET() {
 }
 
 export async function POST(request: NextRequest) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   // Reject oversized requests before buffering — on the Jetson, an attacker
   // (or just a paste-happy user) could otherwise force the device to read
   // a multi-MB body into RAM only to 413 it after the fact. +32 bytes is

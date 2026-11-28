@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { pauseRun } from "@/lib/coding-agent";
 import { runLifecycleRoute } from "@/lib/coding-agent-route";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -11,5 +12,10 @@ export const dynamic = "force-dynamic";
  */
 export const POST = runLifecycleRoute({
   verb: "pause",
-  act: (id) => NextResponse.json({ run: pauseRun(id) }),
+  act: (id, _body, request) => {
+    if (!isSameOriginRequest(request)) {
+      return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+    }
+    return NextResponse.json({ run: pauseRun(id) });
+  },
 });

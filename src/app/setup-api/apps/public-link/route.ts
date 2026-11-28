@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { sessionIdentity } from "@/lib/route-auth";
 import { PublicLinkError, createPublicLink, disablePublicLink, listPublicLinks, setPublicLinkPassword } from "@/lib/public-app-links";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -72,6 +73,9 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const who = await personOnly(request);
   if ("denied" in who) return who.denied;
   let body: Record<string, unknown>;
@@ -91,6 +95,9 @@ export async function POST(request: Request) {
 }
 
 export async function PATCH(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const who = await personOnly(request);
   if ("denied" in who) return who.denied;
   let body: Record<string, unknown>;
@@ -114,6 +121,9 @@ export async function PATCH(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const who = await personOnly(request);
   if ("denied" in who) return who.denied;
   let appId: unknown;

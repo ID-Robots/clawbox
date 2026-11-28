@@ -24,6 +24,7 @@ import {
 } from "@/lib/hermes-clawai";
 import { normalizeClawboxAiTier, type ClawboxAiTier } from "@/lib/clawbox-ai-models";
 import { normalizeClawaiUiTier, uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 async function readToken(): Promise<string> {
   const t = await get("clawai_token");
@@ -97,6 +98,9 @@ export async function GET() {
 // { tier } override — accepts the UI's three-tier vocabulary ("free"/"flash"/
 // "pro") as well as the device's two ("flash"/"pro").
 export async function POST(request: Request): Promise<Response> {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const blocked = await requireHermes();
   if (blocked) return blocked;
   // The local-only AI lock (TASK-2501): ClawBox AI is not Hermes' provider while it is on.

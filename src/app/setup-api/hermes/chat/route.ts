@@ -107,6 +107,7 @@ import {
 } from "@/lib/hermes-session-refusal";
 import { admitChatRequest, chatLimitSentence } from "@/lib/user-limits";
 import { readUserLimits } from "@/lib/user-limits-server";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * How many images one turn may carry — the same number the composer is told,
@@ -1258,6 +1259,9 @@ async function listenerSession(request: Request): Promise<LiveTurnListenerOption
 // within `STOP_SETTLE_TIMEOUT_MS`, so a caller that deletes the conversation
 // next cannot have that write land after it.
 export async function DELETE(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const params = new URL(request.url).searchParams;
   const which = await transcriptKeyFor(request, params.get("sessionKey"));
   if (!which.ok) {
@@ -1270,6 +1274,9 @@ export async function DELETE(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: {
     message?: string;
     /**

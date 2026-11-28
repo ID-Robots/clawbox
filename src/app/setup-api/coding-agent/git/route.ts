@@ -6,6 +6,7 @@ import { openProjectPullRequest } from "@/lib/coding-pr";
 import { CodingAgentError, httpStatusForCodingError, resolveWorkingDirectory } from "@/lib/coding-agent";
 import { gitChanges, gitFileDiff, gitInfo, gitLog } from "@/lib/coding-git";
 import { requireSession } from "@/lib/route-auth";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -80,6 +81,9 @@ export async function GET(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Disconnecting GitHub needs a signed-in browser session.", kind: "owner_only" },
@@ -104,6 +108,9 @@ export async function DELETE(request: Request) {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Backing up to GitHub needs a signed-in browser session.", kind: "owner_only" },

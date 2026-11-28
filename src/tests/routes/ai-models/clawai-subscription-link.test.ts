@@ -179,7 +179,7 @@ describe("/clawai/poll finishing an entitlement link", () => {
       portalIssuesToken("entitlement");
 
       const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-      const res = await POST();
+      const res = await POST(new Request("http://localhost/", { method: "POST" }));
 
       expect(await res.json()).toEqual({ status: "complete" });
       expect(mockLink).toHaveBeenCalledWith(TOKEN);
@@ -199,7 +199,7 @@ describe("/clawai/poll finishing an entitlement link", () => {
     portalIssuesToken("entitlement");
 
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const res = await POST();
+    const res = await POST(new Request("http://localhost/", { method: "POST" }));
 
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({
@@ -215,7 +215,7 @@ describe("/clawai/poll finishing an entitlement link", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    expect(await (await POST()).json()).toEqual({ status: "complete" });
+    expect(await (await POST(new Request("http://localhost/", { method: "POST" }))).json()).toEqual({ status: "complete" });
     expect(fetchMock).not.toHaveBeenCalled();
     expect(mockLink).not.toHaveBeenCalled();
   });
@@ -232,7 +232,7 @@ describe("/clawai/poll finishing an entitlement link", () => {
       return { ok: true, plan: "pro" };
     });
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    expect(await (await POST()).json()).toEqual({ status: "complete" });
+    expect(await (await POST(new Request("http://localhost/", { method: "POST" }))).json()).toEqual({ status: "complete" });
     expect(stored).toBe(newer);
     expect(mockLink).toHaveBeenCalledWith(TOKEN);
   });
@@ -249,7 +249,7 @@ describe("/clawai/poll finishing an entitlement link", () => {
       return { ok: false, code: "token_rejected", message: "refused" };
     });
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    expect((await POST()).status).toBe(409);
+    expect((await POST(new Request("http://localhost/", { method: "POST" }))).status).toBe(409);
     expect(stored).toBe(newer);
   });
 
@@ -265,7 +265,7 @@ describe("/clawai/poll finishing an entitlement link", () => {
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
     // One link first, so the route's lazy import of the link module is loaded
     // before two polls race (two concurrent first imports race the mock).
-    await POST();
+    await POST(new Request("http://localhost/", { method: "POST" }));
     stored = pendingSession("entitlement");
     mockLink.mockClear();
     mockWriteSession.mockClear();
@@ -279,7 +279,7 @@ describe("/clawai/poll finishing an entitlement link", () => {
       await bothAsked;
       return new Response(JSON.stringify({ status: "complete", access_token: TOKEN }), { status: 200 });
     }));
-    const answers = await Promise.all([POST(), POST()]);
+    const answers = await Promise.all([POST(new Request("http://localhost/", { method: "POST" })), POST(new Request("http://localhost/", { method: "POST" }))]);
     const bodies = await Promise.all(answers.map((r) => r.json()));
 
     expect(mockLink).toHaveBeenCalledTimes(1);
@@ -297,7 +297,7 @@ describe("/clawai/poll finishing an entitlement link", () => {
       .mockResolvedValue({ ...mine, status: "error", error: "refused" }); // another poll finished it meanwhile
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", access_token: TOKEN }), { status: 200 })));
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const res = await POST();
+    const res = await POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: "error", error: "refused" });
     expect(mockLink).not.toHaveBeenCalled();
@@ -311,7 +311,7 @@ describe("/clawai/poll finishing an entitlement link", () => {
       .mockResolvedValue({ ...mine, status: "error", error: null });
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ status: "complete", access_token: TOKEN }), { status: 200 })));
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const body = await (await POST()).json();
+    const body = await (await POST(new Request("http://localhost/", { method: "POST" }))).json();
     expect(body.status).toBe("error");
     expect(body.error).toEqual(expect.any(String));
     expect(mockLink).not.toHaveBeenCalled();
@@ -326,7 +326,7 @@ describe("/clawai/poll finishing an entitlement link", () => {
       { status: 200 },
     )));
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const res = await POST();
+    const res = await POST(new Request("http://localhost/", { method: "POST" }));
     expect(res.status).toBe(410);
     expect(mockLink).not.toHaveBeenCalled();
   });
@@ -334,7 +334,7 @@ describe("/clawai/poll finishing an entitlement link", () => {
   it("a chat-scope session still goes to the configure route, not to the link", async () => {
     portalIssuesToken("primary");
     const { POST } = await import("@/app/setup-api/ai-models/clawai/poll/route");
-    const res = await POST();
+    const res = await POST(new Request("http://localhost/", { method: "POST" }));
     expect((await res.json()).status).toBe("configuring");
     await vi.waitFor(() => expect(mockConfigure).toHaveBeenCalled());
     expect(mockLink).not.toHaveBeenCalled();
@@ -362,7 +362,7 @@ describe("/setup-api/ai-models/subscription-link", () => {
     mockUnlink.mockResolvedValue(true);
     const { revokeNamedTunnelWithoutAccount } = await import("@/lib/portal-heartbeat");
     const { DELETE } = await import("@/app/setup-api/ai-models/subscription-link/route");
-    const res = await DELETE();
+    const res = await DELETE(new Request("http://localhost/", { method: "DELETE" }));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ linked: false, wasLinked: true, tunnelRevoked: true });
     expect(mockUnlink).toHaveBeenCalledTimes(1);
@@ -377,7 +377,7 @@ describe("/setup-api/ai-models/subscription-link", () => {
     mockUnlink.mockRejectedValue(new Error("EACCES"));
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const { DELETE } = await import("@/app/setup-api/ai-models/subscription-link/route");
-    const res = await DELETE();
+    const res = await DELETE(new Request("http://localhost/", { method: "DELETE" }));
     expect(res.status).toBe(500);
     expect((await res.json()).error).toContain("could not remove");
     errorSpy.mockRestore();

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sqliteGet, sqliteSet, sqliteDelete } from "@/lib/sqlite-store";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +27,9 @@ export async function GET() {
  * POST — persist a new dismissal fingerprint, or clear it when omitted.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: { fingerprint?: string | null };
   try {
     body = await request.json();

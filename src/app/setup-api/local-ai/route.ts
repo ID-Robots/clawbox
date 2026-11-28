@@ -13,6 +13,7 @@ import { HermesLocalRemovalError, removeLocalAiFromHermes } from "@/lib/hermes-l
 import { CLAWBOX_AI_CHAT_MODEL, CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-status";
 import { readChatModelStateUnfiltered, POST as setChatModel } from "@/app/setup-api/chat/model/route";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
 
@@ -66,6 +67,9 @@ async function movePrimaryOffLocal(): Promise<boolean> {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: { action?: string };
   try {
     body = await request.json();

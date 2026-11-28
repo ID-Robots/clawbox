@@ -5,12 +5,16 @@ import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import { clearHandoffTokens } from "@/lib/oauth-handoff";
 import { DEVICE_AUTH_PROVIDERS } from "@/lib/oauth-config";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
 const STATE_PATH = path.join(DATA_DIR, "oauth-device-state.json");
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   try {
     let body: { provider?: string } = {};
     try {

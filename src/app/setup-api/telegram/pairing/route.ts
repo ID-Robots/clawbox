@@ -22,6 +22,7 @@ import {
 } from "@/lib/hermes-telegram";
 import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 import { PAIRING_TOKEN_RE, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -168,6 +169,9 @@ export async function GET(request: Request) {
 // list, which is the only approvable token there because Hermes stores codes
 // hashed. See src/lib/telegram-pairing-token.ts.
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   try {
     let body: { code?: unknown };
     try {

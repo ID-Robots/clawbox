@@ -4,6 +4,7 @@ import { listArtifacts } from "@/lib/coding-agent-artifacts";
 import { runSummaryLine, slimRun } from "@/lib/coding-agent-slim";
 import { listCodingStarts } from "@/lib/coding-run-starts";
 import { hasPersonSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -57,6 +58,9 @@ const MAX_HISTORY_LIMIT = 50;
 const MAX_PROJECT_CHARS = 4096;
 
 export async function DELETE(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Clearing the coding run history needs a signed-in browser session.", kind: "owner_only" },

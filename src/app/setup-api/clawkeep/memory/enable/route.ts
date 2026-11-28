@@ -10,6 +10,7 @@ import {
   setMemoryShardEnabled,
   setMemoryShardSetupComplete,
 } from "@/lib/memory-shard";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +33,9 @@ export const dynamic = "force-dynamic";
  * @/lib/paid-plan-gate for why the other writes stay open.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const writer = await memoryShardWriter(request, "Changing the memory index switch");
   if (!writer.ok) return writer.response;
 

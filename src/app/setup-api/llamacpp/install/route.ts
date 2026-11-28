@@ -14,6 +14,7 @@ import {
   llamacppInstallTask,
   type ConfigureScope,
 } from "@/lib/llamacpp-install-task";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * POST /setup-api/llamacpp/install → install, start and configure Gemma 4
@@ -31,6 +32,9 @@ import {
  * gateway config are not two installs' to write at once.
  */
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: { model?: string; scope?: ConfigureScope; activate?: boolean };
   try {
     body = await request.json();

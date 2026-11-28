@@ -21,6 +21,7 @@ import {
   type ProviderSaveOutcome,
   type ProviderSignInEnd,
 } from "@/lib/provider-auth-tasks";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -251,7 +252,10 @@ async function finishSubscriptionLink(session: ClawAiConnectSession, accessToken
   return NextResponse.json({ status: "complete" });
 }
 
-export async function POST() {
+export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const session = await readClawAiSession();
   if (!session) {
     return NextResponse.json({ status: "error", error: "No pending ClawBox AI session." }, { status: 400 });

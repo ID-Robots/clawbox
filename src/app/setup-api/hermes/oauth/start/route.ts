@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
 import { cliLoginAvailable, cliLoginDriverFor, startCliLogin } from "@/lib/hermes-cli-login";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
  * ClawBox drives a provider's CLI login only when the harness's own dashboard
@@ -45,6 +46,9 @@ const START_KEYS = [
 ] as const;
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const gate = await ownerGate(request);
   if (gate) return gate;
 

@@ -3,6 +3,7 @@ import { DEFAULT_MEMORY_SCHEDULE, writeMemorySchedule } from "@/lib/clawkeep-mem
 import { refresh as refreshMemoryScheduler } from "@/lib/clawkeep-memory-scheduler";
 import { confirmed, confirmRequired, memoryShardWriter } from "@/lib/memory-shard-writer";
 import { setMemoryShardEnabled, setMemoryShardSetupComplete } from "@/lib/memory-shard";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +38,9 @@ const RESET_EFFECT = {
 } as const;
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   const writer = await memoryShardWriter(request, "Resetting Memory Shard");
   if (!writer.ok) return writer.response;
   const body = await request.json().catch(() => ({}));

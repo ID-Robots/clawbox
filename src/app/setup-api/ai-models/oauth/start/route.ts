@@ -7,6 +7,7 @@ import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import { clearHandoffTokens } from "@/lib/oauth-handoff";
 import { OAUTH_PROVIDERS, isGoogleConfigured } from "@/lib/oauth-config";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 const STATE_PATH = path.join(DATA_DIR, "oauth-state.json");
 
@@ -15,6 +16,9 @@ function base64url(buf: Buffer): string {
 }
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   try {
     let body: { provider?: string } = {};
     try {

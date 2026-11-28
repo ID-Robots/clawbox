@@ -5,6 +5,7 @@ import { getKnown } from "@/lib/config-store";
 import { HAS_CONTROL_CHAR, readHotspotEnvKnown, readHotspotSettings, writeHotspotSettings } from "@/lib/hotspot-env";
 import { parseNmcliTerseLine, RESTART_AP_TIMEOUT_MS } from "@/lib/network";
 import { startRootStep } from "@/lib/root-step-runner";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 const execFileAsync = promisify(execFile);
 
@@ -73,6 +74,16 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
+  // The session cookie is SameSite=Lax, so a page on another origin of the
+  // same site (another box's `*.clawbox.tech` name) gets it attached to its
+  // POST: it could set a hotspot key it knows and raise the AP, or take the
+  // AP down. Only this box's own pages (or a caller that sends no Origin) save.
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json(
+      { error: "The hotspot can only be changed from this ClawBox's own pages.", code: "cross_origin" },
+      { status: 403 }
+    );
+  }
   try {
     let body: { ssid?: string; password?: string; enabled?: boolean };
     try {

@@ -32,7 +32,7 @@ vi.mock("@/lib/oauth-config", () => ({
 const mockFs = vi.mocked(fsp);
 
 describe("POST /setup-api/ai-models/oauth/device-poll", () => {
-  let devicePollPost: () => Promise<Response>;
+  let devicePollPost: (request: Request) => Promise<Response>;
 
   const validState = {
     provider: "openai",
@@ -72,7 +72,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     });
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(res.status).toBe(200);
@@ -86,7 +86,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     });
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(body.status).toBe("pending");
@@ -95,7 +95,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
   it("returns 400 when no state file exists", async () => {
     mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(res.status).toBe(400);
@@ -109,7 +109,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     };
     mockFs.readFile.mockResolvedValue(JSON.stringify(expiredState));
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(res.status).toBe(400);
@@ -125,7 +125,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     };
     mockFs.readFile.mockResolvedValue(JSON.stringify(invalidState));
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(res.status).toBe(400);
@@ -143,7 +143,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     });
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(res.status).toBe(200);
@@ -182,7 +182,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
       });
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(res.status).toBe(200);
@@ -202,7 +202,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     });
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(res.status).toBe(502);
@@ -225,7 +225,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
       });
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(res.status).toBe(502);
@@ -252,7 +252,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
       });
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(res.status).toBe(200);
@@ -276,7 +276,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     });
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(res.status).toBe(502);
@@ -287,7 +287,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     const mockFetch = vi.fn().mockRejectedValue(new Error("Network error"));
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(res.status).toBe(500);
@@ -309,7 +309,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     });
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     // Should not fail - should use device_auth_id as fallback
@@ -336,7 +336,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
           text: () => Promise.resolve("Invalid code"),
         }));
 
-      const res = await devicePollPost();
+      const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
 
       expect(res.status).toBe(502);
       expect(mockFs.unlink).toHaveBeenCalledWith(STATE_PATH);
@@ -349,7 +349,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
         json: () => Promise.resolve({ authorization_code: "test-auth-code" }),
       }));
 
-      const res = await devicePollPost();
+      const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
 
       expect(res.status).toBe(502);
       expect(mockFs.unlink).toHaveBeenCalledWith(STATE_PATH);
@@ -360,7 +360,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
       mockFs.stat.mockResolvedValue({ mtimeMs: Date.now() - 20 * 60 * 1000 } as never);
       mockFs.readFile.mockRejectedValue(new Error("ENOENT"));
 
-      const res = await devicePollPost();
+      const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
 
       // No state file, so the poll itself is a 400 — the sweep runs regardless.
       expect(res.status).toBe(400);
@@ -371,7 +371,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
       mockFs.stat.mockResolvedValue({ mtimeMs: Date.now() - 60 * 1000 } as never);
       vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 403 }));
 
-      const res = await devicePollPost();
+      const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
 
       expect((await res.json()).status).toBe("pending");
       expect(mockFs.unlink).not.toHaveBeenCalledWith(TOKENS_PATH);
@@ -385,7 +385,7 @@ describe("POST /setup-api/ai-models/oauth/device-poll", () => {
     });
     vi.stubGlobal("fetch", mockFetch);
 
-    const res = await devicePollPost();
+    const res = await devicePollPost(new Request("http://localhost/", { method: "POST" }));
     const body = await res.json();
 
     expect(body.status).toBe("pending");

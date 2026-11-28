@@ -178,7 +178,7 @@ describe("GET /setup-api/whatsapp/pair", () => {
 
 describe("DELETE /setup-api/whatsapp/pair", () => {
   it("stops the session and reports idle", async () => {
-    const res = await DELETE();
+    const res = await DELETE(new Request("http://localhost/", { method: "DELETE" }));
     const body = await res.json();
 
     expect(res.status).toBe(200);
@@ -188,7 +188,7 @@ describe("DELETE /setup-api/whatsapp/pair", () => {
 
   it("stops the OpenClaw session, not the Hermes bridge", async () => {
     mockHarness.mockResolvedValue("openclaw");
-    await DELETE();
+    await DELETE(new Request("http://localhost/", { method: "DELETE" }));
     expect(stop).not.toHaveBeenCalled();
     expect(openclawStop).toHaveBeenCalled();
   });

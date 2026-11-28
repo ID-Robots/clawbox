@@ -11,8 +11,12 @@ import { prefetchUpdateWhatsNew } from "@/lib/update-whats-new-server";
 import { HARNESS_DOWNGRADE_OVERRIDE_FLAG } from "@/lib/harness-downgrade";
 import { activeAgentWork } from "@/lib/update-busy";
 import { UPDATE_IGNORE_BUSY_FLAG } from "@/lib/update-constants";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   // The one destructive route the wizard genuinely needs before a password can
   // exist (UpdateStep is step 2, CredentialsStep is step 3), so it takes the
   // bootstrap carve-out — but only that. The moment `password_configured` (or

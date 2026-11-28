@@ -7,6 +7,7 @@ import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 import { forgetProviderVerified } from "@/lib/provider-verified";
+import { isSameOriginRequest } from "@/lib/same-origin";
 
 // Store an API key for a Hermes inference provider via `hermes auth add`. Hermes
 // keeps the credential in its own pooled-auth store (~/.hermes), NOT ClawBox's
@@ -38,6 +39,9 @@ const API_KEY_RE = /^[!-~]{8,512}$/;
 // CLI's output that this would miss, and no regex escaping to get wrong.
 
 export async function POST(request: Request) {
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json({ error: "This can only be done from this ClawBox's own pages.", code: "cross_origin" }, { status: 403 });
+  }
   let body: { provider?: string; apiKey?: string };
   try {
     body = await request.json();

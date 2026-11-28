@@ -269,6 +269,33 @@ describe("/setup-api/system/hotspot", () => {
       expect(readEnv()).toBe("HOTSPOT_SSID='NewHotspot'\nHOTSPOT_PASSWORD='password123'\n");
     });
 
+    it("refuses a save sent from another origin and writes nothing", async () => {
+      // Another box's tunnel name is the same site: the browser attaches the
+      // session cookie to this POST.
+      const res = await hotspotPost(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "https://another-box.clawbox.tech" },
+        body: JSON.stringify({ ssid: "Known", password: "known-to-the-page", enabled: true }),
+      }));
+
+      expect(res.status).toBe(403);
+      expect(await res.json()).toMatchObject({ code: "cross_origin" });
+      expect(mockSetMany).not.toHaveBeenCalled();
+      expect(mockStartRootStep).not.toHaveBeenCalled();
+      expect(() => readEnv()).toThrow();
+    });
+
+    it("saves from this box's own page", async () => {
+      const res = await hotspotPost(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "http://localhost" },
+        body: JSON.stringify({ ssid: "NewHotspot", password: "password123" }),
+      }));
+
+      expect(res.status).toBe(200);
+      expect(readEnv()).toBe("HOTSPOT_SSID='NewHotspot'\nHOTSPOT_PASSWORD='password123'\n");
+    });
+
     it("returns 400 for invalid JSON", async () => {
       const req = new Request("http://localhost/test", {
         method: "POST",
