@@ -127,11 +127,14 @@ test.describe("app store happy path", () => {
       if (outcome.code === "not_registered") {
         const prefs = await getPreferences();
         expect((prefs.installed_apps as string[] | undefined) ?? [], `'${slug}' refused, so not on the desktop`).not.toContain(slug);
-        await uninstallApp(slug).catch(() => {});
+        // A cleanup the box refuses (project_remove_failed answers 503) throws
+        // here and fails the check: a rejected candidate must not stay on disk.
+        await uninstallApp(slug);
         continue;
       }
       if (outcome.retryable !== false) break;
     }
+    expect(FORCED_APP_ID, `requested app ${FORCED_APP_ID} did not install`).toBeFalsy();
     console.warn("[app-store] no candidate installed; follow-up tests skip");
   });
 
