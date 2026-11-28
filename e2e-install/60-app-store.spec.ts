@@ -130,11 +130,13 @@ test.describe("app store happy path", () => {
         // A cleanup the box refuses (project_remove_failed answers 503) throws
         // here and fails the check: a rejected candidate must not stay on disk.
         await uninstallApp(slug);
+        expect(FORCED_APP_ID, `requested app '${slug}' did not register`).toBeFalsy();
         continue;
       }
+      // A store-side refusal (rate limit, outage) stays a skip, forced or not.
       if (outcome.retryable !== false) break;
+      expect(FORCED_APP_ID, `requested app '${slug}' was refused (${outcome.code})`).toBeFalsy();
     }
-    expect(FORCED_APP_ID, `requested app ${FORCED_APP_ID} did not install`).toBeFalsy();
     console.warn("[app-store] no candidate installed; follow-up tests skip");
   });
 
