@@ -256,6 +256,24 @@ describe("a write through the gateway", () => {
     expect(readFile()).toEqual({ agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } } });
     expect(cliCalls()).toEqual([]);
   });
+
+  it("waits on the gateway's apply only as long as the caller asks, and lets the file decide (TASK-2882)", async () => {
+    // The core writes the file at once and answers only once a channel reload
+    // it defers behind every agent run in flight has run: minutes on a busy box.
+    writeFile({ tts: { providers: { openai: { voice: "sage" } } } });
+    const gateway = state.gateway!;
+    const realPatch = gateway.patch.bind(gateway);
+    const waits: unknown[] = [];
+    gateway.patch = async (patch, options) => {
+      waits.push((options as { timeoutMs?: number }).timeoutMs);
+      await realPatch(patch, options);
+      throw new Error("config.patch timed out");
+    };
+    await lib.runOpenclawConfigSet(["tts.providers.openai.voice", "echo"], { gatewayApplyWaitMs: 3_000 });
+    expect(waits).toEqual([3_000]);
+    expect(readFile()).toEqual({ tts: { providers: { openai: { voice: "echo" } } } });
+    expect(cliCalls()).toEqual([]);
+  });
 });
 
 /**
