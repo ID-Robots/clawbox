@@ -214,7 +214,7 @@ function ChatMessageRowImpl({
             })}
           </div>
         )}
-        {bodyText ? (isUser ? shownText : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))) : null}
+        {bodyText ? (isUser ? shownText : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"), { play: t("chat.embed.play"), openOnYouTube: t("chat.embed.openOnYouTube"), untitled: t("chat.embed.untitled") })) : null}
         {isSystem && msg.actions && <ChatNoticeActions actions={msg.actions} t={t} onOpenProviders={onOpenProviders} onSwitchTo={onSwitchTo} />}
         {isLongUser && (
           <button
@@ -383,7 +383,7 @@ export const StreamingReplyBubble = memo(function StreamingReplyBubble({ text, t
       }}>
         {/* Lifted out HERE, not on the way into state, so an interrupted
             turn keeps the directive and can still become cards. */}
-        {renderText(streamingDraftRefsText(streamingEmailRefsText(text)), t("chat.table"), t("chat.detailsSummary"))}
+        {renderText(streamingDraftRefsText(streamingEmailRefsText(text)), t("chat.table"), t("chat.detailsSummary"), { play: t("chat.embed.play"), openOnYouTube: t("chat.embed.openOnYouTube"), untitled: t("chat.embed.untitled") })}
         <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
         <style>{`@keyframes blink { 50% { opacity: 0 } }`}</style>
       </div>

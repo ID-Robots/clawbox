@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { EMBED_PENDING_RE, EMBED_SHORTCODE_RE, embedAttributes, withoutEmbedShortcodes } from "@/lib/speech-text";
 
 function isSafeHref(url: string): boolean {
   try {
@@ -149,9 +150,173 @@ type MdBlock =
   | { kind: "heading"; level: number; text: string }
   | { kind: "table"; header: string[] | null; rows: string[][] }
   | { kind: "list"; items: { marker: string; text: string }[] }
+  | { kind: "embed"; attrs: Record<string, string> | null }
   | { kind: "para"; lines: string[] };
 
 const FENCE_RE = /^\s*```/;
+
+/**
+ * Where an `[embed … /]` (speech-text.ts) starts on this line, and what it is:
+ * whole, or the half-streamed tail of the reply (`attrs: null`, drawn as
+ * nothing so it never flashes). `rest` is this line and every line after it.
+ * An opener inside an inline code span is skipped, like a fenced one.
+ */
+function findEmbed(line: string, rest: string): { at: number; length: number; attrs: Record<string, string> | null } | null {
+  const opener = /\[e/gi;
+  let m: RegExpExecArray | null;
+  while ((m = opener.exec(line)) !== null) {
+    if ((line.slice(0, m.index).split("`").length - 1) % 2 === 1) continue;
+    const tail = rest.slice(m.index);
+    const whole = new RegExp(EMBED_SHORTCODE_RE.source, "iy").exec(tail);
+    if (whole) return { at: m.index, length: whole[0].length, attrs: embedAttributes(whole[1]) };
+    if (new RegExp(`^${EMBED_PENDING_RE.source}`, "i").test(tail)) return { at: m.index, length: tail.length, attrs: null };
+  }
+  return null;
+}
+
+/** The labels an embed card shows; the caller translates them, like `tableLabel`. */
+export type EmbedLabels = { play: string; openOnYouTube: string; untitled: string };
+const EMBED_LABELS: EmbedLabels = { play: "Play", openOnYouTube: "Open on YouTube", untitled: "Embedded content" };
+
+const YOUTUBE_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+
+/** `90`, `90s`, `1m30s`, `1h2m3s` as whole seconds; anything else is no start. */
+function youTubeStart(value: string | null): number | null {
+  const m = value?.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/);
+  if (!m || !value) return null;
+  const seconds = Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0);
+  return seconds > 0 ? seconds : null;
+}
+
+/**
+ * The video an https YouTube link points at, and its start time. Every other
+ * parameter is dropped: the card's URLs are rebuilt from the checked id, never
+ * copied from the reply.
+ */
+function youTubeVideo(url: string): { id: string; start: number | null } | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" || parsed.port || parsed.username || parsed.password) return null;
+  const host = parsed.hostname.toLowerCase();
+  const path = parsed.pathname.split("/").filter(Boolean);
+  let id: string | undefined;
+  if (host === "youtu.be") {
+    if (path.length === 1) id = path[0];
+  } else if (["youtube.com", "www.youtube.com", "m.youtube.com"].includes(host)) {
+    if (path.length === 1 && path[0] === "watch") id = parsed.searchParams.get("v") ?? undefined;
+    else if (path.length === 2 && ["shorts", "live", "embed"].includes(path[0])) id = path[1];
+  } else if (["youtube-nocookie.com", "www.youtube-nocookie.com"].includes(host)) {
+    if (path.length === 2 && path[0] === "embed") id = path[1];
+  }
+  if (!id || !YOUTUBE_ID_RE.test(id)) return null;
+  const hashT = new URLSearchParams(parsed.hash.slice(1)).get("t");
+  const start = youTubeStart(parsed.searchParams.get("start") ?? parsed.searchParams.get("t") ?? hashT);
+  return { id, start };
+}
+
+/**
+ * A YouTube card: thumbnail, title, Play. The player frame is not in the page
+ * until Play is pressed (OpenClaw's Control UI does the same), and the watch
+ * link is always there for a video that will not play inline.
+ */
+function YouTubeEmbed(
+  { id, start, title, labels, spaced }: { id: string; start: number | null; title: string; labels: EmbedLabels; spaced: boolean },
+) {
+  const [playing, setPlaying] = useState(false);
+  const watch = `https://www.youtube.com/watch?v=${id}${start ? `&t=${start}s` : ""}`;
+  return (
+    <div data-testid="chat-embed-youtube" className={`${spaced ? "mt-2" : ""} w-full max-w-[420px]`}>
+      <div className="relative w-full overflow-hidden rounded-lg bg-black" style={{ aspectRatio: "16 / 9" }}>
+        {playing ? (
+          <iframe
+            src={`https://www.youtube-nocookie.com/embed/${id}?autoplay=1${start ? `&start=${start}` : ""}`}
+            title={title || "YouTube"}
+            allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+            allowFullScreen
+            referrerPolicy="strict-origin-when-cross-origin"
+            sandbox="allow-scripts allow-same-origin allow-presentation allow-popups allow-popups-to-escape-sandbox"
+            className="absolute inset-0 h-full w-full border-0"
+          />
+        ) : (
+          <button
+            type="button"
+            data-testid="chat-embed-youtube-play"
+            onClick={() => setPlaying(true)}
+            aria-label={title ? `${labels.play}: ${title}` : labels.play}
+            className="absolute inset-0 h-full w-full cursor-pointer border-0 bg-transparent p-0"
+          >
+            <img src={`https://i.ytimg.com/vi/${id}/hqdefault.jpg`} alt="" loading="lazy" className="h-full w-full object-cover" />
+            <span
+              aria-hidden="true"
+              className="absolute left-1/2 top-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1 rounded-full bg-black/70 py-1.5 pl-2.5 pr-3.5 text-[13px] font-semibold text-white"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 22 }}>play_arrow</span>
+              {labels.play}
+            </span>
+          </button>
+        )}
+      </div>
+      {title && <div className="mt-1 text-[13px] font-medium">{title}</div>}
+      <a href={watch} target="_blank" rel="noopener noreferrer" className="text-xs text-[#f97316] underline">
+        {labels.openOnYouTube}
+      </a>
+    </div>
+  );
+}
+
+/**
+ * One `[embed … /]`, by what it points at. The reply is untrusted text, so the
+ * URL decides only WHICH of these is drawn and never reaches markup as typed:
+ *   - an https YouTube video: the card above;
+ *   - a hosted Canvas document (`ref=`, or a `/__openclaw__/canvas/…` URL): a
+ *     titled card. OpenClaw's Control UI fetches those over its authenticated
+ *     gateway socket; this chat has no such channel, and framing the path
+ *     here would be answered by the gateway catch-all with the Control UI
+ *     shell (token and all), or by nothing on Hermes;
+ *   - any other https page: its title as an ordinary link, no frame;
+ *   - anything else (javascript:, data:, http:, garbage): the title as text.
+ */
+function EmbedBlock({ attrs, labels, spaced }: { attrs: Record<string, string>; labels: EmbedLabels; spaced: boolean }) {
+  const title = attrs.title ?? "";
+  const className = spaced ? "mt-2" : "";
+  const video = attrs.url ? youTubeVideo(attrs.url) : null;
+  if (video) return <YouTubeEmbed id={video.id} start={video.start} title={title} labels={labels} spaced={spaced} />;
+  let href: string | null = null;
+  let hosted = Boolean(attrs.ref);
+  if (attrs.url) {
+    try {
+      const parsed = new URL(attrs.url, "https://localhost");
+      if (parsed.pathname.startsWith("/__openclaw__/canvas/")) hosted = true;
+      const absolute = new URL(attrs.url);
+      if (absolute.protocol === "https:" && !absolute.username && !absolute.password) href = absolute.href;
+    } catch {
+      // Not an absolute URL: at most a hosted document, never a link.
+    }
+  }
+  if (hosted) {
+    return (
+      <div
+        data-testid="chat-embed-hosted"
+        className={`${className} inline-flex max-w-full items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-[13px]`}
+      >
+        <span aria-hidden="true" className="material-symbols-rounded text-white/50" style={{ fontSize: 18 }}>widgets</span>
+        <span className="font-medium">{title || labels.untitled}</span>
+      </div>
+    );
+  }
+  if (href) {
+    return (
+      <div className={className}>
+        <a href={href} target="_blank" rel="noopener noreferrer" className="text-[#f97316] underline break-all">{title || attrs.url}</a>
+      </div>
+    );
+  }
+  return title ? <div className={className}>{title}</div> : null;
+}
 /**
  * `<details>`, the ONE piece of HTML this renderer admits.
  *
@@ -348,6 +513,22 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
       continue;
     }
 
+    // `[embed … /]` is its own block, wherever on the line it starts and
+    // however many lines its attributes run over; the prose around it stays.
+    const rest = /\[e/i.test(line) ? lines.slice(i).join("\n") : "";
+    const embed = rest ? findEmbed(line, rest) : null;
+    if (embed) {
+      const before = line.slice(0, embed.at).trimEnd();
+      if (before) para.push(before);
+      flushPara();
+      blocks.push({ kind: "embed", attrs: embed.attrs });
+      const consumed = rest.slice(0, embed.at + embed.length);
+      i += consumed.split("\n").length - 1;
+      const after = lines[i]?.slice(consumed.length - consumed.lastIndexOf("\n") - 1).trimStart() ?? "";
+      if (embed.attrs && after) lines.splice(i + 1, 0, after);
+      continue;
+    }
+
     if (!line.trim()) {
       flushPara();
       continue;
@@ -426,11 +607,12 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
  * would make appending a turn reshuffle what is open.
  */
 function DetailsBlock(
-  { summary, body, tableLabel, detailsLabel, spaced }: {
+  { summary, body, tableLabel, detailsLabel, embedLabels, spaced }: {
     summary: string;
     body: string;
     tableLabel: string;
     detailsLabel: string;
+    embedLabels: EmbedLabels;
     spaced: boolean;
   },
 ) {
@@ -460,7 +642,7 @@ function DetailsBlock(
       </button>
       {open && body && (
         <div data-testid="chat-markdown-details-body" className="mt-1 pl-4 border-l border-white/10">
-          {renderText(body, tableLabel, detailsLabel)}
+          {renderText(body, tableLabel, detailsLabel, embedLabels)}
         </div>
       )}
     </div>
@@ -472,7 +654,7 @@ function DetailsBlock(
  * the caller because this module is a pure renderer with no access to `t` —
  * the same way `audioLabel` is handed `t("chat.audioReply")`.
  */
-export function renderText(text: string, tableLabel = "Table", detailsLabel = "Details") {
+export function renderText(text: string, tableLabel = "Table", detailsLabel = "Details", embedLabels: EmbedLabels = EMBED_LABELS) {
   return parseBlocks(text, detailsLabel).map((block, i) => {
     // The first block sits flush against the top of the bubble; every later
     // one keeps the spacing its kind had before.
@@ -490,9 +672,13 @@ export function renderText(text: string, tableLabel = "Table", detailsLabel = "D
             body={block.body}
             tableLabel={tableLabel}
             detailsLabel={detailsLabel}
+            embedLabels={embedLabels}
             spaced={spaced}
           />
         );
+      case "embed":
+        // A half-streamed shortcode draws nothing until it is whole.
+        return block.attrs ? <EmbedBlock key={i} attrs={block.attrs} labels={embedLabels} spaced={spaced} /> : null;
       case "heading":
         return block.level <= 2 ? (
           <h2 key={i} className={`font-bold text-sm ${spaced ? "mt-2.5" : ""} mb-1`}>{renderInline(block.text, `h-${i}`)}</h2>
@@ -585,7 +771,8 @@ export function renderText(text: string, tableLabel = "Table", detailsLabel = "D
  * out loud than it looks on screen.
  */
 export function plainTextForLabel(text: string, max = 100): string {
-  const flat = text
+  // An `[embed … /]` is drawn, not read: its title at most.
+  const flat = withoutEmbedShortcodes(text)
     // The one HTML the renderer consumes (see DETAILS_OPEN_RE): the tags are
     // layout, never words, and read out they are "less than details greater
     // than". The summary and the body stay — they are the aside's own text.

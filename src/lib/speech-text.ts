@@ -14,6 +14,41 @@
 /** The most one spoken reply says; the rest is on screen. */
 export const SPEECH_MAX_CHARS = 1500;
 
+/**
+ * OpenClaw's rich-render shortcode, `[embed url="…" title="…" /]` (its
+ * reference/rich-output-protocol.md). The same grammar as OpenClaw's own
+ * parser: no `]` inside, self-closing, values in double or single quotes.
+ * Here, not in chat-markdown.tsx, because this file has no imports and is
+ * read by the speak route too; the chat renderer takes it from here so the
+ * screen and the voice agree on what counts as one.
+ */
+export const EMBED_SHORTCODE_RE = /\[embed\s+([^\]]*?)\/\]/gi;
+
+/**
+ * The tail of a reply still streaming that may yet become a shortcode: `[e`
+ * up to the closing `/`, attribute by attribute. Anything that cannot grow
+ * into one ("[embed shortcode] …") does not match and stays text.
+ */
+export const EMBED_PENDING_RE =
+  /\[(?:e|em|emb|embe|embed(?:\s+[A-Za-z_][\w-]*\s*=\s*(?:"[^"\]]*"|'[^'\]]*'))*(?:\s+(?:[A-Za-z_][\w-]*(?:\s*=\s*(?:"[^"\]]*|'[^'\]]*)?)?)?)?\s*\/?)$/i;
+
+/** A shortcode's attributes, names lower-cased, blank values dropped. */
+export function embedAttributes(raw: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  for (const m of raw.matchAll(/([A-Za-z_][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
+    const value = (m[2] ?? m[3] ?? "").trim();
+    if (value) attrs[m[1].toLowerCase()] = value;
+  }
+  return attrs;
+}
+
+/** Text with each shortcode reduced to its title and a half-streamed one dropped. */
+export function withoutEmbedShortcodes(text: string): string {
+  return text
+    .replace(EMBED_SHORTCODE_RE, (_m, raw: string) => ` ${embedAttributes(raw).title ?? ""} `)
+    .replace(EMBED_PENDING_RE, " ");
+}
+
 export function speechTextFor(markdown: string, maxChars: number = SPEECH_MAX_CHARS): string {
   let text = markdown
     // Directive lines carry nothing to say: `MEDIA:<path>` (chat-media.ts)
@@ -21,7 +56,10 @@ export function speechTextFor(markdown: string, maxChars: number = SPEECH_MAX_CH
     // a sentence that starts "Email: the invoice went out" is still read.
     .replace(/^\s*MEDIA:.*$/gm, " ")
     .replace(/^\s*EMAIL:\s*\S+\s*$/gm, " ")
-    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/```[\s\S]*?```/g, " ");
+  // An embed is drawn, not read: its title at most (before the URL rule
+  // below would leave the rest of the shortcode behind as words).
+  text = withoutEmbedShortcodes(text)
     .replace(/`([^`]*)`/g, "$1")
     // Images become nothing; links become their label.
     .replace(/!\[[^\]]*\]\([^)]*\)/g, " ")

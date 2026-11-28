@@ -256,7 +256,10 @@ const nextConfig: NextConfig = {
       // (fetch is CORS-blocked cross-origin), and without it the browser
       // CSP-blocks the probe before it leaves the page — the
       // auto-redirect never fires and users must follow the manual URL.
-      `img-src 'self' data: blob: ${LOCAL_LAN_SOURCES}`,
+      // https://i.ytimg.com: the thumbnail of a YouTube card in the chat
+      // (`[embed url=… /]`, src/lib/chat-markdown.tsx) — that one host only.
+      // Its player frame is already covered by frame-src's https: below.
+      `img-src 'self' data: blob: ${LOCAL_LAN_SOURCES} https://i.ytimg.com`,
       "font-src 'self'",
       // media-src is not inherited from img-src: without it media
       // falls back to default-src 'self', and a blob: <audio> — the
