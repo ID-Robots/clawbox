@@ -175,6 +175,46 @@ describe("Voice panel", () => {
     expect(screen.queryByTestId("voice-saving")).toBeNull();
   });
 
+  it("stops waiting for a write whose answer never comes, and reads the box again", async () => {
+    // The box took the voice, but its answer is lost: every control used to
+    // stay disabled under "Saving…" until the tab was left and opened again.
+    let written = false;
+    const gets: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (init?.method === "POST" && url === "/setup-api/tts") {
+        written = true;
+        // Like a real fetch: pending until the caller aborts it.
+        return await new Promise<Response>((_, reject) => {
+          init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+        });
+      }
+      if (url === "/setup-api/tts") gets.push(url);
+      const body = written ? status({ voice: { local: "af_heart", cloud: "echo" } }) : status();
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }));
+    render(<VoiceOutputPanel active />);
+    const select = await screen.findByTestId("voice-voice");
+    await screen.findByText("Speak from");
+    vi.useFakeTimers();
+    fireEvent.change(select, { target: { value: "echo" } });
+    expect(screen.getByTestId("voice-saving")).toHaveTextContent("Saving…");
+    expect(screen.getByTestId("voice-voice")).toBeDisabled();
+    const readsBefore = gets.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(14_000); });
+    expect(screen.getByTestId("voice-voice")).toBeDisabled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    vi.useRealTimers();
+    await waitFor(() => expect(screen.getByTestId("voice-voice")).toHaveValue("echo"));
+    expect(gets.length).toBe(readsBefore + 1);
+    expect(screen.queryByTestId("voice-saving")).toBeNull();
+    expect(screen.getByTestId("voice-voice")).toBeEnabled();
+    expect(screen.getByTestId("voice-play")).toBeEnabled();
+    // Not an error: the box may well have taken the change, and the panel now
+    // shows what it has.
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("shows no privacy notice, in either direction of the fall-through", async () => {
     // The panel used to draw two: an amber one where the cloud speaks first,
     // and a muted line where the box's own voice leads and the cloud stands

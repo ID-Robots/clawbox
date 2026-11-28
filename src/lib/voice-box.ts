@@ -27,7 +27,7 @@ import {
   speechEntitledTier,
 } from "@/lib/hermes-tts";
 import { buildTtsInventory, KOKORO_STAMP, localTtsCommandRunnable, type LocalModelEntry } from "@/lib/local-models";
-import { readConfig, runOpenclawConfigSet } from "@/lib/openclaw-config";
+import { readConfig, runOpenclawConfigSet, type OpenclawConfigSetOptions } from "@/lib/openclaw-config";
 import {
   localCommandPath,
   withoutClawboxCloudVoice,
@@ -167,6 +167,7 @@ export async function writeActiveVoiceProvider(
   harness: ActiveHarness,
   engines: readonly VoiceEngine[],
   providerId: string,
+  options?: OpenclawConfigSetOptions,
 ): Promise<void> {
   if (harness === "hermes") {
     // Endpoint and credential first, selection last — see selectHermesEngine.
@@ -175,7 +176,7 @@ export async function writeActiveVoiceProvider(
     await selectHermesEngine(engine, await resolveClawaiToken());
     return;
   }
-  await runOpenclawConfigSet([`${await ttsConfigHome()}.provider`, providerId]);
+  await runOpenclawConfigSet([`${await ttsConfigHome()}.provider`, providerId], options);
 }
 
 /** The box does not have the engine that provider id belongs to. */

@@ -176,6 +176,15 @@ const WARMING_AFTER_SECONDS = 3;
  */
 const PLAN_FOLLOW_RECHECK_MS = 5_000;
 
+/**
+ * How long the panel waits for a write's answer before it stops waiting and
+ * reads the box again. Every control is disabled while a write is out, so an
+ * answer that is slow (a CLI fallback, a gateway still starting) or lost on
+ * the way must not keep them disabled for as long as the tab stays open. A
+ * voice change answers in a few seconds; this is the backstop, not the wait.
+ */
+const WRITE_ANSWER_MS = 15_000;
+
 const CARD = "rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5";
 const ROW = "flex items-center justify-between gap-4";
 const SELECT = "min-w-[12rem] max-w-[60%] rounded-lg border border-white/10 bg-[var(--bg-elevated)] px-3 py-2 text-sm text-[var(--text-primary)] disabled:opacity-50";
@@ -467,13 +476,17 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     setWriting(reason);
     setError(null);
     setNotice(null);
+    const answer = new AbortController();
+    const giveUp = window.setTimeout(() => answer.abort(), WRITE_ANSWER_MS);
     try {
       const res = await fetch("/setup-api/tts", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        signal: answer.signal,
       });
       const data = await res.json().catch(() => ({}));
+      if (answer.signal.aborted) return;
       if (!res.ok) {
         setError(refusalText(data, t("settings.voice.error.changeFailed")));
         return;
@@ -502,12 +515,16 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         setNotice(t("settings.voice.fallback"));
       }
     } catch {
-      setError(t("settings.voice.error.unreachable"));
+      if (!answer.signal.aborted) setError(t("settings.voice.error.unreachable"));
     } finally {
+      window.clearTimeout(giveUp);
       setBusy(null);
       setWriting(null);
+      // The answer never came in time: the write may still land on the box,
+      // so the controls come back with what the box says now, not the guess.
+      if (answer.signal.aborted) void load();
     }
-  }, [refusalText, t]);
+  }, [load, refusalText, t]);
 
   // Auto is a standing instruction, not a one-off write: if the engine it
   // resolves to is not the one the box is configured for, move the box rather

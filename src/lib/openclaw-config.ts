@@ -110,6 +110,15 @@ export interface OpenclawConfigSetOptions {
    * stricter bounds.
    */
   timeoutMs?: number;
+  /**
+   * How long the running gateway's `config.patch` is waited on, below the 20 s
+   * default. The gateway writes the file at once but answers only once it has
+   * APPLIED the change, and a write that needs a channel reload is applied only
+   * after every agent run and reply in flight has finished — minutes on a busy
+   * box. A caller that needs only the file passes a few seconds: the read-back
+   * after a timeout decides, as it does for any write. The CLI keeps `timeoutMs`.
+   */
+  gatewayApplyWaitMs?: number;
   /** Maximum attempts including the first try. Default: 4. */
   maxAttempts?: number;
   /** Linear backoff base — delay between attempts is `baseBackoffMs * attempt`. Default: 100. */
@@ -299,7 +308,11 @@ async function configWritesViaGateway(
   }
   if (ops.length === 0) return { done: "unchanged" };
   const areas = loggedConfigAreas(ops.map((op) => op.path));
-  const timeoutMs = Math.min(options.timeoutMs ?? GATEWAY_CONFIG_PATCH_TIMEOUT_MS, GATEWAY_CONFIG_PATCH_TIMEOUT_MS);
+  const timeoutMs = Math.min(
+    options.timeoutMs ?? GATEWAY_CONFIG_PATCH_TIMEOUT_MS,
+    options.gatewayApplyWaitMs ?? GATEWAY_CONFIG_PATCH_TIMEOUT_MS,
+    GATEWAY_CONFIG_PATCH_TIMEOUT_MS,
+  );
   for (let attempt = 1; attempt <= GATEWAY_PATCH_CONFLICT_ATTEMPTS; attempt++) {
     let baseHash: string | null;
     try {

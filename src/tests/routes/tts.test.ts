@@ -27,6 +27,14 @@ vi.mock("@/lib/openclaw-config", () => ({
   openclawIsAbsent: () => false,
 }));
 
+/**
+ * What every speech write on OpenClaw asks of the gateway: a few seconds for
+ * it to APPLY the change, then the file decides (TASK-2882). A `tts.*` key is
+ * applied with a reload of every channel, which the core defers until the
+ * agent runs in flight are done — minutes on a busy box.
+ */
+const SPEECH_WRITE = { gatewayApplyWaitMs: 3_000 };
+
 const ffmpegMock = vi.fn();
 vi.mock("@/lib/local-models", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/local-models")>();
@@ -187,12 +195,12 @@ describe("spoken replies", () => {
     const { POST } = await route();
     let res = await POST(post({ action: "autoReply", enabled: false }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["tts.auto", "off"]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.auto", "off"], SPEECH_WRITE);
     expect(setAutoReplyMock).toHaveBeenCalledWith(false);
     configSetMock.mockClear();
     res = await POST(post({ action: "autoReply", enabled: true }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["tts.auto", "inbound"]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.auto", "inbound"], SPEECH_WRITE);
     expect(setAutoReplyMock).toHaveBeenCalledWith(true);
   });
 
@@ -483,7 +491,7 @@ describe("POST /setup-api/tts — select", () => {
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "local" }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL], SPEECH_WRITE);
     // The choice, and nothing the owner did not pick: no backfilled language.
     expect(writeStateMock.mock.calls[0][0]).toEqual({ choice: "local" });
   });
@@ -503,7 +511,7 @@ describe("POST /setup-api/tts — select", () => {
     const res = await POST(post({ action: "select", choice: "local" }));
     expect(res.status).toBe(200);
     expect(wireMock).toHaveBeenCalledWith("tts");
-    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL], SPEECH_WRITE);
     const body = await res.json();
     expect(body.fallback).toBeUndefined();
     expect(writeStateMock.mock.calls[0][0]).toEqual({ choice: "local" });
@@ -558,7 +566,7 @@ describe("POST /setup-api/tts — select", () => {
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "cloud" }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", "openai"]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", "openai"], SPEECH_WRITE);
   });
 
   it("does not rewrite the config when the box is already on that provider", async () => {
@@ -744,7 +752,10 @@ describe("POST /setup-api/tts — voice and language", () => {
     const { POST } = await route();
     const res = await POST(post({ action: "voice", engine: "cloud", voice: "nova" }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["tts.providers.openai.voice", "nova"]);
+    // Waiting only briefly for the gateway to apply it: the voice is on disk the
+    // moment the gateway writes it, and the answer must not sit behind a channel
+    // reload the core holds back until every agent run has finished.
+    expect(configSetMock).toHaveBeenCalledWith(["tts.providers.openai.voice", "nova"], SPEECH_WRITE);
   });
 
   it("refuses a cloud voice the configured model cannot speak, and says which model", async () => {
@@ -759,7 +770,7 @@ describe("POST /setup-api/tts — voice and language", () => {
     expect(configSetMock).not.toHaveBeenCalled();
     const ok = await POST(post({ action: "voice", engine: "cloud", voice: "nova" }));
     expect(ok.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["tts.providers.openai.voice", "nova"]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.providers.openai.voice", "nova"], SPEECH_WRITE);
   });
 
   it("refuses a cloud voice for a box that has no cloud voice", async () => {
@@ -928,7 +939,7 @@ describe("POST /setup-api/tts — the local-only AI lock (TASK-2501)", () => {
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "auto" }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL], SPEECH_WRITE);
   });
 
   it("keeps the box's own voice a choice", async () => {
@@ -937,7 +948,7 @@ describe("POST /setup-api/tts — the local-only AI lock (TASK-2501)", () => {
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "local" }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL], SPEECH_WRITE);
   });
 
   it("selects the same cloud voice once the lock is off", async () => {

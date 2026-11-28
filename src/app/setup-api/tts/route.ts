@@ -98,6 +98,20 @@ const ACTIONS = ["select", "voice", "language", "autoReply", "autoPlayAll", "sho
  */
 const OWNER_ONLY_ACTIONS: ReadonlySet<(typeof ACTIONS)[number]> = new Set(["autoReply", "autoPlayAll", "shortSpoken"]);
 
+/**
+ * How long a speech write on OpenClaw waits for the running gateway to APPLY it.
+ *
+ * `config.patch` writes openclaw.json at once, but it answers only after the
+ * gateway has applied the change. Every `tts.*` key is applied with a reload of
+ * EVERY channel, and the core defers that reload until each agent run, reply
+ * and request in flight has finished — up to 300 s. On a busy box the voice was
+ * on disk at once and the answer came 331 s later, while the panel sat on
+ * "Saving…" (TASK-2882). Nothing here needs that reload: the status and the
+ * sample read the file, and the channels take the voice when the gateway
+ * reloads them. So the write waits a few seconds and the file decides.
+ */
+const SPEECH_WRITE = { gatewayApplyWaitMs: 3_000 };
+
 function refuse(error: string, code: string, status: number) {
   return NextResponse.json({ error, code }, { status, headers: NO_STORE });
 }
@@ -213,7 +227,7 @@ async function handleAutoReply(enabled: unknown) {
     return refuse("Say whether spoken replies are on or off.", "bad_request", 400);
   }
   if ((await getActiveHarness()) === "openclaw" && !openclawIsAbsent()) {
-    await runOpenclawConfigSet([`${await ttsConfigHome()}.auto`, ttsAutoModeFor(enabled)]);
+    await runOpenclawConfigSet([`${await ttsConfigHome()}.auto`, ttsAutoModeFor(enabled)], SPEECH_WRITE);
   }
   await setVoiceAutoReply(enabled);
   return NextResponse.json(await status(), { headers: NO_STORE });
@@ -332,7 +346,7 @@ async function handleVoice(engine: unknown, voice: unknown) {
       // voice from its provider definition (and the readers prefer the
       // top-level home). ttsConfigHome() keys off the same signal the readers
       // use — where the providers actually are.
-      await runOpenclawConfigSet([`${await ttsConfigHome()}.providers.${target.providerId}.voice`, voice]);
+      await runOpenclawConfigSet([`${await ttsConfigHome()}.providers.${target.providerId}.voice`, voice], SPEECH_WRITE);
     }
   } else {
     return refuse("Pick the voice on this box or the cloud voice.", "unknown_engine", 400);
@@ -365,7 +379,7 @@ async function selectProvider(
   providerId: string,
 ): Promise<Response | null> {
   try {
-    await writeActiveVoiceProvider(harness, before.engines, providerId);
+    await writeActiveVoiceProvider(harness, before.engines, providerId, SPEECH_WRITE);
   } catch (err) {
     if (err instanceof VoiceProviderUnavailableError) {
       return refuse(err.message, err.code, 409);
