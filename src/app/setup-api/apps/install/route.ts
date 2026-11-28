@@ -118,6 +118,27 @@ async function installFromStore(appId: string): Promise<NextResponse> {
   if (!outcome.ok) {
     return NextResponse.json({ ok: false, error: outcome.error, code: outcome.code, retryable: outcome.retryable, appId, source: CLAWBOX_APP_SOURCE }, { status: outcome.status });
   }
+  // Files in the owner's projects are not an app on the desktop: only a
+  // registered one is in installed_apps (its server listening, for a server
+  // app — src/lib/app-start-failure.ts). One that is not was answered 200
+  // `ok: true`, so app_install and scripts reported an install the owner never
+  // got a tile for. Installing again retries the registration over the files.
+  if (!outcome.registered) {
+    return NextResponse.json({
+      ok: false,
+      error: outcome.detail ?? `${app.name} is in your projects, but it could not be put on the desktop.`,
+      code: "not_registered",
+      retryable: true,
+      appId,
+      source: CLAWBOX_APP_SOURCE,
+      version: outcome.version,
+      folder: outcome.folder,
+      kind: outcome.kind,
+      registered: false,
+      detail: outcome.detail,
+      alreadyInstalled: outcome.alreadyInstalled,
+    }, { status: 502 });
+  }
   return NextResponse.json({
     ok: true,
     appId,
