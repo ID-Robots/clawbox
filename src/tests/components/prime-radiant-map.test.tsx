@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import PrimeRadiantMap from "@/components/PrimeRadiantMap";
 import { I18nProvider } from "@/lib/i18n";
 import { MapView } from "@/components/prime-radiant-map/view";
@@ -646,6 +646,9 @@ describe("PrimeRadiantMap", () => {
       </I18nProvider>,
     );
     expect(await screen.findByRole("slider", { name: "Pages shown (the most connected first)" }, { timeout: 15_000 })).toHaveValue("0");
+    // The page list walks the whole vault: the verified pages are asked for once per revision, not per visit.
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 51 of 200"));
+    expect(vi.mocked(fetch).mock.calls.filter(([u]) => String(u).includes("verified=true"))).toHaveLength(1);
   });
 
   it("still finds a page the slider hides, and shows it with its neighbours once picked", async () => {
@@ -669,25 +672,52 @@ describe("PrimeRadiantMap", () => {
     expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 103 of 200");
   });
 
-  it("stops and starts the turn from one button that says which, and remembers it", async () => {
+  it("stops the turn when the owner takes the map in hand and says so; the button starts it again and only its choice is remembered", async () => {
     const setSpin = vi.spyOn(MapView.prototype, "setSpin");
     const view = await mount();
+    await waitFor(() => expect(glCalls.some(([k]) => k === "drawArraysInstanced")).toBe(true));
     const button = screen.getByTestId("prime-radiant-map-spin");
-    expect(button).toHaveAccessibleName("Rotation on: stop it");
-    expect(button.textContent).toBe("sync");
-    await waitFor(() => expect(setSpin).toHaveBeenLastCalledWith(true));
-    fireEvent.click(button);
-    expect(button).toHaveAccessibleName("Rotation off: start it");
-    expect(button.textContent).toBe("sync_disabled");
-    await waitFor(() => expect(setSpin).toHaveBeenLastCalledWith(false));
-    // Taking the map in hand no longer stops or starts it: the button decides.
     const canvas = screen.getByTestId("prime-radiant-map-canvas");
+    const stored = () => window.localStorage.getItem("clawbox.primeRadiant.mapSpin");
+    const on = async () => {
+      await waitFor(() => expect(button).toHaveAccessibleName("Rotation on: stop it"));
+      expect(button.textContent).toBe("sync");
+      await waitFor(() => expect(setSpin).toHaveBeenLastCalledWith(true));
+    };
+    const off = async () => {
+      await waitFor(() => expect(button).toHaveAccessibleName("Rotation off: start it"));
+      expect(button.textContent).toBe("sync_disabled");
+    };
+    await on();
+
+    // A drag stops it, and the button says so; nothing is remembered for it.
     fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
     fireEvent.pointerMove(canvas, { pointerId: 1, clientX: 160, clientY: 120 });
     fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 160, clientY: 120 });
-    expect(button).toHaveAccessibleName("Rotation off: start it");
+    await off();
+    expect(stored()).toBeNull();
+    // The button starts it again; a zoom stops it, and so does a search flight.
+    fireEvent.click(button);
+    await on();
+    expect(stored()).toBe("1");
+    fireEvent.wheel(canvas, { deltaY: 120 });
+    await off();
+    fireEvent.click(button);
+    await on();
+    fireEvent.change(screen.getByTestId("prime-radiant-map-search"), { target: { value: "acme" } });
+    await off();
+    expect(stored()).toBe("1");
+    // A map opened again turns as the button last left it.
     view.unmount();
     setSpin.mockClear();
+    await mount();
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-map-spin")).toHaveAccessibleName("Rotation on: stop it"));
+    await waitFor(() => expect(setSpin).toHaveBeenLastCalledWith(true));
+
+    // Stopped with the button: remembered so.
+    fireEvent.click(screen.getByTestId("prime-radiant-map-spin"));
+    expect(stored()).toBe("0");
+    cleanup();
     await mount();
     expect(screen.getByTestId("prime-radiant-map-spin")).toHaveAccessibleName("Rotation off: start it");
     await waitFor(() => expect(setSpin).toHaveBeenLastCalledWith(false));

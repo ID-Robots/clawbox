@@ -254,6 +254,9 @@ const summaries = new Map<string, string | null>();
 const SUMMARY_CACHE = 500;
 const summaryKey = (revision: string | null, id: string) => `${revision ?? ""}\n${id}`;
 
+/** The verified pages of one vault revision (the page list reads the whole vault): once per revision, kept between visits. */
+let verifiedKept: { revision: string | null; ids: ReadonlySet<string> } | null = null;
+
 function keepSummary(key: string, text: string | null): void {
   summaries.delete(key);
   summaries.set(key, text);
@@ -286,13 +289,13 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest, focusM
     const v = Number(remembered(DENSITY_KEY) ?? NaN);
     return Number.isInteger(v) && v >= 0 && v <= 100 ? v : 50;
   });
-  /** The slow turn; an owner who prefers less motion starts with it stopped. */
+  /** The slow turn as it is now; a new view starts as the button last left it (stopped for an owner who prefers less motion). */
   const [spin, setSpin] = useState(() => {
     const v = remembered(SPIN_KEY);
     return v === null ? !prefersFlat() : v === "1";
   });
   /** Verified pages by path (the graph does not carry them): the slider never hides one. */
-  const [verifiedIds, setVerifiedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [verifiedFor, setVerifiedFor] = useState(() => verifiedKept);
   /** Bumped when a summary arrives (they are kept outside React, in `summaries`). */
   const [, setSummaryArrived] = useState(0);
   /** The summary that could not be read, so the card stops saying it is reading. */
@@ -353,8 +356,9 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest, focusM
     return () => ctl.abort();
   }, [revision, reload, stableT]);
 
-  // The verified pages, from the page list (500 a request); unread, the slider ranks by connections alone.
+  // The verified pages, from the page list (500 a request) once the graph is in; unread, the slider ranks by connections alone.
   useEffect(() => {
+    if (!model || verifiedFor?.revision === model.revision) return;
     const ctl = new AbortController();
     (async () => {
       const ids = new Set<string>();
@@ -365,10 +369,12 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest, focusM
         offset += got.pages.length;
         total = got.total;
       }
-      if (!ctl.signal.aborted) setVerifiedIds(ids);
+      if (ctl.signal.aborted) return;
+      verifiedKept = { revision: model.revision, ids };
+      setVerifiedFor(verifiedKept);
     })().catch(() => {});
     return () => ctl.abort();
-  }, [revision, reload]);
+  }, [model, verifiedFor]);
 
   // The picked page's summary: asked for once it is picked, never with the graph (thousands of pages).
   useEffect(() => {
@@ -433,6 +439,10 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest, focusM
         setData((d) => (d && d.model === model && communities.length === model.n ? { ...d, analysis: { communities, insights } } : d));
       },
       onSettled: setSettled,
+      // A drag, zoom, pan or flight stopped the turn: the button says so; the remembered choice stays the button's.
+      onSpinStopped() {
+        setSpin(false);
+      },
       onContextLost() {
         setMode("2d");
       },
@@ -497,12 +507,13 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest, focusM
 
   const verified = useMemo(() => {
     const out: number[] = [];
-    for (const id of verifiedIds) {
-      const i = model?.index.get(id);
+    if (!model || verifiedFor?.revision !== model.revision) return out;
+    for (const id of verifiedFor.ids) {
+      const i = model.index.get(id);
       if (i !== undefined) out.push(i);
     }
     return out;
-  }, [model, verifiedIds]);
+  }, [model, verifiedFor]);
 
   // Only shows and hides pages: the layout (every page) and the camera stay as they are on every step.
   const densityNow = useDeferredValue(density);
@@ -686,8 +697,8 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest, focusM
   const dot = (k: number) => css(model.domains[k] === "" ? GREY : rgb(k));
   const pill = "inline-flex items-center gap-1.5 rounded-full border border-white/[0.1] bg-black/60 px-2.5 py-1 text-[11px] text-[var(--text-secondary)] backdrop-blur hover:bg-black/80 hover:text-[var(--text-primary)] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed";
   const overlay = "rounded-xl border border-white/[0.1] bg-[var(--win-ground,#0d1117)] shadow-xl";
-  /** Some pages are off screen (the slider or a hidden domain): the chip says how many of all are shown. */
-  const partial = edges !== null && edges.pages < model.n;
+  /** Some pages are off the canvas (the slider or a hidden domain): the chip says how many of all are shown. */
+  const partial = mode !== "none" && edges !== null && edges.pages < model.n;
   const densityText = t("primeRadiant.map.densityValue", { shown: edges?.pages ?? model.n, total: model.n });
   // Escape folds an overlay away and hands the focus back to the button that opened it.
   const onLegendKey = (e: KeyboardEvent<HTMLElement>) => {
@@ -836,7 +847,7 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest, focusM
           </div>
         </div>
 
-        <div className="pointer-events-none absolute left-2 top-2 flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]" hidden={focusMode} data-testid="prime-radiant-map-status">
+        <div className="pointer-events-none absolute left-2 top-2 flex max-w-[calc(100%-15rem)] flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-muted)]" hidden={focusMode} data-testid="prime-radiant-map-status">
           <span className="rounded-full bg-black/40 px-2 py-0.5">
             {partial
               ? t("primeRadiant.map.summaryShown", { pages: edges.pages, totalPages: model.n, links: edges.links, totalLinks: model.links })

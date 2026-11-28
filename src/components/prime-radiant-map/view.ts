@@ -40,6 +40,8 @@ export interface MapViewEvents {
   onFrame(): void;
   onCommunities(communities: Int32Array, insights: GraphInsights): void;
   onSettled(settled: boolean): void;
+  /** The owner took the map in hand (drag, zoom, pan, a flight) and the turn stopped. */
+  onSpinStopped(): void;
   onContextLost(): void;
   /** The layout cannot run at all (its code failed to load): no positions will come. */
   onLayoutFailed(): void;
@@ -104,7 +106,7 @@ export class MapView {
   private distance = 800;
   private zoom = 1;
   private target = new Float64Array(3);
-  /** The slow turn: the Map's rotation button decides it ({@link setSpin}); a flat view never turns. */
+  /** The slow turn: set by the Map ({@link setSpin}), stopped by the owner's hand ({@link interact}); a flat view never turns. */
   private spin = false;
   private fitting = true;
   private fit = { x: 0, y: 0, z: 0, r: 100 };
@@ -323,17 +325,22 @@ export class MapView {
     this.zoom = c.zoom;
     this.target.set(c.target);
     this.fitting = false;
+    this.spin = false;
     this.changed();
   }
 
-  /** Turn on its own, or stand still: the owner's choice, kept until they change it. */
+  /** Turn on its own, or stand still: the rotation button's (and, on a new view, the remembered) choice. */
   setSpin(on: boolean): void {
     this.spin = on && this.kind === "webgl";
     this.invalidate();
   }
 
-  /** The owner took the wheel: no more reframing on our own (the turn is the rotation button's). */
+  /** The owner took the wheel: no more turning or reframing on our own (the rotation button is told). */
   interact(): void {
+    if (this.spin) {
+      this.spin = false;
+      this.events.onSpinStopped();
+    }
     this.fitting = false;
   }
 
