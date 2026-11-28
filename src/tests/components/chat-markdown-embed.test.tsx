@@ -246,6 +246,10 @@ describe("embed shortcode: what is read aloud", () => {
   it("leaves only the title in the accessible label", () => {
     expect(plainTextForLabel(reply)).toBe("Here is the trailer: Trailer Enjoy.");
     expect(plainTextForLabel(`Done. [embed ref="cv_1" /]`)).toBe("Done.");
+    // A reply still arriving: the half-written tail is not read either.
+    expect(plainTextForLabel(`Done. [embed ref="cv_1"`)).toBe("Done.");
+    expect(speechTextFor(`Done.\n[embed url="https://www.youtube.com/watch?v=jNQXAC9IVRw" tit`)).toBe("Done.");
+    expect(speechTextFor("See the [embed shortcode] docs.")).toBe("See the [embed shortcode] docs.");
   });
 
   it("leaves only the title in what the voice says", () => {

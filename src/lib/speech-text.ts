@@ -55,10 +55,15 @@ export function embedAttributes(raw: string): { url?: string; ref?: string; titl
   return attrs;
 }
 
-/** Text with each shortcode reduced to its title. */
+/**
+ * Text with each shortcode reduced to its title, and a half-written one at
+ * the very end (a reply still arriving) dropped: neither is ever read out.
+ */
 export function withoutEmbedShortcodes(text: string): string {
-  return text.replace(EMBED_SHORTCODE_RE, (_m, quoted?: string, loose?: string) =>
-    ` ${embedAttributes(quoted ?? loose ?? "").title ?? ""} `);
+  return text
+    .replace(EMBED_SHORTCODE_RE, (_m, quoted?: string, loose?: string) =>
+      ` ${embedAttributes(quoted ?? loose ?? "").title ?? ""} `)
+    .replace(EMBED_PENDING_RE, " ");
 }
 
 export function speechTextFor(markdown: string, maxChars: number = SPEECH_MAX_CHARS): string {
