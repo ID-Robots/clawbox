@@ -213,6 +213,21 @@ describe("useMonitorLayoutSync", () => {
     expect(getDeskScreens()?.find((s) => s.main)?.id).toBe("b");
   });
 
+  it("asks /setup-api/monitors by default, and the url it is given — /login's signed-out read — the same way", async () => {
+    const desk = manualFetch();
+    const { unmount } = renderHook(() => useMonitorLayoutSync(true));
+    expect(desk.fetchMock).toHaveBeenLastCalledWith("/setup-api/monitors", { cache: "no-store" });
+    unmount();
+    const login = manualFetch();
+    renderHook(() => useMonitorLayoutSync(true, { url: "/login-api/monitors" }));
+    expect(login.fetchMock).toHaveBeenLastCalledWith("/login-api/monitors", { cache: "no-store" });
+    await login.answer(ROW);
+    expect(getDeskScreens()?.find((s) => s.main)).toMatchObject({ id: "a", x: 0, width: 2560 });
+    await advance(MONITOR_POLL_MS);
+    expect(login.fetchMock).toHaveBeenCalledTimes(2);
+    expect(login.fetchMock).toHaveBeenLastCalledWith("/login-api/monitors", { cache: "no-store" });
+  });
+
   it("forgets the layout and asks nothing more once unmounted", async () => {
     const f = manualFetch();
     const { unmount } = renderHook(() => useMonitorLayoutSync(true));

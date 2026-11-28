@@ -202,8 +202,11 @@ export function useViewerMonitors(enabled = true): MonitorStatusLike | null | un
  * the extension keeps on <html> (`useViewerMonitors`): this box's own are the
  * wrong ones, so it does not read them at all. The kiosk having no layout is a
  * layout of one screen. Never on /updating (`recall`).
+ *
+ * `url` is /login's (TASK-2850): signed out, it asks `/login-api/monitors`,
+ * which answers the box's own screen the geometry alone and needs no session.
  */
-export function useMonitorLayoutSync(enabled: boolean, { recall = false }: { recall?: boolean } = {}): void {
+export function useMonitorLayoutSync(enabled: boolean, { recall = false, url = "/setup-api/monitors" }: { recall?: boolean; url?: string } = {}): void {
   const viewer = useViewerMonitors(enabled && !recall);
   const viewed = viewer !== undefined;
   useEffect(() => {
@@ -241,7 +244,7 @@ export function useMonitorLayoutSync(enabled: boolean, { recall = false }: { rec
 
     const read = async (): Promise<"on" | "off" | "error"> => {
       try {
-        const res = await fetch("/setup-api/monitors", { cache: "no-store" });
+        const res = await fetch(url, { cache: "no-store" });
         if (!res.ok) return seen && res.status >= 500 ? "error" : "off";
         const status = (await res.json()) as MonitorStatusLike;
         if (!live) return "off";
@@ -315,5 +318,5 @@ export function useMonitorLayoutSync(enabled: boolean, { recall = false }: { rec
       setDeskScreens(null);
       setMonitorSessionWindow(false);
     };
-  }, [own, recall]);
+  }, [own, recall, url]);
 }

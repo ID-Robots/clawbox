@@ -1,8 +1,10 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useSyncExternalStore } from "react";
 import Image from "next/image";
 import { I18nProvider, useT } from "@/lib/i18n";
+import { getDeskScreens, subscribeDeskScreens, updatingScreenRect } from "@/lib/desktop-screens";
+import { useMonitorLayoutSync } from "@/lib/use-monitor-layout";
 import {
   announceSessionSwitch,
   loginRedirectTarget,
@@ -58,6 +60,9 @@ const followSignInElsewhere: SessionSwitchDestination = (change) =>
  * other line re-rendered in English around it.
  */
 type LoginError = { key: string } | { text: string } | null;
+
+/** The server's render, and the hydrating one, know no monitors: one screen. */
+const noLayout = () => null;
 
 function LoginForm() {
   const { t } = useT();
@@ -183,9 +188,27 @@ function LoginForm() {
     }
   };
 
+  // Over a row of monitors the page — its spinner too — is drawn on the main
+  // one only and the others are plain ground, as on /updating. Signed out, the
+  // layout comes from /login-api/monitors (TASK-2850). One screen, a phone or a
+  // browser tab: no box at all (`contents`), and the page is as it always was.
+  useMonitorLayoutSync(true, { url: "/login-api/monitors" });
+  const on = updatingScreenRect(useSyncExternalStore(subscribeDeskScreens, getDeskScreens, noLayout));
+  const frame = (page: React.ReactNode) => (
+    <div className={on ? "relative h-dvh w-full overflow-hidden" : "contents"} style={on ? { background: "var(--bg-deep)" } : undefined}>
+      <div
+        className={on ? "absolute overflow-y-auto" : "contents"}
+        style={on ? { left: on.x, top: on.y, width: on.width, height: on.height } : undefined}
+        data-testid="login-main-screen"
+      >
+        {page}
+      </div>
+    </div>
+  );
+
   if (!ready) {
-    return (
-      <div className="min-h-screen flex items-center justify-center" style={{ background: "var(--bg-deep)" }}>
+    return frame(
+      <div className={`${on ? "min-h-full" : "min-h-screen"} flex items-center justify-center`} style={{ background: "var(--bg-deep)" }}>
         <div className="spinner" role="status" aria-label={t("loading")} />
       </div>
     );
@@ -194,11 +217,11 @@ function LoginForm() {
   const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
   const dateStr = now.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" });
 
-  return (
+  return frame(
     <div
       className="flex flex-col items-center justify-between sm:justify-center px-5 py-6 sm:py-12 relative overflow-hidden"
       style={{
-        minHeight: "100dvh",
+        minHeight: on ? "100%" : "100dvh",
         background: "radial-gradient(ellipse at top, rgba(249,115,22,0.15), transparent 60%), radial-gradient(ellipse at bottom, rgba(249,115,22,0.08), transparent 50%), var(--bg-deep)",
       }}
     >
