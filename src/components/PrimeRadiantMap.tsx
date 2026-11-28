@@ -505,9 +505,10 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest, focusM
     return out.sort((a, b) => model.degree[b] - model.degree[a] || a - b);
   }, [model, needle, hidden]);
 
+  /** This revision's verified pages, else the last set known (a newer revision, a list that could not be read). */
   const verified = useMemo(() => {
     const out: number[] = [];
-    if (!model || verifiedFor?.revision !== model.revision) return out;
+    if (!model || !verifiedFor) return out;
     for (const id of verifiedFor.ids) {
       const i = model.index.get(id);
       if (i !== undefined) out.push(i);
@@ -517,10 +518,13 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest, focusM
 
   // Only shows and hides pages: the layout (every page) and the camera stay as they are on every step.
   const densityNow = useDeferredValue(density);
-  /** The pages the slider keeps: the most connected, every verified page, and the picked page with its neighbours. */
+  /**
+   * The pages the slider keeps: the most connected, every verified page, and the picked page with its
+   * neighbours. Until some verified list is known (still reading, or it could not be read) every page shows.
+   */
   const shown = useMemo(() => {
     if (!model) return null;
-    const keep = model.n > DENSITY_FEWEST ? Math.round(DENSITY_FEWEST * Math.pow(model.n / DENSITY_FEWEST, densityNow / 100)) : model.n;
+    const keep = model.n > DENSITY_FEWEST && verifiedFor ? Math.round(DENSITY_FEWEST * Math.pow(model.n / DENSITY_FEWEST, densityNow / 100)) : model.n;
     const out = new Uint8Array(model.n);
     for (let i = 0; i < model.n; i++) out[i] = model.rank[i] < keep ? 1 : 0;
     for (const i of verified) out[i] = 1;
@@ -529,7 +533,7 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest, focusM
       for (let k = model.offsets[selected]; k < model.offsets[selected + 1]; k++) out[model.adj[k]] = 1;
     }
     return out;
-  }, [model, densityNow, verified, selected]);
+  }, [model, densityNow, verified, verifiedFor, selected]);
 
   const states = useMemo(() => {
     if (!model || !shown) return null;
@@ -585,7 +589,8 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest, focusM
   }, [spin, mode, model]);
   useEffect(() => {
     matchCursor.current = -1;
-    if (matches && matches.length > 0) viewRef.current?.flyTo(matches.slice(0, 500));
+    // Typing only looks: the turn stops when a result is picked.
+    if (matches && matches.length > 0) viewRef.current?.flyTo(matches.slice(0, 500), false);
   }, [matches]);
 
   const labels = useMemo(() => {

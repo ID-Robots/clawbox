@@ -44,8 +44,9 @@ const ISOLATED = {
 };
 
 let graph: Record<string, unknown>;
-/** What `GET pages?verified=true` lists. */
+/** What `GET pages?verified=true` lists, or that it fails. */
 let verifiedPaths: string[];
+let verifiedFails: boolean;
 let glCalls: Array<[string, unknown[]]>;
 /** What `GET pages/<path>?view=summary` answers, by page; a page not listed answers 404. */
 let summaryOf: Record<string, string | null>;
@@ -97,7 +98,9 @@ function installFetch() {
     const ok = (json: unknown, code = 200) => ({ ok: code < 400, status: code, json: async () => json });
     if (url.startsWith("/setup-api/preferences")) return ok({ ui_language: "en" });
     if (url === "/setup-api/prime-radiant/graph") return ok(graph);
-    if (url.startsWith("/setup-api/prime-radiant/pages?verified=true")) return ok({ total: verifiedPaths.length, pages: verifiedPaths.map((path) => ({ path })) });
+    if (url.startsWith("/setup-api/prime-radiant/pages?verified=true")) {
+      return verifiedFails ? ok({ error: "The Prime Radiant vault could not be read.", code: "vault_unavailable" }, 500) : ok({ total: verifiedPaths.length, pages: verifiedPaths.map((path) => ({ path })) });
+    }
     const page = /^\/setup-api\/prime-radiant\/pages\/(.+)\?view=summary$/.exec(url);
     if (page) {
       const id = decodeURIComponent(page[1]);
@@ -111,6 +114,7 @@ function installFetch() {
 beforeEach(() => {
   graph = GRAPH;
   verifiedPaths = [];
+  verifiedFails = false;
   window.localStorage.clear();
   summaryOf = {};
   summaryGate = null;
@@ -187,8 +191,8 @@ describe("PrimeRadiantMap", () => {
     await waitFor(() => expect(lastStates(setStates)[0]).toBe(STATE_MATCH));
     const states = lastStates(setStates);
     expect([...states]).toEqual([STATE_MATCH, STATE_DIM, STATE_MATCH, STATE_DIM, STATE_DIM, STATE_DIM]);
-    // The camera flies to what matched.
-    expect(flyTo).toHaveBeenCalledWith([0, 2]);
+    // The camera flies to what matched (typing keeps the slow turn; picking a result stops it).
+    expect(flyTo).toHaveBeenCalledWith([0, 2], false);
 
     fireEvent.click(results[1]);
     const card = await screen.findByTestId("prime-radiant-map-selected");
@@ -651,6 +655,47 @@ describe("PrimeRadiantMap", () => {
     expect(vi.mocked(fetch).mock.calls.filter(([u]) => String(u).includes("verified=true"))).toHaveLength(1);
   });
 
+  it("keeps the verified pages it last knew when a newer revision's list cannot be read", async () => {
+    graph = { ...CHAIN, revision: "3".repeat(40) };
+    verifiedPaths = ["notes/p150.md"];
+    const setStates = vi.spyOn(MapView.prototype, "setStates");
+    const first = render(
+      <I18nProvider>
+        <PrimeRadiantMap revision={0} onOpenPage={vi.fn()} onIngest={vi.fn()} />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 101 of 200"), { timeout: 15_000 });
+    first.unmount();
+    graph = { ...CHAIN, revision: "4".repeat(40) };
+    verifiedFails = true;
+    render(
+      <I18nProvider>
+        <PrimeRadiantMap revision={1} onOpenPage={vi.fn()} onIngest={vi.fn()} />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.filter(([u]) => String(u).includes("verified=true"))).toHaveLength(2));
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 101 of 200"));
+    expect(lastStates(setStates)[150]).not.toBe(STATE_HIDDEN);
+  });
+
+  it("shows every page while no verified list is known, so one that cannot be read hides no verified page", async () => {
+    graph = { ...CHAIN, revision: "2".repeat(40) };
+    verifiedFails = true;
+    // A window that never read the list: fresh modules, nothing kept from an earlier visit.
+    vi.resetModules();
+    const { default: FreshMap } = await import("@/components/PrimeRadiantMap");
+    const { I18nProvider: FreshProvider } = await import("@/lib/i18n");
+    render(
+      <FreshProvider>
+        <FreshMap revision={0} onOpenPage={vi.fn()} onIngest={vi.fn()} />
+      </FreshProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 200 · Links: 199"), { timeout: 15_000 });
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).includes("verified=true"))).toBe(true));
+    expect(screen.getByTestId("prime-radiant-map-density")).toHaveValue("50");
+    expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 200 · Links: 199");
+  });
+
   it("still finds a page the slider hides, and shows it with its neighbours once picked", async () => {
     graph = { ...CHAIN, revision: "8".repeat(40) };
     const setStates = vi.spyOn(MapView.prototype, "setStates");
@@ -704,7 +749,13 @@ describe("PrimeRadiantMap", () => {
     await off();
     fireEvent.click(button);
     await on();
+    // Typing a search only looks (the camera flies, the turn goes on); picking a result stops it.
     fireEvent.change(screen.getByTestId("prime-radiant-map-search"), { target: { value: "acme" } });
+    expect(await screen.findByTestId("prime-radiant-map-match-count")).toHaveTextContent("Matching pages: 2");
+    fireEvent.change(screen.getByTestId("prime-radiant-map-search"), { target: { value: "acme r" } });
+    expect(await screen.findByTestId("prime-radiant-map-match-count")).toHaveTextContent("Matching pages: 1");
+    expect(button).toHaveAccessibleName("Rotation on: stop it");
+    fireEvent.click(screen.getByTestId("prime-radiant-map-result"));
     await off();
     expect(stored()).toBe("1");
     // A map opened again turns as the button last left it.

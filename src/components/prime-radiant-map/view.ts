@@ -353,8 +353,8 @@ export class MapView {
     this.changed();
   }
 
-  /** Fly to the given nodes (all of them in view), or frame one up close. */
-  flyTo(nodes: readonly number[]): void {
+  /** Fly to the given nodes (all of them in view), or frame one up close; `stopTurn` false keeps the slow turn (a search as it is typed). */
+  flyTo(nodes: readonly number[], stopTurn = true): void {
     if (nodes.length === 0 || this.n === 0) return;
     this.dropHover();
     let x = 0, y = 0, z = 0;
@@ -369,7 +369,8 @@ export class MapView {
     let r = 0;
     for (const i of nodes) r = Math.max(r, Math.hypot(this.pos[i * 3] - x, this.pos[i * 3 + 1] - y, this.pos[i * 3 + 2] - z));
     r = Math.max(r + 20, 70);
-    this.interact();
+    if (stopTurn) this.interact();
+    else this.fitting = false;
     if (this.kind === "2d") {
       this.target.set([x, y, 0]);
       this.zoom = this.fitZoom(r);
