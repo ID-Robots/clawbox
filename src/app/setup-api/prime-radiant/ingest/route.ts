@@ -10,7 +10,8 @@
  * `index`) and are staged as one upload batch through the drop's own staging
  * (its names, caps and disk reserve), then ingested like a drop. 412
  * `no_credential` when the box has neither a ClawBox AI sign-in nor a model
- * of its own (Local AI, or the owner's External engine), 409
+ * of its own (Local AI, or the owner's External engine), 412 `no_anthropic_key`
+ * when the owner chose Anthropic and no API key is saved, 409
  * `cloud_ai_locked` when the local-only AI lock is on and the box has no
  * model of its own — before anything is read; 409 `window_too_small` when
  * the box's own model cannot hold one document's page (`IngestWindowError`).

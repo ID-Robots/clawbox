@@ -39,12 +39,24 @@ export interface TokenUsage {
   cacheHitTokens: number;
 }
 
+/**
+ * The Claude models Prime Radiant can write with on the owner's own Anthropic
+ * account, each with a list rate below: the picker offers no model whose calls
+ * would be priced at 0. A subset of the coding agent's `ANTHROPIC_MODELS`.
+ */
+export const PRIME_RADIANT_CLAUDE_MODELS = ["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5", "claude-fable-5-2"] as const;
+
 export const DEFAULT_COST_RATES: CostRates = Object.freeze({
   basis: "estimate",
   currency: "USD",
   unit: "per-million-tokens",
   models: Object.freeze({
     "deepseek-v4-flash": Object.freeze({ input: 0.14, cachedInput: 0.0028, output: 0.28 }),
+    // Anthropic's list rates (input / cache read / output), as docs/benchmarks/coding-anthropic-models-2026-11.md prices them. Billed to the owner's own account, never to the ClawBox AI allowance.
+    "claude-sonnet-5-5": Object.freeze({ input: 2, cachedInput: 0.1, output: 10 }),
+    "claude-haiku-5-5": Object.freeze({ input: 0.1, cachedInput: 0.01, output: 0.5 }),
+    "claude-opus-5-5": Object.freeze({ input: 4, cachedInput: 0.2, output: 20 }),
+    "claude-fable-5-2": Object.freeze({ input: 8, cachedInput: 0.2, output: 40 }),
   }),
 });
 

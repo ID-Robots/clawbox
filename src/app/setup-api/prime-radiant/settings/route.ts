@@ -7,8 +7,11 @@
  * nightly schedule; the contradiction pass; the search index's size limit;
  * domains and their owners; the golden questions' nightly check; the daily
  * questions — how many an owner gets, each owner's language, and whether the
- * assistant may send them), the defaults and the cost rates they price with.
- * Never creates anything.
+ * assistant may send them; which model answers — `model.provider` `auto`
+ * until the owner picks `anthropic` and one of `limits.claudeModels`), the
+ * defaults and the cost rates they price with, and `anthropic.keySaved`
+ * (whether an API key is among the coding agent's Anthropic accounts, never
+ * the key). Never creates anything.
  *
  * PUT — a patch: only the sections and fields named change, each validated
  * strictly; a bad field refuses the whole patch (400 `invalid`) and writes
@@ -25,6 +28,7 @@
 import { requireSession } from "@/lib/route-auth";
 import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import { DAILY_LANGUAGES, MAX_DAILY_PER_OWNER, MIN_DAILY_PER_OWNER } from "@/lib/prime-radiant/daily";
+import { PRIME_RADIANT_CLAUDE_MODELS } from "@/lib/prime-radiant/cost-rates";
 import { isOwnOutput } from "@/lib/prime-radiant/ingest-sources";
 import { nextRunAtMs, refresh } from "@/lib/prime-radiant/nightly-scheduler";
 import { fail, json, readJsonBody, writerGuard } from "@/lib/prime-radiant/route-helpers";
@@ -67,16 +71,33 @@ const LIMITS = {
   structureModelFallback: { min: 0, max: MAX_STRUCTURE_MODEL_FALLBACK },
   summariesMaxPages: { min: 0, max: MAX_SUMMARIES_MAX_PAGES },
   summariesCapUsd: { min: 0, max: MAX_SUMMARIES_CAP_USD },
+  claudeModels: PRIME_RADIANT_CLAUDE_MODELS,
 };
 
-function answer() {
-  return { settings: readSettings(), defaults: defaultSettings(), limits: LIMITS, nightly: { nextRunAt: nextRunAtMs() }, rates: effectiveCostRates() };
+/** Whether an Anthropic API key is among the coding agent's accounts — never the key itself. */
+async function anthropicKeySaved(): Promise<boolean> {
+  try {
+    return await (await import("@/lib/coding-anthropic")).hasAnthropicKey();
+  } catch {
+    return false;
+  }
+}
+
+async function answer() {
+  return {
+    settings: readSettings(),
+    defaults: defaultSettings(),
+    limits: LIMITS,
+    nightly: { nextRunAt: nextRunAtMs() },
+    rates: effectiveCostRates(),
+    anthropic: { keySaved: await anthropicKeySaved() },
+  };
 }
 
 export async function GET(req: Request) {
   const denied = await requireSession(req);
   if (denied) return denied;
-  return json(answer());
+  return json(await answer());
 }
 
 export async function PUT(req: Request) {
@@ -127,5 +148,5 @@ export async function PUT(req: Request) {
       console.warn(`[prime-radiant] the search index did not follow its new size limit yet: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
-  return json(answer());
+  return json(await answer());
 }

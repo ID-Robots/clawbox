@@ -113,8 +113,8 @@ export default function PrimeRadiantUsage({ revision }: { revision: number }) {
                   {weeklyAt ? ` · ${t("primeRadiant.usage.allowance.freesUp", { at: weeklyAt })}` : ""}
                 </p>
               )}
-              {/* A spent ClawBox AI allowance stops nothing the box's own engine writes. */}
-              {spent && meter.engine !== "local" && (
+              {/* A spent ClawBox AI allowance stops nothing the box's own engine or the owner's Anthropic account writes. */}
+              {spent && meter.engine !== "local" && meter.engine !== "anthropic" && (
                 <p role="status" className="text-[11px] text-amber-200" data-testid="prime-radiant-usage-allowance-spent">
                   {spentAt ? t("primeRadiant.usage.allowance.spentAt", { at: spentAt }) : t("primeRadiant.usage.allowance.spent")}
                 </p>
@@ -122,6 +122,11 @@ export default function PrimeRadiantUsage({ revision }: { revision: number }) {
               {meter.engine === "local" && (
                 <p className="text-[11px] text-[var(--text-secondary)]" data-testid="prime-radiant-usage-engine-local">
                   {t("primeRadiant.usage.engineLocal")}
+                </p>
+              )}
+              {meter.engine === "anthropic" && (
+                <p className="text-[11px] text-[var(--text-secondary)]" data-testid="prime-radiant-usage-engine-anthropic">
+                  {t("primeRadiant.usage.engineAnthropic")}
                 </p>
               )}
               {/* The window's calls to the box's own engine, whichever engine writes now. */}

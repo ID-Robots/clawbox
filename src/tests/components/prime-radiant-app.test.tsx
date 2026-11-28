@@ -204,7 +204,7 @@ let ingestJobs: unknown[];
 /** The account half of `GET costs?allowance=1`. */
 let allowanceAccount: unknown;
 /** Which engine writes, and the window's calls to the box's own engine (TASK-2501 PR-C). */
-let allowanceEngine: "clawbox-ai" | "local" | null;
+let allowanceEngine: "clawbox-ai" | "local" | "anthropic" | null;
 let allowanceLocal: { calls: number; tokensIn: number; tokensOut: number; usdEstimate: number };
 /** Refusals the fake answers the next `DELETE ingest/<id>` calls with, first first. */
 let stopRefusals: number[];
@@ -214,6 +214,8 @@ let skipCodeProjects: boolean;
 let olderOpusServer: boolean;
 /** The search index size limit, MB, on a server that has the setting (null: an older one). */
 let searchIndexLimitMb: number | null;
+/** The model provider section (TASK-2874) on a server that has it, with whether an Anthropic key is saved; null: an older server. */
+let modelServer: { provider: "auto" | "anthropic"; keySaved: boolean } | null;
 /** The structure pass's settings section; null: a server from before it. */
 let structureSettings: { enabled: boolean; company: string; enrichTop: number; modelFallback: number } | null;
 /** What `POST init` says its one-time memory-wiki repair did. */
@@ -347,6 +349,7 @@ function installFetch() {
         golden: { enabled: true, maxQuestions: 50 }, verification: { perOwner: 5, outbound: false, languages: [] },
         ...(searchIndexLimitMb !== null ? { search: { indexLimitMb: searchIndexLimitMb } } : {}),
         ...(structureSettings ? { structure: structureSettings } : {}),
+        ...(modelServer ? { model: { provider: modelServer.provider, anthropicModel: "claude-sonnet-5-5" } } : {}),
       };
       return ok({
         settings, defaults: searchIndexLimitMb !== null ? { ...settings, search: { indexLimitMb: 160 } } : settings,
@@ -356,7 +359,9 @@ function installFetch() {
           goldenMaxQuestions: { min: 1, max: 500 }, dailyPerOwner: { min: 1, max: 12 },
           ...(olderOpusServer ? { opusCapUsd: { min: 0.01, max: 1000 }, opusMaxPages: { min: 4, max: 2000 } } : {}),
           ...(searchIndexLimitMb !== null ? { searchIndexLimitMb: { min: 32, max: 4096 } } : {}),
+          ...(modelServer ? { claudeModels: ["claude-sonnet-5-5", "claude-haiku-5-5"] } : {}),
         },
+        ...(modelServer ? { anthropic: { keySaved: modelServer.keySaved } } : {}),
         nightly: { nextRunAt: null }, rates: {},
         ...(olderOpusServer ? { opusSource: "subscription" } : {}),
       });
@@ -423,6 +428,7 @@ beforeEach(() => {
   olderOpusServer = false;
   searchIndexLimitMb = null;
   structureSettings = null;
+  modelServer = null;
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
   window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
   listed = [LIST_ENTRY];
@@ -1102,6 +1108,49 @@ describe("PrimeRadiantApp", () => {
       const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
       expect((put?.body as { search: unknown }).search).toEqual({ indexLimitMb: 512 });
     });
+  });
+
+  it("offers Anthropic as the model provider, says when no API key is saved, and saves the choice with the Claude model", async () => {
+    modelServer = { provider: "auto", keySaved: false };
+    await mount();
+    await openTab("settings");
+    const provider = await screen.findByTestId("prime-radiant-model-provider");
+    expect(provider).toHaveValue("auto");
+    expect(screen.queryByTestId("prime-radiant-claude-model")).toBeNull();
+    fireEvent.change(provider, { target: { value: "anthropic" } });
+    expect(await screen.findByTestId("prime-radiant-claude-model")).toHaveValue("claude-sonnet-5-5");
+    expect(screen.getByTestId("prime-radiant-model-no-key")).toHaveTextContent("No Anthropic API key is saved on this box yet.");
+    fireEvent.change(screen.getByTestId("prime-radiant-claude-model"), { target: { value: "claude-haiku-5-5" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect((put?.body as { model: unknown }).model).toEqual({ provider: "anthropic", anthropicModel: "claude-haiku-5-5" });
+    });
+  });
+
+  it("offers no model provider to a server that does not know it, and sends none", async () => {
+    await mount();
+    await openTab("settings");
+    await screen.findByTestId("prime-radiant-settings-save");
+    expect(screen.queryByTestId("prime-radiant-model-provider")).toBeNull();
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect(put?.body).not.toHaveProperty("model");
+    });
+  });
+
+  it("says the owner's Anthropic account writes the pages, and that a spent ClawBox AI allowance stops nothing then (TASK-2874)", async () => {
+    allowanceEngine = "anthropic";
+    allowanceAccount = {
+      available: true, plan: "max", timeZone: "UTC",
+      weekly: { used: 10_000_000, limit: 10_000_000, percentUsed: 100, isOverLimit: true, resetAt: "2026-01-09T14:05:00.000Z" },
+      burst: null,
+    };
+    await mount();
+    await openTab("settings");
+    expect(await screen.findByTestId("prime-radiant-usage-engine-anthropic")).toHaveTextContent("Your own Anthropic account writes the pages");
+    expect(screen.queryByTestId("prime-radiant-usage-allowance-spent")).toBeNull();
   });
 
   it("offers no index size limit to a server that does not know it, and sends none", async () => {

@@ -202,6 +202,7 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
 
   const client = options.client ?? (await flashClient());
   const verdicts = new Map<string, { verdict: GoldenVerdict; why: string }>();
+  const modelName = client.engine === "local" ? "The model on this box" : client.engine === "anthropic" ? "Anthropic" : "ClawBox AI";
   // An empty or cut-off answer is asked again in smaller calls, never resent as it was.
   const retry: RetryOptions = {
     ...options.retry,
@@ -349,7 +350,7 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
         spent
           ? `The golden-question judge stopped: ${spentText}. Tonight's questions wait for the next night.`
           : refusal
-            ? `${client.engine === "local" ? "The model on this box" : "ClawBox AI"} refused the golden-question judge (${refusal}); the check was skipped.`
+            ? `${modelName} refused the golden-question judge (${refusal}); the check was skipped.`
             : "No golden question could be judged tonight; the check was skipped.",
       );
     }
@@ -365,7 +366,7 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
     result.notes.push(`The golden-question judge stopped part way: ${spentText}. The ${asked.length - scored.length} question(s) it did not judge wait for the next night.`);
   } else if (lockedPartWay) {
     result.notes.push(`Local-only AI went on part way through the golden-question check. The ${asked.length - scored.length} question(s) not judged wait for a night the lock is off.`);
-  } else if (refusal) result.notes.push(`ClawBox AI refused the golden-question judge part way (${refusal}); the rest count as not judged.`);
+  } else if (refusal) result.notes.push(`${client.engine === "anthropic" ? "Anthropic" : "ClawBox AI"} refused the golden-question judge part way (${refusal}); the rest count as not judged.`);
 
   result.tally = goldenTally(scored.map((q) => verdicts.get(q.id)?.verdict ?? null));
   const scoreId = options.runId ?? `gs-${crypto.randomBytes(6).toString("hex")}`;

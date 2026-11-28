@@ -206,6 +206,17 @@ describe("the allowance meter", () => {
     });
   });
 
+  it("leaves the owner's own Anthropic calls out of the ClawBox AI share, and out of the box's-own-engine count too (TASK-2874)", async () => {
+    await seedCosts();
+    const at = daysAgo(2);
+    recordCost(vault, { runId: "ing-0000000000ff", operation: "ingest.write", model: "claude-sonnet-5-5", tokensIn: 7000, tokensOut: 700, usdEstimate: 0.02, at });
+    recordCost(vault, { runId: "run-0000000000ff", operation: "golden", model: "claude-haiku-5-5", tokensIn: 300, tokensOut: 30, usdEstimate: 0.001, at });
+    const meter = await readAllowanceMeter(vault, { now: () => NOW, account: null, engine: async () => "anthropic" });
+    expect(meter.primeRadiant).toEqual({ calls: 2, tokensIn: 1200, tokensOut: 120, usdEstimate: 0.02 });
+    expect(meter.local).toEqual({ calls: 0, tokensIn: 0, tokensOut: 0, usdEstimate: 0 });
+    expect(meter.engine).toBe("anthropic");
+  });
+
   it("leaves the box's own engine out of the ClawBox AI share and counts it on its own (TASK-2501 PR-C)", async () => {
     await seedCosts();
     const at = daysAgo(2);

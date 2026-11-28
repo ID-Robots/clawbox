@@ -48,6 +48,13 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 export const OFF_ALLOWANCE_OPERATIONS: readonly string[] = Object.freeze(["opus-review"]);
 
+/**
+ * Calls the owner's own Anthropic account answered are recorded under the
+ * Claude model id and billed by Anthropic: counted against no ClawBox AI
+ * allowance, and not "the box's own engine" either.
+ */
+const ANTHROPIC_MODEL_PREFIX = "claude-";
+
 export interface AllowanceWindow {
   used: number;
   limit: number;
@@ -81,7 +88,7 @@ export interface AllowanceMeter {
   /** Prime Radiant's calls the box's own engine answered in the window: counted against no allowance. */
   local: CostTotals;
   /** Which engine writes the pages now (flash-client `flashEngine`); null when none can. */
-  engine: "clawbox-ai" | "local" | null;
+  engine: "clawbox-ai" | "local" | "anthropic" | null;
   /** The account's pool; null when it was not asked for. */
   account: AllowanceAccount | null;
 }
@@ -128,14 +135,14 @@ export interface AllowanceMeterOptions {
   /** How to read the account's pool; `null` leaves it unasked. Default: {@link readAllowanceAccount}. */
   account?: (() => Promise<AllowanceAccount>) | null;
   /** Which engine writes now. Default: flash-client's `flashEngine`. */
-  engine?: () => Promise<"clawbox-ai" | "local" | null>;
+  engine?: () => Promise<"clawbox-ai" | "local" | "anthropic" | null>;
 }
 
 /** Prime Radiant's ClawBox AI calls in the allowance's window, beside the account's pool. Creates nothing. */
 export async function readAllowanceMeter(vault: string, options: AllowanceMeterOptions = {}): Promise<AllowanceMeter> {
   const now = (options.now ?? (() => new Date()))();
   const since = new Date(now.getTime() - ALLOWANCE_WINDOW_DAYS * DAY_MS).toISOString();
-  const primeRadiant = readCostTotals(vault, { since, excludeOperations: OFF_ALLOWANCE_OPERATIONS, models: { except: LOCAL_ENGINE_REF_PREFIXES } });
+  const primeRadiant = readCostTotals(vault, { since, excludeOperations: OFF_ALLOWANCE_OPERATIONS, models: { except: [...LOCAL_ENGINE_REF_PREFIXES, ANTHROPIC_MODEL_PREFIX] } });
   const local = readCostTotals(vault, { since, models: { only: LOCAL_ENGINE_REF_PREFIXES } });
   const ask = options.account === undefined ? readAllowanceAccount : options.account;
   const [account, engine] = await Promise.all([

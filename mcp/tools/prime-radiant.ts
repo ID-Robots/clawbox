@@ -29,6 +29,7 @@
 
 import { z } from "zod";
 import { CLAIM_ID_RE } from "../../src/lib/prime-radiant/claims";
+import { PRIME_RADIANT_CLAUDE_MODELS } from "../../src/lib/prime-radiant/cost-rates";
 import { DAILY_LANGUAGES } from "../../src/lib/prime-radiant/daily";
 import { recheckOf } from "../../src/lib/prime-radiant/recheck";
 import { isContentPage } from "../../src/lib/prime-radiant/links";
@@ -173,6 +174,7 @@ const NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
   invalid_name: { code: "BAD_ARGUMENT", next: "Leave that file out: Prime Radiant reads .txt, .md, .pdf, .docx, .odt and .rtf." },
   busy: { code: "CONFLICT", next: "One is already running. Do not start another; follow it with prime_radiant_ingest_status or prime_radiant_status." },
   no_credential: { code: "CONFLICT", next: "No model can write the pages: the box is neither signed in to ClawBox AI nor running a model of its own. Tell the user to sign in under Settings → Providers or set up Local AI in Settings." },
+  no_anthropic_key: { code: "CONFLICT", next: "Prime Radiant is set to write with the user's own Anthropic account and no API key is saved on this box. Tell the user to add an Anthropic API key among the Coding Agent's Anthropic accounts, or to choose Automatic in Prime Radiant's settings (prime_radiant_settings_update model_provider: auto)." },
   cloud_ai_locked: { code: "CONFLICT", next: "Local-only AI is on and no model is set up on this box to write the pages. Tell the user to set up Local AI in Settings." },
   window_too_small: { code: "CONFLICT", next: "The model on this box has too small a window to write pages. Tell the user to choose a model with a larger window in Settings → Local AI." },
   lint_blocked: { code: "CONFLICT", next: "Change what the rules name — a secret in the text, a claim id another page uses or one that was retired — and try again, or tell the user." },
@@ -1278,7 +1280,7 @@ function registerPassTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_settings_update",
-    "Change the Prime Radiant settings the user asked for: nightly schedule, contradiction pass, search index limit, domains and owners, golden-question check, daily questions per owner and owners' languages, exclude list, parallelism, skip code projects, nightly folders.",
+    "Change the Prime Radiant settings the user asked for: nightly schedule, contradiction pass, search index limit, domains and owners, golden-question check, daily questions per owner and owners' languages, exclude list, parallelism, skip code projects, nightly folders, the model provider.",
     {
       nightly_enabled: zOptBool("Run the nightly pass on its schedule."),
       nightly_time: z.string().regex(TIME_RE, "HH:MM, 24-hour").optional().describe("When the nightly pass runs, box time, HH:MM."),
@@ -1294,11 +1296,13 @@ function registerPassTools(reg: Registrar): void {
       golden_max_questions: z.number().int().min(1).max(500).optional().describe("Most golden questions one night checks."),
       daily_per_owner: z.number().int().min(1).max(20).optional().describe("Most daily questions an owner gets a day."),
       owner_languages: zOptList(100, 100, `The whole list of owners' languages, each owner=code (${DAILY_LANGUAGES.join(", ")}).`),
+      model_provider: zEnumOf(["auto", "anthropic"], "auto: ClawBox AI, else the box's own model. anthropic: the owner's own API key (wiki text leaves the box).").optional(),
+      anthropic_model: zEnumOf(PRIME_RADIANT_CLAUDE_MODELS, "The Claude model used when model_provider is anthropic.").optional(),
       reset: z.array(zEnumOf(
-        ["nightly", "contradictions", "domains", "ingest_exclude", "ingest_parallel", "skip_code_projects", "nightly_folders", "search_index_limit_mb", "golden", "daily_per_owner", "owner_languages"],
+        ["nightly", "contradictions", "domains", "ingest_exclude", "ingest_parallel", "skip_code_projects", "nightly_folders", "search_index_limit_mb", "golden", "daily_per_owner", "owner_languages", "model"],
         "A setting to put back to its default.",
       ))
-        .max(11)
+        .max(12)
         .optional()
         .describe("Settings to put back to their defaults."),
       confirm: zConfirm("Must be true. Set it only when the user asked for these settings."),
@@ -1308,6 +1312,7 @@ function registerPassTools(reg: Registrar): void {
       nightly_enabled?: boolean; nightly_time?: string; contradictions_enabled?: boolean; search_index_limit_mb?: number;
       domains?: string[]; ingest_exclude?: string[]; ingest_parallel?: number; skip_code_projects?: boolean; nightly_folders?: string[]; reset?: string[]; confirm: true;
       golden_enabled?: boolean; golden_max_questions?: number; daily_per_owner?: number; owner_languages?: string[];
+      model_provider?: string; anthropic_model?: string;
     }) => {
       const patch: Record<string, Record<string, unknown> | unknown[] | null> = {};
       const section = (name: string) => (patch[name] && !Array.isArray(patch[name]) ? patch[name] : (patch[name] = {})) as Record<string, unknown>;
@@ -1322,6 +1327,8 @@ function registerPassTools(reg: Registrar): void {
       if (a.golden_enabled !== undefined) section("golden").enabled = a.golden_enabled;
       if (a.golden_max_questions !== undefined) section("golden").maxQuestions = a.golden_max_questions;
       if (a.daily_per_owner !== undefined) section("verification").perOwner = a.daily_per_owner;
+      if (a.model_provider !== undefined) section("model").provider = a.model_provider;
+      if (a.anthropic_model !== undefined) section("model").anthropicModel = a.anthropic_model;
       if (a.owner_languages !== undefined) {
         const bad = a.owner_languages.find((l) => !OWNER_LANGUAGE_RE.test(l));
         if (bad) throw new ToolError("BAD_ARGUMENT", `"${bad.slice(0, 60)}" is not owner=language.`, `Write each as the owner's name, =, then one of ${DAILY_LANGUAGES.join(", ")}.`);
@@ -1333,7 +1340,7 @@ function registerPassTools(reg: Registrar): void {
         patch.domains = a.domains.map((d) => ({ name: d.slice(0, d.indexOf("=")), owner: d.slice(d.indexOf("=") + 1).trim() }));
       }
       for (const r of a.reset ?? []) {
-        if (r === "nightly" || r === "contradictions" || r === "domains") patch[r] = null;
+        if (r === "nightly" || r === "contradictions" || r === "domains" || r === "model") patch[r] = null;
         else if (r === "ingest_exclude") section("ingest").exclude = null;
         else if (r === "ingest_parallel") section("ingest").parallel = null;
         else if (r === "skip_code_projects") section("ingest").skipCodeProjects = null;

@@ -9,7 +9,7 @@
  * `{ job }`, progress on `GET ingest/<new id>/events`; what fails again is
  * the new job's dead letters.
  *
- * 404 `not_found`, 409 `busy` (`runningId`), 412 `no_credential`, 409
+ * 404 `not_found`, 409 `busy` (`runningId`), 412 `no_credential` / `no_anthropic_key`, 409
  * `cloud_ai_locked` (route-helpers `noEngineRefusal`), 409 `window_too_small`
  * (`IngestWindowError`). The owner
  * (cookie AND same origin) or the assistant through the MCP bearer, like

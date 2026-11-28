@@ -65,7 +65,7 @@ import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import path from "@/lib/runtime-path";
 import { fullComparisonDone, readComparedThrough, runContradictionPass, type ClaimEmbedder, type ContradictionPassResult } from "./contradictions";
 import type { CostRates } from "./cost-rates";
-import { ALLOWANCE_SPENT, allowanceSpentText, flashAvailable, type AllowanceStop, type FlashClient } from "./flash-client";
+import { ALLOWANCE_SPENT, allowanceSpentText, flashAvailable, flashUnavailableReason, type AllowanceStop, type FlashClient } from "./flash-client";
 import { verifiedTouches, type VerifiedTouch } from "./gate";
 import { changedPaths, git, VAULT_MAIN_BRANCH, withVaultLock } from "./git";
 import { runGoldenScore, type GoldenScoreResult } from "./golden-score";
@@ -428,7 +428,13 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
   const rates = deps.rates ?? effectiveCostRates();
   const notes = summary.notes;
   const online = await (deps.online ?? flashAvailable)().catch(() => false);
-  if (!online) notes.push("No model can write from this box (ClawBox AI or a model of its own); the ingest and the contradiction judge were skipped.");
+  if (!online) {
+    notes.push(
+      (await flashUnavailableReason().catch(() => null)) === "no_anthropic_key"
+        ? "Prime Radiant is set to write with an Anthropic API key and none is saved on this box; the ingest and the contradiction judge were skipped."
+        : "No model can write from this box (ClawBox AI or a model of its own); the ingest and the contradiction judge were skipped.",
+    );
+  }
 
   // Once per vault, before the branch is cut: what memory-wiki wrote into main goes first.
   try {
