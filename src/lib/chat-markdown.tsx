@@ -157,32 +157,40 @@ const FENCE_RE = /^\s*```/;
 
 /**
  * Where an `[embed … /]` (speech-text.ts) starts on this line, and what it is:
- * whole, or the half-streamed tail of the reply (`attrs: null`, drawn as
- * nothing so it never flashes). `rest` is this line and every line after it.
- * An opener inside an inline code span is skipped, like a fenced one.
+ * whole, or — while the reply is still `streaming` — its half-written tail
+ * (`attrs: null`, drawn as nothing so it never flashes; a settled reply is
+ * never cut). The match may run on over the following lines. An opener inside
+ * a closed inline code span is skipped, like a fenced one.
  */
-function findEmbed(line: string, rest: string): { at: number; length: number; attrs: Record<string, string> | null } | null {
+const EMBED_OPENER_RE = /\[embed\s|\[(?:e|em|emb|embe|embed)$/i;
+const EMBED_AT_RE = new RegExp(EMBED_SHORTCODE_RE.source, "iy");
+const EMBED_PENDING_AT_RE = new RegExp(`^${EMBED_PENDING_RE.source}`, "i");
+function findEmbed(lines: string[], i: number, streaming: boolean): { at: number; length: number; attrs: Record<string, string> | null } | null {
+  const line = lines[i];
+  if (!EMBED_OPENER_RE.test(line)) return null;
+  const rest = lines.slice(i).join("\n");
   const opener = /\[e/gi;
   let m: RegExpExecArray | null;
   while ((m = opener.exec(line)) !== null) {
-    if ((line.slice(0, m.index).split("`").length - 1) % 2 === 1) continue;
+    const ticks = line.slice(0, m.index).split("`").length - 1;
+    if (ticks % 2 === 1 && line.indexOf("`", m.index) !== -1) continue;
     const tail = rest.slice(m.index);
-    const whole = new RegExp(EMBED_SHORTCODE_RE.source, "iy").exec(tail);
-    if (whole) return { at: m.index, length: whole[0].length, attrs: embedAttributes(whole[1]) };
-    if (new RegExp(`^${EMBED_PENDING_RE.source}`, "i").test(tail)) return { at: m.index, length: tail.length, attrs: null };
+    EMBED_AT_RE.lastIndex = 0;
+    const whole = EMBED_AT_RE.exec(tail);
+    if (whole) return { at: m.index, length: whole[0].length, attrs: embedAttributes(whole[1] ?? whole[2] ?? "") };
+    if (streaming && EMBED_PENDING_AT_RE.test(tail)) return { at: m.index, length: tail.length, attrs: null };
   }
   return null;
 }
 
 /** The labels an embed card shows; the caller translates them, like `tableLabel`. */
 export type EmbedLabels = { play: string; openOnYouTube: string; untitled: string };
-const EMBED_LABELS: EmbedLabels = { play: "Play", openOnYouTube: "Open on YouTube", untitled: "Embedded content" };
 
 const YOUTUBE_ID_RE = /^[A-Za-z0-9_-]{11}$/;
 
 /** `90`, `90s`, `1m30s`, `1h2m3s` as whole seconds; anything else is no start. */
 function youTubeStart(value: string | null): number | null {
-  const m = value?.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s?)?$/);
+  const m = value?.match(/^(?:(\d{1,3})h)?(?:(\d{1,4})m)?(?:(\d{1,6})s?)?$/);
   if (!m || !value) return null;
   const seconds = Number(m[1] ?? 0) * 3600 + Number(m[2] ?? 0) * 60 + Number(m[3] ?? 0);
   return seconds > 0 ? seconds : null;
@@ -435,7 +443,10 @@ function splitTableRow(line: string): string[] {
   return cells;
 }
 
-function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
+/** A line that is nothing but a list, heading or quote marker. */
+const LONE_MARKER_RE = /^\s*(?:[-*+]|\d{1,9}[.)]|#{1,6}|>)?\s*$/;
+
+function parseBlocks(text: string, detailsLabel: string, embeds: boolean, streaming: boolean): MdBlock[] {
   const lines = text.split("\n");
   const blocks: MdBlock[] = [];
   let para: string[] = [];
@@ -465,10 +476,32 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
       continue;
     }
 
+    // `[embed … /]` is its own block, wherever on the line it starts and
+    // however many lines its attributes run over. A `<details>` that opens
+    // earlier on the line keeps it: its body comes back through here.
+    const detailsStart = line.search(DETAILS_OPEN_RE);
+    const embed = embeds ? findEmbed(lines, i, streaming) : null;
+    if (embed && (detailsStart === -1 || embed.at < detailsStart)) {
+      const before = line.slice(0, embed.at);
+      if (before.trim()) {
+        // The prose before it is scanned as a line of its own, so a bullet or
+        // a heading stays one; a bare marker ("- ") was the card's own and goes.
+        lines.splice(i, 1, ...(LONE_MARKER_RE.test(before) ? [] : [before.trimEnd()]), line.slice(embed.at));
+        i--;
+        continue;
+      }
+      flushPara();
+      blocks.push({ kind: "embed", attrs: embed.attrs });
+      const consumed = lines.slice(i).join("\n").slice(0, embed.at + embed.length);
+      i += consumed.split("\n").length - 1;
+      const after = lines[i].slice(consumed.length - consumed.lastIndexOf("\n") - 1).trimStart();
+      if (embed.attrs && after) lines.splice(i + 1, 0, after);
+      continue;
+    }
+
     // `<details>` is consumed at BLOCK level, like a fence, and for the same
     // reason: its body holds blank lines, lists and code, and splitting on
     // paragraphs first would tear it into pieces with the tags left in them.
-    const detailsStart = line.search(DETAILS_OPEN_RE);
     if (detailsStart !== -1) {
       // Prose can share the line with the tag: keep it in the paragraph it
       // belongs to rather than swallowing it into the disclosure.
@@ -507,25 +540,9 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
       // again — unless it opens another block, in which case it is scanned as
       // a line of its own so that one folds too instead of printing its tags.
       if (after.trim()) {
-        if (DETAILS_OPEN_RE.test(after)) lines.splice(i + 1, 0, after);
+        if (DETAILS_OPEN_RE.test(after) || (embeds && EMBED_OPENER_RE.test(after))) lines.splice(i + 1, 0, after);
         else para.push(after);
       }
-      continue;
-    }
-
-    // `[embed … /]` is its own block, wherever on the line it starts and
-    // however many lines its attributes run over; the prose around it stays.
-    const rest = /\[e/i.test(line) ? lines.slice(i).join("\n") : "";
-    const embed = rest ? findEmbed(line, rest) : null;
-    if (embed) {
-      const before = line.slice(0, embed.at).trimEnd();
-      if (before) para.push(before);
-      flushPara();
-      blocks.push({ kind: "embed", attrs: embed.attrs });
-      const consumed = rest.slice(0, embed.at + embed.length);
-      i += consumed.split("\n").length - 1;
-      const after = lines[i]?.slice(consumed.length - consumed.lastIndexOf("\n") - 1).trimStart() ?? "";
-      if (embed.attrs && after) lines.splice(i + 1, 0, after);
       continue;
     }
 
@@ -543,7 +560,8 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
 
     if (TABLE_ROW_RE.test(line)) {
       const rowLines: string[] = [];
-      while (i < lines.length && TABLE_ROW_RE.test(lines[i])) {
+      // A row holding an `[embed … /]` ends the table and is scanned again.
+      while (i < lines.length && TABLE_ROW_RE.test(lines[i]) && !(rowLines.length && embeds && findEmbed(lines, i, streaming))) {
         rowLines.push(lines[i]);
         i++;
       }
@@ -569,6 +587,8 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
       flushPara();
       const items: { marker: string; text: string }[] = [];
       while (i < lines.length) {
+        // An item holding an `[embed … /]` ends the list and is scanned again.
+        if (items.length && embeds && findEmbed(lines, i, streaming)) break;
         const bullet = lines[i].match(BULLET_RE);
         const ordered = bullet ? null : lines[i].match(ORDERED_RE);
         if (bullet) items.push({ marker: "•", text: bullet[1] });
@@ -607,12 +627,13 @@ function parseBlocks(text: string, detailsLabel: string): MdBlock[] {
  * would make appending a turn reshuffle what is open.
  */
 function DetailsBlock(
-  { summary, body, tableLabel, detailsLabel, embedLabels, spaced }: {
+  { summary, body, tableLabel, detailsLabel, embedLabels, streaming, spaced }: {
     summary: string;
     body: string;
     tableLabel: string;
     detailsLabel: string;
-    embedLabels: EmbedLabels;
+    embedLabels: EmbedLabels | undefined;
+    streaming: boolean;
     spaced: boolean;
   },
 ) {
@@ -642,7 +663,7 @@ function DetailsBlock(
       </button>
       {open && body && (
         <div data-testid="chat-markdown-details-body" className="mt-1 pl-4 border-l border-white/10">
-          {renderText(body, tableLabel, detailsLabel, embedLabels)}
+          {renderText(body, tableLabel, detailsLabel, embedLabels, streaming)}
         </div>
       )}
     </div>
@@ -653,9 +674,20 @@ function DetailsBlock(
  * `tableLabel` names the scroll container a wide table sits in. It arrives from
  * the caller because this module is a pure renderer with no access to `t` —
  * the same way `audioLabel` is handed `t("chat.audioReply")`.
+ *
+ * `embedLabels` turns on OpenClaw's `[embed … /]` (EmbedBlock): only the
+ * assistant's chat bubbles pass them, the surface the shortcode is for.
+ * `streaming` says the text is a reply still arriving, so a half-written
+ * shortcode at its end is held back instead of flashing.
  */
-export function renderText(text: string, tableLabel = "Table", detailsLabel = "Details", embedLabels: EmbedLabels = EMBED_LABELS) {
-  return parseBlocks(text, detailsLabel).map((block, i) => {
+export function renderText(
+  text: string,
+  tableLabel = "Table",
+  detailsLabel = "Details",
+  embedLabels?: EmbedLabels,
+  streaming = false,
+) {
+  return parseBlocks(text, detailsLabel, Boolean(embedLabels), streaming).map((block, i) => {
     // The first block sits flush against the top of the bubble; every later
     // one keeps the spacing its kind had before.
     const spaced = i > 0;
@@ -673,12 +705,13 @@ export function renderText(text: string, tableLabel = "Table", detailsLabel = "D
             tableLabel={tableLabel}
             detailsLabel={detailsLabel}
             embedLabels={embedLabels}
+            streaming={streaming}
             spaced={spaced}
           />
         );
       case "embed":
         // A half-streamed shortcode draws nothing until it is whole.
-        return block.attrs ? <EmbedBlock key={i} attrs={block.attrs} labels={embedLabels} spaced={spaced} /> : null;
+        return block.attrs && embedLabels ? <EmbedBlock key={i} attrs={block.attrs} labels={embedLabels} spaced={spaced} /> : null;
       case "heading":
         return block.level <= 2 ? (
           <h2 key={i} className={`font-bold text-sm ${spaced ? "mt-2.5" : ""} mb-1`}>{renderInline(block.text, `h-${i}`)}</h2>

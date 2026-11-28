@@ -362,7 +362,7 @@ const ChatAppStreamingBubble = memo(function ChatAppStreamingBubble({ text, t }:
             still agree, which is the property that matters; there is no
             `dropUnfinishedDirective` equivalent for media, and the
             mascot chat accepts the same token. */}
-        {renderText(streamingDraftRefsText(streamingEmailRefsText(splitMediaDirectives(text).text)), t("chat.table"), t("chat.detailsSummary"), { play: t("chat.embed.play"), openOnYouTube: t("chat.embed.openOnYouTube"), untitled: t("chat.embed.untitled") })}
+        {renderText(streamingDraftRefsText(streamingEmailRefsText(splitMediaDirectives(text).text)), t("chat.table"), t("chat.detailsSummary"), { play: t("chat.embed.play"), openOnYouTube: t("chat.embed.openOnYouTube"), untitled: t("chat.embed.untitled") }, true)}
         <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
       </div>
     </div>

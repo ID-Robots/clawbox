@@ -16,21 +16,26 @@ export const SPEECH_MAX_CHARS = 1500;
 
 /**
  * OpenClaw's rich-render shortcode, `[embed url="…" title="…" /]` (its
- * reference/rich-output-protocol.md). The same grammar as OpenClaw's own
- * parser: no `]` inside, self-closing, values in double or single quotes.
+ * reference/rich-output-protocol.md): self-closing, values in double or
+ * single quotes. Two alternatives: quoted values first, so a title such as
+ * "Trailer [HD]" still closes the shortcode, then OpenClaw's own looser
+ * `\[embed\s+([^\]]*?)\/\]`. Values are capped in length so a hostile reply
+ * cannot make a match scan the whole text from every opener.
  * Here, not in chat-markdown.tsx, because this file has no imports and is
  * read by the speak route too; the chat renderer takes it from here so the
  * screen and the voice agree on what counts as one.
  */
-export const EMBED_SHORTCODE_RE = /\[embed\s+([^\]]*?)\/\]/gi;
+export const EMBED_SHORTCODE_RE =
+  /\[embed((?:\s+[A-Za-z_][\w-]*\s*=\s*(?:"[^"]{0,2048}"|'[^']{0,2048}'))+)\s*\/\]|\[embed(\s[^\]]{0,2048}?)\/\]/gi;
 
 /**
- * The tail of a reply still streaming that may yet become a shortcode: `[e`
+ * The tail of a reply still STREAMING that may yet become a shortcode: `[e`
  * up to the closing `/`, attribute by attribute. Anything that cannot grow
- * into one ("[embed shortcode] …") does not match and stays text.
+ * into one ("[embed shortcode] …") does not match and stays text. Only the
+ * renderer's streaming pass uses it: a settled reply is never cut.
  */
 export const EMBED_PENDING_RE =
-  /\[(?:e|em|emb|embe|embed(?:\s+[A-Za-z_][\w-]*\s*=\s*(?:"[^"\]]*"|'[^'\]]*'))*(?:\s+(?:[A-Za-z_][\w-]*(?:\s*=\s*(?:"[^"\]]*|'[^'\]]*)?)?)?)?\s*\/?)$/i;
+  /\[(?:e|em|emb|embe|embed(?:\s+[A-Za-z_][\w-]*\s*=\s*(?:"[^"]*"|'[^']*'))*(?:\s+[A-Za-z_][\w-]*(?:\s*=\s*(?:"[^"]*|'[^']*)?)?)?\s*\/?)$/i;
 
 /** A shortcode's attributes, names lower-cased, blank values dropped. */
 export function embedAttributes(raw: string): Record<string, string> {
@@ -42,11 +47,10 @@ export function embedAttributes(raw: string): Record<string, string> {
   return attrs;
 }
 
-/** Text with each shortcode reduced to its title and a half-streamed one dropped. */
+/** Text with each shortcode reduced to its title. */
 export function withoutEmbedShortcodes(text: string): string {
-  return text
-    .replace(EMBED_SHORTCODE_RE, (_m, raw: string) => ` ${embedAttributes(raw).title ?? ""} `)
-    .replace(EMBED_PENDING_RE, " ");
+  return text.replace(EMBED_SHORTCODE_RE, (_m, quoted?: string, loose?: string) =>
+    ` ${embedAttributes(quoted ?? loose ?? "").title ?? ""} `);
 }
 
 export function speechTextFor(markdown: string, maxChars: number = SPEECH_MAX_CHARS): string {

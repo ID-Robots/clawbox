@@ -383,7 +383,7 @@ export const StreamingReplyBubble = memo(function StreamingReplyBubble({ text, t
       }}>
         {/* Lifted out HERE, not on the way into state, so an interrupted
             turn keeps the directive and can still become cards. */}
-        {renderText(streamingDraftRefsText(streamingEmailRefsText(text)), t("chat.table"), t("chat.detailsSummary"), { play: t("chat.embed.play"), openOnYouTube: t("chat.embed.openOnYouTube"), untitled: t("chat.embed.untitled") })}
+        {renderText(streamingDraftRefsText(streamingEmailRefsText(text)), t("chat.table"), t("chat.detailsSummary"), { play: t("chat.embed.play"), openOnYouTube: t("chat.embed.openOnYouTube"), untitled: t("chat.embed.untitled") }, true)}
         <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
         <style>{`@keyframes blink { 50% { opacity: 0 } }`}</style>
       </div>

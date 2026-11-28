@@ -15,8 +15,10 @@ import { shortSpeechTextFor } from "@/lib/short-speech-text";
 
 const ID = "dQw4w9WgXcQ";
 
-function bubble(text: string) {
-  return render(<div data-testid="bubble">{renderText(text)}</div>);
+const LABELS = { play: "Play", openOnYouTube: "Open on YouTube", untitled: "Embedded content" };
+
+function bubble(text: string, streaming = false) {
+  return render(<div data-testid="bubble">{renderText(text, "Table", "Details", LABELS, streaming)}</div>);
 }
 
 function playerSrc(text: string): string | null {
@@ -172,12 +174,69 @@ describe("embed shortcode: while streaming", () => {
     const full = `Here you go: [embed url="https://www.youtube.com/watch?v=${ID}" title="Trailer" /]`;
     // Every prefix the stream can deliver, from "[e" to the closing "/".
     for (let end = full.indexOf("[e") + 2; end < full.length; end++) {
-      const { container, unmount } = bubble(full.slice(0, end));
+      const { container, unmount } = bubble(full.slice(0, end), true);
       expect(container.textContent, full.slice(0, end)).toBe("Here you go:");
       unmount();
     }
-    bubble(full);
+    bubble(full, true);
     expect(screen.getByTestId("chat-embed-youtube")).toBeInTheDocument();
+  });
+
+  it("never cuts the end of a settled reply", () => {
+    const { container } = bubble("To show a video, type [embed");
+    expect(container.textContent).toBe("To show a video, type [embed");
+  });
+});
+
+describe("embed shortcode: inside other blocks", () => {
+  const shortcode = `[embed url="https://youtu.be/${ID}" title="Demo" /]`;
+
+  it("lifts it out of a list, a table and a <details> without leaving it raw", () => {
+    for (const text of [
+      `- Intro\n- ${shortcode}\n- Outro`,
+      `1. Watch: ${shortcode}`,
+      `| a | b |\n|---|---|\n| 1 | ${shortcode} |`,
+      `${shortcode} <details><summary>More</summary>body</details>`,
+      `<details><summary>More</summary>body</details> ${shortcode}`,
+      `Press \` to start ${shortcode}`,
+    ]) {
+      const { container, unmount } = bubble(text);
+      expect(screen.getAllByTestId("chat-embed-youtube"), text).toHaveLength(1);
+      expect(container.textContent, text).not.toContain("[embed");
+      expect(container.textContent, text).not.toContain("/]");
+      unmount();
+    }
+    const { container } = bubble(`- Intro\n- ${shortcode}\n- Outro`);
+    expect(container.textContent).toContain("Intro");
+    expect(container.textContent).toContain("Outro");
+    expect(container.textContent).not.toMatch(/^-|\n-/);
+  });
+
+  it("draws one inside a disclosure once it is opened", () => {
+    bubble(`<details><summary>Video</summary>\n${shortcode}\n</details>`);
+    fireEvent.click(screen.getByTestId("chat-markdown-details-toggle"));
+    expect(screen.getByTestId("chat-markdown-details-body").textContent).not.toContain("[embed");
+    expect(screen.getByTestId("chat-embed-youtube")).toBeInTheDocument();
+  });
+
+  it("closes over a title that holds brackets", () => {
+    const { container } = bubble(`[embed url="https://youtu.be/${ID}" title="Trailer [HD]" /]`);
+    expect(screen.getByTestId("chat-embed-youtube")).toHaveTextContent("Trailer [HD]");
+    expect(container.textContent).not.toContain("[embed");
+  });
+
+  it("leaves renderText callers outside the chat as they were", () => {
+    const { container } = render(<div>{renderText(shortcode)}</div>);
+    expect(container.textContent).toBe(shortcode);
+  });
+
+  it("stays fast on a hostile reply", () => {
+    const hostile = `[embed${" ".repeat(50_000)}x [embed url="${"a".repeat(50_000)}`;
+    const t0 = performance.now();
+    bubble(hostile, true);
+    speechTextFor(hostile);
+    plainTextForLabel(hostile);
+    expect(performance.now() - t0).toBeLessThan(1500);
   });
 });
 
@@ -187,13 +246,11 @@ describe("embed shortcode: what is read aloud", () => {
   it("leaves only the title in the accessible label", () => {
     expect(plainTextForLabel(reply)).toBe("Here is the trailer: Trailer Enjoy.");
     expect(plainTextForLabel(`Done. [embed ref="cv_1" /]`)).toBe("Done.");
-    expect(plainTextForLabel(`Done. [embed url="https://www.you`)).toBe("Done.");
   });
 
   it("leaves only the title in what the voice says", () => {
     expect(speechTextFor(reply)).toBe("Here is the trailer: Trailer Enjoy.");
     expect(speechTextFor(`Done.\n[embed ref="cv_1" height="320" /]`)).toBe("Done.");
-    expect(speechTextFor(`Done. [embed url="https://www.you`)).toBe("Done.");
     expect(shortSpeechTextFor(reply)).not.toContain("embed");
   });
 });
