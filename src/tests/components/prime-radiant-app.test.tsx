@@ -526,6 +526,18 @@ describe("PrimeRadiantApp", () => {
     expect(calls.some((c) => c.url === "/setup-api/prime-radiant/graph")).toBe(true);
   });
 
+  it("steps the header, the tabs and the footer aside in the Map's focus mode, and Escape brings them back", async () => {
+    await mount();
+    const focus = await screen.findByTestId("prime-radiant-map-focus");
+    const chrome = () => [screen.getByTestId("prime-radiant-subtitle"), screen.getByTestId("prime-radiant-tab-map"), screen.getByTestId("prime-radiant-refresh")];
+    chrome().forEach((el) => expect(el).toBeVisible());
+    fireEvent.click(focus);
+    chrome().forEach((el) => expect(el).not.toBeVisible());
+    expect(focus).toBeVisible();
+    fireEvent.keyDown(focus, { key: "Escape" });
+    chrome().forEach((el) => expect(el).toBeVisible());
+  });
+
   it("has six tabs: Map, Pages, Review, Questions, Add and Settings", async () => {
     await mount();
     await screen.findByTestId("prime-radiant-tab-map");

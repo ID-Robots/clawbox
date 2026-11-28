@@ -40,6 +40,8 @@ export interface MapViewEvents {
   onFrame(): void;
   onCommunities(communities: Int32Array, insights: GraphInsights): void;
   onSettled(settled: boolean): void;
+  /** The owner took the wheel while the map was turning: the turn stopped. */
+  onSpinStopped(): void;
   onContextLost(): void;
   /** The layout cannot run at all (its code failed to load): no positions will come. */
   onLayoutFailed(): void;
@@ -329,8 +331,15 @@ export class MapView {
 
   /** The owner took the wheel: no more turning or reframing on our own. */
   interact(): void {
+    if (this.spin) this.events.onSpinStopped();
     this.spin = false;
     this.fitting = false;
+  }
+
+  /** The slow turn on or off (the Map's rotation button). The flat view never turns. */
+  setSpin(on: boolean): void {
+    this.spin = on && this.kind === "webgl";
+    this.invalidate();
   }
 
   /** Frame the whole graph again. */

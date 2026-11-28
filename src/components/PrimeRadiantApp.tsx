@@ -108,6 +108,8 @@ export default function PrimeRadiantApp() {
   const [browsePage, setBrowsePage] = useState<string | null>(null);
   /** Bumped by anything that changed the vault, so every tab re-reads. */
   const [revision, setRevision] = useState(0);
+  /** The Map's focus mode: the graph takes the window, so the header, the tabs and the footer step aside. */
+  const [mapFocus, setMapFocus] = useState(false);
   /**
    * The one `POST init` this window makes, shared by every read that finds
    * the vault missing: a remount (React's development double-mount, a window
@@ -297,6 +299,8 @@ export default function PrimeRadiantApp() {
     else if (at.right > strip.right) el.scrollLeft += at.right - strip.right + 12;
   }, [tab, ready]);
 
+  const focused = mapFocus && tab === "map";
+
   return (
     <div
       className={`h-full flex flex-col ${APP_GROUND} text-white overflow-hidden @container`}
@@ -304,7 +308,7 @@ export default function PrimeRadiantApp() {
       data-help-bounds
     >
       {/* On a phone the counts drop under the title and wrap, rather than being cut at the window's edge. */}
-      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-5 pt-4 pb-3 border-b border-white/[0.06]">
+      <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-5 pt-4 pb-3 border-b border-white/[0.06]" hidden={focused}>
         <div className="flex items-center gap-2 min-w-0">
           <PrimeRadiantIcon className="w-5 h-5 shrink-0" />
           <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{PRODUCT_NAME}</h1>
@@ -345,6 +349,7 @@ export default function PrimeRadiantApp() {
           ref={tabStrip}
           onScroll={measureTabStrip}
           className="flex gap-1 px-3 py-2 border-b border-white/[0.06] overflow-x-auto"
+          hidden={focused}
           role="tablist"
           aria-label={t("primeRadiant.tabsLabel")}
           data-overflow={[tabOverflow.left && "left", tabOverflow.right && "right"].filter(Boolean).join(" ") || undefined}
@@ -373,7 +378,7 @@ export default function PrimeRadiantApp() {
       )}
 
       <main
-        className={`flex-1 min-h-0 px-5 py-4 ${ready && tab === "map" ? "overflow-hidden flex flex-col" : "overflow-y-auto"}`}
+        className={`flex-1 min-h-0 ${focused ? "p-2" : "px-5 py-4"} ${ready && tab === "map" ? "overflow-hidden flex flex-col" : "overflow-y-auto"}`}
         role={ready ? "tabpanel" : undefined}
       >
         {error && phase === "ready" && (
@@ -436,7 +441,7 @@ export default function PrimeRadiantApp() {
                     </p>
                   }
                 >
-                  <PrimeRadiantMap revision={revision} onOpenPage={openFromMap} onIngest={toIngest} />
+                  <PrimeRadiantMap revision={revision} onOpenPage={openFromMap} onIngest={toIngest} focusMode={mapFocus} onFocusModeChange={setMapFocus} />
                 </Suspense>
               </div>
             )}
@@ -489,7 +494,7 @@ export default function PrimeRadiantApp() {
         )}
       </main>
       {ready && (
-        <footer className="px-5 py-2 border-t border-white/[0.06] text-[11px] text-[var(--text-muted)] flex items-center justify-between gap-2">
+        <footer className="px-5 py-2 border-t border-white/[0.06] text-[11px] text-[var(--text-muted)] flex items-center justify-between gap-2" hidden={focused}>
           <span className="truncate">
             {status?.lint.ok ? t("primeRadiant.lintOk") : t("primeRadiant.lintIssues", { errors: status?.lint.errors ?? 0, warnings: status?.lint.warnings ?? 0 })}
           </span>
