@@ -1,7 +1,8 @@
 /**
  * /setup-api/prime-radiant/settings — every Prime Radiant setting in one place.
  *
- * GET → `{ settings, defaults, limits, nightly: { nextRunAt }, rates }`: the
+ * GET → `{ settings, defaults, limits, nightly: { nextRunAt }, rates, memory }`
+ * (`memory`: what each `inMemory` switch holds right now, bytes, about): the
  * settings in force (the file's valid sections over the defaults — ingest
  * exclude list, parallelism and nightly folders; cost-rate overrides; the
  * nightly schedule; the contradiction pass; the search index's size limit;
@@ -16,7 +17,8 @@
  * folders follow the folder picker's rule (404 `folder_not_found`, 400
  * `folder_refused`, with `index`). The nightly timer is re-armed after a save,
  * and a changed `search.indexLimitMb` queues a whole-vault index run that
- * fills or trims the index to it.
+ * fills or trims the index to it. An `inMemory` switch turned off frees its
+ * memory before the answer; one turned on loads in the background.
  * The owner (cookie AND same origin), or the assistant through the MCP bearer
  * — whose tool asks for the owner's word first — except the cost rates, which
  * decide what the nightly spending caps measure, and `verification.outbound`, whether the assistant may message the owners at
@@ -50,6 +52,8 @@ import {
   SettingsError,
   writeSettings,
 } from "@/lib/prime-radiant/settings";
+import type { InMemorySettings } from "@/lib/prime-radiant/settings";
+import { heldPageBytes, readVaultSnapshot, releaseHeldPages, vaultInitialised } from "@/lib/prime-radiant/vault";
 
 export const dynamic = "force-dynamic";
 
@@ -69,14 +73,37 @@ const LIMITS = {
   summariesCapUsd: { min: 0, max: MAX_SUMMARIES_CAP_USD },
 };
 
-function answer() {
-  return { settings: readSettings(), defaults: defaultSettings(), limits: LIMITS, nightly: { nextRunAt: nextRunAtMs() }, rates: effectiveCostRates() };
+async function answer() {
+  return { settings: readSettings(), defaults: defaultSettings(), limits: LIMITS, nightly: { nextRunAt: nextRunAtMs() }, rates: effectiveCostRates(), memory: await heldMemory() };
+}
+
+/**
+ * What each `inMemory` switch holds right now, in bytes (about). The vectors
+ * count only while their switch is on (off, what a search loaded is search's
+ * own ten-minute cache), and only then is the search index's module loaded.
+ */
+async function heldMemory(): Promise<{ pages: number; pageBodies: number; searchVectors: number }> {
+  const vectors = readSettings().inMemory.searchVectors
+    ? await import("@/lib/prime-radiant/shard-index").then((m) => m.heldVectorBytes()).catch(() => 0)
+    : 0;
+  return { ...heldPageBytes(), searchVectors: vectors };
+}
+
+/** A switch turned off frees its memory before the answer; one turned on fills it in the background, so the next read is already quick. */
+async function followInMemory(before: InMemorySettings, after: InMemorySettings): Promise<void> {
+  releaseHeldPages(after);
+  if (before.searchVectors && !after.searchVectors) await import("@/lib/prime-radiant/shard-index").then((m) => m.releaseVaultVectors());
+  const warn = (err: unknown) => console.warn(`[prime-radiant] could not load into memory yet: ${err instanceof Error ? err.message : String(err)}`);
+  if ((after.pages && !before.pages) || (after.pageBodies && !before.pageBodies)) {
+    void vaultInitialised().then((ready) => (ready ? readVaultSnapshot() : null)).catch(warn);
+  }
+  if (after.searchVectors && !before.searchVectors) void import("@/lib/prime-radiant/shard-index").then((m) => m.loadVaultVectors()).catch(warn);
 }
 
 export async function GET(req: Request) {
   const denied = await requireSession(req);
   if (denied) return denied;
-  return json(answer());
+  return json(await answer());
 }
 
 export async function PUT(req: Request) {
@@ -112,6 +139,7 @@ export async function PUT(req: Request) {
     patch = { ...patch, ingest: { ...patch.ingest, folders: resolved } };
   }
   const limitBefore = readSettings().search.indexLimitMb;
+  const inMemoryBefore = readSettings().inMemory;
   let saved;
   try {
     saved = writeSettings(patch);
@@ -127,5 +155,6 @@ export async function PUT(req: Request) {
       console.warn(`[prime-radiant] the search index did not follow its new size limit yet: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
-  return json(answer());
+  await followInMemory(inMemoryBefore, saved.inMemory).catch(() => undefined);
+  return json(await answer());
 }

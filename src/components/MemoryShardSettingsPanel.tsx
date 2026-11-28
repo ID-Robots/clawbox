@@ -41,13 +41,14 @@ const CONFIRM_MS = 5_000;
  * built from the same tokens, and lifting one into a shared kit is a change
  * that has to own both files.
  */
-function Switch({ checked, busy, disabled, label, onChange }: {
+function Switch({ checked, busy, disabled, label, onChange, testId = "memory-shard-switch" }: {
   checked: boolean;
   busy: boolean;
   /** Held for a reason other than a write in flight — today, the paid plan. */
   disabled: boolean;
   label: string;
   onChange: (next: boolean) => void;
+  testId?: string;
 }) {
   return (
     <div className="flex items-center gap-2 shrink-0">
@@ -71,7 +72,7 @@ function Switch({ checked, busy, disabled, label, onChange }: {
         aria-busy={busy}
         disabled={busy || disabled}
         onClick={() => onChange(!checked)}
-        data-testid="memory-shard-switch"
+        data-testid={testId}
         className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
           checked ? "bg-[var(--coral-bright)]" : "bg-gray-600"
         }`}
@@ -212,6 +213,9 @@ export default function MemoryShardSettingsPanel({ state, onChanged, onReset }: 
           this box — beside the switch that governs whether it is built. */}
       <MemoryShardEmbedderCard />
 
+      {/* Whether the index is kept in the system's memory, beside where it is embedded. */}
+      <IndexInRamCard />
+
       {/* Which of the owner's own documents the box reads is the other half
           of the consent the switch above gives, so it sits beside it — before
           this card the folders lived only in the wizard's first step, and once
@@ -262,6 +266,107 @@ export default function MemoryShardSettingsPanel({ state, onChanged, onReset }: 
           {resetError && <p className="basis-full mt-2 text-[11px] text-red-400" role="alert">{resetError}</p>}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** What `clawkeep/memory/ram` answers (src/lib/memory-shard-ram.ts). */
+interface IndexInRam {
+  on: boolean;
+  bytes: number;
+  availableBytes: number | null;
+  stopped: { reason: "too_big" | "memory_unknown"; bytes: number; availableBytes: number | null; at: string } | null;
+}
+
+function sizeText(bytes: number | null, locale: string): string {
+  const mb = (bytes ?? 0) / 1_048_576;
+  const fmt = (n: number) => new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(n);
+  return mb >= 1024 ? `${fmt(mb / 1024)} GB` : `${fmt(mb)} MB`;
+}
+
+/**
+ * "Keep the index in RAM": off by default. On, the box reads the index files
+ * through every two minutes at the lowest priority so the system keeps them
+ * in memory. What the switch shows is what the route answered, as above.
+ * Hidden on a server from before the setting (no route).
+ */
+function IndexInRamCard() {
+  const { t, locale } = useT();
+  const [state, setState] = useState<IndexInRam | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    fetch("/setup-api/clawkeep/memory/ram")
+      .then((res) => (res.ok ? (res.json() as Promise<IndexInRam>) : null))
+      .then((body) => { if (live && body && typeof body.on === "boolean") setState(body); })
+      .catch(() => undefined);
+    return () => { live = false; };
+  }, []);
+
+  if (!state) return null;
+
+  const save = async (on: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/clawkeep/memory/ram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ on }),
+      });
+      const body = await res.json().catch(() => null) as (IndexInRam & { code?: string }) | null;
+      if (res.status === 409 && body && typeof body.on === "boolean") {
+        setState(body);
+        setError(body.code === "too_big"
+          ? t("clawkeep.memory.ram.refusedTooBig", { size: sizeText(body.bytes, locale), free: sizeText(body.availableBytes, locale) })
+          : t("clawkeep.memory.ram.refusedUnknown"));
+        return;
+      }
+      if (!res.ok || !body || typeof body.on !== "boolean") throw new Error("ram");
+      setState(body);
+    } catch {
+      setError(t("clawkeep.memory.ram.failed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className={CARD} data-testid="memory-shard-ram-card">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">memory</span>
+            <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+              {t("clawkeep.memory.ram.title")}
+            </span>
+          </div>
+          <p className="text-[11px] text-[var(--text-muted)] mt-1 leading-relaxed">{t("clawkeep.memory.ram.hint")}</p>
+        </div>
+        <Switch
+          checked={state.on}
+          busy={busy}
+          disabled={false}
+          label={t("clawkeep.memory.ram.title")}
+          onChange={(next) => void save(next)}
+          testId="memory-shard-ram-switch"
+        />
+      </div>
+      {state.on && (
+        <p className="text-[11px] text-[var(--text-secondary)] mt-3" data-testid="memory-shard-ram-holds">
+          {t("clawkeep.memory.ram.holds", { size: sizeText(state.bytes, locale) })}
+        </p>
+      )}
+      {!state.on && state.stopped && !error && (
+        <p className="text-[11px] text-amber-400 mt-3 leading-relaxed" data-testid="memory-shard-ram-stopped">
+          {state.stopped.reason === "too_big"
+            ? t("clawkeep.memory.ram.stoppedTooBig", { size: sizeText(state.stopped.bytes, locale), free: sizeText(state.stopped.availableBytes, locale) })
+            : t("clawkeep.memory.ram.stoppedUnknown")}
+        </p>
+      )}
+      {error && <StatusMessage type="error" message={error} />}
     </div>
   );
 }

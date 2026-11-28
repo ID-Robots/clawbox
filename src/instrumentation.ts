@@ -822,6 +822,17 @@ export async function register() {
     console.error('[instrumentation] Could not load memory index scheduler:', err instanceof Error ? err.message : err)
   }
   try {
+    // "Keep the Memory Shard index in RAM", when it was left on: the reading
+    // runs in a low-priority child, never here (src/lib/memory-shard-ram.ts).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const memoryShardRam = require('./lib/memory-shard-ram')
+    void memoryShardRam.startIndexInRamIfOn().catch((err: unknown) => {
+      console.error('[instrumentation] Memory index RAM warm-up boot failed:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not load the memory index RAM warm-up:', err instanceof Error ? err.message : err)
+  }
+  try {
     // Prime Radiant's nightly pass, armed from its own settings file the same
     // way. Arming is a timer only: a box whose vault was never created skips
     // the slot when it fires, and nothing is created at boot.

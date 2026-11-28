@@ -80,6 +80,7 @@ import { isKnowledgePage, safePagePath, vaultDir } from "./paths";
 import { readRecordFrontmatter } from "./records";
 import { redactText } from "./redact";
 import { searchIndexLimitBytes } from "./settings";
+import { readInMemorySettings } from "./settings";
 import { stripRecordBlock } from "./structure";
 import { vaultInitialised } from "./vault";
 import type { PageFrontmatter } from "./schema";
@@ -1033,6 +1034,8 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       }
     });
     if (wrote) dropVectorCache(vaultIndexPathFor(vault));
+    // inMemory.searchVectors: the new vectors loaded again now, not by the next search.
+    if (wrote && vectorsKeptLoaded()) void loadVaultVectors(vault).catch(() => undefined);
     return {
       mode: full ? "full" : "incremental",
       indexed,
@@ -1273,7 +1276,8 @@ function loadVectors(db: DatabaseSync, file: string): VectorCache | null {
   const stamp = metaGet(db, "generation") ?? "0";
   const arm = () => {
     if (slot.timer) clearTimeout(slot.timer);
-    slot.timer = setTimeout(() => dropVectorCache(file), VECTOR_CACHE_IDLE_MS);
+    // inMemory.searchVectors: kept loaded while it is on, never dropped when search is idle.
+    slot.timer = setTimeout(() => (vectorsKeptLoaded() ? arm() : dropVectorCache(file)), VECTOR_CACHE_IDLE_MS);
     slot.timer.unref?.();
   };
   if (slot.cache?.stamp === stamp) {
@@ -1319,6 +1323,48 @@ function loadVectors(db: DatabaseSync, file: string): VectorCache | null {
   };
   arm();
   return slot.cache;
+}
+
+// ── inMemory.searchVectors ──────────────────────────────────────────────────
+
+function vectorsKeptLoaded(): boolean {
+  try {
+    return readInMemorySettings().searchVectors;
+  } catch {
+    return false;
+  }
+}
+
+/** What the loaded search vectors take right now, in bytes: every buffer a loaded store holds, and its row ids. */
+export function heldVectorBytes(): number {
+  const slots = processStore("prime-radiant:shard-index-vectors", () => new Map<string, CacheSlot>());
+  let bytes = 0;
+  for (const { cache } of slots.values()) {
+    if (!cache) continue;
+    for (const a of [cache.codes, cache.scales, cache.verified, cache.lift]) bytes += a.buffer.byteLength;
+    bytes += 8 * cache.ids.length + 40 * (cache.rowOf?.size ?? 0);
+  }
+  return bytes;
+}
+
+/** The switch went off: the loaded vectors are dropped at once (the next search loads them again, and drops them when idle as before). */
+export function releaseVaultVectors(): void {
+  const slots = processStore("prime-radiant:shard-index-vectors", () => new Map<string, CacheSlot>());
+  for (const file of slots.keys()) dropVectorCache(file);
+}
+
+/** The switch went on (or an index run wrote): load the vault's vectors now, so a search does not wait for them. Nothing when search is off or there is no usable index. */
+export async function loadVaultVectors(vault: string = vaultDir()): Promise<void> {
+  if (!(await vaultIndexingAllowed(vault))) return;
+  const file = vaultIndexPathFor(vault);
+  const db = await openForRead(file);
+  if (!db) return;
+  try {
+    if (metaGet(db, "identity") !== storeIdentity(await resolveMemoryEmbedder(), vault)) return;
+    loadVectors(db, file);
+  } finally {
+    db.close();
+  }
 }
 
 /**

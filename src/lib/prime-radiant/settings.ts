@@ -169,6 +169,21 @@ export interface VerificationSettings {
   languages: OwnerLanguage[];
 }
 
+/**
+ * What the web server may keep in memory, each switch on its own and all off
+ * by default — off is exactly the behaviour and memory use without them. A
+ * switch turned on works from the next read, no restart; one turned off has
+ * its memory freed at once (the settings route; every read frees it too).
+ */
+export interface InMemorySettings {
+  /** Parsed page headers and claims (vault.ts): a read parses again only the pages whose frontmatter changed. */
+  pages: boolean;
+  /** Page text too (vault.ts): a read reads again only the files that changed. */
+  pageBodies: boolean;
+  /** The search vectors stay loaded (shard-index.ts), never dropped when search is idle. */
+  searchVectors: boolean;
+}
+
 export interface PrimeRadiantSettings {
   ingest: IngestSettings;
   /** The owner's rate overrides, model by model (empty = the defaults). */
@@ -181,6 +196,7 @@ export interface PrimeRadiantSettings {
   domains: DomainSetting[];
   golden: GoldenSettings;
   verification: VerificationSettings;
+  inMemory: InMemorySettings;
 }
 
 export function defaultSettings(): PrimeRadiantSettings {
@@ -195,6 +211,7 @@ export function defaultSettings(): PrimeRadiantSettings {
     domains: [],
     golden: { enabled: true, maxQuestions: DEFAULT_GOLDEN_MAX_QUESTIONS },
     verification: { perOwner: DEFAULT_DAILY_PER_OWNER, outbound: false, languages: [] },
+    inMemory: { pages: false, pageBodies: false, searchVectors: false },
   };
 }
 
@@ -335,6 +352,11 @@ const FIELDS = {
         : { ok: false, error: `summaries.maxPages must be a whole number from 0 to ${MAX_SUMMARIES_MAX_PAGES}.` },
     capUsd: (v: unknown) => readNumber(v, 0, MAX_SUMMARIES_CAP_USD, "summaries.capUsd"),
   },
+  inMemory: {
+    pages: (v: unknown) => readBool(v, "inMemory.pages"),
+    pageBodies: (v: unknown) => readBool(v, "inMemory.pageBodies"),
+    searchVectors: (v: unknown) => readBool(v, "inMemory.searchVectors"),
+  },
 } as const;
 
 type SectionName = keyof typeof FIELDS;
@@ -390,6 +412,28 @@ export function readSettings(root: string = primeRadiantRoot()): PrimeRadiantSet
   return out;
 }
 
+/** The `inMemory` switches last read, and the settings file they were read from. */
+let inMemoryRead: { key: string; value: InMemorySettings } | null = null;
+
+/**
+ * `inMemory` as {@link readSettings} answers it, read again only when the
+ * settings file changed (its size, times or inode): vault.ts asks on every
+ * page read. A file written in the last 2 s is read again every time, since a
+ * second write within the same timestamp tick could leave all of those as
+ * they were.
+ */
+export function readInMemorySettings(root: string = primeRadiantRoot()): InMemorySettings {
+  let key: string | null;
+  try {
+    const st = fs.statSync(settingsPath(root));
+    key = Date.now() - Math.max(st.mtimeMs, st.ctimeMs) < 2_000 ? null : `${root}\0${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.ino}`;
+  } catch {
+    key = `${root}\0-`;
+  }
+  if (key === null || inMemoryRead?.key !== key) inMemoryRead = { key: key ?? "", value: readSettings(root).inMemory };
+  return inMemoryRead.value;
+}
+
 /** The cost rates in force: defaults with the owner's overrides. */
 export function effectiveCostRates(root: string = primeRadiantRoot()): CostRates {
   return mergeCostRates(readSettings(root).costRates);
@@ -406,6 +450,7 @@ export interface SettingsPatch {
   domains?: unknown;
   golden?: { enabled?: unknown; maxQuestions?: unknown } | null;
   verification?: { perOwner?: unknown; outbound?: unknown; languages?: unknown } | null;
+  inMemory?: { pages?: unknown; pageBodies?: unknown; searchVectors?: unknown } | null;
 }
 
 /** The keys a patch may carry, per section — anything else is refused, never stored. */
@@ -418,6 +463,7 @@ const PATCH_KEYS: Readonly<Record<string, readonly string[]>> = {
   verification: Object.keys(FIELDS.verification),
   structure: Object.keys(FIELDS.structure),
   summaries: Object.keys(FIELDS.summaries),
+  inMemory: Object.keys(FIELDS.inMemory),
 };
 
 /** The vault search index's size limit in force, in bytes (shard-index.ts reads it at every run). */

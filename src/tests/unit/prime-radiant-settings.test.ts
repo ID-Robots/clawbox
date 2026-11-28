@@ -32,6 +32,7 @@ import {
   SettingsError,
   defaultSettings,
   effectiveCostRates,
+  readInMemorySettings,
   readSettings,
   readSettingsPatch,
   searchIndexLimitBytes,
@@ -271,6 +272,43 @@ describe("exclude-list migration", () => {
     // The earlier list is a frozen record: today's grew from it.
     for (const p of previous) expect(DEFAULT_INGEST_EXCLUDES).toContain(p);
     expect(Object.isFrozen(previous)).toBe(true);
+  });
+});
+
+describe("what is kept in memory (inMemory)", () => {
+  const off = { pages: false, pageBodies: false, searchVectors: false };
+
+  it("is all off by default, each switch stored on its own, read back and reset", () => {
+    expect(defaultSettings().inMemory).toEqual(off);
+    expect(readSettings().inMemory).toEqual(off);
+    expect(writeSettings({ inMemory: { pages: true } }).inMemory).toEqual({ ...off, pages: true });
+    expect(writeSettings({ inMemory: { searchVectors: true } }).inMemory).toEqual({ ...off, pages: true, searchVectors: true });
+    expect(JSON.parse(fs.readFileSync(settingsPath(), "utf8")).inMemory).toEqual({ pages: true, searchVectors: true });
+    expect(writeSettings({ inMemory: { pages: null } }).inMemory).toEqual({ ...off, searchVectors: true });
+    expect(writeSettings({ inMemory: null }).inMemory).toEqual(off);
+  });
+
+  it("refuses a value that is not true or false, or a key it does not know, and reads a bad stored value as off", () => {
+    expect(() => writeSettings({ inMemory: { pageBodies: "yes" } })).toThrow(/inMemory.pageBodies must be true or false/);
+    expect(() => readSettingsPatch({ inMemory: { everything: true } })).toThrow(/Unknown setting: inMemory.everything/);
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(settingsPath(), JSON.stringify({ inMemory: { pages: 1, pageBodies: true } }));
+    expect(readSettings().inMemory).toEqual({ ...off, pageBodies: true });
+  });
+
+  it("is read again by readInMemorySettings as soon as the file changes", () => {
+    expect(readInMemorySettings()).toEqual(off);
+    writeSettings({ inMemory: { pages: true } });
+    expect(readInMemorySettings().pages).toBe(true);
+    // A settled file is answered from the last read until it changes.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 10_000 });
+    try {
+      expect(readInMemorySettings().pages).toBe(true);
+      writeSettings({ inMemory: { pages: false } });
+      expect(readInMemorySettings().pages).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

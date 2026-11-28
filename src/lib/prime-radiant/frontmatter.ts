@@ -51,23 +51,33 @@ export type ParsedPage =
  */
 export function parsePage(text: string): ParsedPage {
   const { yamlText, body: rawBody } = splitFrontmatter(text);
-  const body = stripManagedBlocks(rawBody).text;
-  if (yamlText === null) {
-    return { ok: false, errors: [{ field: "", message: "no frontmatter block" }], body, raw: null };
-  }
+  return withBody(parseHead(yamlText), stripManagedBlocks(rawBody).text);
+}
+
+/** A page's parse without its body: what the YAML text alone decides (vault.ts keeps it in memory under `inMemory.pages`). */
+export type ParsedHead = { ok: true; frontmatter: PageFrontmatter } | { ok: false; errors: SchemaError[]; raw: unknown };
+
+/** Parse and validate the YAML between a page's fences (null: the page has none). Never throws. */
+export function parseHead(yamlText: string | null): ParsedHead {
+  if (yamlText === null) return { ok: false, errors: [{ field: "", message: "no frontmatter block" }], raw: null };
   if (Buffer.byteLength(yamlText, "utf8") > MAX_FRONTMATTER_BYTES) {
-    return { ok: false, errors: [{ field: "", message: "frontmatter is too large" }], body, raw: null };
+    return { ok: false, errors: [{ field: "", message: "frontmatter is too large" }], raw: null };
   }
   let raw: unknown;
   try {
     raw = yaml.load(yamlText, { schema: yaml.CORE_SCHEMA, json: false });
   } catch (err) {
     const reason = err instanceof Error ? err.message.split("\n")[0] : "unreadable";
-    return { ok: false, errors: [{ field: "", message: `YAML: ${reason}` }], body, raw: null };
+    return { ok: false, errors: [{ field: "", message: `YAML: ${reason}` }], raw: null };
   }
   const result = validateFrontmatter(raw);
-  if (!result.ok) return { ok: false, errors: result.errors, body, raw };
-  return { ok: true, frontmatter: result.frontmatter, body };
+  if (!result.ok) return { ok: false, errors: result.errors, raw };
+  return { ok: true, frontmatter: result.frontmatter };
+}
+
+/** {@link parsePage}'s answer from a head and the body (managed blocks already out), in its own key order. */
+export function withBody(head: ParsedHead, body: string): ParsedPage {
+  return head.ok ? { ok: true, frontmatter: head.frontmatter, body } : { ok: false, errors: head.errors, body, raw: head.raw };
 }
 
 function ordered(fm: PageFrontmatter): Record<string, unknown> {

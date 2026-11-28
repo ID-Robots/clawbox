@@ -1286,7 +1286,12 @@ OpenClaw gateway's busy sessions).
 `memory_shard_reindex`, `memory_shard_reindex_stop`, `memory_shard_sources_list`
 / `_add` / `_remove`, `memory_shard_schedule_get` / `_set`,
 `memory_shard_provider_get` / `_set`, `memory_shard_enable`,
-`memory_shard_reset` (both editions)
+`memory_shard_reset`, `memory_shard_ram_get` / `_set` (both editions)
+
+`memory_shard_ram_get` / `_set` read and switch "Keep the index in RAM"
+(`GET`/`POST /setup-api/clawkeep/memory/ram`, off by default): the index size
+and free memory in MB, and why it switched itself off when it did; switching on
+over half of the free memory is refused (`too_big`, nothing written).
 
 `memory_shard_status` reads `GET /setup-api/clawkeep/memory` — the same status
 the Memory Shard app draws: switched on, set up, the paid-plan gate, health,
@@ -1435,7 +1440,7 @@ owner when it touches a verified page.
 | Questions: an owner's daily questions, in their language | `GET daily?owner=` | `prime_radiant_daily_questions` (sending stays off until the owner turns it on; answers go back through `prime_radiant_claim_verify`, `prime_radiant_review_resolve` and `prime_radiant_page_edit`; a review item with no claim to verify carries `fix_first`: the page is put right, then the item dismissed; a page still current is answered with the `recheck_after` its type gives it from today, or `by_type` for a type never re-checked) |
 | Settings: Run now / Merge a held night | `POST nightly/run` / `POST nightly/run { merge }` | `prime_radiant_nightly_run` / `prime_radiant_nightly_merge` |
 | — run the connect pass | `POST maintenance { action: "connect" }` | `prime_radiant_connect_run` |
-| Settings: Save (schedule, contradictions, domains and owners, exclude list, parallel, skip code projects, nightly folders); Questions → Question settings (golden check on/off + nightly cap, daily questions per owner) and Daily questions (owners' languages) | `PUT settings` | `prime_radiant_settings_update` |
+| Settings: Save (schedule, contradictions, domains and owners, exclude list, parallel, skip code projects, nightly folders, Memory switches); Questions → Question settings (golden check on/off + nightly cap, daily questions per owner) and Daily questions (owners' languages) | `PUT settings` | `prime_radiant_settings_update` |
 
 The route refusals become instructions (`NEXT` in the module): `owner_only` says
 it is the owner's and not to retry, `not_initialised` sends the agent to

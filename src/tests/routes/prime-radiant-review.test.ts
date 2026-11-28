@@ -329,7 +329,7 @@ describe("history, diff, revert", () => {
 describe("settings", () => {
   it("exposes every section, saves a patch, validates folders and refuses a bad field whole", async () => {
     const get = await (await settingsGET(req("GET", "/settings"))).json();
-    expect(Object.keys(get.settings).sort()).toEqual(["contradictions", "costRates", "domains", "golden", "ingest", "nightly", "search", "structure", "summaries", "verification"]);
+    expect(Object.keys(get.settings).sort()).toEqual(["contradictions", "costRates", "domains", "golden", "inMemory", "ingest", "nightly", "search", "structure", "summaries", "verification"]);
     expect(get.limits.summariesMaxPages).toEqual({ min: 0, max: 2000 });
     expect(get.defaults.summaries).toEqual({ enabled: true, maxPages: 150, capUsd: 0.25 });
     // The removed Opus tier: no section, no limits, no account source.
@@ -367,6 +367,20 @@ describe("settings", () => {
       expect((await res.json()).code).toBe("invalid");
     }
     expect((await (await settingsGET(req("GET", "/settings"))).json()).settings.nightly.time).toBe("02:15");
+  });
+
+  it("answers what each inMemory switch holds; one turned on fills in the background, one turned off is freed before the answer", async () => {
+    await seed();
+    const get = await (await settingsGET(req("GET", "/settings"))).json();
+    expect(get.settings.inMemory).toEqual({ pages: false, pageBodies: false, searchVectors: false });
+    expect(get.memory).toEqual({ pages: 0, pageBodies: 0, searchVectors: 0 });
+    const on = await settingsPUT(req("PUT", "/settings", { inMemory: { pages: true } }));
+    expect(on.status).toBe(200);
+    expect((await on.json()).settings.inMemory).toEqual({ pages: true, pageBodies: false, searchVectors: false });
+    await vi.waitFor(async () => expect((await (await settingsGET(req("GET", "/settings"))).json()).memory.pages).toBeGreaterThan(0));
+    const off = await (await settingsPUT(req("PUT", "/settings", { inMemory: { pages: false } }))).json();
+    expect(off.memory).toEqual({ pages: 0, pageBodies: 0, searchVectors: 0 });
+    expect((await settingsPUT(req("PUT", "/settings", { inMemory: { pages: "on" } }))).status).toBe(400);
   });
 
   it("loads a file that still has the retired context section, and refuses a patch that names it", async () => {

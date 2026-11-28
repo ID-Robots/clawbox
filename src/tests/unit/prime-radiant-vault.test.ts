@@ -13,10 +13,13 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 // commit asks for it.
 const shard = vi.hoisted(() => ({ scheduleReindexAfterCommit: vi.fn() }));
 vi.mock("@/lib/prime-radiant/shard-index", () => shard);
+import fsp from "fs/promises";
 import {
   ensureVault,
+  heldPageBytes,
   readPage,
   readVaultSnapshot,
+  releaseHeldPages,
   vaultInitialised,
   vaultOperation,
   VaultLintBlockedError,
@@ -25,6 +28,7 @@ import {
 import { changedPaths, commitCount, currentBranch, git, headCommit, logForPath, showFileAt } from "@/lib/prime-radiant/git";
 import { safePagePath, stateDbPath, vaultDir } from "@/lib/prime-radiant/paths";
 import { readRetiredLedger, syncActiveClaims, withStateDb } from "@/lib/prime-radiant/state-db";
+import { readSettings, writeSettings } from "@/lib/prime-radiant/settings";
 import { claim, frontmatter, pageText } from "../helpers/prime-radiant-fixtures";
 
 // Real git processes, in series: give them room on a loaded CI runner.
@@ -322,5 +326,210 @@ describe("prime radiant vault", () => {
     }, { reindex: false, lint: false });
     await new Promise((r) => setTimeout(r, 50));
     expect(shard.scheduleReindexAfterCommit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("pages kept in memory (settings inMemory)", () => {
+  const A = "concepts/widget-pricing.md";
+  const B = "concepts/widget-colours.md";
+  const off = { pages: false, pageBodies: false, searchVectors: false };
+
+  async function seedPages(): Promise<string> {
+    await vaultOperation(
+      "ingest: test",
+      async (tx) => {
+        await tx.write(A, pageText({ title: "Widget pricing" }));
+        await tx.write(B, pageText({ title: "Widget colours", claims: [claim("acme-sales/widgets/colour")] }));
+      },
+      { lint: false, reindex: false },
+    );
+    return vaultDir();
+  }
+  const pageOf = async (rel: string) => (await readVaultSnapshot()).pages.find((p) => p.path === rel) ?? null;
+  const fmOf = async (rel: string) => {
+    const page = await pageOf(rel);
+    return page?.parsed.ok ? page.parsed.frontmatter : null;
+  };
+  /** Opens of `rel`'s file: a page answered from memory is never opened. */
+  const opensOf = (spy: { mock: { calls: unknown[][] } }, rel: string) => spy.mock.calls.filter((c) => String(c[0]).endsWith(rel)).length;
+  /** The clock past the racy window, so a page written just now counts as settled. */
+  const settle = () => vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 10_000 });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    releaseHeldPages(off);
+  });
+
+  it("is off by default: nothing is kept, every read parses again, and the answer is the same with it on", async () => {
+    await seedPages();
+    expect(readSettings().inMemory).toEqual(off);
+    const first = await readVaultSnapshot();
+    const again = await readVaultSnapshot();
+    const fm = first.pages.find((p) => p.path === A)!.parsed;
+    expect(fm.ok && Object.isFrozen(fm.frontmatter)).toBe(false);
+    expect(again.pages.find((p) => p.path === A)!.parsed).not.toBe(fm);
+    expect(heldPageBytes()).toEqual({ pages: 0, pageBodies: 0 });
+    writeSettings({ inMemory: { pages: true, pageBodies: true } });
+    settle();
+    await readVaultSnapshot();
+    // Same pages, same fields, same key order — from memory as from disk.
+    expect(JSON.stringify((await readVaultSnapshot()).pages)).toBe(JSON.stringify(first.pages));
+    expect(JSON.stringify(await readPage(B))).toBe(JSON.stringify(first.pages.find((p) => p.path === B)));
+  });
+
+  it("pages: an unchanged page is answered from memory, frozen all the way down", async () => {
+    await seedPages();
+    writeSettings({ inMemory: { pages: true } });
+    const fm = (await fmOf(B))!;
+    expect(await fmOf(B)).toBe(fm);
+    expect(((await readPage(B))!.parsed as { frontmatter: unknown }).frontmatter).toBe(fm);
+    expect(heldPageBytes().pages).toBeGreaterThan(0);
+    expect(heldPageBytes().pageBodies).toBe(0);
+    // A caller cannot change what the next read answers.
+    expect(Object.isFrozen(fm) && Object.isFrozen(fm.claims) && Object.isFrozen(fm.claims[0]) && Object.isFrozen(fm.generated)).toBe(true);
+    expect(() => {
+      (fm as { title: string }).title = "Changed";
+    }).toThrow(TypeError);
+    expect(() => fm.claims.push(claim("acme-sales/widgets/size"))).toThrow(TypeError);
+    expect(() => {
+      (fm.claims[0] as { text: string }).text = "Changed";
+    }).toThrow(TypeError);
+    expect((await fmOf(B))!.title).toBe("Widget colours");
+    expect((await fmOf(B))!.claims).toHaveLength(1);
+  });
+
+  for (const bodies of [false, true]) {
+    it(`${bodies ? "pages + pageBodies" : "pages"}: a change is seen on the next read — Prime Radiant, the disk, git, a page added or deleted`, async () => {
+      const vault = await seedPages();
+      writeSettings({ inMemory: { pages: true, pageBodies: bodies } });
+      if (bodies) settle();
+      expect((await fmOf(A))!.title).toBe("Widget pricing");
+      // Through Prime Radiant's own write.
+      await vaultOperation("edit: a", (tx) => tx.write(A, pageText({ title: "Widget prices" })), { lint: false, reindex: false });
+      expect((await fmOf(A))!.title).toBe("Widget prices");
+      // On disk, by an editor, the same size and the same times as before.
+      const abs = path.join(vault, ...A.split("/"));
+      const st = fs.statSync(abs);
+      fs.writeFileSync(abs, pageText({ title: "Widget PRICES" }));
+      fs.utimesSync(abs, st.atime, st.mtime);
+      expect(fs.statSync(abs).size).toBe(st.size);
+      expect((await fmOf(A))!.title).toBe("Widget PRICES");
+      // By git: the committed text back.
+      gitOut(vault, "checkout", "--quiet", "HEAD", "--", A);
+      expect((await fmOf(A))!.title).toBe("Widget prices");
+      // The body too, the frontmatter unchanged.
+      fs.writeFileSync(abs, pageText({ title: "Widget prices" }, "A new body, written on disk.\n"));
+      expect((await pageOf(A))!.parsed.body).toContain("A new body, written on disk.");
+      // Added and deleted.
+      fs.writeFileSync(path.join(vault, "concepts", "widget-sizes.md"), pageText({ title: "Widget sizes" }));
+      expect((await fmOf("concepts/widget-sizes.md"))!.title).toBe("Widget sizes");
+      const held = heldPageBytes().pages;
+      fs.rmSync(abs);
+      expect(await pageOf(A)).toBeNull();
+      expect(await readPage(A)).toBeNull();
+      expect(heldPageBytes().pages).toBeLessThan(held);
+    });
+  }
+
+  it("pageBodies: a settled file is not read again until its size, times or inode move", async () => {
+    const vault = await seedPages();
+    writeSettings({ inMemory: { pageBodies: true } });
+    settle();
+    const open = vi.spyOn(fsp, "open");
+    const text = (await pageOf(A))!.text;
+    expect(opensOf(open, A)).toBe(1);
+    expect((await pageOf(A))!.text).toBe(text);
+    expect((await readPage(A))!.text).toBe(text);
+    expect(opensOf(open, A)).toBe(1);
+    expect(heldPageBytes().pageBodies).toBeGreaterThan(0);
+    expect(heldPageBytes().pages).toBe(0);
+    // Replaced whole, same size and same times: another inode.
+    const abs = path.join(vault, ...A.split("/"));
+    const st = fs.statSync(abs);
+    const replaced = pageText({ title: "Widget PRICING" });
+    fs.writeFileSync(`${abs}.new`, replaced);
+    fs.utimesSync(`${abs}.new`, st.atime, st.mtime);
+    fs.renameSync(`${abs}.new`, abs);
+    expect((await pageOf(A))!.text).toBe(replaced);
+    expect(opensOf(open, A)).toBe(2);
+    // A symlink in its place is no page, as before.
+    fs.rmSync(abs);
+    fs.symlinkSync(path.join(vault, ...B.split("/")), abs);
+    expect(await readPage(A)).toBeNull();
+  });
+
+  it("pageBodies: a file changed in the last two seconds is read again every time", async () => {
+    await seedPages();
+    writeSettings({ inMemory: { pageBodies: true } });
+    const open = vi.spyOn(fsp, "open");
+    await pageOf(A);
+    await pageOf(A);
+    expect(opensOf(open, A)).toBe(2);
+    expect(heldPageBytes().pageBodies).toBe(0);
+  });
+
+  it("frees what a switch held once it is off: at once from the settings route, and on the next read", async () => {
+    await seedPages();
+    writeSettings({ inMemory: { pages: true, pageBodies: true } });
+    settle();
+    await readVaultSnapshot();
+    expect(heldPageBytes().pages).toBeGreaterThan(0);
+    expect(heldPageBytes().pageBodies).toBeGreaterThan(0);
+    releaseHeldPages(writeSettings({ inMemory: { pageBodies: false } }).inMemory);
+    expect(heldPageBytes().pageBodies).toBe(0);
+    expect(heldPageBytes().pages).toBeGreaterThan(0);
+    // Switched off by hand in settings.json: the next read frees it.
+    writeSettings({ inMemory: null });
+    await readPage(A);
+    expect(heldPageBytes()).toEqual({ pages: 0, pageBodies: 0 });
+    const fm = await fmOf(A);
+    expect(fm && Object.isFrozen(fm)).toBe(false);
+  });
+
+  it("keeps nothing a switch turned off while a read was under way", async () => {
+    await seedPages();
+    writeSettings({ inMemory: { pages: true, pageBodies: true } });
+    settle();
+    const open = fsp.open.bind(fsp);
+    let switched = false;
+    // The first page file the snapshot opens: the switch goes off mid-read, as the settings route turns it off.
+    vi.spyOn(fsp, "open").mockImplementation(async (...args: Parameters<typeof fsp.open>) => {
+      if (!switched) {
+        switched = true;
+        releaseHeldPages(writeSettings({ inMemory: { pageBodies: false } }).inMemory);
+      }
+      return open(...args);
+    });
+    await readVaultSnapshot();
+    expect(switched).toBe(true);
+    expect(heldPageBytes().pageBodies).toBe(0);
+    expect(heldPageBytes().pages).toBeGreaterThan(0);
+  });
+
+  it("keeps no more than a quarter of the box's memory; past it a page is read as if the switches were off", async () => {
+    await seedPages();
+    writeSettings({ inMemory: { pages: true } });
+    const one = (await readPage(A))!;
+    const held = heldPageBytes().pages;
+    releaseHeldPages(off);
+    // Room for one page's parse, not two.
+    vi.spyOn(os, "totalmem").mockReturnValue(4 * (held + 100));
+    await readVaultSnapshot();
+    expect(heldPageBytes().pages).toBeLessThanOrEqual(held + 100);
+    expect(heldPageBytes().pages).toBeGreaterThan(0);
+    expect(JSON.stringify(await readPage(A))).toBe(JSON.stringify(one));
+    expect((await fmOf(B))!.title).toBe("Widget colours");
+  });
+
+  it("keeps only the box's own vault: a vault read from elsewhere (a nightly worktree) is parsed every time", async () => {
+    await seedPages();
+    writeSettings({ inMemory: { pages: true } });
+    const other = path.join(root, "worktree");
+    fs.cpSync(vaultDir(), other, { recursive: true });
+    const fm = (await readVaultSnapshot(other)).pages.find((p) => p.path === A)!.parsed;
+    expect((await readVaultSnapshot(other)).pages.find((p) => p.path === A)!.parsed).not.toBe(fm);
+    expect(fm.ok && Object.isFrozen(fm.frontmatter)).toBe(false);
+    expect(heldPageBytes().pages).toBe(0);
   });
 });

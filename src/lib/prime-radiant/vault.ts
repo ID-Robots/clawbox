@@ -9,10 +9,15 @@
  */
 
 import fs from "fs/promises";
-import { constants as fsConstants } from "fs";
+import { constants as fsConstants, type Stats } from "fs";
+import os from "os";
+import { createHash } from "crypto";
 import path, { untraced } from "@/lib/runtime-path";
+import { processStore } from "@/lib/process-store";
 import { withPluginFields } from "./plugin-compat";
 import { parsePage, serializePage, pageSummary, type ParsedPage } from "./frontmatter";
+import { parseHead, splitFrontmatter, withBody, type ParsedHead } from "./frontmatter";
+import { readInMemorySettings } from "./settings";
 import { hasVerification, type PageFrontmatter } from "./schema";
 import { generatedSummary } from "./summary-meta";
 import { isKnowledgePage, pageAbsPath, RESERVED_DIRS, safePagePath, vaultDir } from "./paths";
@@ -151,20 +156,178 @@ export async function ensureVault(vault: string = vaultDir()): Promise<{ created
   });
 }
 
-async function readPageAt(vault: string, rel: string): Promise<VaultPage | null> {
+// ── pages kept in memory (settings `inMemory`) ──────────────────────────────
+//
+// Off (the default) a read parses every page it reads, as it always did. With
+// `inMemory.pages` the frontmatter's parse is kept, frozen, beside a hash of
+// the YAML it came from: every read still reads the file, and parses it again
+// only when that YAML changed — whoever changed it (Prime Radiant, the nightly
+// merge, an undo, git or an editor on disk). With `inMemory.pageBodies` the
+// file's text is kept too and the file is not read again while its size, times
+// and inode are the ones it was read at. Only the box's own vault is kept (a
+// nightly worktree is read and thrown away); a page a full read no longer
+// finds is forgotten, and a switch turned off frees what it held.
+
+/** A file changed this recently is read again: a second write in the same timestamp tick could leave its size and times as they were. */
+const RACY_MS = 2_000;
+/** About what one kept page costs beside its parse or its text: the map entry, its record and the hash. */
+const ENTRY_BYTES = 160;
+
+interface HeldText { value: string; size: number; mtimeMs: number; ctimeMs: number; ino: number; bytes: number }
+interface HeldHead { hash: string; head: ParsedHead; bytes: number }
+interface HeldPage { text: HeldText | null; head: HeldHead | null }
+interface HeldVault {
+  pages: Map<string, HeldPage>;
+  headBytes: number;
+  textBytes: number;
+  /** The switches as the last read or release saw them: a read already under way keeps nothing a switch turned off since. */
+  on: { pages: boolean; pageBodies: boolean };
+  /** The most both switches together keep, a quarter of the box's memory (2 GB on an 8 GB box): past it a page is read as if they were off. */
+  ceiling: number;
+}
+interface Hold { vault: HeldVault; pages: boolean; bodies: boolean }
+
+/** One per process, by vault (the routes and the boot layer are separate module copies). */
+const heldVaults = processStore("prime-radiant:held-pages", () => new Map<string, HeldVault>());
+
+/** The switches in force for a read of `vault`, freeing what a switch now off still holds; null when nothing is kept. */
+function holdFor(vault: string): Hold | null {
+  const key = path.resolve(vault);
+  if (key !== path.resolve(vaultDir())) return null;
+  let on;
+  try {
+    on = readInMemorySettings();
+  } catch {
+    on = { pages: false, pageBodies: false };
+  }
+  releaseHeldPages(on);
+  if (!on.pages && !on.pageBodies) return null;
+  let held = heldVaults.get(key);
+  if (!held) heldVaults.set(key, (held = { pages: new Map(), headBytes: 0, textBytes: 0, on: { pages: on.pages, pageBodies: on.pageBodies }, ceiling: 0 }));
+  held.ceiling = Math.floor(os.totalmem() / 4);
+  return { vault: held, pages: on.pages, bodies: on.pageBodies };
+}
+
+/** Free what the switches that are off still hold: at once from the settings route, and on every read. */
+export function releaseHeldPages(on: { pages: boolean; pageBodies: boolean }): void {
+  for (const [key, held] of heldVaults) {
+    held.on = { pages: on.pages, pageBodies: on.pageBodies };
+    if (!on.pages && !on.pageBodies) {
+      heldVaults.delete(key);
+      continue;
+    }
+    if (!on.pages && held.headBytes > 0) for (const rel of [...held.pages.keys()]) keep(held, rel, "head", null);
+    if (!on.pageBodies && held.textBytes > 0) for (const rel of [...held.pages.keys()]) keep(held, rel, "text", null);
+  }
+}
+
+/** What `inMemory.pages` and `inMemory.pageBodies` hold right now, in bytes — about: V8's heap as these structures take it. */
+export function heldPageBytes(): { pages: number; pageBodies: number } {
+  let pages = 0;
+  let pageBodies = 0;
+  for (const held of heldVaults.values()) {
+    pages += held.headBytes;
+    pageBodies += held.textBytes;
+  }
+  return { pages, pageBodies };
+}
+
+function keep(held: HeldVault, rel: string, part: "head", value: HeldHead | null): void;
+function keep(held: HeldVault, rel: string, part: "text", value: HeldText | null): void;
+function keep(held: HeldVault, rel: string, part: "head" | "text", kept: HeldHead | HeldText | null): void {
+  const entry = held.pages.get(rel) ?? { text: null, head: null };
+  const was = entry[part]?.bytes ?? 0;
+  // Its switch turned off while this read ran, or the ceiling reached: nothing is kept (and what was is stale).
+  const value = kept && (part === "head" ? held.on.pages : held.on.pageBodies) && held.headBytes + held.textBytes - was + kept.bytes <= held.ceiling ? kept : null;
+  if (part === "head") {
+    entry.head = value as HeldHead | null;
+    held.headBytes += (value?.bytes ?? 0) - was;
+  } else {
+    entry.text = value as HeldText | null;
+    held.textBytes += (value?.bytes ?? 0) - was;
+  }
+  if (entry.head || entry.text) held.pages.set(rel, entry);
+  else held.pages.delete(rel);
+}
+
+function forget(hold: Hold | null, rel: string): void {
+  if (!hold) return;
+  keep(hold.vault, rel, "head", null);
+  keep(hold.vault, rel, "text", null);
+}
+
+/** About what a string takes on the heap: a header, one byte a character, two once any is past Latin-1. */
+function stringBytes(s: string): number {
+  return 16 + Math.ceil((s.length * (/[^\u0000-\u00ff]/.test(s) ? 2 : 1)) / 8) * 8;
+}
+
+/** Freeze `value` all the way down (a caller can never change what the next read answers) and answer about what it takes on the heap. */
+function freezeAndMeasure(value: unknown): number {
+  if (typeof value === "string") return stringBytes(value);
+  if (typeof value === "number") return Number.isInteger(value) && Math.abs(value) < 2 ** 30 ? 0 : 16;
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return 0;
+  Object.freeze(value);
+  const values = Object.values(value);
+  let bytes = Array.isArray(value) ? 32 + 8 * values.length : 56 + 16 * values.length;
+  for (const v of values) bytes += freezeAndMeasure(v);
+  return bytes;
+}
+
+/** The page's parse, from memory while its YAML is the one parsed last. */
+function heldParse(hold: Hold, rel: string, text: string): ParsedPage {
+  const { yamlText, body } = splitFrontmatter(text);
+  const hash = createHash("sha256").update(yamlText === null ? "\0" : `-${yamlText}`).digest("base64");
+  let held = hold.vault.pages.get(rel)?.head;
+  if (held?.hash !== hash) {
+    const head = parseHead(yamlText);
+    // The YAML text is counted too: the parse's strings are slices of it.
+    held = { hash, head, bytes: ENTRY_BYTES + freezeAndMeasure(head) + (yamlText === null ? 0 : stringBytes(yamlText)) };
+    keep(hold.vault, rel, "head", held);
+  }
+  return withBody(held.head, stripManagedBlocks(body).text);
+}
+
+/** The page from the text in memory, while the file is the one it was read from; null when it must be read. */
+async function heldRead(abs: string, rel: string, held: HeldText, hold: Hold): Promise<VaultPage | "gone" | null> {
+  let st: Stats;
+  try {
+    st = await fs.lstat(abs);
+  } catch {
+    return "gone";
+  }
+  // A symlink is never read (O_NOFOLLOW below), so it is no page either.
+  if (!st.isFile()) return "gone";
+  if (st.size !== held.size || st.mtimeMs !== held.mtimeMs || st.ctimeMs !== held.ctimeMs || st.ino !== held.ino) return null;
+  return { path: rel, text: held.value, bytes: st.size, mtimeMs: st.mtimeMs, parsed: hold.pages ? heldParse(hold, rel, held.value) : parsePage(held.value) };
+}
+
+async function readPageAt(vault: string, rel: string, hold: Hold | null = null): Promise<VaultPage | null> {
   const abs = pageAbsPath(vault, rel);
+  const heldText = hold?.bodies ? hold.vault.pages.get(rel)?.text : null;
+  if (hold && heldText) {
+    const page = await heldRead(abs, rel, heldText, hold);
+    if (page === "gone") forget(hold, rel);
+    if (page) return page === "gone" ? null : page;
+  }
+  // Taken before the stat: a file changed after this is newer than the time its text is kept with.
+  const readAt = Date.now();
   // One handle for the check and the read: O_NOFOLLOW refuses a symlink, and
   // fstat/readFile on the same descriptor cannot race a swap of the path.
   let handle;
   try {
     handle = await fs.open(abs, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   } catch {
+    forget(hold, rel);
     return null;
   }
   try {
     const st = await handle.stat();
-    if (!st.isFile()) return null;
+    if (!st.isFile()) {
+      forget(hold, rel);
+      return null;
+    }
     if (st.size > MAX_PAGE_FILE_BYTES) {
+      forget(hold, rel);
       return {
         path: rel,
         text: "",
@@ -174,7 +337,11 @@ async function readPageAt(vault: string, rel: string): Promise<VaultPage | null>
       };
     }
     const text = await handle.readFile("utf8");
-    return { path: rel, text, bytes: st.size, mtimeMs: st.mtimeMs, parsed: parsePage(text) };
+    if (hold?.bodies) {
+      const settled = readAt - Math.max(st.mtimeMs, st.ctimeMs) >= RACY_MS;
+      keep(hold.vault, rel, "text", settled ? { value: text, size: st.size, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs, ino: st.ino, bytes: ENTRY_BYTES + stringBytes(text) } : null);
+    }
+    return { path: rel, text, bytes: st.size, mtimeMs: st.mtimeMs, parsed: hold?.pages ? heldParse(hold, rel, text) : parsePage(text) };
   } finally {
     await handle.close();
   }
@@ -184,7 +351,7 @@ async function readPageAt(vault: string, rel: string): Promise<VaultPage | null>
 export async function readPage(rel: string, vault: string = vaultDir()): Promise<VaultPage | null> {
   const safe = safePagePath(rel);
   if (!safe || !isKnowledgePage(safe)) return null;
-  return readPageAt(vault, safe);
+  return readPageAt(vault, safe, holdFor(vault));
 }
 
 /**
@@ -196,7 +363,7 @@ export async function readPage(rel: string, vault: string = vaultDir()): Promise
 export async function readListedPage(rel: string, vault: string = vaultDir()): Promise<VaultPage | null> {
   const safe = safePagePath(rel);
   if (!safe || !isKnowledgePage(safe) || safe.split("/").length > MAX_PAGE_SEGMENTS || !(await reachedByWalk(vault, safe))) return null;
-  return readPageAt(vault, safe);
+  return readPageAt(vault, safe, holdFor(vault));
 }
 
 /** Every knowledge page in the vault, sorted by path. Symlinks and dot-folders are never followed. */
@@ -228,6 +395,12 @@ export async function readVaultSnapshot(vault: string = vaultDir()): Promise<Vau
     }
   }
   await walk("", 0);
+  const hold = holdFor(vault);
+  if (hold) {
+    // A page the walk no longer finds was deleted or moved: forgotten.
+    const walked = new Set(rels);
+    for (const rel of [...hold.vault.pages.keys()]) if (!walked.has(rel)) forget(hold, rel);
+  }
   // A few reads in flight at once: one after the other, a large vault spends
   // most of its read waiting on each file in turn. The order stays the walk's.
   const read: Array<VaultPage | null> = new Array(rels.length).fill(null);
@@ -235,7 +408,7 @@ export async function readVaultSnapshot(vault: string = vaultDir()): Promise<Vau
   const reader = async () => {
     while (next < rels.length) {
       const at = next++;
-      read[at] = await readPageAt(vault, rels[at]);
+      read[at] = await readPageAt(vault, rels[at], hold);
     }
   };
   await Promise.all(Array.from({ length: Math.min(SNAPSHOT_READS_IN_FLIGHT, rels.length) }, reader));
