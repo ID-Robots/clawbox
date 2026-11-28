@@ -1030,8 +1030,8 @@ async function processBatch(
       if (e?.kind === "aborted" && signal.aborted) {
         return { updates: [], transient: new Set(), pagesWritten: 0, commit: null, cost: cost.calls ? cost : null, fatal: null };
       }
-      // The box's own engine words its refusal for the owner itself (its key, its runtime); ClawBox AI's are the table's.
-      const fatal = e && FATAL_MESSAGES[e.kind] ? (client.engine === "local" ? e.message : FATAL_MESSAGES[e.kind]!) : null;
+      // The box's own engine (and the owner's Anthropic account) words its refusal for the owner itself (its key, its runtime); ClawBox AI's are the table's.
+      const fatal = e && FATAL_MESSAGES[e.kind] ? (client.engine === "local" || client.engine === "anthropic" ? e.message : FATAL_MESSAGES[e.kind]!) : null;
       return failAll(
         e?.kind === "aborted" ? "stopped" : `model call failed${e ? ` (${e.kind})` : ""}`,
         fatal,

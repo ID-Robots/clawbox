@@ -29,8 +29,12 @@ interface SettingsAnswer {
     searchIndexLimitMb?: { min: number; max: number };
     /** Absent on a server from before the structure pass. */
     structureCompany?: number;
+    /** The Claude models the Anthropic choice offers; absent on a server from before it. */
+    claudeModels?: readonly string[];
   };
   nightly: { nextRunAt: number | null };
+  /** Whether an Anthropic API key is saved among the coding agent's accounts; absent on a server from before the Anthropic choice. */
+  anthropic?: { keySaved: boolean };
 }
 
 interface NightlyAnswer {
@@ -52,6 +56,8 @@ interface Draft {
   domains: Array<{ name: string; owner: string }>;
   structure: boolean;
   company: string;
+  modelProvider: string;
+  claudeModel: string;
 }
 
 function draftOf(s: Settings): Draft {
@@ -68,6 +74,8 @@ function draftOf(s: Settings): Draft {
     // Absent on a server from before the structure pass.
     structure: s.structure?.enabled ?? true,
     company: s.structure?.company ?? "",
+    modelProvider: s.model?.provider ?? "auto",
+    claudeModel: s.model?.anthropicModel ?? "",
   };
 }
 
@@ -136,6 +144,7 @@ export default function PrimeRadiantSettings({ revision = 0, onChanged }: { revi
         },
         ...(indexLimit ? { search: { indexLimitMb } } : {}),
         ...(answer.settings.structure ? { structure: { enabled: draft.structure, company: draft.company.trim() } } : {}),
+        ...(answer.limits.claudeModels ? { model: { provider: draft.modelProvider, anthropicModel: answer.limits.claudeModels.includes(draft.claudeModel) ? draft.claudeModel : answer.limits.claudeModels[0] } } : {}),
         domains,
       }));
       setAnswer(next);
@@ -262,6 +271,33 @@ export default function PrimeRadiantSettings({ revision = 0, onChanged }: { revi
               {t("primeRadiant.settings.excludeDefaults")}
             </button>
           </section>
+
+          {answer.limits.claudeModels && (
+            <section className={`${CARD_SURFACE} p-4 space-y-3`}>
+              <h3 className={SECTION_LABEL}>{t("primeRadiant.settings.modelTitle")}</h3>
+              <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                {t("primeRadiant.settings.modelProvider")}
+                <select className={`${FIELD} text-xs`} value={draft.modelProvider} onChange={(e) => set({ modelProvider: e.target.value })} data-testid="prime-radiant-model-provider">
+                  <option value="auto">{t("primeRadiant.settings.modelProviderAuto")}</option>
+                  <option value="anthropic">{t("primeRadiant.settings.modelProviderAnthropic")}</option>
+                </select>
+              </label>
+              {draft.modelProvider === "anthropic" && (
+                <>
+                  <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                    {t("primeRadiant.settings.claudeModel")}
+                    <select className={`${FIELD} text-xs`} value={draft.claudeModel} onChange={(e) => set({ claudeModel: e.target.value })} data-testid="prime-radiant-claude-model">
+                      {answer.limits.claudeModels.map((m) => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                  </label>
+                  {answer.anthropic?.keySaved === false && (
+                    <p role="status" className="text-[11px] text-amber-200" data-testid="prime-radiant-model-no-key">{t("primeRadiant.settings.modelNoKey")}</p>
+                  )}
+                </>
+              )}
+              <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.modelBody")}</p>
+            </section>
+          )}
 
           {answer.limits.searchIndexLimitMb && (
             <section className={`${CARD_SURFACE} p-4 space-y-3`}>

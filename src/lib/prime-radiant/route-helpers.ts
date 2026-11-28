@@ -12,6 +12,7 @@ import { requireSession } from "@/lib/route-auth";
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { PageEditError } from "./edit";
+import { NO_ANTHROPIC_KEY_MESSAGE } from "./flash-client";
 import { ASSISTANT_AUTHOR, VAULT_AUTHOR, type VaultAuthor } from "./git";
 import { isOwnOutput } from "./ingest-sources";
 import { MAX_UPLOAD_FILES_PER_BATCH } from "./ingest-upload";
@@ -91,7 +92,9 @@ export function fail(code: string, error: string, status: number): NextResponse 
  * 409 `cloud_ai_locked` when the local-only AI lock is on and the box has no
  * model of its own (the lock never falls back to the cloud).
  */
-export function noEngineRefusal(reason: "cloud_ai_locked" | "no_credential"): NextResponse {
+export function noEngineRefusal(reason: "cloud_ai_locked" | "no_credential" | "no_anthropic_key"): NextResponse {
+  // Its own code: `no_credential` has a catalogue text (sign in to ClawBox AI) that would hide this message from the owner.
+  if (reason === "no_anthropic_key") return fail("no_anthropic_key", NO_ANTHROPIC_KEY_MESSAGE, 412);
   return reason === "cloud_ai_locked"
     ? fail("cloud_ai_locked", "Local-only AI is on, and no model is set up on this box: set up Local AI first; Prime Radiant writes its pages with it.", 409)
     : fail("no_credential", "Sign this box in to ClawBox AI, or set up Local AI on it, first; Prime Radiant writes its pages with one of them.", 412);

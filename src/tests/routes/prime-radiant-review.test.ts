@@ -24,6 +24,9 @@ const creds = vi.hoisted(() => ({
 vi.mock("@/lib/harness/credentials", () => creds);
 const bearer = vi.hoisted(() => ({ verifyMcpBearer: vi.fn((h: string | null) => h === "Bearer test-assistant-bearer") }));
 vi.mock("@/lib/mcp-token", () => bearer);
+// Whether an Anthropic API key is among the coding agent's accounts: the settings answer says so, never the key.
+const anthropicKey = vi.hoisted(() => ({ saved: false }));
+vi.mock("@/lib/coding-anthropic", () => ({ hasAnthropicKey: async () => anthropicKey.saved }));
 
 import { GET as reviewGET, POST as reviewPOST } from "@/app/setup-api/prime-radiant/review/route";
 import { POST as resolvePOST } from "@/app/setup-api/prime-radiant/review/[id]/resolve/route";
@@ -329,14 +332,25 @@ describe("history, diff, revert", () => {
 describe("settings", () => {
   it("exposes every section, saves a patch, validates folders and refuses a bad field whole", async () => {
     const get = await (await settingsGET(req("GET", "/settings"))).json();
-    expect(Object.keys(get.settings).sort()).toEqual(["contradictions", "costRates", "domains", "golden", "ingest", "nightly", "search", "structure", "summaries", "verification"]);
+    expect(Object.keys(get.settings).sort()).toEqual(["contradictions", "costRates", "domains", "golden", "ingest", "model", "nightly", "search", "structure", "summaries", "verification"]);
     expect(get.limits.summariesMaxPages).toEqual({ min: 0, max: 2000 });
     expect(get.defaults.summaries).toEqual({ enabled: true, maxPages: 150, capUsd: 0.25 });
     // The removed Opus tier: no section, no limits, no account source.
     expect(get.defaults).not.toHaveProperty("opus");
     expect(Object.keys(get.limits).filter((k) => /opus/i.test(k))).toEqual([]);
     expect(get).not.toHaveProperty("opusSource");
-    expect(Object.keys(get.rates.models)).toEqual(["deepseek-v4-flash"]);
+    expect(Object.keys(get.rates.models)).toEqual(["deepseek-v4-flash", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5", "claude-fable-5-2"]);
+    // Who answers the model calls: automatic until the owner picks Anthropic and one of the Claude models Prime Radiant has a rate for.
+    expect(get.settings.model).toEqual({ provider: "auto", anthropicModel: "claude-sonnet-5-5" });
+    expect(get.limits.claudeModels).toEqual(["claude-sonnet-5-5", "claude-haiku-5-5", "claude-opus-5-5", "claude-fable-5-2"]);
+    expect(get.anthropic).toEqual({ keySaved: false });
+    anthropicKey.saved = true;
+    const picked = await settingsPUT(req("PUT", "/settings", { model: { provider: "anthropic", anthropicModel: "claude-haiku-5-5" } }));
+    expect(picked.status).toBe(200);
+    expect(await picked.json()).toMatchObject({ settings: { model: { provider: "anthropic", anthropicModel: "claude-haiku-5-5" } }, anthropic: { keySaved: true } });
+    expect((await settingsPUT(req("PUT", "/settings", { model: { provider: "openai" } }))).status).toBe(400);
+    expect((await settingsPUT(req("PUT", "/settings", { model: null }))).status).toBe(200);
+    anthropicKey.saved = false;
     expect(get.limits.searchIndexLimitMb).toEqual({ min: 32, max: 4096 });
     expect(get.defaults.search).toEqual({ indexLimitMb: 160 });
     // The golden check, the daily questions and the structure pass answer their limits and defaults side by side.

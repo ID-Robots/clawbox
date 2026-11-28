@@ -21,6 +21,8 @@ import os from "os";
 import path, { untraced } from "@/lib/runtime-path";
 import { DEFAULT_INGEST_EXCLUDES, EXCLUDE_DEFAULTS_GENERATION, isDefaultExcludeList, readExcludeList } from "./ingest-exclude";
 import { mergeCostRates, readRateOverrides, type CostRates, type ModelRate } from "./cost-rates";
+import { PRIME_RADIANT_CLAUDE_MODELS } from "./cost-rates";
+import { DEFAULT_ANTHROPIC_MODEL } from "@/lib/coding-provider";
 import { DAILY_LANGUAGES, DEFAULT_DAILY_PER_OWNER, isDailyLanguage, MAX_DAILY_PER_OWNER, MIN_DAILY_PER_OWNER, type DailyLanguage } from "./daily";
 import { primeRadiantRoot } from "./paths";
 
@@ -87,6 +89,10 @@ export const DEFAULT_SUMMARIES_MAX_PAGES = 150;
 export const MAX_SUMMARIES_MAX_PAGES = 2000;
 export const DEFAULT_SUMMARIES_CAP_USD = 0.25;
 export const MAX_SUMMARIES_CAP_USD = 100;
+
+/** Who answers Prime Radiant's model calls: the box's own pick (ClawBox AI Flash, else the box's engine), or the owner's own Anthropic account. */
+export const MODEL_PROVIDERS = ["auto", "anthropic"] as const;
+export type ModelProvider = (typeof MODEL_PROVIDERS)[number];
 
 export interface IngestSettings {
   /**
@@ -169,6 +175,13 @@ export interface VerificationSettings {
   languages: OwnerLanguage[];
 }
 
+export interface ModelSettings {
+  /** `auto`: as before (ClawBox AI, else the box's own engine). `anthropic`: the API-key accounts of the coding agent's Anthropic pool. */
+  provider: ModelProvider;
+  /** The Claude model `anthropic` writes with (one of `PRIME_RADIANT_CLAUDE_MODELS`). */
+  anthropicModel: string;
+}
+
 export interface PrimeRadiantSettings {
   ingest: IngestSettings;
   /** The owner's rate overrides, model by model (empty = the defaults). */
@@ -181,6 +194,7 @@ export interface PrimeRadiantSettings {
   domains: DomainSetting[];
   golden: GoldenSettings;
   verification: VerificationSettings;
+  model: ModelSettings;
 }
 
 export function defaultSettings(): PrimeRadiantSettings {
@@ -195,6 +209,7 @@ export function defaultSettings(): PrimeRadiantSettings {
     domains: [],
     golden: { enabled: true, maxQuestions: DEFAULT_GOLDEN_MAX_QUESTIONS },
     verification: { perOwner: DEFAULT_DAILY_PER_OWNER, outbound: false, languages: [] },
+    model: { provider: "auto", anthropicModel: DEFAULT_ANTHROPIC_MODEL },
   };
 }
 
@@ -335,6 +350,12 @@ const FIELDS = {
         : { ok: false, error: `summaries.maxPages must be a whole number from 0 to ${MAX_SUMMARIES_MAX_PAGES}.` },
     capUsd: (v: unknown) => readNumber(v, 0, MAX_SUMMARIES_CAP_USD, "summaries.capUsd"),
   },
+  model: {
+    provider: (v: unknown): Read<ModelProvider> =>
+      (MODEL_PROVIDERS as readonly unknown[]).includes(v) ? { ok: true, value: v as ModelProvider } : { ok: false, error: `model.provider must be one of ${MODEL_PROVIDERS.join(", ")}.` },
+    anthropicModel: (v: unknown): Read<string> =>
+      (PRIME_RADIANT_CLAUDE_MODELS as readonly unknown[]).includes(v) ? { ok: true, value: v as string } : { ok: false, error: `model.anthropicModel must be one of ${PRIME_RADIANT_CLAUDE_MODELS.join(", ")}.` },
+  },
 } as const;
 
 type SectionName = keyof typeof FIELDS;
@@ -406,6 +427,7 @@ export interface SettingsPatch {
   domains?: unknown;
   golden?: { enabled?: unknown; maxQuestions?: unknown } | null;
   verification?: { perOwner?: unknown; outbound?: unknown; languages?: unknown } | null;
+  model?: { provider?: unknown; anthropicModel?: unknown } | null;
 }
 
 /** The keys a patch may carry, per section — anything else is refused, never stored. */
@@ -418,6 +440,7 @@ const PATCH_KEYS: Readonly<Record<string, readonly string[]>> = {
   verification: Object.keys(FIELDS.verification),
   structure: Object.keys(FIELDS.structure),
   summaries: Object.keys(FIELDS.summaries),
+  model: Object.keys(FIELDS.model),
 };
 
 /** The vault search index's size limit in force, in bytes (shard-index.ts reads it at every run). */

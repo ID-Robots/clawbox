@@ -825,6 +825,26 @@ describe("prime_radiant_status", () => {
   });
 });
 
+describe("the model provider (TASK-2874)", () => {
+  it("is set and reset through the settings route, only to the two providers and the Claude models Prime Radiant prices", async () => {
+    answer([/\/settings$/, { settings: { model: { provider: "anthropic", anthropicModel: "claude-haiku-5-5" } } }]);
+    const set = await harness().call("prime_radiant_settings_update", { model_provider: "anthropic", anthropic_model: "claude-haiku-5-5", confirm: true });
+    expect(set.isError).toBe(false);
+    expect(call(0)[1]).toMatchObject({ method: "PUT", body: { model: { provider: "anthropic", anthropicModel: "claude-haiku-5-5" } } });
+    if (!set.isError) expect(JSON.parse(set.text).settings.model).toEqual({ provider: "anthropic", anthropicModel: "claude-haiku-5-5" });
+
+    api.mockClear();
+    await harness().call("prime_radiant_settings_update", { reset: ["model"], confirm: true });
+    expect(call(0)[1]).toMatchObject({ method: "PUT", body: { model: null } });
+
+    const shape = z.object(harness().get("prime_radiant_settings_update").shape);
+    for (const bad of [{ model_provider: "openai" }, { anthropic_model: "claude-3-opus" }]) {
+      expect(shape.safeParse({ ...bad, confirm: true }).success, JSON.stringify(bad)).toBe(false);
+    }
+    expect(shape.safeParse({ model_provider: "auto", anthropic_model: "claude-sonnet-5-5", confirm: true }).success).toBe(true);
+  });
+});
+
 describe("the search index size limit", () => {
   it("is set and reset in MB through the settings route, and refused outside 32..4096 before anything is sent", async () => {
     answer([/\/settings$/, { settings: { search: { indexLimitMb: 512 } } }]);

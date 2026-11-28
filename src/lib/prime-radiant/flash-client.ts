@@ -26,6 +26,23 @@
  * ({@link createLocalFlashClient}: Local AI or the owner's External engine) —
  * which is also the one engine the local-only AI lock allows.
  *
+ * A THIRD CHOICE, THE OWNER'S OWN ANTHROPIC ACCOUNT (TASK-2874): when the
+ * owner picks `anthropic` in Prime Radiant's settings ({@link createAnthropicFlashClient}),
+ * every call goes to Anthropic's Messages API with an API key of the coding
+ * agent's account pool (src/lib/anthropic-accounts.ts: the same accounts, the
+ * same owner secret store; the key is read per call, never logged, never in
+ * argv, a response body or data/config.json). The pool's own fallback applies:
+ * an account at its usage limit, or whose key Anthropic refuses, is marked in
+ * the pool and the next API-key account answers. When none can, the call fails
+ * with the reason (`allowance` for accounts at their limit, `auth` for refused
+ * keys, `no_credential` for none saved) — never a silent move to ClawBox AI or
+ * the box's own engine. Subscription sign-ins (`oauth`, the `claude` login) are
+ * not used: they are for Claude Code and the gateway, not a direct API call.
+ * The local-only AI lock still wins: with it on, the choice is not honoured and
+ * the pass uses the engine the lock allows, as for ClawBox AI. The calls are
+ * recorded under the Claude model id and are counted against no ClawBox AI
+ * allowance.
+ *
  * THE BOX'S OWN ENGINE HAS A WINDOW. A client that answers from it carries a
  * {@link FlashBudget} — the window, the longest answer, one request at a
  * time — and every pass sizes its calls to it (the writer's batches:
@@ -59,6 +76,8 @@ import { postLocalChat, type LocalEngine } from "@/lib/local-engine";
 import { processStore } from "@/lib/process-store";
 import { estimateTokens } from "@/lib/token-estimate";
 import { createStubFlashClient } from "./flash-stub";
+import { redactText } from "./redact";
+import { readSettings } from "./settings";
 
 export interface FlashUsage {
   promptTokens: number;
@@ -95,7 +114,7 @@ export interface FlashBudget {
 export interface FlashClient {
   readonly model: string;
   /** Where the calls are answered; absent is ClawBox AI (and a test's client). */
-  readonly engine?: "clawbox-ai" | "local";
+  readonly engine?: "clawbox-ai" | "local" | "anthropic";
   /** Present on a client whose model has a bounded window: every pass sizes its calls to it. */
   readonly budget?: FlashBudget;
   complete(request: FlashRequest): Promise<FlashResponse>;
@@ -125,7 +144,7 @@ export class FlashCallError extends Error {
     readonly status: number | null = null,
     readonly retryAfterMs: number | null = null,
     /** The spent allowance an `allowance` refusal names, with its "frees up at"; null for every other kind. */
-    readonly allowance: ClawaiAllowanceRefusal | null = null,
+    readonly allowance: (ClawaiAllowanceRefusal & { provider?: "anthropic" }) | null = null,
   ) {
     super(message);
     this.name = "FlashCallError";
@@ -150,6 +169,8 @@ export const ALLOWANCE_SPENT = "allowance_spent";
 export interface AllowanceStop {
   kind: ClawaiAllowanceKind;
   resetAt: string | null;
+  /** Set when the accounts at their limit are the owner's own Anthropic accounts, not the box's ClawBox AI plan. */
+  provider?: "anthropic";
 }
 
 /**
@@ -161,9 +182,9 @@ export function allowanceStopOf(err: unknown): AllowanceStop | null {
   if (err instanceof FlashCallError && err.kind !== "allowance") return null;
   const a = err && typeof err === "object" ? (err as { allowance?: unknown }).allowance : null;
   if (!a || typeof a !== "object") return null;
-  const { kind, resetAt } = a as { kind?: unknown; resetAt?: unknown };
+  const { kind, resetAt, provider } = a as { kind?: unknown; resetAt?: unknown; provider?: unknown };
   if (!(CLAWAI_ALLOWANCE_KINDS as readonly unknown[]).includes(kind)) return null;
-  return { kind: kind as ClawaiAllowanceKind, resetAt: typeof resetAt === "string" ? resetAt : null };
+  return { kind: kind as ClawaiAllowanceKind, resetAt: typeof resetAt === "string" ? resetAt : null, ...(provider === "anthropic" ? { provider } : {}) };
 }
 
 /**
@@ -173,6 +194,7 @@ export function allowanceStopOf(err: unknown): AllowanceStop | null {
  */
 export function allowanceSpentText(stop: AllowanceStop, options: { now?: number; timeZone?: string | null } = {}): string {
   const at = formatFreesUpAt(stop.resetAt, { locale: "en", now: options.now, timeZone: options.timeZone });
+  if (stop.provider === "anthropic") return at ? `Every Anthropic account is at its limit, back at ${at}` : "Every Anthropic account is at its limit";
   return at ? `ClawBox AI allowance spent, frees up at ${at}` : "ClawBox AI allowance spent";
 }
 
@@ -435,6 +457,187 @@ export function createLocalFlashClient(engine: LocalEngine, options: { fetchImpl
   };
 }
 
+// ── the owner's own Anthropic account ────────────────────────────────────
+
+const ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_VERSION = "2023-06-01";
+
+/**
+ * Anthropic's own words, in a 400, when an organisation's or workspace's spend limit is reached — the pool's
+ * classifier knows the CLI's wordings, not this one — and when it lifts ("You will regain access on 2026-12-01 at 00:00 UTC.").
+ */
+const API_SPEND_LIMIT_RE = /reached your specified API usage limits/i;
+const REGAIN_ACCESS_RE = /regain access on (\d{4}-\d{2}-\d{2})(?: at (\d{2}:\d{2}))?/i;
+
+/** What a step says when the owner chose Anthropic and no API key is saved on the box. */
+export const NO_ANTHROPIC_KEY_MESSAGE =
+  "Prime Radiant is set to write with your own Anthropic account, but no API key is saved on this box. Add one among the coding agent's Anthropic accounts, or choose Automatic in Prime Radiant's settings.";
+
+export interface AnthropicFlashOptions {
+  /** The Claude model id, as the owner picked it (and as the costs table records it). */
+  model: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+/**
+ * A {@link FlashClient} on the owner's own Anthropic API-key accounts: see the
+ * module docblock. Each call asks the pool (`prepareAccount`) for the next
+ * usable API-key account in the owner's order and sends it with `x-api-key`;
+ * a usage limit or a refused key moves the pool on and the call to the next
+ * account, and when none is left the error says why.
+ */
+export function createAnthropicFlashClient(options: AnthropicFlashOptions): FlashClient {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const model = options.model;
+  const timeoutMs = options.timeoutMs ?? FLASH_CALL_TIMEOUT_MS;
+  return {
+    model,
+    engine: "anthropic",
+    async complete(request) {
+      // Before any account is touched, as for ClawBox AI: a pass chosen before the lock went on sends nothing to the cloud once it is.
+      if (await isCloudAiLocked()) throw new FlashCallError("no_engine", CLOUD_AI_LOCKED_MESSAGE);
+      // Lazily: the pool pulls the owner secret store, and a box that never chose Anthropic never loads it.
+      const pool = await import("@/lib/anthropic-accounts");
+      const { classifyAnthropicFailure, effectiveStatus, limitUntil, modelLimitedUntil, MAX_LIMIT_MS } = await import("@/lib/anthropic-limit");
+      const { verifyAnthropicKey } = await import("@/lib/coding-anthropic");
+      // Only API keys answer here: a sign-in is Claude Code's and the gateway's, not a direct API call's.
+      const notKeys = (await pool.readAccounts()).filter((a) => a.kind !== "api_key").map((a) => a.id);
+      const tried = new Set<string>(notKeys);
+      let withTemperature = true;
+      let refusal: FlashCallError | null = null;
+      // The accounts THIS call found at a limit, and when it lifts: the pool's own write may have failed, and the call still knows.
+      const limitedHere = new Map<string, number>();
+      // A refused key the owner may have replaced meanwhile: asked for again, once per account, with the fresher copy preferred.
+      const reread = new Set<string>();
+      let prefer: { id: string; refused: string | null } | null = null;
+      for (;;) {
+        const { prepared } = await pool.prepareAccount({ exclude: tried, model, prefer });
+        prefer = null;
+        if (!prepared || prepared.credential.kind !== "api_key") break;
+        const { account, credential } = prepared;
+        tried.add(account.id);
+        // The last await before the request: the lock can go on while the pool was read.
+        if (await isCloudAiLocked()) throw new FlashCallError("no_engine", CLOUD_AI_LOCKED_MESSAGE);
+        const signals = [AbortSignal.timeout(timeoutMs)];
+        if (request.signal) signals.push(request.signal);
+        let res: Response;
+        try {
+          res = await fetchImpl(ANTHROPIC_MESSAGES_URL, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-api-key": credential.secret, "anthropic-version": ANTHROPIC_VERSION },
+            body: JSON.stringify({
+              model,
+              max_tokens: request.maxTokens,
+              ...(withTemperature ? { temperature: 0 } : {}),
+              system: request.system,
+              messages: [{ role: "user", content: request.user }],
+            }),
+            signal: AbortSignal.any(signals),
+          });
+        } catch (err) {
+          if (request.signal?.aborted) throw new FlashCallError("aborted", "The ingest was stopped.");
+          throw new FlashCallError("network", `Anthropic could not be reached: ${err instanceof Error ? err.name : "error"}`);
+        }
+        if (res.ok) {
+          let body: unknown;
+          try {
+            body = await res.json();
+          } catch {
+            throw new FlashCallError("bad_response", "Anthropic answered something that is not JSON.");
+          }
+          const b = (body ?? {}) as { content?: Array<{ type?: unknown; text?: unknown }>; stop_reason?: unknown; usage?: Record<string, unknown> };
+          const text = (Array.isArray(b.content) ? b.content : []).map((c) => (c?.type === "text" && typeof c.text === "string" ? c.text : "")).join("");
+          const stop = typeof b.stop_reason === "string" ? b.stop_reason : null;
+          const finishReason = stop === "max_tokens" ? "length" : stop === "end_turn" || stop === "stop_sequence" ? "stop" : stop;
+          if (text.trim() === "") {
+            throw new FlashCallError("bad_response", finishReason === "length" ? "Anthropic reached the output cap before it answered." : "Anthropic answered with no text.");
+          }
+          // Prompt tokens are the uncached input plus what was written to and read from the cache; the read share is the cheaper one.
+          const u = b.usage ?? {};
+          const cacheHit = num(u.cache_read_input_tokens);
+          const usage = { promptTokens: num(u.input_tokens) + num(u.cache_creation_input_tokens) + cacheHit, completionTokens: num(u.output_tokens), cacheHitTokens: cacheHit };
+          return { text, usage, model, finishReason };
+        }
+        const status = res.status;
+        const bodyText = await errorBodyOf(res);
+        let apiMessage = "";
+        try {
+          const m = (JSON.parse(bodyText) as { error?: { message?: unknown } }).error?.message;
+          if (typeof m === "string") apiMessage = redactText(m).text.slice(0, 200);
+        } catch {
+          // A body that is not Anthropic's JSON says nothing about the account.
+        }
+        const failure = classifyAnthropicFailure(`${status} ${bodyText}`, Date.now(), { transientRate: true, reason: status === 402 ? "billing" : null });
+        let limit = failure?.type === "limit" && failure.limit.kind !== "rate" ? failure.limit : null;
+        if (!limit && status === 400 && API_SPEND_LIMIT_RE.test(apiMessage)) {
+          const when = REGAIN_ACCESS_RE.exec(apiMessage);
+          const back = when ? Date.parse(`${when[1]}T${when[2] ?? "00:00"}:00Z`) : NaN;
+          // A time the pool would not believe (past, or further out than it parks an account for) is no time: the default window.
+          limit = { kind: "spend", resetsAt: back > Date.now() && back - Date.now() <= MAX_LIMIT_MS ? back : null };
+        }
+        if (limit) {
+          // A usage limit or an empty balance: the account rests in the pool until it lifts, and the next account answers.
+          const until = limitUntil(limit, Date.now());
+          limitedHere.set(account.id, until);
+          await pool.markLimited(account.id, until, limit.kind, { source: "box" }).catch(() => undefined);
+          continue;
+        }
+        if (failure?.type === "auth") {
+          // Asked the way the coding agent asks: a key Anthropic's own list also refuses is marked; a stale copy is not.
+          const verdict = await pool.probeAccountCredential(account.id, verifyAnthropicKey, { source: "box" }, credential.secret).catch(() => "unknown" as const);
+          refusal = new FlashCallError("auth", "Anthropic refused the API key saved on this box.", status);
+          // The owner replaced the key while this call was in flight: the pool hands the fresher copy back; the refused one stays excluded.
+          if (verdict === "ok" && !reread.has(account.id)) {
+            reread.add(account.id);
+            tried.delete(account.id);
+            prefer = { id: account.id, refused: credential.secret };
+          }
+          continue;
+        }
+        // Not about the account: this call's own outcome.
+        if (status === 400 && withTemperature && /temperature/i.test(apiMessage)) {
+          // A model that takes no temperature: asked again without it, on the same account.
+          withTemperature = false;
+          tried.delete(account.id);
+          continue;
+        }
+        if ((status === 400 || status === 413) && CONTEXT_REFUSAL_RE.test(`${apiMessage} ${bodyText}`)) {
+          throw new FlashCallError("too_long", "Anthropic refused the request as too long for the model's window.", status);
+        }
+        if (status === 429) throw new FlashCallError("rate_limited", "Anthropic is busy (429).", status, retryAfterMs(res.headers.get("retry-after")));
+        if (status >= 500) throw new FlashCallError("server", `Anthropic answered ${status}.`, status, retryAfterMs(res.headers.get("retry-after")));
+        throw new FlashCallError("refused", `Anthropic refused the request (${status}${apiMessage ? `: ${apiMessage}` : ""}).`, status);
+      }
+      // No account is left to answer: say which way it ended.
+      const keys = (await pool.readAccounts()).filter((a) => a.kind === "api_key");
+      if (keys.length === 0) throw new FlashCallError("no_credential", NO_ANTHROPIC_KEY_MESSAGE);
+      const now = Date.now();
+      // At a limit now: the pool says so, or this call found it, or this MODEL's week is spent on it (the account stays `ok` for the others).
+      const liftsAt = (a: (typeof keys)[number]): number | null =>
+        limitedHere.get(a.id) ?? (effectiveStatus(a, now) === "limited" ? (a.limitedUntil ?? Infinity) : modelLimitedUntil(a, model, now));
+      const limited = keys.filter((a) => liftsAt(a) !== null);
+      if (limited.length > 0 && limited.length + keys.filter((a) => liftsAt(a) === null && (a.status === "revoked" || a.status === "expired")).length === keys.length) {
+        const back = Math.min(...limited.map((a) => liftsAt(a) as number));
+        const resetAt = Number.isFinite(back) ? new Date(back).toISOString() : null;
+        const weekly = limited.some((a) => a.limitKind !== "session" && a.limitKind !== "rate");
+        throw new FlashCallError("allowance", "Every Anthropic account saved on this box is at its limit.", 429, null, {
+          kind: weekly ? "weekly" : "burst",
+          resetAt,
+          message: null,
+          provider: "anthropic",
+        });
+      }
+      if (refusal) throw refusal;
+      // Nothing was refused: the accounts left were marked dead before this call, or could not be asked (the secret store did not answer).
+      if (keys.some((a) => a.status === "revoked" || a.status === "expired")) {
+        throw new FlashCallError("auth", "Anthropic does not accept any API key saved on this box. Replace it among the coding agent's Anthropic accounts.");
+      }
+      throw new FlashCallError("no_credential", "No Anthropic API key saved on this box could be read just now: the box's secret store did not answer.");
+    },
+  };
+}
+
 /** A client that answers every call with why nothing can write: no engine on a locked box. */
 function unavailableFlashClient(): FlashClient {
   return {
@@ -451,6 +654,26 @@ export const NO_ENGINE_MESSAGE = "Local-only AI is on, and no model is set up on
 // ── which client answers ──────────────────────────────────────────────────
 
 const store = processStore("prime-radiant:flash-client", () => ({ override: null as FlashClient | null }));
+
+/**
+ * The Claude model Prime Radiant is set to write with, or null: the box never
+ * chose Anthropic (settings `model.provider` is `auto`, as it is until the
+ * owner changes it), or the local-only AI lock is on (the lock wins).
+ */
+async function chosenAnthropicModel(): Promise<string | null> {
+  const { provider, anthropicModel } = readSettings().model;
+  return provider === "anthropic" && !(await isCloudAiLocked()) ? anthropicModel : null;
+}
+
+/** Whether a saved API key could answer right now: one that Anthropic refused for good does not count; one at its limit does (the call says so). */
+async function anthropicKeyUsable(): Promise<boolean> {
+  try {
+    const { readAccounts } = await import("@/lib/anthropic-accounts");
+    return (await readAccounts()).some((a) => a.kind === "api_key" && a.status !== "revoked" && a.status !== "expired");
+  } catch {
+    return false;
+  }
+}
 
 /** Install a client every ingest uses instead of the real one (tests). `null` removes it. */
 export function setFlashClientOverride(client: FlashClient | null): void {
@@ -470,6 +693,8 @@ export function stubEnabled(): boolean {
 export async function flashClient(): Promise<FlashClient> {
   if (store.override) return store.override;
   if (stubEnabled()) return createStubFlashClient();
+  const claude = await chosenAnthropicModel();
+  if (claude) return createAnthropicFlashClient({ model: claude });
   const engine = await resolveFeatureEngine();
   if (engine.kind === "local") return createLocalFlashClient(engine.engine);
   if (engine.kind === "none" && engine.reason === "cloud_ai_locked") return unavailableFlashClient();
@@ -483,8 +708,9 @@ export async function flashClient(): Promise<FlashClient> {
  * the call itself — one request, then the step stops on `allowance` — never a
  * remembered refusal that would keep turning a since-upgraded plan away.
  */
-export async function flashUnavailableReason(): Promise<"cloud_ai_locked" | "no_credential" | null> {
+export async function flashUnavailableReason(): Promise<"cloud_ai_locked" | "no_credential" | "no_anthropic_key" | null> {
   if (store.override || stubEnabled()) return null;
+  if (await chosenAnthropicModel()) return (await anthropicKeyUsable()) ? null : "no_anthropic_key";
   const engine = await resolveFeatureEngine();
   return engine.kind === "none" ? engine.reason : null;
 }
@@ -495,9 +721,10 @@ export async function flashAvailable(): Promise<boolean> {
 }
 
 /** Which engine would write right now, for the views that say so: null when none can. */
-export async function flashEngine(): Promise<"clawbox-ai" | "local" | null> {
+export async function flashEngine(): Promise<"clawbox-ai" | "local" | "anthropic" | null> {
   if (store.override) return store.override.engine ?? "clawbox-ai";
   if (stubEnabled()) return "clawbox-ai";
+  if (await chosenAnthropicModel()) return "anthropic";
   const engine = await resolveFeatureEngine();
   return engine.kind === "none" ? null : engine.kind;
 }
