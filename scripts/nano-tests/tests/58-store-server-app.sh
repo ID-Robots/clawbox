@@ -267,7 +267,10 @@ r=$(call GET "/setup-api/apps/store?limit=200&q=$APP")
 
 for round in install reinstall; do
   if [ "$round" = install ]; then r=$(install "$(left 480)"); else r=$(install "$(left 840)"); fi
-  if [ "$(status_of "$r")" = 200 ] && [ "$(body_of "$r" | py "j.get(\"ok\")")" = True ]; then
+  # A server that did not come up is answered 502 not_registered (TASK-2849):
+  # the files are in place and the checks below say why it is not running.
+  if { [ "$(status_of "$r")" = 200 ] && [ "$(body_of "$r" | py "j.get(\"ok\")")" = True ]; } \
+    || { [ "$(status_of "$r")" = 502 ] && [ "$(body_of "$r" | py "j.get(\"code\")")" = not_registered ]; }; then
     say "ok - $round: the Store installed $APP with no project folder chosen"
   else
     say "not ok - $round: the install answered HTTP $(status_of "$r") $(body_of "$r" | py "j.get(\"error\")" | head -c 300)"; exit 0

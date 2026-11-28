@@ -109,7 +109,7 @@ describe("installing a ClawBox app", () => {
     expect(res.status).toBe(502);
     expect(await res.json()).toEqual({
       ok: false, error: detail, code: "not_registered", retryable: true, appId: "hello-app", source: "clawbox",
-      version: "1.0.0", folder: "hello-app", kind: "server", registered: false, alreadyInstalled: false,
+      version: "1.0.0", folder: "hello-app", kind: "server", registered: false, detail, alreadyInstalled: false,
     });
   });
 

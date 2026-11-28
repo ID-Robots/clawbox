@@ -135,6 +135,7 @@ async function installFromStore(appId: string): Promise<NextResponse> {
       folder: outcome.folder,
       kind: outcome.kind,
       registered: false,
+      detail: outcome.detail,
       alreadyInstalled: outcome.alreadyInstalled,
     }, { status: 502 });
   }
