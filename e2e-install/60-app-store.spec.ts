@@ -120,6 +120,16 @@ test.describe("app store happy path", () => {
       expect(outcome.status, `refusal for '${slug}' carries a real status`).toBeGreaterThanOrEqual(400);
       expect(outcome.code, `refusal for '${slug}' names its code`).toBeTruthy();
       console.warn(`[app-store] '${slug}' refused (${outcome.code}): ${outcome.error ?? outcome.clawhub?.error ?? "unknown"}`);
+      // A ClawBox app whose server cannot run here (a build for a newer glibc
+      // or another CPU than this JetPack-shaped image) is that app's verdict,
+      // not the store refusing the runner: it is off the desktop, and the walk
+      // goes on.
+      if (outcome.code === "not_registered") {
+        const prefs = await getPreferences();
+        expect((prefs.installed_apps as string[] | undefined) ?? [], `'${slug}' refused, so not on the desktop`).not.toContain(slug);
+        await uninstallApp(slug).catch(() => {});
+        continue;
+      }
       if (outcome.retryable !== false) break;
     }
     console.warn("[app-store] no candidate installed; follow-up tests skip");

@@ -98,6 +98,21 @@ describe("installing a ClawBox app", () => {
     expect(await res.json()).toEqual({ ok: false, error: "The package does not match.", code: "sha256_mismatch", retryable: false, appId: "hello-app", source: "clawbox" });
   });
 
+  it("answers an app it could not put on the desktop as a failure, not as installed", async () => {
+    fetchMock.mockResolvedValue(json(200, RECORD));
+    const detail = "Hello App is in your projects, but its server could not be put on the desktop: exec format error. Start it from the Coding Agent, then use Add to desktop.";
+    installClawboxApp.mockResolvedValue({
+      ok: true, appId: "hello-app", folder: "hello-app", directory: "/projects/hello-app", version: "1.0.0", kind: "server",
+      registered: false, webappUrl: null, detail, alreadyInstalled: false,
+    });
+    const res = await POST(post({ appId: "hello-app", source: "clawbox" }));
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({
+      ok: false, error: detail, code: "not_registered", retryable: true, appId: "hello-app", source: "clawbox",
+      version: "1.0.0", folder: "hello-app", kind: "server", registered: false, alreadyInstalled: false,
+    });
+  });
+
   it("refuses a record that is not a ClawBox app, and one the Store does not have", async () => {
     fetchMock.mockResolvedValue(json(200, { ...RECORD, source: undefined }));
     let res = await POST(post({ appId: "hello-app", source: "clawbox" }));
