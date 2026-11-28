@@ -150,8 +150,10 @@ type MdBlock =
   | { kind: "heading"; level: number; text: string }
   | { kind: "table"; header: string[] | null; rows: string[][] }
   | { kind: "list"; items: { marker: string; text: string }[] }
-  | { kind: "embed"; attrs: Record<string, string> | null }
+  | { kind: "embed"; attrs: EmbedAttrs | null }
   | { kind: "para"; lines: string[] };
+
+type EmbedAttrs = ReturnType<typeof embedAttributes>;
 
 const FENCE_RE = /^\s*```/;
 
@@ -162,12 +164,14 @@ const FENCE_RE = /^\s*```/;
  * never cut). The match may run on over the following lines. An opener inside
  * a closed inline code span is skipped, like a fenced one.
  */
-const EMBED_OPENER_RE = /\[embed\s|\[(?:e|em|emb|embe|embed)$/i;
+const EMBED_OPENER_RE = /\[embed\s/i;
+const EMBED_OPENER_TAIL_RE = /\[(?:e|em|emb|embe|embed)$/i;
+const hasEmbedOpener = (line: string) => EMBED_OPENER_RE.test(line) || EMBED_OPENER_TAIL_RE.test(line);
 const EMBED_AT_RE = new RegExp(EMBED_SHORTCODE_RE.source, "iy");
 const EMBED_PENDING_AT_RE = new RegExp(`^${EMBED_PENDING_RE.source}`, "i");
-function findEmbed(lines: string[], i: number, streaming: boolean): { at: number; length: number; attrs: Record<string, string> | null } | null {
+function findEmbed(lines: string[], i: number, streaming: boolean): { at: number; length: number; attrs: EmbedAttrs | null } | null {
   const line = lines[i];
-  if (!EMBED_OPENER_RE.test(line)) return null;
+  if (!hasEmbedOpener(line)) return null;
   const rest = lines.slice(i).join("\n");
   const opener = /\[e/gi;
   let m: RegExpExecArray | null;
@@ -288,7 +292,7 @@ function YouTubeEmbed(
  *   - any other https page: its title as an ordinary link, no frame;
  *   - anything else (javascript:, data:, http:, garbage): the title as text.
  */
-function EmbedBlock({ attrs, labels, spaced }: { attrs: Record<string, string>; labels: EmbedLabels; spaced: boolean }) {
+function EmbedBlock({ attrs, labels, spaced }: { attrs: EmbedAttrs; labels: EmbedLabels; spaced: boolean }) {
   const title = attrs.title ?? "";
   const className = spaced ? "mt-2" : "";
   const video = attrs.url ? youTubeVideo(attrs.url) : null;
@@ -540,7 +544,7 @@ function parseBlocks(text: string, detailsLabel: string, embeds: boolean, stream
       // again — unless it opens another block, in which case it is scanned as
       // a line of its own so that one folds too instead of printing its tags.
       if (after.trim()) {
-        if (DETAILS_OPEN_RE.test(after) || (embeds && EMBED_OPENER_RE.test(after))) lines.splice(i + 1, 0, after);
+        if (DETAILS_OPEN_RE.test(after) || (embeds && hasEmbedOpener(after))) lines.splice(i + 1, 0, after);
         else para.push(after);
       }
       continue;

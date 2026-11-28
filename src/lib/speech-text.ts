@@ -37,12 +37,20 @@ export const EMBED_SHORTCODE_RE =
 export const EMBED_PENDING_RE =
   /\[(?:e|em|emb|embe|embed(?:\s+[A-Za-z_][\w-]*\s*=\s*(?:"[^"]*"|'[^']*'))*(?:\s+[A-Za-z_][\w-]*(?:\s*=\s*(?:"[^"]*|'[^']*)?)?)?\s*\/?)$/i;
 
-/** A shortcode's attributes, names lower-cased, blank values dropped. */
-export function embedAttributes(raw: string): Record<string, string> {
-  const attrs: Record<string, string> = {};
+/**
+ * A shortcode's attributes, blank values dropped. Only the names the chat
+ * reads are kept, each written under its own fixed key: the reply is
+ * untrusted, so a name out of it is never used as a property name.
+ */
+export function embedAttributes(raw: string): { url?: string; ref?: string; title?: string } {
+  const attrs: { url?: string; ref?: string; title?: string } = {};
   for (const m of raw.matchAll(/([A-Za-z_][\w-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)) {
     const value = (m[2] ?? m[3] ?? "").trim();
-    if (value) attrs[m[1].toLowerCase()] = value;
+    if (!value) continue;
+    const name = m[1].toLowerCase();
+    if (name === "url") attrs.url = value;
+    else if (name === "ref") attrs.ref = value;
+    else if (name === "title") attrs.title = value;
   }
   return attrs;
 }
